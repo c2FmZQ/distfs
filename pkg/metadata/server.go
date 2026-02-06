@@ -42,6 +42,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handleGetInode(w, r, id)
 			return
 		}
+		if r.Method == http.MethodDelete {
+			s.handleDeleteInode(w, r, id)
+			return
+		}
 	} else if r.URL.Path == "/v1/meta/inode" && r.Method == http.MethodPost {
 		s.handleCreateInode(w, r)
 		return
@@ -61,11 +65,6 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	var data []byte
-	// MetadataFSM db is private, but ServeHTTP is in same package.
-	// Wait, db is private in fsm.
-	// I need to expose db or add Read method to FSM.
-	// FSM db is unexported.
-	// But Server and FSM are in `metadata` package. Go allows access.
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		v := b.Get([]byte(id))
@@ -118,4 +117,29 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
+	if s.raft.State() != raft.Leader {
+		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	cmd := LogCommand{Type: CmdDeleteInode, Data: []byte(id)}
+	b, _ := json.Marshal(cmd)
+
+	f := s.raft.Apply(b, 5*time.Second)
+	if err := f.Error(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if resp := f.Response(); resp != nil {
+		if err, ok := resp.(error); ok && err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
 }

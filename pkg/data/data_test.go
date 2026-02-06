@@ -1,5 +1,16 @@
 // Copyright 2026 TTBT Enterprises LLC
-// ... License ...
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package data
 
@@ -90,7 +101,7 @@ func TestIntegrityScrubber(t *testing.T) {
 	content := []byte("valid data")
 	h := sha256.Sum256(content)
 	id := hex.EncodeToString(h[:])
-	
+
 	if err := store.WriteChunk(id, bytes.NewReader(content)); err != nil {
 		t.Fatalf("WriteChunk failed: %v", err)
 	}
@@ -103,11 +114,9 @@ func TestIntegrityScrubber(t *testing.T) {
 	}
 
 	// Corrupt it manually
-	// We need to construct the sharded path manually for corruption test
-	// id[:2]/id[2:4]/id
 	relPath := filepath.Join(id[:2], id[2:4], id)
 	path := filepath.Join(tmpDir, relPath)
-	
+
 	if err := os.WriteFile(path, []byte("garbage"), 0600); err != nil {
 		t.Fatalf("Failed to corrupt file at %s: %v", path, err)
 	}
@@ -116,6 +125,32 @@ func TestIntegrityScrubber(t *testing.T) {
 	if err := scrubber.verifyChunk(id); err == nil {
 		t.Error("verifyChunk passed on corrupt chunk")
 	}
+
+	// Test Start/Stop Loop
+	scrubber.Start()
+	time.Sleep(150 * time.Millisecond)
+	scrubber.Stop()
+}
+
+func TestDiskStore_WriteError(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewDiskStore(tmpDir)
+
+	// Make dir read-only to force write error
+	// Note: on some systems (root), this might not fail.
+	if err := os.Chmod(tmpDir, 0500); err != nil {
+		t.Skip("Cannot chmod")
+	}
+	
+	// Try to write (sharded dir creation should fail)
+	h := sha256.Sum256([]byte("fail"))
+	id := hex.EncodeToString(h[:])
+	
+	if err := store.WriteChunk(id, bytes.NewReader([]byte("fail"))); err == nil {
+		t.Error("Expected error writing to readonly dir")
+	}
+	
+	os.Chmod(tmpDir, 0755) // Restore
 }
 
 func TestAPI(t *testing.T) {
@@ -159,10 +194,42 @@ func TestAPI(t *testing.T) {
 	if string(got) != string(content) {
 		t.Errorf("GET mismatch")
 	}
-	
+
 	// Verify Invalid ID
 	resp, _ = http.Get(ts.URL + "/v1/data/bad-id")
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("Expected 400 for bad ID, got %d", resp.StatusCode)
+	}
+
+	// Test Method Not Allowed
+	req2, _ := http.NewRequest("POST", ts.URL+"/v1/data/"+chunkID, nil)
+	resp2, _ := http.DefaultClient.Do(req2)
+	if resp2.StatusCode != http.StatusMethodNotAllowed {
+		t.Errorf("Expected 405, got %d", resp2.StatusCode)
+	}
+
+	// Test PUT Too Large (3MB)
+	large := make([]byte, 3*1024*1024)
+	reqLarge, _ := http.NewRequest("PUT", ts.URL+"/v1/data/"+chunkID, bytes.NewReader(large))
+	respLarge, _ := http.DefaultClient.Do(reqLarge)
+	if respLarge.StatusCode != http.StatusInternalServerError {
+		t.Errorf("Expected 500/Fail for large body, got %d", respLarge.StatusCode)
+	}
+}
+
+func TestDiskStore_TempFiles(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, _ := NewDiskStore(tmpDir)
+
+	// Create temp files
+	os.Create(filepath.Join(tmpDir, "tmp-123"))
+	os.Create(filepath.Join(tmpDir, "tmp-456"))
+
+	count := 0
+	for range store.ListChunks() {
+		count++
+	}
+	if count != 0 {
+		t.Errorf("ListChunks should ignore tmp files, got %d", count)
 	}
 }

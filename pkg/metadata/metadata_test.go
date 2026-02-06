@@ -104,6 +104,25 @@ func TestMetadataCluster(t *testing.T) {
 	if got.ID != "inode-1" {
 		t.Errorf("GET ID mismatch")
 	}
+
+	// Test Delete Inode
+	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("DELETE failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DELETE status %d", resp.StatusCode)
+	}
+
+	// Verify Deleted
+	resp, err = http.Get(ts.URL + "/v1/meta/inode/inode-1")
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected 404 after delete, got %d", resp.StatusCode)
+	}
 }
 
 func TestFSMRestore(t *testing.T) {
@@ -153,6 +172,29 @@ func TestFSMRestore(t *testing.T) {
 	})
 	if err != nil {
 		t.Error(err)
+	}
+}
+
+func TestFSM_Errors(t *testing.T) {
+	tmpDir := t.TempDir()
+	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"))
+	defer fsm.Close()
+
+	// Invalid JSON
+	l := &raft.Log{Data: []byte(`{bad`)}
+	if err := fsm.Apply(l); err == nil {
+		t.Error("Expected error on invalid json")
+	}
+
+	// Unknown Command
+	cmd := LogCommand{Type: 99}
+	b, _ := json.Marshal(cmd)
+	l = &raft.Log{Data: b}
+	resp := fsm.Apply(l)
+	if resp == nil {
+		t.Error("Expected error on unknown command")
+	} else if err, ok := resp.(error); !ok || err.Error() != "unknown command" {
+		t.Errorf("Expected 'unknown command', got %v", resp)
 	}
 }
 
