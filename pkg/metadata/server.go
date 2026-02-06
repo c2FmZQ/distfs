@@ -49,12 +49,28 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if r.URL.Path == "/v1/meta/inode" && r.Method == http.MethodPost {
 		s.handleCreateInode(w, r)
 		return
+	} else if r.URL.Path == "/v1/node" && r.Method == http.MethodPost {
+		s.handleRegisterNode(w, r)
+		return
+	} else if r.URL.Path == "/v1/user" && r.Method == http.MethodPost {
+		s.handleCreateUser(w, r)
+		return
+	} else if r.URL.Path == "/v1/group" && r.Method == http.MethodPost {
+		s.handleCreateGroup(w, r)
+		return
+	} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
+		// Update Group (PUT)
+		if r.Method == http.MethodPut {
+			s.handleUpdateGroup(w, r)
+			return
+		}
 	}
 	http.NotFound(w, r)
 }
 
+// ... Inode Handlers ...
+
 func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id string) {
-	// Strong Consistency: Verify Leader
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
 		return
@@ -86,46 +102,54 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdCreateInode, 10*1024*1024, http.StatusCreated)
+}
+
+func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
+	s.applyCommandRaw(w, CmdDeleteInode, []byte(id), http.StatusOK)
+}
+
+func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdCreateUser, 1024*1024, http.StatusCreated)
+}
+
+func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdCreateGroup, 1024*1024, http.StatusCreated)
+}
+
+func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
+	// Expects full group JSON
+	s.applyCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
+}
+
+// Helpers
+func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 
-	// DoS Protection: Limit body size to 10MB
-	r.Body = http.MaxBytesReader(w, r.Body, 10*1024*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
-	cmd := LogCommand{Type: CmdCreateInode, Data: body}
-	b, _ := json.Marshal(cmd)
-
-	f := s.raft.Apply(b, 5*time.Second)
-	if err := f.Error(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	// FSM Response
-	if resp := f.Response(); resp != nil {
-		if err, ok := resp.(error); ok && err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusCreated)
+	s.applyCommandRaw(w, cmdType, body, successCode)
 }
 
-func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
+func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, data []byte, successCode int) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 
-	cmd := LogCommand{Type: CmdDeleteInode, Data: []byte(id)}
+	cmd := LogCommand{Type: cmdType, Data: data}
 	b, _ := json.Marshal(cmd)
 
 	f := s.raft.Apply(b, 5*time.Second)
@@ -141,5 +165,5 @@ func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(successCode)
 }

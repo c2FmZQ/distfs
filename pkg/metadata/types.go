@@ -25,6 +25,42 @@ const (
 	DirType  InodeType = 1
 )
 
+type ChunkEntry struct {
+	ID    string   `json:"id"`
+	Nodes []string `json:"nodes"`
+}
+
+type User struct {
+	ID        string `json:"id"`
+	PublicKey []byte `json:"public_key"`
+	Name      string `json:"name"`
+}
+
+type Group struct {
+	ID        string         `json:"id"`
+	OwnerID   string         `json:"owner_id"`
+	Members   map[string]bool `json:"members"` // UserID -> bool
+	PublicKey []byte         `json:"public_key"`
+	Lockbox   crypto.Lockbox `json:"lockbox"`
+}
+
+type NodeStatus string
+
+const (
+	NodeStatusActive   NodeStatus = "active"
+	NodeStatusDead     NodeStatus = "dead"
+	NodeStatusDraining NodeStatus = "draining"
+)
+
+type Node struct {
+	ID            string     `json:"id"`
+	Address       string     `json:"address"` // Data API Address
+	Status        NodeStatus `json:"status"`
+	LastHeartbeat int64      `json:"last_heartbeat"`
+	Capacity      int64      `json:"capacity"`
+	Used          int64      `json:"used"`
+}
+
 type Inode struct {
 	ID            string         `json:"id"`
 	ParentID      string         `json:"parent_id"`
@@ -34,7 +70,7 @@ type Inode struct {
 	Mode          uint32         `json:"mode"`
 	Size          uint64         `json:"size"`
 	EncryptedName []byte         `json:"enc_name"`
-	ChunkManifest []string       `json:"manifest"`
+	ChunkManifest []ChunkEntry   `json:"manifest"`
 	Lockbox       crypto.Lockbox `json:"lockbox"`
 	Version       uint64         `json:"version"`
 }

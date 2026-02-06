@@ -29,19 +29,15 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func TestMetadataCluster(t *testing.T) {
+func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
 	tmpDir := t.TempDir()
 	key := make([]byte, 32)
 
-	// Start Node
-	// Bind to port 0 to get random port
 	node, err := NewRaftNode("node1", "127.0.0.1:0", tmpDir, key)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
-	defer node.Shutdown()
 
-	// Bootstrap single node cluster
 	cfg := raft.Configuration{
 		Servers: []raft.Server{
 			{
@@ -52,10 +48,10 @@ func TestMetadataCluster(t *testing.T) {
 	}
 	f := node.Raft.BootstrapCluster(cfg)
 	if err := f.Error(); err != nil {
+		node.Shutdown()
 		t.Fatalf("Bootstrap failed: %v", err)
 	}
 
-	// Wait for leader
 	leader := false
 	for i := 0; i < 50; i++ {
 		if node.Raft.State() == raft.Leader {
@@ -65,12 +61,18 @@ func TestMetadataCluster(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	if !leader {
+		node.Shutdown()
 		t.Fatalf("Node did not become leader")
 	}
 
-	// Setup Server
 	server := NewServer(node.Raft, node.FSM)
 	ts := httptest.NewServer(server)
+	return node, ts
+}
+
+func TestMetadataCluster(t *testing.T) {
+	node, ts := setupCluster(t)
+	defer node.Shutdown()
 	defer ts.Close()
 
 	// Test Create Inode
@@ -125,6 +127,45 @@ func TestMetadataCluster(t *testing.T) {
 	}
 }
 
+func TestIdentityRegistry(t *testing.T) {
+	node, ts := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// Create User
+	user := User{ID: "u1", Name: "Alice"}
+	body, _ := json.Marshal(user)
+	resp, err := http.Post(ts.URL+"/v1/user", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("User Create failed: %d", resp.StatusCode)
+	}
+
+	// Create Group
+	group := Group{ID: "g1", OwnerID: "u1"}
+	body, _ = json.Marshal(group)
+	resp, err = http.Post(ts.URL+"/v1/group", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Group Create failed: %d", resp.StatusCode)
+	}
+
+	// Register Node
+	n := Node{ID: "node-data-1", Status: NodeStatusActive}
+	body, _ = json.Marshal(n)
+	resp, err = http.Post(ts.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Node Register failed: %d", resp.StatusCode)
+	}
+}
+
 func TestFSMRestore(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "fsm.bolt")
@@ -134,9 +175,6 @@ func TestFSMRestore(t *testing.T) {
 	}
 	defer fsm.Close()
 
-	// Write data directly via internal method or via mocked apply
-	// Ideally we use Apply but that parses LogCommand.
-	// We can use applyUpdateInode directly.
 	inode := Inode{ID: "restore-test"}
 	data, _ := json.Marshal(inode)
 	fsm.applyUpdateInode(data)

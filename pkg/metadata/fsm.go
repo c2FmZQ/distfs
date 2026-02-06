@@ -16,12 +16,18 @@ package metadata
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
+)
+
+var (
+	ErrExists   = errors.New("already exists")
+	ErrNotFound = errors.New("not found")
 )
 
 type MetadataFSM struct {
@@ -36,8 +42,13 @@ func NewMetadataFSM(path string) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		_, err := tx.CreateBucketIfNotExists([]byte("inodes"))
-		return err
+		buckets := []string{"inodes", "nodes", "users", "groups"}
+		for _, bucket := range buckets {
+			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		db.Close()
@@ -56,9 +67,14 @@ func (fsm *MetadataFSM) Close() error {
 type CommandType uint8
 
 const (
-	CmdCreateInode CommandType = 1
-	CmdUpdateInode CommandType = 2
-	CmdDeleteInode CommandType = 3
+	CmdCreateInode   CommandType = 1
+	CmdUpdateInode   CommandType = 2
+	CmdDeleteInode   CommandType = 3
+	CmdRegisterNode  CommandType = 4
+	CmdHeartbeatNode CommandType = 5
+	CmdCreateUser    CommandType = 6
+	CmdCreateGroup   CommandType = 7
+	CmdUpdateGroup   CommandType = 8
 )
 
 type LogCommand struct {
@@ -77,6 +93,14 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyUpdateInode(cmd.Data)
 	case CmdDeleteInode:
 		return fsm.applyDeleteInode(cmd.Data)
+	case CmdRegisterNode, CmdHeartbeatNode:
+		return fsm.applyRegisterNode(cmd.Data)
+	case CmdCreateUser:
+		return fsm.applyCreateUser(cmd.Data)
+	case CmdCreateGroup:
+		return fsm.applyCreateGroup(cmd.Data)
+	case CmdUpdateGroup:
+		return fsm.applyUpdateGroup(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -105,6 +129,76 @@ func (fsm *MetadataFSM) applyDeleteInode(data []byte) interface{} {
 	})
 }
 
+func (fsm *MetadataFSM) applyRegisterNode(data []byte) interface{} {
+	var node Node
+	if err := json.Unmarshal(data, &node); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		encoded, err := json.Marshal(node)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(node.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyCreateUser(data []byte) interface{} {
+	var user User
+	if err := json.Unmarshal(data, &user); err != nil {
+		return err
+	}
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("users"))
+		if b.Get([]byte(user.ID)) != nil {
+			return ErrExists
+		}
+		encoded, err := json.Marshal(user)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(user.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyCreateGroup(data []byte) interface{} {
+	var group Group
+	if err := json.Unmarshal(data, &group); err != nil {
+		return err
+	}
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		if b.Get([]byte(group.ID)) != nil {
+			return ErrExists
+		}
+		encoded, err := json.Marshal(group)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(group.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyUpdateGroup(data []byte) interface{} {
+	var group Group
+	if err := json.Unmarshal(data, &group); err != nil {
+		return err
+	}
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		if b.Get([]byte(group.ID)) == nil {
+			return ErrNotFound
+		}
+		encoded, err := json.Marshal(group)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(group.ID), encoded)
+	})
+}
+
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	return &MetadataSnapshot{db: fsm.db}, nil
 }
@@ -112,12 +206,10 @@ func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
 
-	// Close current DB to release lock
 	if err := fsm.db.Close(); err != nil {
 		return fmt.Errorf("close db: %w", err)
 	}
 
-	// Write snapshot to temp file
 	tmpPath := fsm.path + ".restore.tmp"
 	f, err := os.Create(tmpPath)
 	if err != nil {
@@ -133,14 +225,12 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 	}
 	f.Close()
 
-	// Atomic replace
 	if err := os.Rename(tmpPath, fsm.path); err != nil {
 		os.Remove(tmpPath)
 		fsm.reopen()
 		return err
 	}
 
-	// Reopen
 	return fsm.reopen()
 }
 
