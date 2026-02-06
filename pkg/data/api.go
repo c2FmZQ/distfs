@@ -15,6 +15,7 @@
 package data
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -63,7 +64,53 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Replication Pipeline
+	replicas := r.URL.Query().Get("replicas")
+	if replicas != "" {
+		targets := strings.Split(replicas, ",")
+		nextTarget := targets[0]
+		remaining := strings.Join(targets[1:], ",")
+
+		if err := s.replicate(id, nextTarget, remaining); err != nil {
+			// If replication fails, we fail the write to ensure consistency
+			// (Client should retry)
+			http.Error(w, fmt.Sprintf("replication failed: %v", err), http.StatusBadGateway)
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusCreated)
+}
+
+func (s *Server) replicate(id, target, remaining string) error {
+	rc, err := s.store.ReadChunk(id)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	// Target is assumed to be a valid base URL (e.g., http://host:port)
+	url := fmt.Sprintf("%s/v1/data/%s", target, id)
+	if remaining != "" {
+		url += "?replicas=" + remaining
+	}
+
+	req, err := http.NewRequest("PUT", url, rc)
+	if err != nil {
+		return err
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, id string) {

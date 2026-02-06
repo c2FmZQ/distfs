@@ -17,6 +17,7 @@ package metadata
 import (
 	"encoding/json"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -59,16 +60,53 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleCreateGroup(w, r)
 		return
 	} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
-		// Update Group (PUT)
 		if r.Method == http.MethodPut {
 			s.handleUpdateGroup(w, r)
 			return
 		}
+	} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
+		s.handleAllocateChunk(w, r)
+		return
 	}
 	http.NotFound(w, r)
 }
 
-// ... Inode Handlers ...
+func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
+	var nodes []Node
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err != nil {
+				continue
+			}
+			if n.Status == NodeStatusActive {
+				nodes = append(nodes, n)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	if len(nodes) == 0 {
+		http.Error(w, "no active nodes", http.StatusServiceUnavailable)
+		return
+	}
+
+	rand.Seed(time.Now().UnixNano())
+	rand.Shuffle(len(nodes), func(i, j int) { nodes[i], nodes[j] = nodes[j], nodes[i] })
+
+	if len(nodes) > 3 {
+		nodes = nodes[:3]
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nodes)
+}
 
 func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id string) {
 	if s.raft.State() != raft.Leader {
@@ -122,11 +160,9 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
-	// Expects full group JSON
 	s.applyCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
 }
 
-// Helpers
 func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)

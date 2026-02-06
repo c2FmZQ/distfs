@@ -15,6 +15,10 @@
 package client
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -106,5 +110,77 @@ func TestClientIntegration(t *testing.T) {
 	info, _ := f.Stat()
 	if info.Size() != int64(len(content)) {
 		t.Error("Stat size mismatch")
+	}
+}
+
+func TestReplication(t *testing.T) {
+	// 1. Setup Metadata Node
+	metaDir := t.TempDir()
+	metaKey := make([]byte, 32)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metaNode.Shutdown()
+
+	metaNode.Raft.BootstrapCluster(raft.Configuration{
+		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
+	})
+
+	time.Sleep(2 * time.Second)
+
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM)
+	tsMeta := httptest.NewServer(metaServer)
+	defer tsMeta.Close()
+
+	// 2. Three Data Nodes
+	nodes := make([]*httptest.Server, 3)
+	stores := make([]data.Store, 3)
+	for i := 0; i < 3; i++ {
+		dir := t.TempDir()
+		store, _ := data.NewDiskStore(dir)
+		stores[i] = store
+		server := data.NewServer(store)
+		ts := httptest.NewServer(server)
+		nodes[i] = ts
+		defer ts.Close()
+
+		// Register with Metadata
+		node := metadata.Node{
+			ID:      fmt.Sprintf("data-%d", i),
+			Address: ts.URL,
+			Status:  metadata.NodeStatusActive,
+		}
+		body, _ := json.Marshal(node)
+		http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	}
+
+	// 3. Client
+	c := NewClient(tsMeta.URL, nodes[0].URL)
+
+	// 4. Write
+	content := []byte("replicated data")
+	_, err = c.WriteFile("repl-file", content)
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// 5. Verify on ALL nodes
+	chunks := stores[0].ListChunks()
+	var chunkID string
+	for id := range chunks {
+		chunkID = id
+		break
+	}
+
+	if chunkID == "" {
+		t.Fatal("No chunks found on primary")
+	}
+
+	for i := 0; i < 3; i++ {
+		has, _ := stores[i].HasChunk(chunkID)
+		if !has {
+			t.Errorf("Node %d missing chunk %s", i, chunkID)
+		}
 	}
 }

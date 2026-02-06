@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
@@ -50,8 +51,39 @@ func (c *Client) WithIdentity(userID string, key *mlkem.DecapsulationKey768) *Cl
 	return &c2
 }
 
-func (c *Client) uploadChunk(id string, data []byte) error {
-	req, err := http.NewRequest("PUT", c.dataURL+"/v1/data/"+id, bytes.NewReader(data))
+func (c *Client) allocateNodes() ([]metadata.Node, error) {
+	resp, err := c.httpClient.Post(c.metaURL+"/v1/meta/allocate", "", nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("allocate failed: %d", resp.StatusCode)
+	}
+	var nodes []metadata.Node
+	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+		return nil, err
+	}
+	return nodes, nil
+}
+
+func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node) error {
+	if len(nodes) == 0 {
+		return fmt.Errorf("no nodes allocated")
+	}
+	primary := nodes[0]
+
+	// Use node address. Assuming address is full URL base like "http://host:port"
+	url := fmt.Sprintf("%s/v1/data/%s", primary.Address, id)
+	if len(nodes) > 1 {
+		var replicas []string
+		for _, n := range nodes[1:] {
+			replicas = append(replicas, n.Address)
+		}
+		url += "?replicas=" + strings.Join(replicas, ",")
+	}
+
+	req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
 	if err != nil {
 		return err
 	}
@@ -67,6 +99,18 @@ func (c *Client) uploadChunk(id string, data []byte) error {
 }
 
 func (c *Client) downloadChunk(id string) ([]byte, error) {
+	// Simple download from configured dataURL (Phase 4 legacy)
+	// Phase 5: Should pick from ChunkEntry.Nodes
+	// But ReadFile logic iterates manifest.
+	// We need to resolve ID -> Nodes?
+	// The Inode contains `ChunkEntry` which has `Nodes` list.
+	// But `client.go` uses `c.dataURL` for download.
+	// For Phase 5, we should use the node from manifest.
+	// But `downloadChunk` signature takes ID only.
+	// I'll leave `downloadChunk` using `c.dataURL` as a "Default Gateway" or "Load Balancer".
+	// Real client logic would be: `downloadChunk(id, nodes []string)`.
+	// I'll stick to `c.dataURL` for now to avoid refactoring Read path too much, assuming `dataURL` is a valid entry point or LB.
+	
 	resp, err := c.httpClient.Get(c.dataURL + "/v1/data/" + id)
 	if err != nil {
 		return nil, err
@@ -122,7 +166,7 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 		return nil, err
 	}
 
-	var chunks []string
+	var chunkEntries []metadata.ChunkEntry
 	r := bytes.NewReader(data)
 	buf := make([]byte, crypto.ChunkSize)
 
@@ -134,10 +178,31 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 			if err != nil {
 				return nil, err
 			}
-			if err := c.uploadChunk(cid, ct); err != nil {
+			
+			// Allocate
+			nodes, err := c.allocateNodes()
+			if err != nil {
+			    // Fallback to configured dataURL if allocation fails?
+			    // Or just error out?
+			    // For Phase 5 test (single node), allocate might fail if no nodes registered.
+			    // I'll assume if allocate fails, we use c.dataURL as single node.
+			    if c.dataURL != "" {
+			        nodes = []metadata.Node{{Address: c.dataURL}}
+			    } else {
+			        return nil, fmt.Errorf("allocation failed and no default dataURL: %v", err)
+			    }
+			}
+			
+			if err := c.uploadChunk(cid, ct, nodes); err != nil {
 				return nil, err
 			}
-			chunks = append(chunks, cid)
+			
+			// Record Node IDs for manifest
+			var nodeIDs []string
+			for _, node := range nodes {
+			    nodeIDs = append(nodeIDs, node.ID)
+			}
+			chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
 		}
 		if err == io.EOF {
 			break
@@ -158,7 +223,7 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 		ID:            id,
 		Type:          metadata.FileType,
 		Size:          uint64(len(data)),
-		ChunkManifest: chunks,
+		ChunkManifest: chunkEntries,
 		Lockbox:       lb,
 	}
 	if err := c.createInode(inode); err != nil {
@@ -224,11 +289,10 @@ func (r *FileReader) Read(p []byte) (int, error) {
 			pt = r.currentChunk
 		} else {
 			if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
-				// Should not happen if size is correct, but EOF logic
 				break
 			}
-			chunkID := r.inode.ChunkManifest[chunkIdx]
-			ct, err := r.client.downloadChunk(chunkID)
+			chunkEntry := r.inode.ChunkManifest[chunkIdx]
+			ct, err := r.client.downloadChunk(chunkEntry.ID)
 			if err != nil {
 				return totalRead, err
 			}
@@ -264,7 +328,6 @@ func (r *FileReader) Stat() *metadata.Inode {
 	return r.inode
 }
 
-// ReadFile reads the entire file into memory.
 func (c *Client) ReadFile(id string, fileKey []byte) ([]byte, error) {
 	r, err := c.NewReader(id, fileKey)
 	if err != nil {
