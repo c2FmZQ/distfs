@@ -73,7 +73,6 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node) erro
 	}
 	primary := nodes[0]
 
-	// Use node address. Assuming address is full URL base like "http://host:port"
 	url := fmt.Sprintf("%s/v1/data/%s", primary.Address, id)
 	if len(nodes) > 1 {
 		var replicas []string
@@ -99,18 +98,6 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node) erro
 }
 
 func (c *Client) downloadChunk(id string) ([]byte, error) {
-	// Simple download from configured dataURL (Phase 4 legacy)
-	// Phase 5: Should pick from ChunkEntry.Nodes
-	// But ReadFile logic iterates manifest.
-	// We need to resolve ID -> Nodes?
-	// The Inode contains `ChunkEntry` which has `Nodes` list.
-	// But `client.go` uses `c.dataURL` for download.
-	// For Phase 5, we should use the node from manifest.
-	// But `downloadChunk` signature takes ID only.
-	// I'll leave `downloadChunk` using `c.dataURL` as a "Default Gateway" or "Load Balancer".
-	// Real client logic would be: `downloadChunk(id, nodes []string)`.
-	// I'll stick to `c.dataURL` for now to avoid refactoring Read path too much, assuming `dataURL` is a valid entry point or LB.
-	
 	resp, err := c.httpClient.Get(c.dataURL + "/v1/data/" + id)
 	if err != nil {
 		return nil, err
@@ -159,13 +146,7 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 	return &inode, nil
 }
 
-// WriteFile writes a file. Returns the FileKey used.
-func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
-	fileKey := make([]byte, 32)
-	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
-		return nil, err
-	}
-
+func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, data []byte) error {
 	var chunkEntries []metadata.ChunkEntry
 	r := bytes.NewReader(data)
 	buf := make([]byte, crypto.ChunkSize)
@@ -176,31 +157,25 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 			chunkData := buf[:n]
 			cid, ct, err := crypto.EncryptChunk(fileKey, chunkData)
 			if err != nil {
-				return nil, err
+				return err
 			}
-			
-			// Allocate
+
 			nodes, err := c.allocateNodes()
 			if err != nil {
-			    // Fallback to configured dataURL if allocation fails?
-			    // Or just error out?
-			    // For Phase 5 test (single node), allocate might fail if no nodes registered.
-			    // I'll assume if allocate fails, we use c.dataURL as single node.
-			    if c.dataURL != "" {
-			        nodes = []metadata.Node{{Address: c.dataURL}}
-			    } else {
-			        return nil, fmt.Errorf("allocation failed and no default dataURL: %v", err)
-			    }
+				if c.dataURL != "" {
+					nodes = []metadata.Node{{Address: c.dataURL}}
+				} else {
+					return fmt.Errorf("allocation failed: %v", err)
+				}
 			}
-			
+
 			if err := c.uploadChunk(cid, ct, nodes); err != nil {
-				return nil, err
+				return err
 			}
-			
-			// Record Node IDs for manifest
+
 			var nodeIDs []string
 			for _, node := range nodes {
-			    nodeIDs = append(nodeIDs, node.ID)
+				nodeIDs = append(nodeIDs, node.ID)
 			}
 			chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
 		}
@@ -208,25 +183,34 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
-			return nil, err
+			return err
 		}
 	}
 
 	inode := metadata.Inode{
 		ID:            id,
-		Type:          metadata.FileType,
+		Type:          iType,
 		Size:          uint64(len(data)),
 		ChunkManifest: chunkEntries,
 		Lockbox:       lb,
 	}
-	if err := c.createInode(inode); err != nil {
+	return c.createInode(inode)
+}
+
+// WriteFile writes a file. Returns the FileKey used.
+func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
+	fileKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
+		return nil, err
+	}
+	if err := c.writeInodeContent(id, metadata.FileType, fileKey, data); err != nil {
 		return nil, err
 	}
 	return fileKey, nil

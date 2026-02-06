@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	"crypto/mlkem"
 	"encoding/json"
 	"io"
 	"math/rand"
@@ -23,20 +24,58 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c2FmZQ/tlsproxy/jwks"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
 
 type Server struct {
-	raft *raft.Raft
-	fsm  *MetadataFSM
+	raft    *raft.Raft
+	fsm     *MetadataFSM
+	jwks    *jwks.Remote
+	nodeKey *mlkem.DecapsulationKey768
 }
 
-func NewServer(r *raft.Raft, fsm *MetadataFSM) *Server {
-	return &Server{raft: r, fsm: fsm}
+func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768) *Server {
+	retryClient := retryablehttp.NewClient()
+	retryClient.Logger = nil
+	remote := jwks.NewRemote(retryClient, nil)
+	if jwksURL != "" {
+		remote.SetIssuers([]jwks.Issuer{{JWKSURI: jwksURL}})
+	}
+
+	return &Server{
+		raft:    r,
+		fsm:     fsm,
+		jwks:    remote,
+		nodeKey: nodeKey,
+	}
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Public Endpoints (Registration)
+	if r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost {
+		s.handleRegisterUser(w, r)
+		return
+	}
+
+	// Authenticated Endpoints
+	// Verify Sealed Token
+	// ... logic to verify token ...
+	// For Phase 6/7 transition, I'll allow "anonymous" if no header, but enforce if present?
+	// Or enforce strictly?
+	// Let's implement middleware logic inline or helper.
+	// If auth fails, return 401.
+	// We need to parse "Authorization: Bearer <SealedToken>"
+	// SealedToken = KEM(NodePub) + AES(Token)
+	// We need to decrypt.
+	// Token = { UserID, Timestamp, Signature }
+	
+	// For now, I'll add the User Registration Logic first.
+	// Existing endpoints remain open until middleware is fully baked.
+
 	if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/inode/")
 		if r.Method == http.MethodGet {
@@ -54,6 +93,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 		return
 	} else if r.URL.Path == "/v1/user" && r.Method == http.MethodPost {
+		// Deprecated/Legacy direct creation? No, remove it to force Register.
+		// Keeping for tests compatibility for a moment, but Register is the new path.
 		s.handleCreateUser(w, r)
 		return
 	} else if r.URL.Path == "/v1/group" && r.Method == http.MethodPost {
@@ -71,6 +112,58 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
+	if s.raft.State() != raft.Leader {
+		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		JWT     string `json:"jwt"`
+		SignKey []byte `json:"sign_key"`
+		EncKey  []byte `json:"enc_key"`
+		Name    string `json:"name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.jwks.Ready(r.Context())
+	token, err := jwt.Parse(req.JWT, func(token *jwt.Token) (interface{}, error) {
+		kid, _ := token.Header["kid"].(string)
+		return s.jwks.GetKey(kid)
+	})
+
+	if err != nil || !token.Valid {
+		http.Error(w, "invalid jwt: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		http.Error(w, "invalid claims", http.StatusUnauthorized)
+		return
+	}
+	email, _ := claims["email"].(string)
+	if email == "" {
+		http.Error(w, "jwt missing email", http.StatusUnauthorized)
+		return
+	}
+
+	// Create User
+	user := User{
+		ID:      email,
+		SignKey: req.SignKey,
+		EncKey:  req.EncKey,
+		Name:    req.Name,
+	}
+	body, _ := json.Marshal(user)
+
+	s.applyCommandRaw(w, CmdCreateUser, body, http.StatusCreated)
+}
+
+// ... Rest of handlers same as before ...
 func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	var nodes []Node
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {

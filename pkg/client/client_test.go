@@ -47,7 +47,7 @@ func TestClientIntegration(t *testing.T) {
 	// Wait for leader
 	time.Sleep(2 * time.Second)
 
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 
@@ -129,7 +129,7 @@ func TestReplication(t *testing.T) {
 
 	time.Sleep(2 * time.Second)
 
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 
@@ -182,5 +182,82 @@ func TestReplication(t *testing.T) {
 		if !has {
 			t.Errorf("Node %d missing chunk %s", i, chunkID)
 		}
+	}
+}
+
+func TestDirectories(t *testing.T) {
+	// Setup Cluster (Single node fine for logic)
+	metaDir := t.TempDir()
+	metaKey := make([]byte, 32)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metaNode.Shutdown()
+
+	metaNode.Raft.BootstrapCluster(raft.Configuration{
+		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
+	})
+	time.Sleep(2 * time.Second)
+
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
+	tsMeta := httptest.NewServer(metaServer)
+	defer tsMeta.Close()
+
+	dataDir := t.TempDir()
+	dataStore, _ := data.NewDiskStore(dataDir)
+	dataServer := data.NewServer(dataStore)
+	tsData := httptest.NewServer(dataServer)
+	defer tsData.Close()
+
+	// Register Data Node
+	node := metadata.Node{
+		ID:      "data-1",
+		Address: tsData.URL,
+		Status:  metadata.NodeStatusActive,
+	}
+	body, _ := json.Marshal(node)
+	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+
+	c := NewClient(tsMeta.URL, tsData.URL)
+	
+	// Identity needed for Lockbox (Mkdir uses writeInodeContent which uses Lockbox)
+	dk, _ := crypto.GenerateEncryptionKey()
+	c = c.WithIdentity("user-1", dk)
+
+	// Ensure Root
+	if err := c.EnsureRoot(); err != nil {
+		t.Fatalf("EnsureRoot failed: %v", err)
+	}
+
+	// Mkdir /a
+	if err := c.Mkdir("/a"); err != nil {
+		t.Fatalf("Mkdir /a failed: %v", err)
+	}
+
+	// Mkdir /a/b
+	if err := c.Mkdir("/a/b"); err != nil {
+		t.Fatalf("Mkdir /a/b failed: %v", err)
+	}
+
+	// Create File
+	content := []byte("file content")
+	if err := c.CreateFile("/a/b/f.txt", content); err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
+	}
+
+	// Resolve
+	inode, key, err := c.ResolvePath("/a/b/f.txt")
+	if err != nil {
+		t.Fatalf("ResolvePath failed: %v", err)
+	}
+
+	// Read
+	readBack, err := c.ReadFile(inode.ID, key)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
+	}
+	if string(readBack) != string(content) {
+		t.Errorf("Content mismatch")
 	}
 }

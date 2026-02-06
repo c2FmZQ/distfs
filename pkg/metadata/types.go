@@ -25,23 +25,26 @@ const (
 	DirType  InodeType = 1
 )
 
+const RootID = "root-directory-inode-id-0000000000"
+
 type ChunkEntry struct {
 	ID    string   `json:"id"`
 	Nodes []string `json:"nodes"`
 }
 
 type User struct {
-	ID        string `json:"id"`
-	PublicKey []byte `json:"public_key"`
-	Name      string `json:"name"`
+	ID      string `json:"id"`
+	SignKey []byte `json:"sign_key"`
+	EncKey  []byte `json:"enc_key"`
+	Name    string `json:"name"`
 }
 
 type Group struct {
-	ID        string         `json:"id"`
-	OwnerID   string         `json:"owner_id"`
-	Members   map[string]bool `json:"members"` // UserID -> bool
-	PublicKey []byte         `json:"public_key"`
-	Lockbox   crypto.Lockbox `json:"lockbox"`
+	ID      string          `json:"id"`
+	OwnerID string          `json:"owner_id"`
+	Members map[string]bool `json:"members"`
+	EncKey  []byte          `json:"enc_key"`
+	Lockbox crypto.Lockbox  `json:"lockbox"`
 }
 
 type NodeStatus string
@@ -54,8 +57,9 @@ const (
 
 type Node struct {
 	ID            string     `json:"id"`
-	Address       string     `json:"address"` // Data API Address
+	Address       string     `json:"address"`
 	Status        NodeStatus `json:"status"`
+	PublicKey     []byte     `json:"public_key"`
 	LastHeartbeat int64      `json:"last_heartbeat"`
 	Capacity      int64      `json:"capacity"`
 	Used          int64      `json:"used"`
