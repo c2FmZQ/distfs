@@ -1,0 +1,274 @@
+// Copyright 2026 TTBT Enterprises LLC
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+package client
+
+import (
+	"bytes"
+	"crypto/mlkem"
+	"crypto/rand"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
+)
+
+type Client struct {
+	metaURL    string
+	dataURL    string
+	httpClient *http.Client
+	userID     string
+	decKey     *mlkem.DecapsulationKey768
+}
+
+func NewClient(metaAddr, dataAddr string) *Client {
+	return &Client{
+		metaURL:    metaAddr,
+		dataURL:    dataAddr,
+		httpClient: &http.Client{},
+	}
+}
+
+func (c *Client) WithIdentity(userID string, key *mlkem.DecapsulationKey768) *Client {
+	c2 := *c
+	c2.userID = userID
+	c2.decKey = key
+	return &c2
+}
+
+func (c *Client) uploadChunk(id string, data []byte) error {
+	req, err := http.NewRequest("PUT", c.dataURL+"/v1/data/"+id, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("upload failed: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) downloadChunk(id string) ([]byte, error) {
+	resp, err := c.httpClient.Get(c.dataURL + "/v1/data/" + id)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("download chunk failed: %d", resp.StatusCode)
+	}
+	return io.ReadAll(resp.Body)
+}
+
+func (c *Client) createInode(inode metadata.Inode) error {
+	data, err := json.Marshal(inode)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inode", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		return fmt.Errorf("create inode failed: %d", resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *Client) getInode(id string) (*metadata.Inode, error) {
+	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/inode/" + id)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get inode failed: %d", resp.StatusCode)
+	}
+	var inode metadata.Inode
+	if err := json.NewDecoder(resp.Body).Decode(&inode); err != nil {
+		return nil, err
+	}
+	return &inode, nil
+}
+
+// WriteFile writes a file. Returns the FileKey used.
+func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
+	fileKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
+		return nil, err
+	}
+
+	var chunks []string
+	r := bytes.NewReader(data)
+	buf := make([]byte, crypto.ChunkSize)
+
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunkData := buf[:n]
+			cid, ct, err := crypto.EncryptChunk(fileKey, chunkData)
+			if err != nil {
+				return nil, err
+			}
+			if err := c.uploadChunk(cid, ct); err != nil {
+				return nil, err
+			}
+			chunks = append(chunks, cid)
+		}
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	lb := crypto.NewLockbox()
+	if c.decKey != nil {
+		if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
+			return nil, err
+		}
+	}
+
+	inode := metadata.Inode{
+		ID:            id,
+		Type:          metadata.FileType,
+		Size:          uint64(len(data)),
+		ChunkManifest: chunks,
+		Lockbox:       lb,
+	}
+	if err := c.createInode(inode); err != nil {
+		return nil, err
+	}
+	return fileKey, nil
+}
+
+type FileReader struct {
+	client          *Client
+	inode           *metadata.Inode
+	fileKey         []byte
+	offset          int64
+	currentChunkIdx int64
+	currentChunk    []byte
+}
+
+func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
+	inode, err := c.getInode(id)
+	if err != nil {
+		return nil, err
+	}
+
+	if fileKey == nil {
+		if c.decKey == nil {
+			return nil, fmt.Errorf("client has no identity to unlock file")
+		}
+		key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
+		if err != nil {
+			return nil, err
+		}
+		fileKey = key
+	}
+
+	return &FileReader{
+		client:          c,
+		inode:           inode,
+		fileKey:         fileKey,
+		offset:          0,
+		currentChunkIdx: -1,
+	}, nil
+}
+
+func (r *FileReader) Read(p []byte) (int, error) {
+	if r.offset >= int64(r.inode.Size) {
+		return 0, io.EOF
+	}
+
+	remaining := int64(r.inode.Size) - r.offset
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
+	}
+
+	totalRead := 0
+	chunkSize := int64(crypto.ChunkSize)
+
+	for len(p) > 0 {
+		chunkIdx := r.offset / chunkSize
+		chunkOffset := r.offset % chunkSize
+
+		var pt []byte
+		if chunkIdx == r.currentChunkIdx && r.currentChunk != nil {
+			pt = r.currentChunk
+		} else {
+			if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
+				// Should not happen if size is correct, but EOF logic
+				break
+			}
+			chunkID := r.inode.ChunkManifest[chunkIdx]
+			ct, err := r.client.downloadChunk(chunkID)
+			if err != nil {
+				return totalRead, err
+			}
+			pt, err = crypto.DecryptChunk(r.fileKey, ct)
+			if err != nil {
+				return totalRead, err
+			}
+			r.currentChunk = pt
+			r.currentChunkIdx = chunkIdx
+		}
+
+		available := int64(len(pt)) - chunkOffset
+		if available <= 0 {
+			return totalRead, fmt.Errorf("chunk offset out of bounds")
+		}
+
+		toCopy := int64(len(p))
+		if toCopy > available {
+			toCopy = available
+		}
+
+		copy(p, pt[chunkOffset:chunkOffset+toCopy])
+
+		n := int(toCopy)
+		p = p[n:]
+		r.offset += int64(n)
+		totalRead += n
+	}
+	return totalRead, nil
+}
+
+func (r *FileReader) Stat() *metadata.Inode {
+	return r.inode
+}
+
+// ReadFile reads the entire file into memory.
+func (c *Client) ReadFile(id string, fileKey []byte) ([]byte, error) {
+	r, err := c.NewReader(id, fileKey)
+	if err != nil {
+		return nil, err
+	}
+	return io.ReadAll(r)
+}
