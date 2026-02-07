@@ -55,26 +55,10 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Public Endpoints (Registration)
 	if r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost {
 		s.handleRegisterUser(w, r)
 		return
 	}
-
-	// Authenticated Endpoints
-	// Verify Sealed Token
-	// ... logic to verify token ...
-	// For Phase 6/7 transition, I'll allow "anonymous" if no header, but enforce if present?
-	// Or enforce strictly?
-	// Let's implement middleware logic inline or helper.
-	// If auth fails, return 401.
-	// We need to parse "Authorization: Bearer <SealedToken>"
-	// SealedToken = KEM(NodePub) + AES(Token)
-	// We need to decrypt.
-	// Token = { UserID, Timestamp, Signature }
-	
-	// For now, I'll add the User Registration Logic first.
-	// Existing endpoints remain open until middleware is fully baked.
 
 	if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/inode/")
@@ -93,8 +77,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 		return
 	} else if r.URL.Path == "/v1/user" && r.Method == http.MethodPost {
-		// Deprecated/Legacy direct creation? No, remove it to force Register.
-		// Keeping for tests compatibility for a moment, but Register is the new path.
 		s.handleCreateUser(w, r)
 		return
 	} else if r.URL.Path == "/v1/group" && r.Method == http.MethodPost {
@@ -108,6 +90,17 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
 		s.handleAllocateChunk(w, r)
 		return
+	} else if strings.HasPrefix(r.URL.Path, "/v1/meta/directory/") && strings.HasSuffix(r.URL.Path, "/entry") {
+		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/directory/")
+		id = strings.TrimSuffix(id, "/entry")
+		if r.Method == http.MethodPut {
+			s.handleAddChild(w, r, id)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			s.handleRemoveChild(w, r, id)
+			return
+		}
 	}
 	http.NotFound(w, r)
 }
@@ -151,7 +144,6 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Create User
 	user := User{
 		ID:      email,
 		SignKey: req.SignKey,
@@ -163,7 +155,6 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	s.applyCommandRaw(w, CmdCreateUser, body, http.StatusCreated)
 }
 
-// ... Rest of handlers same as before ...
 func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	var nodes []Node
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -254,6 +245,28 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 	s.applyCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
+}
+
+func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id string) {
+	var update ChildUpdate
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	update.ParentID = id // Enforce URL param
+	body, _ := json.Marshal(update)
+	s.applyCommandRaw(w, CmdAddChild, body, http.StatusOK)
+}
+
+func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id string) {
+	var update ChildUpdate
+	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	update.ParentID = id
+	body, _ := json.Marshal(update)
+	s.applyCommandRaw(w, CmdRemoveChild, body, http.StatusOK)
 }
 
 func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {

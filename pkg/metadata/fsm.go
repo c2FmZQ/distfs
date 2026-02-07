@@ -75,11 +75,19 @@ const (
 	CmdCreateUser    CommandType = 6
 	CmdCreateGroup   CommandType = 7
 	CmdUpdateGroup   CommandType = 8
+	CmdAddChild      CommandType = 9
+	CmdRemoveChild   CommandType = 10
 )
 
 type LogCommand struct {
 	Type CommandType `json:"type"`
 	Data []byte      `json:"data"`
+}
+
+type ChildUpdate struct {
+	ParentID string `json:"parent_id"`
+	Name     string `json:"name"`
+	ChildID  string `json:"child_id"`
 }
 
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
@@ -101,6 +109,10 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyCreateGroup(cmd.Data)
 	case CmdUpdateGroup:
 		return fsm.applyUpdateGroup(cmd.Data)
+	case CmdAddChild:
+		return fsm.applyAddChild(cmd.Data)
+	case CmdRemoveChild:
+		return fsm.applyRemoveChild(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -196,6 +208,84 @@ func (fsm *MetadataFSM) applyUpdateGroup(data []byte) interface{} {
 			return err
 		}
 		return b.Put([]byte(group.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
+	var update ChildUpdate
+	if err := json.Unmarshal(data, &update); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(update.ParentID))
+		if v == nil {
+			return ErrNotFound
+		}
+
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+
+		if inode.Type != DirType {
+			return fmt.Errorf("parent not a directory")
+		}
+		if inode.Children == nil {
+			inode.Children = make(map[string]string)
+		}
+
+		if _, exists := inode.Children[update.Name]; exists {
+			return ErrExists
+		}
+
+		inode.Children[update.Name] = update.ChildID
+
+		encoded, err := json.Marshal(inode)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(inode.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
+	var update ChildUpdate
+	if err := json.Unmarshal(data, &update); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(update.ParentID))
+		if v == nil {
+			return ErrNotFound
+		}
+
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+
+		if inode.Type != DirType {
+			return fmt.Errorf("parent not a directory")
+		}
+
+		if inode.Children == nil {
+			return ErrNotFound
+		}
+		if _, exists := inode.Children[update.Name]; !exists {
+			return ErrNotFound
+		}
+
+		delete(inode.Children, update.Name)
+
+		encoded, err := json.Marshal(inode)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(inode.ID), encoded)
 	})
 }
 

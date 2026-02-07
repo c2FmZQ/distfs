@@ -72,9 +72,10 @@ type Inode struct {
 	OwnerID       string         `json:"owner_id"`
 	GroupID       string         `json:"group_id"`
 	Mode          uint32         `json:"mode"`
-	Size          uint64         `json:"size"`
-	EncryptedName []byte         `json:"enc_name"`
-	ChunkManifest []ChunkEntry   `json:"manifest"`
-	Lockbox       crypto.Lockbox `json:"lockbox"`
+	Size          uint64            `json:"size"`
+	EncryptedName []byte            `json:"enc_name"`
+	Children      map[string]string `json:"children,omitempty"`
+	ChunkManifest []ChunkEntry      `json:"manifest"`
+	Lockbox       crypto.Lockbox    `json:"lockbox"`
 	Version       uint64         `json:"version"`
 }
