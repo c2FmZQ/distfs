@@ -15,6 +15,7 @@
 package data
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,28 +32,76 @@ func NewServer(store Store) *Server {
 	return &Server{store: store}
 }
 
+// ServeHTTP needs a slightly better router
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Path: /v1/data/{chunk_id}
 	if !strings.HasPrefix(r.URL.Path, "/v1/data/") {
 		http.NotFound(w, r)
 		return
 	}
 
-	chunkID := strings.TrimPrefix(r.URL.Path, "/v1/data/")
-	// Strict validation
+	path := strings.TrimPrefix(r.URL.Path, "/v1/data/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	
+	chunkID := parts[0]
 	if !validChunkID.MatchString(chunkID) {
 		http.Error(w, "invalid chunk id", http.StatusBadRequest)
 		return
 	}
 
-	switch r.Method {
-	case http.MethodPut:
-		s.handlePut(w, r, chunkID)
-	case http.MethodGet:
-		s.handleGet(w, r, chunkID)
-	default:
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	if len(parts) == 1 {
+		switch r.Method {
+		case http.MethodPut:
+			s.handlePut(w, r, chunkID)
+		case http.MethodGet:
+			s.handleGet(w, r, chunkID)
+		default:
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		}
+		return
 	}
+
+	if len(parts) == 2 && parts[1] == "replicate" && r.Method == http.MethodPost {
+		s.handleReplicate(w, r, chunkID)
+		return
+	}
+
+	http.NotFound(w, r)
+}
+
+func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id string) {
+	var req struct {
+		Targets []string `json:"targets"`
+	}
+	// Limit JSON size
+	r.Body = http.MaxBytesReader(w, r.Body, 4096)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Targets) == 0 {
+		http.Error(w, "no targets", http.StatusBadRequest)
+		return
+	}
+
+	// We assume first target is next hop, rest are forwarded
+	target := req.Targets[0]
+	remaining := ""
+	if len(req.Targets) > 1 {
+		remaining = strings.Join(req.Targets[1:], ",")
+	}
+
+	// Async or Sync? Sync is safer for feedback.
+	if err := s.replicate(id, target, remaining); err != nil {
+		http.Error(w, fmt.Sprintf("replication failed: %v", err), http.StatusBadGateway)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {

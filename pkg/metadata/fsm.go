@@ -67,16 +67,17 @@ func (fsm *MetadataFSM) Close() error {
 type CommandType uint8
 
 const (
-	CmdCreateInode   CommandType = 1
-	CmdUpdateInode   CommandType = 2
-	CmdDeleteInode   CommandType = 3
-	CmdRegisterNode  CommandType = 4
-	CmdHeartbeatNode CommandType = 5
-	CmdCreateUser    CommandType = 6
-	CmdCreateGroup   CommandType = 7
-	CmdUpdateGroup   CommandType = 8
-	CmdAddChild      CommandType = 9
-	CmdRemoveChild   CommandType = 10
+	CmdCreateInode     CommandType = 1
+	CmdUpdateInode     CommandType = 2
+	CmdDeleteInode     CommandType = 3
+	CmdRegisterNode    CommandType = 4
+	CmdHeartbeatNode   CommandType = 5
+	CmdCreateUser      CommandType = 6
+	CmdCreateGroup     CommandType = 7
+	CmdUpdateGroup     CommandType = 8
+	CmdAddChild        CommandType = 9
+	CmdRemoveChild     CommandType = 10
+	CmdAddChunkReplica CommandType = 11
 )
 
 type LogCommand struct {
@@ -88,6 +89,12 @@ type ChildUpdate struct {
 	ParentID string `json:"parent_id"`
 	Name     string `json:"name"`
 	ChildID  string `json:"child_id"`
+}
+
+type AddReplicaRequest struct {
+	InodeID string   `json:"inode_id"`
+	ChunkID string   `json:"chunk_id"`
+	NodeIDs []string `json:"node_ids"`
 }
 
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
@@ -113,6 +120,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyAddChild(cmd.Data)
 	case CmdRemoveChild:
 		return fsm.applyRemoveChild(cmd.Data)
+	case CmdAddChunkReplica:
+		return fsm.applyAddChunkReplica(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -286,6 +295,55 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 			return err
 		}
 		return b.Put([]byte(inode.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
+	var req AddReplicaRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(req.InodeID))
+		if v == nil {
+			return ErrNotFound
+		}
+
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+
+		updated := false
+		for i, chunk := range inode.ChunkManifest {
+			if chunk.ID == req.ChunkID {
+				for _, newID := range req.NodeIDs {
+					exists := false
+					for _, existingID := range chunk.Nodes {
+						if existingID == newID {
+							exists = true
+							break
+						}
+					}
+					if !exists {
+						inode.ChunkManifest[i].Nodes = append(inode.ChunkManifest[i].Nodes, newID)
+						updated = true
+					}
+				}
+				break
+			}
+		}
+
+		if updated {
+			encoded, err := json.Marshal(inode)
+			if err != nil {
+				return err
+			}
+			return b.Put([]byte(inode.ID), encoded)
+		}
+		return nil
 	})
 }
 

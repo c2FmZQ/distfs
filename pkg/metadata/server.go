@@ -43,6 +43,8 @@ type Server struct {
 
 	nonceCache map[string]time.Time
 	nonceMu    sync.Mutex
+
+	replMonitor *ReplicationMonitor
 }
 
 func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768) *Server {
@@ -53,12 +55,27 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 		remote.SetIssuers([]jwks.Issuer{{JWKSURI: jwksURL}})
 	}
 
-	return &Server{
+	s := &Server{
 		raft:       r,
 		fsm:        fsm,
 		jwks:       remote,
 		nodeKey:    nodeKey,
 		nonceCache: make(map[string]time.Time),
+	}
+	s.replMonitor = NewReplicationMonitor(s)
+	s.replMonitor.Start()
+	return s
+}
+
+func (s *Server) Shutdown() {
+	if s.replMonitor != nil {
+		s.replMonitor.Stop()
+	}
+}
+
+func (s *Server) ForceReplicationScan() {
+	if s.replMonitor != nil {
+		s.replMonitor.Scan()
 	}
 }
 

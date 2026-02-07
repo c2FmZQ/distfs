@@ -50,6 +50,7 @@ func TestClientIntegration(t *testing.T) {
 	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
+	defer metaServer.Shutdown()
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
@@ -135,6 +136,7 @@ func TestReplication(t *testing.T) {
 	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
+	defer metaServer.Shutdown()
 
 	// 2. Three Data Nodes
 	nodes := make([]*httptest.Server, 3)
@@ -206,6 +208,7 @@ func TestDirectories(t *testing.T) {
 	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
+	defer metaServer.Shutdown()
 
 	dataDir := t.TempDir()
 	dataStore, _ := data.NewDiskStore(dataDir)
@@ -262,5 +265,97 @@ func TestDirectories(t *testing.T) {
 	}
 	if string(readBack) != string(content) {
 		t.Errorf("Content mismatch")
+	}
+}
+
+func TestReplicationRepair(t *testing.T) {
+	// 1. Setup Metadata
+	metaDir := t.TempDir()
+	metaKey := make([]byte, 32)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer metaNode.Shutdown()
+
+	metaNode.Raft.BootstrapCluster(raft.Configuration{
+		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
+	})
+	time.Sleep(2 * time.Second)
+
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
+	tsMeta := httptest.NewServer(metaServer)
+	defer tsMeta.Close()
+	defer metaServer.Shutdown()
+
+	// 2. Start ONE Data Node initially
+	dataDir1 := t.TempDir()
+	store1, _ := data.NewDiskStore(dataDir1)
+	server1 := data.NewServer(store1)
+	ts1 := httptest.NewServer(server1)
+	defer ts1.Close()
+
+	node1 := metadata.Node{ID: "data-1", Address: ts1.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	body, _ := json.Marshal(node1)
+	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+
+	// 3. Write File (Will have 1 replica)
+	c := NewClient(tsMeta.URL, ts1.URL)
+	content := []byte("repair me")
+	_, err = c.WriteFile("repair-file", content) // Raw write
+	if err != nil {
+		t.Fatalf("Write failed: %v", err)
+	}
+
+	// Get Chunk ID
+	chunks := store1.ListChunks()
+	var chunkID string
+	for id := range chunks {
+		chunkID = id
+		break
+	}
+	if chunkID == "" {
+		t.Fatal("No chunks found on primary")
+	}
+
+	// 4. Start 2 more Data Nodes
+	dataDir2 := t.TempDir()
+	store2, _ := data.NewDiskStore(dataDir2)
+	server2 := data.NewServer(store2)
+	ts2 := httptest.NewServer(server2)
+	defer ts2.Close()
+
+	dataDir3 := t.TempDir()
+	store3, _ := data.NewDiskStore(dataDir3)
+	server3 := data.NewServer(store3)
+	ts3 := httptest.NewServer(server3)
+	defer ts3.Close()
+
+	node2 := metadata.Node{ID: "data-2", Address: ts2.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	body, _ = json.Marshal(node2)
+	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+
+	node3 := metadata.Node{ID: "data-3", Address: ts3.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	body, _ = json.Marshal(node3)
+	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+
+	// 5. Trigger Repair
+	metaServer.ForceReplicationScan()
+
+	// 6. Wait for verify
+	start := time.Now()
+	repaired := false
+	for time.Since(start) < 5*time.Second {
+		h2, _ := store2.HasChunk(chunkID)
+		h3, _ := store3.HasChunk(chunkID)
+		if h2 && h3 {
+			repaired = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+
+	if !repaired {
+		t.Fatal("Chunk not repaired to new nodes")
 	}
 }
