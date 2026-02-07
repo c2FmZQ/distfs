@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	"context"
 	"crypto/mlkem"
 	"encoding/base64"
 	"encoding/json"
@@ -40,6 +41,7 @@ type Server struct {
 	fsm     *MetadataFSM
 	jwks    *jwks.Remote
 	nodeKey *mlkem.DecapsulationKey768
+	signKey *crypto.IdentityKey
 
 	nonceCache map[string]time.Time
 	nonceMu    sync.Mutex
@@ -47,7 +49,7 @@ type Server struct {
 	replMonitor *ReplicationMonitor
 }
 
-func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768) *Server {
+func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -60,6 +62,7 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 		fsm:        fsm,
 		jwks:       remote,
 		nodeKey:    nodeKey,
+		signKey:    signKey,
 		nonceCache: make(map[string]time.Time),
 	}
 	s.replMonitor = NewReplicationMonitor(s)
@@ -79,6 +82,10 @@ func (s *Server) ForceReplicationScan() {
 	}
 }
 
+type contextKey string
+
+const userContextKey contextKey = "user"
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/meta/key" && r.Method == http.MethodGet {
 		s.handleGetNodeKey(w, r)
@@ -93,9 +100,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.authenticate(r); err != nil {
+	user, err := s.authenticate(r)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
+	}
+	if user != nil {
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+		r = r.WithContext(ctx)
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
@@ -114,9 +126,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if r.URL.Path == "/v1/meta/inodes" && r.Method == http.MethodPost {
 		s.handleGetInodes(w, r)
 		return
+	} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
+		s.handleIssueToken(w, r)
+		return
 	} else if r.URL.Path == "/v1/user" && r.Method == http.MethodPost {
-		// Only via Register now?
-		// Keeping for internal use if authed?
 		s.handleCreateUser(w, r)
 		return
 	} else if r.URL.Path == "/v1/group" && r.Method == http.MethodPost {
@@ -145,27 +158,23 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (s *Server) authenticate(r *http.Request) error {
-	// If NodeKey is not set (e.g. tests without auth), skip auth?
-	// Phase 6 tests don't have NodeKey.
-	// If I force auth, existing tests fail.
-	// I'll skip if s.nodeKey is nil (Dev/Test Mode).
+func (s *Server) authenticate(r *http.Request) (*User, error) {
 	if s.nodeKey == nil {
-		return nil
+		return nil, nil
 	}
 
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		return fmt.Errorf("missing auth")
+		return nil, fmt.Errorf("missing auth")
 	}
 	sealed, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Bearer "))
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	kemSize := mlkem.CiphertextSize768
 	if len(sealed) < kemSize {
-		return fmt.Errorf("token too short")
+		return nil, fmt.Errorf("token too short")
 	}
 
 	kemCT := sealed[:kemSize]
@@ -173,43 +182,34 @@ func (s *Server) authenticate(r *http.Request) error {
 
 	ss, err := s.nodeKey.Decapsulate(kemCT)
 	if err != nil {
-		return fmt.Errorf("decapsulation failed: %v", err)
+		return nil, fmt.Errorf("decapsulation failed: %v", err)
 	}
 
 	pt, err := crypto.DecryptDEM(ss, demCT)
 	if err != nil {
-		return fmt.Errorf("decryption failed: %v", err)
+		return nil, fmt.Errorf("decryption failed: %v", err)
 	}
 
 	var signed SignedAuthToken
 	if err := json.Unmarshal(pt, &signed); err != nil {
-		return err
+		return nil, err
 	}
 
 	var token AuthToken
 	if err := json.Unmarshal(signed.Payload, &token); err != nil {
-		return err
+		return nil, err
 	}
 
 	if time.Since(time.Unix(token.Time, 0)) > 5*time.Minute {
-		return fmt.Errorf("expired")
+		return nil, fmt.Errorf("expired")
 	}
 
-	// Replay Check
 	s.nonceMu.Lock()
 	if _, exists := s.nonceCache[token.Nonce]; exists {
 		s.nonceMu.Unlock()
-		return fmt.Errorf("replay detected")
+		return nil, fmt.Errorf("replay detected")
 	}
 	s.nonceCache[token.Nonce] = time.Now()
-	// Cleanup old nonces (lazy)
-	// Simple strategy: Iterate and delete if > 5m old.
-	// Optimize: only do this occasionally or if map gets large.
-	// For now, simple linear scan if map > 1000 items? Or just every time?
-	// Every time is slow. Let's do a simple probability check or just ignore for prototype.
-	// Reviewer said "Action: ...", didn't specify optimized cleanup.
-	// I'll leave cleanup for a background ticker in real app, or simple check here.
-	// To be safe, I'll clean up if map is too big.
 	if len(s.nonceCache) > 10000 && rand.Intn(100) == 0 {
 		now := time.Now()
 		for nonce, t := range s.nonceCache {
@@ -230,14 +230,14 @@ func (s *Server) authenticate(r *http.Request) error {
 		return json.Unmarshal(v, &user)
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	if !crypto.VerifySignature(user.SignKey, signed.Payload, signed.Signature) {
-		return fmt.Errorf("invalid signature")
+		return nil, fmt.Errorf("invalid signature")
 	}
 
-	return nil
+	return &user, nil
 }
 
 func (s *Server) handleGetNodeKey(w http.ResponseWriter, r *http.Request) {
@@ -250,7 +250,74 @@ func (s *Server) handleGetNodeKey(w http.ResponseWriter, r *http.Request) {
 	w.Write(pub.Bytes())
 }
 
-// ... Handlers (RegisterUser, etc) ...
+func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
+	if s.signKey == nil {
+		http.Error(w, "signing key not configured", http.StatusInternalServerError)
+		return
+	}
+
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var req struct {
+		InodeID string   `json:"inode_id"`
+		Chunks  []string `json:"chunks"`
+		Mode    string   `json:"mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Verify Permission
+	var inode Inode
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(req.InodeID))
+		if v == nil {
+			return fmt.Errorf("inode not found")
+		}
+		return json.Unmarshal(v, &inode)
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	if inode.OwnerID != user.ID {
+		// TODO: Check group
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	// Construct Token
+	capToken := CapabilityToken{
+		Chunks: req.Chunks,
+		Mode:   req.Mode,
+		Exp:    time.Now().Add(10 * time.Minute).Unix(),
+	}
+	if len(capToken.Chunks) == 0 {
+		// If empty, allow all chunks in inode?
+		for _, c := range inode.ChunkManifest {
+			capToken.Chunks = append(capToken.Chunks, c.ID)
+		}
+	}
+
+	payload, _ := json.Marshal(capToken)
+	sig := s.signKey.Sign(payload)
+
+	signed := SignedAuthToken{
+		Payload:   payload,
+		Signature: sig,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(signed)
+}
+
 func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)

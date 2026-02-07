@@ -90,3 +90,9 @@ type SignedAuthToken struct {
 	Payload   []byte `json:"payload"`
 	Signature []byte `json:"sig"`
 }
+
+type CapabilityToken struct {
+	Chunks []string `json:"chunks"`
+	Mode   string   `json:"mode"` // "R" or "W"
+	Exp    int64    `json:"exp"`
+}

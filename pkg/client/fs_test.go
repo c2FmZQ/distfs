@@ -45,13 +45,14 @@ func TestDistFS_ReadDir(t *testing.T) {
 	})
 	time.Sleep(2 * time.Second)
 
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil)
+	signKey, _ := crypto.GenerateIdentityKey()
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil, signKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 
 	dataDir := t.TempDir()
 	dataStore, _ := data.NewDiskStore(dataDir)
-	dataServer := data.NewServer(dataStore)
+	dataServer := data.NewServer(dataStore, nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 

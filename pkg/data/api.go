@@ -15,6 +15,7 @@
 package data
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,14 +23,19 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 type Server struct {
-	store Store
+	store      Store
+	metaPubKey []byte
 }
 
-func NewServer(store Store) *Server {
-	return &Server{store: store}
+func NewServer(store Store, metaPubKey []byte) *Server {
+	return &Server{store: store, metaPubKey: metaPubKey}
 }
 
 // ServeHTTP needs a slightly better router
@@ -45,7 +51,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	
+
 	chunkID := parts[0]
 	if !validChunkID.MatchString(chunkID) {
 		http.Error(w, "invalid chunk id", http.StatusBadRequest)
@@ -72,11 +78,72 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) error {
+	if s.metaPubKey == nil {
+		return nil
+	}
+
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return fmt.Errorf("missing auth")
+	}
+	tokenStr := strings.TrimPrefix(auth, "Bearer ")
+
+	tokenBytes, err := base64.StdEncoding.DecodeString(tokenStr)
+	if err != nil {
+		return fmt.Errorf("invalid token format")
+	}
+
+	var signed metadata.SignedAuthToken
+	if err := json.Unmarshal(tokenBytes, &signed); err != nil {
+		return fmt.Errorf("invalid token structure")
+	}
+
+	if !crypto.VerifySignature(s.metaPubKey, signed.Payload, signed.Signature) {
+		return fmt.Errorf("invalid signature")
+	}
+
+	var cap metadata.CapabilityToken
+	if err := json.Unmarshal(signed.Payload, &cap); err != nil {
+		return fmt.Errorf("invalid capability payload")
+	}
+
+	if time.Now().Unix() > cap.Exp {
+		return fmt.Errorf("token expired")
+	}
+
+	if !strings.Contains(cap.Mode, requiredMode) {
+		if requiredMode == "R" && !strings.Contains(cap.Mode, "R") {
+			return fmt.Errorf("read permission denied")
+		}
+		if requiredMode == "W" && !strings.Contains(cap.Mode, "W") {
+			return fmt.Errorf("write permission denied")
+		}
+	}
+
+	allowed := false
+	for _, c := range cap.Chunks {
+		if c == chunkID {
+			allowed = true
+			break
+		}
+	}
+	if !allowed {
+		return fmt.Errorf("chunk access denied")
+	}
+
+	return nil
+}
+
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id string) {
+	if err := s.authenticate(r, id, "R"); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
 	var req struct {
 		Targets []string `json:"targets"`
 	}
-	// Limit JSON size
 	r.Body = http.MaxBytesReader(w, r.Body, 4096)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -88,15 +155,15 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	// We assume first target is next hop, rest are forwarded
 	target := req.Targets[0]
 	remaining := ""
 	if len(req.Targets) > 1 {
 		remaining = strings.Join(req.Targets[1:], ",")
 	}
 
-	// Async or Sync? Sync is safer for feedback.
-	if err := s.replicate(id, target, remaining); err != nil {
+	// Propagate auth
+	token := r.Header.Get("Authorization")
+	if err := s.replicate(id, target, remaining, token); err != nil {
 		http.Error(w, fmt.Sprintf("replication failed: %v", err), http.StatusBadGateway)
 		return
 	}
@@ -105,8 +172,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
-	// Limit body size to prevent DoS. Chunk is ~1MB.
-	// Allow 2MB limit to cover overhead.
+	if err := s.authenticate(r, id, "W"); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
 	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
 
 	if err := s.store.WriteChunk(id, r.Body); err != nil {
@@ -114,16 +184,14 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
-	// Replication Pipeline
 	replicas := r.URL.Query().Get("replicas")
 	if replicas != "" {
 		targets := strings.Split(replicas, ",")
 		nextTarget := targets[0]
 		remaining := strings.Join(targets[1:], ",")
 
-		if err := s.replicate(id, nextTarget, remaining); err != nil {
-			// If replication fails, we fail the write to ensure consistency
-			// (Client should retry)
+		token := r.Header.Get("Authorization")
+		if err := s.replicate(id, nextTarget, remaining, token); err != nil {
 			http.Error(w, fmt.Sprintf("replication failed: %v", err), http.StatusBadGateway)
 			return
 		}
@@ -132,14 +200,13 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (s *Server) replicate(id, target, remaining string) error {
+func (s *Server) replicate(id, target, remaining, token string) error {
 	rc, err := s.store.ReadChunk(id)
 	if err != nil {
 		return err
 	}
 	defer rc.Close()
 
-	// Target is assumed to be a valid base URL (e.g., http://host:port)
 	url := fmt.Sprintf("%s/v1/data/%s", target, id)
 	if remaining != "" {
 		url += "?replicas=" + remaining
@@ -148,6 +215,9 @@ func (s *Server) replicate(id, target, remaining string) error {
 	req, err := http.NewRequest("PUT", url, rc)
 	if err != nil {
 		return err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", token)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -163,6 +233,11 @@ func (s *Server) replicate(id, target, remaining string) error {
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, id string) {
+	if err := s.authenticate(r, id, "R"); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
 	size, err := s.store.GetChunkSize(id)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -175,7 +250,6 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, id string) {
 
 	rc, err := s.store.ReadChunk(id)
 	if err != nil {
-		// Should not happen if GetChunkSize succeeded, but race condition possible
 		if os.IsNotExist(err) {
 			http.NotFound(w, r)
 			return
@@ -189,7 +263,6 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, id string) {
 	w.Header().Set("Content-Length", strconv.FormatInt(size, 10))
 
 	if _, err := io.Copy(w, rc); err != nil {
-		// Response already committed
 		return
 	}
 }

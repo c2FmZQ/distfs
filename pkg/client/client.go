@@ -67,7 +67,12 @@ func (c *Client) allocateNodes() ([]metadata.Node, error) {
 	return nodes, nil
 }
 
-func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node) error {
+func (c *Client) issueToken(inodeID string, chunks []string, mode string) (string, error) {
+	// Not fully implemented until Client Auth is ready.
+	return "", fmt.Errorf("not implemented")
+}
+
+func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, token string) error {
 	if len(nodes) == 0 {
 		return fmt.Errorf("no nodes allocated")
 	}
@@ -86,6 +91,10 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node) erro
 	if err != nil {
 		return err
 	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -97,8 +106,16 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node) erro
 	return nil
 }
 
-func (c *Client) downloadChunk(id string) ([]byte, error) {
-	resp, err := c.httpClient.Get(c.dataURL + "/v1/data/" + id)
+func (c *Client) downloadChunk(id string, token string) ([]byte, error) {
+	req, err := http.NewRequest("GET", c.dataURL+"/v1/data/"+id, nil)
+	if err != nil {
+		return nil, err
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -167,6 +184,9 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 }
 
 func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, data []byte, encryptedName []byte) error {
+	// For now, we continue to use the old flow without tokens because IssueToken requires Client Auth which is not implemented.
+	// I've updated uploadChunk to accept token, passing "" for now.
+	
 	var chunkEntries []metadata.ChunkEntry
 	r := bytes.NewReader(data)
 	buf := make([]byte, crypto.ChunkSize)
@@ -189,7 +209,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 				}
 			}
 
-			if err := c.uploadChunk(cid, ct, nodes); err != nil {
+			if err := c.uploadChunk(cid, ct, nodes, ""); err != nil {
 				return err
 			}
 
@@ -221,6 +241,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		ChunkManifest: chunkEntries,
 		Lockbox:       lb,
 		EncryptedName: encryptedName,
+		OwnerID:       c.userID, // Set Owner!
 	}
 	return c.createInode(inode)
 }
@@ -244,6 +265,7 @@ type FileReader struct {
 	offset          int64
 	currentChunkIdx int64
 	currentChunk    []byte
+	token           string
 }
 
 func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
@@ -262,6 +284,9 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		}
 		fileKey = key
 	}
+	
+	// Issue Token logic pending Client Auth.
+	token := ""
 
 	return &FileReader{
 		client:          c,
@@ -269,6 +294,7 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		fileKey:         fileKey,
 		offset:          0,
 		currentChunkIdx: -1,
+		token:           token,
 	}, nil
 }
 
@@ -297,7 +323,7 @@ func (r *FileReader) Read(p []byte) (int, error) {
 				break
 			}
 			chunkEntry := r.inode.ChunkManifest[chunkIdx]
-			ct, err := r.client.downloadChunk(chunkEntry.ID)
+			ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
 			if err != nil {
 				return totalRead, err
 			}
