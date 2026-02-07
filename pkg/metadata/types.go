@@ -66,16 +66,27 @@ type Node struct {
 }
 
 type Inode struct {
-	ID            string         `json:"id"`
-	ParentID      string         `json:"parent_id"`
-	Type          InodeType      `json:"type"`
-	OwnerID       string         `json:"owner_id"`
-	GroupID       string         `json:"group_id"`
-	Mode          uint32         `json:"mode"`
+	ID            string            `json:"id"`
+	ParentID      string            `json:"parent_id"`
+	Type          InodeType         `json:"type"`
+	OwnerID       string            `json:"owner_id"`
+	GroupID       string            `json:"group_id"`
+	Mode          uint32            `json:"mode"`
 	Size          uint64            `json:"size"`
 	EncryptedName []byte            `json:"enc_name"`
 	Children      map[string]string `json:"children,omitempty"`
 	ChunkManifest []ChunkEntry      `json:"manifest"`
 	Lockbox       crypto.Lockbox    `json:"lockbox"`
-	Version       uint64         `json:"version"`
+	Version       uint64            `json:"version"`
+}
+
+type AuthToken struct {
+	UserID string `json:"uid"`
+	Time   int64  `json:"ts"`
+	Nonce  string `json:"nonce"`
+}
+
+type SignedAuthToken struct {
+	Payload   []byte `json:"payload"`
+	Signature []byte `json:"sig"`
 }

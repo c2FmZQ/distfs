@@ -154,17 +154,23 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 	newKey := make([]byte, 32)
 	rand.Read(newKey)
 
+	encNameBlob, err := crypto.EncryptDEM(newKey, []byte(name))
+	if err != nil {
+		return fmt.Errorf("failed to encrypt name: %w", err)
+	}
+
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(newID, iType, newKey, data); err != nil {
+		if err := c.writeInodeContent(newID, iType, newKey, data, encNameBlob); err != nil {
 			return err
 		}
 	} else {
 		lb := c.createLockbox(newKey)
 		inode := metadata.Inode{
-			ID:       newID,
-			Type:     metadata.DirType,
-			Children: make(map[string]string),
-			Lockbox:  lb,
+			ID:            newID,
+			Type:          metadata.DirType,
+			Children:      make(map[string]string),
+			Lockbox:       lb,
+			EncryptedName: encNameBlob,
 		}
 		if err := c.createInode(inode); err != nil {
 			return err

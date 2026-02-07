@@ -86,14 +86,17 @@ func TestClientIntegration(t *testing.T) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	c = c.WithIdentity("user-1", dk)
 
-	fileID2 := "file-2"
-	_, err = c.WriteFile(fileID2, content)
-	if err != nil {
-		t.Fatalf("WriteFile2 failed: %v", err)
+	if err := c.EnsureRoot(); err != nil {
+		t.Fatalf("EnsureRoot failed: %v", err)
+	}
+
+	fileName := "/file-2.txt"
+	if err := c.CreateFile(fileName, content); err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
 	}
 
 	dfs := c.FS()
-	f, err := dfs.Open(fileID2)
+	f, err := dfs.Open(fileName)
 	if err != nil {
 		t.Fatalf("FS Open failed: %v", err)
 	}

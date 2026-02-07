@@ -146,7 +146,27 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 	return &inode, nil
 }
 
-func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, data []byte) error {
+func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
+	body, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Post(c.metaURL+"/v1/meta/inodes", "application/json", bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get inodes failed: %d", resp.StatusCode)
+	}
+	var inodes []*metadata.Inode
+	if err := json.NewDecoder(resp.Body).Decode(&inodes); err != nil {
+		return nil, err
+	}
+	return inodes, nil
+}
+
+func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, data []byte, encryptedName []byte) error {
 	var chunkEntries []metadata.ChunkEntry
 	r := bytes.NewReader(data)
 	buf := make([]byte, crypto.ChunkSize)
@@ -200,6 +220,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		Size:          uint64(len(data)),
 		ChunkManifest: chunkEntries,
 		Lockbox:       lb,
+		EncryptedName: encryptedName,
 	}
 	return c.createInode(inode)
 }
@@ -210,7 +231,7 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
 		return nil, err
 	}
-	if err := c.writeInodeContent(id, metadata.FileType, fileKey, data); err != nil {
+	if err := c.writeInodeContent(id, metadata.FileType, fileKey, data, nil); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
