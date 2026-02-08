@@ -211,7 +211,7 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 		capToken := CapabilityToken{
 			Chunks: []string{chunkID},
 			Mode:   "RW",
-			Exp:    time.Now().Add(5 * time.Minute).Unix(),
+			Exp:    time.Now().Add(30 * time.Minute).Unix(),
 		}
 		capBytes, _ := json.Marshal(capToken)
 		sig := rm.server.signKey.Sign(capBytes)

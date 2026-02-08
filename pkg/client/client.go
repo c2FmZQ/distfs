@@ -69,17 +69,6 @@ func (c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client {
 
 func (c *Client) authenticateRequest(req *http.Request) error {
 	if c.signKey == nil || c.serverKey == nil {
-		// If keys missing, skip auth? Or fail?
-		// If we skip, server will reject 401.
-		// So we fail here if we intend to authenticate.
-		// But maybe some requests don't need auth?
-		// Allocate/GetInode don't strictly need auth in current implementation?
-		// ServeHTTP checks auth:
-		// authenticate(r) -> returns User/Error.
-		// If Error -> 401.
-		// So ALL requests to ServeHTTP need auth?
-		// authenticate returns error if `Authorization` missing.
-		// So yes, we MUST auth.
 		return fmt.Errorf("client keys (sign/server) not configured")
 	}
 
@@ -130,16 +119,7 @@ func (c *Client) allocateNodes() ([]metadata.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Auth optional for allocate?
-	// Server `handleAllocateChunk` calls `applyCommand`? No, it's read-only View.
-	// But `ServeHTTP` calls `authenticate`.
-	// So we need auth.
-	if err := c.authenticateRequest(req); err != nil {
-		// Return error? Or ignore if keys missing?
-		// If keys missing, we can't auth.
-		// If we don't auth, server returns 401.
-		// So we should try.
-	}
+	c.authenticateRequest(req)
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -182,17 +162,10 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 		return "", fmt.Errorf("issueToken failed: %d %s", resp.StatusCode, string(b))
 	}
 
-	// Response is JSON SignedAuthToken
-	// Data Node expects "Bearer base64(json(SignedAuthToken))".
-	// So we read the JSON bytes and base64 encode them.
 	respBytes, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return "", err
 	}
-	
-	// Optional: verify signature using Server's Sign Key?
-	// We assume trust for now.
-	
 	return base64.StdEncoding.EncodeToString(respBytes), nil
 }
 
@@ -250,29 +223,62 @@ func (c *Client) downloadChunk(id string, token string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
-func (c *Client) createInode(inode metadata.Inode) error {
+func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	data, err := json.Marshal(inode)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inode", bytes.NewReader(data))
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := c.authenticateRequest(req); err != nil {
-		// Ignore error if dev mode?
-	}
-	
+	c.authenticateRequest(req)
 	req.Header.Set("Content-Type", "application/json")
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("create inode failed: %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("create inode failed: %d %s", resp.StatusCode, string(b))
 	}
-	return nil
+	
+	var created metadata.Inode
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return nil, err
+	}
+	return &created, nil
+}
+
+func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
+	data, err := json.Marshal(inode)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("PUT", c.metaURL+"/v1/meta/inode/"+inode.ID, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	c.authenticateRequest(req)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("update inode failed: %d %s", resp.StatusCode, string(b))
+	}
+	
+	var updated metadata.Inode
+	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+		return nil, err
+	}
+	return &updated, nil
 }
 
 func (c *Client) getInode(id string) (*metadata.Inode, error) {
@@ -325,7 +331,6 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 }
 
 func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, data []byte, encryptedName []byte) error {
-	// Create Inode first to establish ownership
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
@@ -336,13 +341,14 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	inode := metadata.Inode{
 		ID:            id,
 		Type:          iType,
-		Size:          uint64(len(data)), // Initial size
-		ChunkManifest: nil, // Empty
+		Size:          uint64(len(data)),
+		ChunkManifest: nil,
 		Lockbox:       lb,
 		EncryptedName: encryptedName,
 		OwnerID:       c.userID,
 	}
-	if err := c.createInode(inode); err != nil {
+	created, err := c.createInode(inode)
+	if err != nil {
 		return err
 	}
 
@@ -359,11 +365,8 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 				return err
 			}
 
-			// Get Token for Chunk (Write)
 			token, err := c.issueToken(id, []string{cid}, "W")
 			if err != nil {
-				// Retry or fail?
-				// If issueToken fails (e.g. keys missing), we fail.
 				return fmt.Errorf("token issue failed: %v", err)
 			}
 
@@ -394,12 +397,12 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		}
 	}
 
-	// Update Inode with Manifest
-	inode.ChunkManifest = chunkEntries
-	return c.createInode(inode)
+	// Final update using updateInode (uses version check)
+	created.ChunkManifest = chunkEntries
+	_, err = c.updateInode(*created)
+	return err
 }
 
-// WriteFile writes a file. Returns the FileKey used.
 func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 	fileKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {
@@ -438,21 +441,7 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		fileKey = key
 	}
 	
-	// Issue Token for Read
-	// We can ask for all chunks?
-	token, err := c.issueToken(id, nil, "R")
-	if err != nil {
-		// return nil, err // If auth not configured, maybe we shouldn't fail if server doesn't enforce?
-		// But server DOES enforce token issue.
-		// If Client keys missing, issueToken fails.
-		// If we are in test without auth, this will fail.
-		// But in tests without auth, we passed `nil` to DataServer, so token is not checked.
-		// But `issueToken` calls `authenticateRequest`.
-		// If `authenticateRequest` fails (missing keys), `issueToken` fails.
-		// So `NewReader` fails.
-		// This breaks tests if we don't configure keys.
-		// So I MUST configure keys in tests.
-	}
+	token, _ := c.issueToken(id, nil, "R")
 
 	return &FileReader{
 		client:          c,

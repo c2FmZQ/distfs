@@ -22,6 +22,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -57,8 +58,10 @@ func (c *Client) EnsureRoot() error {
 		Type:     metadata.DirType,
 		Children: make(map[string]string),
 		Lockbox:  lb,
+		OwnerID:  c.userID,
 	}
-	return c.createInode(inode)
+	_, err = c.createInode(inode)
+	return err
 }
 
 func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
@@ -171,8 +174,9 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 			Children:      make(map[string]string),
 			Lockbox:       lb,
 			EncryptedName: encNameBlob,
+			OwnerID:       c.userID,
 		}
-		if err := c.createInode(inode); err != nil {
+		if _, err := c.createInode(inode); err != nil {
 			return err
 		}
 	}
@@ -181,9 +185,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 	body, _ := json.Marshal(update)
 	req, _ := http.NewRequest("PUT", c.metaURL+"/v1/meta/directory/"+parentInode.ID+"/entry", bytes.NewReader(body))
 	if err := c.authenticateRequest(req); err != nil {
-		// Ignore or return? Ideally return.
-		// But existing code ignores errors from auth setup if keys missing (for backward compat?).
-		// But here keys are present in test.
+		return fmt.Errorf("auth failed: %w", err)
 	}
 	
 	resp, err := c.httpClient.Do(req)
@@ -192,7 +194,8 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("add child failed: %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("add child failed: %d %s", resp.StatusCode, string(b))
 	}
 	return nil
 }

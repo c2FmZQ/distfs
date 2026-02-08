@@ -120,6 +120,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handleDeleteInode(w, r, id)
 			return
 		}
+		if r.Method == http.MethodPut {
+			s.handleUpdateInode(w, r, id)
+			return
+		}
 	} else if r.URL.Path == "/v1/meta/inode" && r.Method == http.MethodPost {
 		s.handleCreateInode(w, r)
 		return
@@ -487,6 +491,10 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 	s.applyCommand(w, r, CmdCreateInode, 10*1024*1024, http.StatusCreated)
 }
 
+func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id string) {
+	s.applyCommand(w, r, CmdUpdateInode, 10*1024*1024, http.StatusOK)
+}
+
 func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
 	s.applyCommandRaw(w, CmdDeleteInode, []byte(id), http.StatusOK)
 }
@@ -560,11 +568,24 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, dat
 		return
 	}
 
-	if resp := f.Response(); resp != nil {
-		if err, ok := resp.(error); ok && err != nil {
+	resp := f.Response()
+	if err, ok := resp.(error); ok && err != nil {
+		switch err {
+		case ErrConflict, ErrExists:
+			http.Error(w, err.Error(), http.StatusConflict)
+		case ErrNotFound:
+			http.Error(w, err.Error(), http.StatusNotFound)
+		default:
 			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
 		}
+		return
+	}
+
+	if resp != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(successCode)
+		json.NewEncoder(w).Encode(resp)
+		return
 	}
 
 	w.WriteHeader(successCode)

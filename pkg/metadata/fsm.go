@@ -28,6 +28,7 @@ import (
 var (
 	ErrExists   = errors.New("already exists")
 	ErrNotFound = errors.New("not found")
+	ErrConflict = errors.New("version conflict")
 )
 
 type MetadataFSM struct {
@@ -104,7 +105,9 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	}
 
 	switch cmd.Type {
-	case CmdCreateInode, CmdUpdateInode:
+	case CmdCreateInode:
+		return fsm.applyCreateInode(cmd.Data)
+	case CmdUpdateInode:
 		return fsm.applyUpdateInode(cmd.Data)
 	case CmdDeleteInode:
 		return fsm.applyDeleteInode(cmd.Data)
@@ -126,20 +129,62 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	return fmt.Errorf("unknown command")
 }
 
-func (fsm *MetadataFSM) applyUpdateInode(data []byte) interface{} {
+func (fsm *MetadataFSM) applyCreateInode(data []byte) interface{} {
 	var inode Inode
 	if err := json.Unmarshal(data, &inode); err != nil {
 		return err
 	}
 
-	return fsm.db.Update(func(tx *bolt.Tx) error {
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
+		if b.Get([]byte(inode.ID)) != nil {
+			return ErrExists
+		}
+		inode.Version = 1
 		encoded, err := json.Marshal(inode)
 		if err != nil {
 			return err
 		}
 		return b.Put([]byte(inode.ID), encoded)
 	})
+	if err != nil {
+		return err
+	}
+	return &inode
+}
+
+func (fsm *MetadataFSM) applyUpdateInode(data []byte) interface{} {
+	var inode Inode
+	if err := json.Unmarshal(data, &inode); err != nil {
+		return err
+	}
+
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(inode.ID))
+		if v == nil {
+			return ErrNotFound
+		}
+		var existing Inode
+		if err := json.Unmarshal(v, &existing); err != nil {
+			return err
+		}
+
+		if inode.Version != existing.Version {
+			return ErrConflict
+		}
+
+		inode.Version++
+		encoded, err := json.Marshal(inode)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(inode.ID), encoded)
+	})
+	if err != nil {
+		return err
+	}
+	return &inode
 }
 
 func (fsm *MetadataFSM) applyDeleteInode(data []byte) interface{} {
@@ -207,7 +252,7 @@ func (fsm *MetadataFSM) applyUpdateGroup(data []byte) interface{} {
 	if err := json.Unmarshal(data, &group); err != nil {
 		return err
 	}
-	return fsm.db.Update(func(tx *bolt.Tx) error {
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("groups"))
 		if b.Get([]byte(group.ID)) == nil {
 			return ErrNotFound
@@ -218,6 +263,10 @@ func (fsm *MetadataFSM) applyUpdateGroup(data []byte) interface{} {
 		}
 		return b.Put([]byte(group.ID), encoded)
 	})
+	if err != nil {
+		return err
+	}
+	return &group
 }
 
 func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
@@ -226,14 +275,14 @@ func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
 		return err
 	}
 
-	return fsm.db.Update(func(tx *bolt.Tx) error {
+	var inode Inode
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		v := b.Get([]byte(update.ParentID))
 		if v == nil {
 			return ErrNotFound
 		}
 
-		var inode Inode
 		if err := json.Unmarshal(v, &inode); err != nil {
 			return err
 		}
@@ -250,6 +299,7 @@ func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
 		}
 
 		inode.Children[update.Name] = update.ChildID
+		inode.Version++
 
 		encoded, err := json.Marshal(inode)
 		if err != nil {
@@ -257,6 +307,10 @@ func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
 		}
 		return b.Put([]byte(inode.ID), encoded)
 	})
+	if err != nil {
+		return err
+	}
+	return &inode
 }
 
 func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
@@ -265,14 +319,14 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		return err
 	}
 
-	return fsm.db.Update(func(tx *bolt.Tx) error {
+	var inode Inode
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		v := b.Get([]byte(update.ParentID))
 		if v == nil {
 			return ErrNotFound
 		}
 
-		var inode Inode
 		if err := json.Unmarshal(v, &inode); err != nil {
 			return err
 		}
@@ -289,6 +343,7 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		}
 
 		delete(inode.Children, update.Name)
+		inode.Version++
 
 		encoded, err := json.Marshal(inode)
 		if err != nil {
@@ -296,6 +351,10 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		}
 		return b.Put([]byte(inode.ID), encoded)
 	})
+	if err != nil {
+		return err
+	}
+	return &inode
 }
 
 func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
@@ -304,14 +363,14 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 		return err
 	}
 
-	return fsm.db.Update(func(tx *bolt.Tx) error {
+	var inode Inode
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		v := b.Get([]byte(req.InodeID))
 		if v == nil {
 			return ErrNotFound
 		}
 
-		var inode Inode
 		if err := json.Unmarshal(v, &inode); err != nil {
 			return err
 		}
@@ -337,6 +396,7 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 		}
 
 		if updated {
+			inode.Version++
 			encoded, err := json.Marshal(inode)
 			if err != nil {
 				return err
@@ -345,6 +405,10 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 		}
 		return nil
 	})
+	if err != nil {
+		return err
+	}
+	return &inode
 }
 
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
