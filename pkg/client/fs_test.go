@@ -45,14 +45,34 @@ func TestDistFS_ReadDir(t *testing.T) {
 	})
 	time.Sleep(2 * time.Second)
 
+	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil, signKey)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 
+	// Generate User Keys
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+
+	// Register User
+	user := metadata.User{
+		ID:      "user-1",
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+		Name:    "User One",
+	}
+	userBytes, _ := json.Marshal(user)
+	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	future := metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Failed to register user: %v", err)
+	}
+
 	dataDir := t.TempDir()
 	dataStore, _ := data.NewDiskStore(dataDir)
-	dataServer := data.NewServer(dataStore, nil)
+	dataServer := data.NewServer(dataStore, signKey.Public())
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -67,8 +87,9 @@ func TestDistFS_ReadDir(t *testing.T) {
 
 	// Setup Client
 	c := NewClient(tsMeta.URL, tsData.URL)
-	dk, _ := crypto.GenerateEncryptionKey()
 	c = c.WithIdentity("user-1", dk)
+	c = c.WithSignKey(userSignKey)
+	c = c.WithServerKey(serverKEM.EncapsulationKey())
 
 	if err := c.EnsureRoot(); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)

@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -157,17 +158,6 @@ func (rm *ReplicationMonitor) checkReplication(inode *Inode, activeNodes map[str
 			var targets []string
 
 			// Find candidates efficiently
-			// We need 'needed' unique nodes from activeNodeIDs that are NOT in existingHolders.
-			// Random selection.
-			
-			// Copy activeNodeIDs to candidates to avoid modifying original?
-			// No, assume we can just pick random.
-			// Simple attempt: try 10 times to pick random.
-			// Or full scan if activeNodeIDs is small.
-			// If activeNodeIDs is large, random is better.
-			// Let's do a simple shuffle of indices if small, or random pick if large.
-			// For simplicity and correctness: iterate all active nodes (random offset?)
-			
 			startIndex := rand.Intn(len(activeNodeIDs))
 			for i := 0; i < len(activeNodeIDs); i++ {
 				idx := (startIndex + i) % len(activeNodeIDs)
@@ -211,7 +201,27 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 	}
 	body, _ := json.Marshal(reqBody)
 
-	resp, err := http.Post(source.Address+"/v1/data/"+chunkID+"/replicate", "application/json", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", source.Address+"/v1/data/"+chunkID+"/replicate", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	
+	// Add Auth Token (System Token)
+	if rm.server.signKey != nil {
+		capToken := CapabilityToken{
+			Chunks: []string{chunkID},
+			Mode:   "RW",
+			Exp:    time.Now().Add(5 * time.Minute).Unix(),
+		}
+		capBytes, _ := json.Marshal(capToken)
+		sig := rm.server.signKey.Sign(capBytes)
+		signed := SignedAuthToken{Payload: capBytes, Signature: sig}
+		b, _ := json.Marshal(signed)
+		token := base64.StdEncoding.EncodeToString(b)
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -240,8 +250,6 @@ func (rm *ReplicationMonitor) executeRepair(inodeID, chunkID string, source Node
 	cmd := LogCommand{Type: CmdAddChunkReplica, Data: body}
 	b, _ := json.Marshal(cmd)
 	
-	// Fire and forget (eventual consistency) or wait?
-	// We are in background. Wait is fine.
 	f := rm.server.raft.Apply(b, 5*time.Second)
 	if err := f.Error(); err != nil {
 		log.Printf("Failed to apply AddReplica: %v", err)

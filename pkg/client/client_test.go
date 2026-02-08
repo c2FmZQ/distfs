@@ -47,11 +47,31 @@ func TestClientIntegration(t *testing.T) {
 	// Wait for leader
 	time.Sleep(2 * time.Second)
 
+	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil, signKey)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
+
+	// Generate User Keys
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+
+	// Register User
+	user := metadata.User{
+		ID:      "user-1",
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+		Name:    "User One",
+	}
+	userBytes, _ := json.Marshal(user)
+	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	future := metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Failed to register user: %v", err)
+	}
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
@@ -59,33 +79,17 @@ func TestClientIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataServer := data.NewServer(dataStore, nil)
+	dataServer := data.NewServer(dataStore, signKey.Public())
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
 	// 3. Client
 	c := NewClient(tsMeta.URL, tsData.URL)
+	c = c.WithIdentity("user-1", dk)
+	c = c.WithSignKey(userSignKey)
+	c = c.WithServerKey(serverKEM.EncapsulationKey())
 
 	// 4. Write File (Raw)
-	// Note: We are using Raw Write which bypasses token acquisition in Client.
-	// But Data Node now REQUIRES tokens if public key is set.
-	// Since we set public key, Data Node will reject request without token.
-	// This test will fail unless we update Client to get token OR we pass nil to Data Node in test?
-	// The prompt asked to implement Access Control.
-	// If I pass nil, I am not testing Access Control fully.
-	// But updating Client is Step 3 of my plan. I haven't done it yet.
-	// So tests WILL fail now.
-	// I should pass nil for now to keep tests green while I work on Client?
-	// Or proceed to update Client immediately?
-	// I will pass nil for now to verify Data Node compilation, then update Client and re-enable auth in tests.
-	// Wait, if I pass nil, `authenticate` returns nil (success).
-	// So tests pass.
-	// I'll pass nil for now.
-	
-	// Wait, I already updated `data.NewServer` to take the key.
-	// If I pass `signKey.Public()`, existing tests break until Client is updated.
-	// I will pass `nil` for now.
-	
 	content := []byte("hello distributed filesystem world")
 	fileID := "file-1"
 	key, err := c.WriteFile(fileID, content)
@@ -103,10 +107,7 @@ func TestClientIntegration(t *testing.T) {
 		t.Errorf("Content mismatch: got %s, want %s", readBack, content)
 	}
 
-	// 6. FS Integration (With Identity)
-	dk, _ := crypto.GenerateEncryptionKey()
-	c = c.WithIdentity("user-1", dk)
-
+	// 6. FS Integration
 	if err := c.EnsureRoot(); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
@@ -153,11 +154,28 @@ func TestReplication(t *testing.T) {
 
 	time.Sleep(2 * time.Second)
 
+	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil, signKey)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
+
+	// Generate User Keys
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+
+	// Register User
+	user := metadata.User{
+		ID:      "user-1",
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+		Name:    "User One",
+	}
+	userBytes, _ := json.Marshal(user)
+	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
 
 	// 2. Three Data Nodes
 	nodes := make([]*httptest.Server, 3)
@@ -166,7 +184,7 @@ func TestReplication(t *testing.T) {
 		dir := t.TempDir()
 		store, _ := data.NewDiskStore(dir)
 		stores[i] = store
-		server := data.NewServer(store, nil) // Nil key
+		server := data.NewServer(store, signKey.Public())
 		ts := httptest.NewServer(server)
 		nodes[i] = ts
 		defer ts.Close()
@@ -183,6 +201,9 @@ func TestReplication(t *testing.T) {
 
 	// 3. Client
 	c := NewClient(tsMeta.URL, nodes[0].URL)
+	c = c.WithIdentity("user-1", dk)
+	c = c.WithSignKey(userSignKey)
+	c = c.WithServerKey(serverKEM.EncapsulationKey())
 
 	// 4. Write
 	content := []byte("replicated data")
@@ -226,15 +247,32 @@ func TestDirectories(t *testing.T) {
 	})
 	time.Sleep(2 * time.Second)
 
+	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil, signKey)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
 
+	// Generate User Keys
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+
+	// Register User
+	user := metadata.User{
+		ID:      "user-1",
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+		Name:    "User One",
+	}
+	userBytes, _ := json.Marshal(user)
+	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+
 	dataDir := t.TempDir()
 	dataStore, _ := data.NewDiskStore(dataDir)
-	dataServer := data.NewServer(dataStore, nil) // Nil key
+	dataServer := data.NewServer(dataStore, signKey.Public())
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -248,10 +286,9 @@ func TestDirectories(t *testing.T) {
 	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
 
 	c := NewClient(tsMeta.URL, tsData.URL)
-	
-	// Identity needed for Lockbox (Mkdir uses writeInodeContent which uses Lockbox)
-	dk, _ := crypto.GenerateEncryptionKey()
 	c = c.WithIdentity("user-1", dk)
+	c = c.WithSignKey(userSignKey)
+	c = c.WithServerKey(serverKEM.EncapsulationKey())
 
 	// Ensure Root
 	if err := c.EnsureRoot(); err != nil {
@@ -305,16 +342,33 @@ func TestReplicationRepair(t *testing.T) {
 	})
 	time.Sleep(2 * time.Second)
 
+	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", nil, signKey)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
 
+	// Generate User Keys
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+
+	// Register User
+	user := metadata.User{
+		ID:      "user-1",
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+		Name:    "User One",
+	}
+	userBytes, _ := json.Marshal(user)
+	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+
 	// 2. Start ONE Data Node initially
 	dataDir1 := t.TempDir()
 	store1, _ := data.NewDiskStore(dataDir1)
-	server1 := data.NewServer(store1, nil) // Nil Key
+	server1 := data.NewServer(store1, signKey.Public())
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
 
@@ -324,6 +378,10 @@ func TestReplicationRepair(t *testing.T) {
 
 	// 3. Write File (Will have 1 replica)
 	c := NewClient(tsMeta.URL, ts1.URL)
+	c = c.WithIdentity("user-1", dk)
+	c = c.WithSignKey(userSignKey)
+	c = c.WithServerKey(serverKEM.EncapsulationKey())
+
 	content := []byte("repair me")
 	_, err = c.WriteFile("repair-file", content) // Raw write
 	if err != nil {
@@ -344,13 +402,13 @@ func TestReplicationRepair(t *testing.T) {
 	// 4. Start 2 more Data Nodes
 	dataDir2 := t.TempDir()
 	store2, _ := data.NewDiskStore(dataDir2)
-	server2 := data.NewServer(store2, nil) // Nil
+	server2 := data.NewServer(store2, signKey.Public())
 	ts2 := httptest.NewServer(server2)
 	defer ts2.Close()
 
 	dataDir3 := t.TempDir()
 	store3, _ := data.NewDiskStore(dataDir3)
-	server3 := data.NewServer(store3, nil) // Nil
+	server3 := data.NewServer(store3, signKey.Public())
 	ts3 := httptest.NewServer(server3)
 	defer ts3.Close()
 

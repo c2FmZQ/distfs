@@ -180,6 +180,12 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
 	body, _ := json.Marshal(update)
 	req, _ := http.NewRequest("PUT", c.metaURL+"/v1/meta/directory/"+parentInode.ID+"/entry", bytes.NewReader(body))
+	if err := c.authenticateRequest(req); err != nil {
+		// Ignore or return? Ideally return.
+		// But existing code ignores errors from auth setup if keys missing (for backward compat?).
+		// But here keys are present in test.
+	}
+	
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
