@@ -137,6 +137,66 @@ func (c *Client) CreateFile(path string, data []byte) error {
 	return c.addEntry(path, metadata.FileType, data)
 }
 
+func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, data []byte) (*metadata.Inode, []byte, error) {
+	mac := hmac.New(sha256.New, parentKey)
+	mac.Write([]byte(name))
+	encName := hex.EncodeToString(mac.Sum(nil))
+
+	newID := generateID()
+	newKey := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
+		return nil, nil, err
+	}
+
+	encNameBlob, err := crypto.EncryptDEM(newKey, []byte(name))
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to encrypt name: %w", err)
+	}
+
+	var newInode *metadata.Inode
+	if iType == metadata.FileType {
+		if err := c.writeInodeContent(newID, iType, newKey, data, encNameBlob); err != nil {
+			return nil, nil, err
+		}
+		newInode, err = c.GetInode(newID)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		lb := c.createLockbox(newKey)
+		inode := metadata.Inode{
+			ID:            newID,
+			Type:          metadata.DirType,
+			Children:      make(map[string]string),
+			Lockbox:       lb,
+			EncryptedName: encNameBlob,
+			OwnerID:       c.userID,
+		}
+		newInode, err = c.createInode(inode)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
+	body, _ := json.Marshal(update)
+	req, _ := http.NewRequest("PUT", c.metaURL+"/v1/meta/directory/"+parentID+"/entry", bytes.NewReader(body))
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, nil, fmt.Errorf("auth failed: %w", err)
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, nil, fmt.Errorf("add child failed: %d %s", resp.StatusCode, string(b))
+	}
+	return newInode, newKey, nil
+}
+
 func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) error {
 	path = strings.Trim(path, "/")
 	if path == "" {
@@ -154,61 +214,8 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 		return fmt.Errorf("parent is not a directory")
 	}
 
-	mac := hmac.New(sha256.New, parentKey)
-	mac.Write([]byte(name))
-	encName := hex.EncodeToString(mac.Sum(nil))
-
-	if parentInode.Children != nil {
-		if _, ok := parentInode.Children[encName]; ok {
-			return fmt.Errorf("entry %s already exists", name)
-		}
-	}
-
-	newID := generateID()
-	newKey := make([]byte, 32)
-	rand.Read(newKey)
-
-	encNameBlob, err := crypto.EncryptDEM(newKey, []byte(name))
-	if err != nil {
-		return fmt.Errorf("failed to encrypt name: %w", err)
-	}
-
-	if iType == metadata.FileType {
-		if err := c.writeInodeContent(newID, iType, newKey, data, encNameBlob); err != nil {
-			return err
-		}
-	} else {
-		lb := c.createLockbox(newKey)
-		inode := metadata.Inode{
-			ID:            newID,
-			Type:          metadata.DirType,
-			Children:      make(map[string]string),
-			Lockbox:       lb,
-			EncryptedName: encNameBlob,
-			OwnerID:       c.userID,
-		}
-		if _, err := c.createInode(inode); err != nil {
-			return err
-		}
-	}
-
-	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
-	body, _ := json.Marshal(update)
-	req, _ := http.NewRequest("PUT", c.metaURL+"/v1/meta/directory/"+parentInode.ID+"/entry", bytes.NewReader(body))
-	if err := c.authenticateRequest(req); err != nil {
-		return fmt.Errorf("auth failed: %w", err)
-	}
-	
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("add child failed: %d %s", resp.StatusCode, string(b))
-	}
-	return nil
+	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, data)
+	return err
 }
 
 func (c *Client) createLockbox(key []byte) crypto.Lockbox {

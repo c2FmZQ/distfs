@@ -384,7 +384,21 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 
 	var email string
 	if s.jwksURL == "DEBUG_INSECURE" {
-		email = "test@example.com"
+		// Attempt to extract email from JWT without verification
+		parts := strings.Split(req.JWT, ".")
+		if len(parts) > 1 {
+			b, _ := base64.RawStdEncoding.DecodeString(parts[1])
+			if b == nil {
+				// Try RawURLEncoding which is standard for JWT
+				b, _ = base64.RawURLEncoding.DecodeString(parts[1])
+			}
+			var claims map[string]interface{}
+			json.Unmarshal(b, &claims)
+			email, _ = claims["email"].(string)
+		}
+		if email == "" {
+			email = "test@example.com"
+		}
 	} else {
 		s.jwks.Ready(r.Context())
 		token, err := jwt.Parse(req.JWT, func(token *jwt.Token) (interface{}, error) {

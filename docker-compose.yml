@@ -31,8 +31,27 @@ services:
       - storage-node-1
       - storage-node-2
       - storage-node-3
+    volumes:
+      - client-config:/root/.distfs
+
+  fuse-tester:
+    build: .
+    entrypoint: ["/bin/test-fuse.sh"]
+    depends_on:
+      - storage-node-1
+      - storage-node-2
+      - storage-node-3
+    cap_add:
+      - SYS_ADMIN
+    devices:
+      - /dev/fuse:/dev/fuse
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - client-config:/root/.distfs
 
 volumes:
   node1-data:
   node2-data:
   node3-data:
+  client-config:

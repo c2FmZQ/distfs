@@ -43,11 +43,19 @@ func main() {
 	)
 	flag.Parse()
 
-	if *nodeID == "" || *masterKey == "" {
-		log.Fatal("-id and -master-key are required")
+	if *nodeID == "" {
+		log.Fatal("-id is required")
 	}
 
-	mKey, err := hex.DecodeString(*masterKey)
+	mKeyStr := *masterKey
+	if mKeyStr == "" {
+		mKeyStr = os.Getenv("DISTFS_MASTER_KEY")
+	}
+	if mKeyStr == "" {
+		log.Fatal("-master-key or DISTFS_MASTER_KEY environment variable is required")
+	}
+
+	mKey, err := hex.DecodeString(mKeyStr)
 	if err != nil || len(mKey) != 32 {
 		log.Fatal("master-key must be a 32-byte hex string")
 	}

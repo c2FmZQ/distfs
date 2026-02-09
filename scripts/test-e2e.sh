@@ -18,13 +18,11 @@ COUNT=0
 LEADER_URL=""
 while true; do
   STATUS=$(wget -qO- --timeout=2 http://storage-node-1:8080/v1/cluster/status 2>&1 || true)
-  # Check if state is Leader
   if echo "$STATUS" | grep -q '"state":"Leader"'; then
     echo "storage-node-1 is Leader"
     LEADER_URL="http://storage-node-1:8080"
     break
   fi
-  # Check if leader address is known
   LEADER_ADDR=$(echo "$STATUS" | grep -o '"leader":"[^"]*"' | cut -d'"' -f4)
   if [ -n "$LEADER_ADDR" ]; then
     echo "Leader found at $LEADER_ADDR"
@@ -32,7 +30,6 @@ while true; do
     LEADER_URL="http://$LEADER_IP:8080"
     break
   fi
-  
   COUNT=$((COUNT + 1))
   if [ $COUNT -ge $MAX_RETRIES ]; then
     echo "TIMEOUT: No leader elected"
@@ -41,25 +38,23 @@ while true; do
   sleep 1
 done
 
-echo "Joining node-2 to cluster..."
-wget -qO- --timeout=5 --post-data '{"id":"node-2","address":"storage-node-2:5000"}' $LEADER_URL/v1/cluster/join
-
-echo "Joining node-3 to cluster..."
-wget -qO- --timeout=5 --post-data '{"id":"node-3","address":"storage-node-3:5000"}' $LEADER_URL/v1/cluster/join
+echo "Joining nodes to cluster..."
+wget -qO- --timeout=5 --post-data '{"id":"node-2","address":"storage-node-2:5000"}' $LEADER_URL/v1/cluster/join || echo "node-2 already joined"
+wget -qO- --timeout=5 --post-data '{"id":"node-3","address":"storage-node-3:5000"}' $LEADER_URL/v1/cluster/join || echo "node-3 already joined"
 
 echo "Waiting for cluster stability..."
 sleep 5
 
-echo "Initializing distfs..."
-distfs init -meta $LEADER_URL -id test@example.com
-
-echo "Registering user..."
-# Using a dummy JWT since server is in DEBUG_INSECURE mode
-DUMMY_JWT="header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.sig"
-distfs register -jwt "$DUMMY_JWT"
+if [ ! -f /root/.distfs/config.json ]; then
+  echo "Initializing distfs..."
+  distfs init -meta $LEADER_URL -id test@example.com
+  echo "Registering user..."
+  DUMMY_JWT="header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.sig"
+  distfs register -jwt "$DUMMY_JWT"
+fi
 
 echo "Creating directory..."
-distfs mkdir /testdir
+distfs mkdir /testdir || echo "testdir already exists"
 
 echo "Uploading file..."
 echo "hello from e2e test" > /tmp/hello.txt
