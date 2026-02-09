@@ -15,12 +15,15 @@
 package metadata
 
 import (
+	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -45,7 +48,7 @@ func NewMetadataFSM(path string) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -81,6 +84,9 @@ const (
 	CmdAddChild        CommandType = 9
 	CmdRemoveChild     CommandType = 10
 	CmdAddChunkReplica CommandType = 11
+	CmdRename          CommandType = 12
+	CmdSetAttr         CommandType = 13
+	CmdLink            CommandType = 14
 )
 
 type LogCommand struct {
@@ -98,6 +104,28 @@ type AddReplicaRequest struct {
 	InodeID string   `json:"inode_id"`
 	ChunkID string   `json:"chunk_id"`
 	NodeIDs []string `json:"node_ids"`
+}
+
+type RenameRequest struct {
+	OldParentID string `json:"old_parent_id"`
+	OldName     string `json:"old_name"`
+	NewParentID string `json:"new_parent_id"`
+	NewName     string `json:"new_name"`
+}
+
+type SetAttrRequest struct {
+	InodeID string  `json:"inode_id"`
+	Mode    *uint32 `json:"mode,omitempty"`
+	UID     *uint32 `json:"uid,omitempty"`
+	GID     *uint32 `json:"gid,omitempty"`
+	Size    *uint64 `json:"size,omitempty"`
+	MTime   *int64  `json:"mtime,omitempty"`
+}
+
+type LinkRequest struct {
+	ParentID string `json:"parent_id"`
+	Name     string `json:"name"`
+	TargetID string `json:"target_id"`
 }
 
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
@@ -127,6 +155,12 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyRemoveChild(cmd.Data)
 	case CmdAddChunkReplica:
 		return fsm.applyAddChunkReplica(cmd.Data)
+	case CmdRename:
+		return fsm.applyRename(cmd.Data)
+	case CmdSetAttr:
+		return fsm.applySetAttr(cmd.Data)
+	case CmdLink:
+		return fsm.applyLink(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -135,6 +169,24 @@ func (fsm *MetadataFSM) applyCreateInode(data []byte) interface{} {
 	var inode Inode
 	if err := json.Unmarshal(data, &inode); err != nil {
 		return err
+	}
+
+	now := time.Now().UnixNano()
+	if inode.MTime == 0 {
+		inode.MTime = now
+	}
+	if inode.CTime == 0 {
+		inode.CTime = now
+	}
+	if inode.NLink == 0 {
+		inode.NLink = 1
+	}
+	if inode.Mode == 0 {
+		if inode.Type == DirType {
+			inode.Mode = 0755
+		} else {
+			inode.Mode = 0644
+		}
 	}
 
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
@@ -218,17 +270,49 @@ func (fsm *MetadataFSM) applyCreateUser(data []byte) interface{} {
 	if err := json.Unmarshal(data, &user); err != nil {
 		return err
 	}
-	return fsm.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		if b.Get([]byte(user.ID)) != nil {
+
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		ub := tx.Bucket([]byte("users"))
+		idx := tx.Bucket([]byte("uids"))
+
+		if ub.Get([]byte(user.ID)) != nil {
 			return ErrExists
 		}
+
+		// Allocate unique UID if not provided or 0
+		if user.UID == 0 {
+			for {
+				uid := generateID32()
+				if uid < 1000 {
+					continue // Reserve low UIDs
+				}
+				if idx.Get(uint32ToBytes(uid)) == nil {
+					user.UID = uid
+					break
+				}
+			}
+		} else {
+			// If UID provided, check if already taken
+			if existing := idx.Get(uint32ToBytes(user.UID)); existing != nil {
+				return fmt.Errorf("UID %d already assigned to %s", user.UID, string(existing))
+			}
+		}
+
 		encoded, err := json.Marshal(user)
 		if err != nil {
 			return err
 		}
-		return b.Put([]byte(user.ID), encoded)
+
+		if err := ub.Put([]byte(user.ID), encoded); err != nil {
+			return err
+		}
+		return idx.Put(uint32ToBytes(user.UID), []byte(user.ID))
 	})
+
+	if err != nil {
+		return err
+	}
+	return &user
 }
 
 func (fsm *MetadataFSM) applyCreateGroup(data []byte) interface{} {
@@ -236,17 +320,49 @@ func (fsm *MetadataFSM) applyCreateGroup(data []byte) interface{} {
 	if err := json.Unmarshal(data, &group); err != nil {
 		return err
 	}
-	return fsm.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		if b.Get([]byte(group.ID)) != nil {
+
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		gb := tx.Bucket([]byte("groups"))
+		idx := tx.Bucket([]byte("gids"))
+
+		if gb.Get([]byte(group.ID)) != nil {
 			return ErrExists
 		}
+
+		// Allocate unique GID if not provided or 0
+		if group.GID == 0 {
+			for {
+				gid := generateID32()
+				if gid < 1000 {
+					continue // Reserve low GIDs
+				}
+				if idx.Get(uint32ToBytes(gid)) == nil {
+					group.GID = gid
+					break
+				}
+			}
+		} else {
+			// If GID provided, check if already taken
+			if existing := idx.Get(uint32ToBytes(group.GID)); existing != nil {
+				return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
+			}
+		}
+
 		encoded, err := json.Marshal(group)
 		if err != nil {
 			return err
 		}
-		return b.Put([]byte(group.ID), encoded)
+
+		if err := gb.Put([]byte(group.ID), encoded); err != nil {
+			return err
+		}
+		return idx.Put(uint32ToBytes(group.GID), []byte(group.ID))
 	})
+
+	if err != nil {
+		return err
+	}
+	return &group
 }
 
 func (fsm *MetadataFSM) applyUpdateGroup(data []byte) interface{} {
@@ -269,6 +385,204 @@ func (fsm *MetadataFSM) applyUpdateGroup(data []byte) interface{} {
 		return err
 	}
 	return &group
+}
+
+func (fsm *MetadataFSM) applyLink(data []byte) interface{} {
+	var req LinkRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+
+		// 1. Load Target
+		vTarget := b.Get([]byte(req.TargetID))
+		if vTarget == nil {
+			return ErrNotFound
+		}
+		var target Inode
+		if err := json.Unmarshal(vTarget, &target); err != nil {
+			return err
+		}
+
+		if target.Type == DirType {
+			return fmt.Errorf("cannot link directory")
+		}
+
+		// 2. Load Parent
+		vParent := b.Get([]byte(req.ParentID))
+		if vParent == nil {
+			return ErrNotFound
+		}
+		var parent Inode
+		if err := json.Unmarshal(vParent, &parent); err != nil {
+			return err
+		}
+
+		// 3. Add to Parent
+		if parent.Children == nil {
+			parent.Children = make(map[string]string)
+		}
+		if _, exists := parent.Children[req.Name]; exists {
+			return ErrExists
+		}
+		parent.Children[req.Name] = req.TargetID
+		parent.Version++
+
+		// 4. Update Target
+		target.NLink++
+		target.Version++
+
+		// 5. Save
+		bParent, _ := json.Marshal(parent)
+		b.Put([]byte(parent.ID), bParent)
+		bTarget, _ := json.Marshal(target)
+		b.Put([]byte(target.ID), bTarget)
+
+		return nil
+	})
+}
+
+func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
+	var req SetAttrRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(req.InodeID))
+		if v == nil {
+			return ErrNotFound
+		}
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+
+		if req.Mode != nil {
+			inode.Mode = *req.Mode
+		}
+		if req.UID != nil {
+			inode.UID = *req.UID
+		}
+		if req.GID != nil {
+			inode.GID = *req.GID
+		}
+		if req.Size != nil {
+			inode.Size = *req.Size
+		}
+		if req.MTime != nil {
+			inode.MTime = *req.MTime
+		}
+
+		inode.CTime = time.Now().UnixNano()
+		inode.Version++
+
+		encoded, err := json.Marshal(inode)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(inode.ID), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
+	var req RenameRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+
+		// 1. Load Old Parent
+		vOld := b.Get([]byte(req.OldParentID))
+		if vOld == nil {
+			return ErrNotFound
+		}
+		var oldParent Inode
+		if err := json.Unmarshal(vOld, &oldParent); err != nil {
+			return err
+		}
+
+		// 2. Identify Child
+		childID, ok := oldParent.Children[req.OldName]
+		if !ok {
+			return ErrNotFound
+		}
+
+		// 3. Load New Parent
+		var newParent Inode
+		if req.NewParentID == req.OldParentID {
+			newParent = oldParent
+		} else {
+			vNew := b.Get([]byte(req.NewParentID))
+			if vNew == nil {
+				return ErrNotFound
+			}
+			if err := json.Unmarshal(vNew, &newParent); err != nil {
+				return err
+			}
+		}
+
+		// 4. Handle Overwrite
+		if targetID, exists := newParent.Children[req.NewName]; exists {
+			vTarget := b.Get([]byte(targetID))
+			if vTarget != nil {
+				var target Inode
+				if err := json.Unmarshal(vTarget, &target); err == nil {
+					if target.Type == DirType && len(target.Children) > 0 {
+						return fmt.Errorf("cannot overwrite non-empty directory")
+					}
+					// Decrement nlink of overwritten entry
+					if target.NLink > 0 {
+						target.NLink--
+					}
+					if target.NLink == 0 {
+						b.Delete([]byte(target.ID))
+					} else {
+						bT, _ := json.Marshal(target)
+						b.Put([]byte(target.ID), bT)
+					}
+				}
+			}
+		}
+
+		// 5. Update
+		delete(oldParent.Children, req.OldName)
+		oldParent.Version++
+
+		if newParent.Children == nil {
+			newParent.Children = make(map[string]string)
+		}
+		newParent.Children[req.NewName] = childID
+		newParent.Version++
+
+		// 5. Update Child Metadata
+		vChild := b.Get([]byte(childID))
+		if vChild != nil {
+			var child Inode
+			if err := json.Unmarshal(vChild, &child); err == nil {
+				child.ParentID = req.NewParentID
+				child.Version++
+				bChild, _ := json.Marshal(child)
+				b.Put([]byte(child.ID), bChild)
+			}
+		}
+
+		// 6. Save
+		bOld, _ := json.Marshal(oldParent)
+		b.Put([]byte(oldParent.ID), bOld)
+
+		if req.NewParentID != req.OldParentID {
+			bNew, _ := json.Marshal(newParent)
+			b.Put([]byte(newParent.ID), bNew)
+		}
+
+		return nil
+	})
 }
 
 func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
@@ -321,42 +635,63 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		return err
 	}
 
-	var inode Inode
-	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte(update.ParentID))
-		if v == nil {
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		ib := tx.Bucket([]byte("inodes"))
+
+		// 1. Load Parent
+		vParent := ib.Get([]byte(update.ParentID))
+		if vParent == nil {
 			return ErrNotFound
 		}
-
-		if err := json.Unmarshal(v, &inode); err != nil {
+		var parent Inode
+		if err := json.Unmarshal(vParent, &parent); err != nil {
 			return err
 		}
 
-		if inode.Type != DirType {
-			return fmt.Errorf("parent not a directory")
-		}
-
-		if inode.Children == nil {
-			return ErrNotFound
-		}
-		if _, exists := inode.Children[update.Name]; !exists {
+		// 2. Identify Child
+		childID, ok := parent.Children[update.Name]
+		if !ok {
 			return ErrNotFound
 		}
 
-		delete(inode.Children, update.Name)
-		inode.Version++
-
-		encoded, err := json.Marshal(inode)
-		if err != nil {
+		// 3. Load Child
+		vChild := ib.Get([]byte(childID))
+		if vChild == nil {
+			return ErrNotFound
+		}
+		var child Inode
+		if err := json.Unmarshal(vChild, &child); err != nil {
 			return err
 		}
-		return b.Put([]byte(inode.ID), encoded)
+
+		// 4. POSIX Checks
+		if child.Type == DirType && len(child.Children) > 0 {
+			return fmt.Errorf("directory not empty")
+		}
+
+		// 5. Remove from Parent
+		delete(parent.Children, update.Name)
+		parent.Version++
+		bParent, _ := json.Marshal(parent)
+		ib.Put([]byte(parent.ID), bParent)
+
+		// 6. Update Child
+		if child.NLink > 0 {
+			child.NLink--
+		}
+		child.Version++
+
+		if child.NLink == 0 {
+			// Delete Inode
+			ib.Delete([]byte(child.ID))
+			// TODO: Cleanup chunks (Garbage Collection)
+		} else {
+			bChild, _ := json.Marshal(child)
+			ib.Put([]byte(child.ID), bChild)
+		}
+
+		return nil
 	})
-	if err != nil {
-		return err
-	}
-	return &inode
 }
 
 func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
@@ -495,3 +830,15 @@ func (s *MetadataSnapshot) Persist(sink raft.SnapshotSink) error {
 }
 
 func (s *MetadataSnapshot) Release() {}
+
+func generateID32() uint32 {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return binary.BigEndian.Uint32(b)
+}
+
+func uint32ToBytes(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, v)
+	return b
+}

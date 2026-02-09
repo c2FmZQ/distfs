@@ -176,6 +176,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
 		s.handleAllocateChunk(w, r)
 		return
+	} else if r.URL.Path == "/v1/meta/rename" && r.Method == http.MethodPost {
+		s.handleRename(w, r)
+		return
+	} else if r.URL.Path == "/v1/meta/setattr" && r.Method == http.MethodPost {
+		s.handleSetAttr(w, r)
+		return
+	} else if r.URL.Path == "/v1/meta/link" && r.Method == http.MethodPost {
+		s.handleLink(w, r)
+		return
 	} else if strings.HasPrefix(r.URL.Path, "/v1/meta/directory/") && strings.HasSuffix(r.URL.Path, "/entry") {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/directory/")
 		id = strings.TrimSuffix(id, "/entry")
@@ -622,6 +631,18 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 	s.applyCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
+}
+
+func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdRename, 1024*1024, http.StatusOK)
+}
+
+func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdSetAttr, 1024*1024, http.StatusOK)
+}
+
+func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
+	s.applyCommand(w, r, CmdLink, 1024*1024, http.StatusOK)
 }
 
 func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id string) {

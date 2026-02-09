@@ -345,7 +345,7 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	return inodes, nil
 }
 
-func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte) error {
+func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
@@ -372,6 +372,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		inode = metadata.Inode{
 			ID:            id,
 			Type:          iType,
+			Mode:          mode,
 			Size:          uint64(size),
 			ChunkManifest: nil,
 			Lockbox:       lb,
@@ -444,7 +445,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 }
 
 // WriteFile writes a file. Returns the FileKey used.
-func (c *Client) WriteFile(id string, r io.Reader, size int64) ([]byte, error) {
+func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]byte, error) {
 	c.keyMu.RLock()
 	fileKey, ok := c.keyCache[id]
 	c.keyMu.RUnlock()
@@ -464,7 +465,7 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64) ([]byte, error) {
 		}
 	}
 
-	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil); err != nil {
+	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil, mode); err != nil {
 		return nil, err
 	}
 	return fileKey, nil

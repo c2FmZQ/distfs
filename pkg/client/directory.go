@@ -130,14 +130,18 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 }
 
 func (c *Client) Mkdir(path string) error {
-	return c.addEntry(path, metadata.DirType, nil, 0)
+	return c.addEntry(path, metadata.DirType, nil, 0, "", 0755)
 }
 
 func (c *Client) CreateFile(path string, r io.Reader, size int64) error {
-	return c.addEntry(path, metadata.FileType, r, size)
+	return c.addEntry(path, metadata.FileType, r, size, "", 0644)
 }
 
-func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64) (*metadata.Inode, []byte, error) {
+func (c *Client) Symlink(target, path string) error {
+	return c.addEntry(path, metadata.SymlinkType, nil, 0, target, 0777)
+}
+
+func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) (*metadata.Inode, []byte, error) {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
@@ -155,7 +159,9 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	var newInode *metadata.Inode
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob); err != nil {
+		// Create empty inode first? No, writeInodeContent handles creation if not found.
+		// BUT we need to pass Mode to writeInodeContent.
+		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob, mode); err != nil {
 			return nil, nil, err
 		}
 		newInode, err = c.GetInode(newID)
@@ -166,11 +172,15 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 		lb := c.createLockbox(newKey)
 		inode := metadata.Inode{
 			ID:            newID,
-			Type:          metadata.DirType,
+			Type:          iType,
+			Mode:          mode,
+			UID:           0, // TODO: set from client info
+			GID:           0,
 			Children:      make(map[string]string),
 			Lockbox:       lb,
 			EncryptedName: encNameBlob,
 			OwnerID:       c.userID,
+			SymlinkTarget: symlinkTarget,
 		}
 		newInode, err = c.createInode(inode)
 		if err != nil {
@@ -197,7 +207,179 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	return newInode, newKey, nil
 }
 
-func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64) error {
+func (c *Client) Rename(oldPath, newPath string) error {
+	oldDir, oldName := filepath.Split(strings.TrimRight(oldPath, "/"))
+	newDir, newName := filepath.Split(strings.TrimRight(newPath, "/"))
+
+	oldParent, oldParentKey, err := c.ResolvePath(oldDir)
+	if err != nil {
+		return fmt.Errorf("resolve old parent: %w", err)
+	}
+	newParent, newParentKey, err := c.ResolvePath(newDir)
+	if err != nil {
+		return fmt.Errorf("resolve new parent: %w", err)
+	}
+
+	return c.RenameRaw(oldParent.ID, oldParentKey, oldName, newParent.ID, newParentKey, newName)
+}
+
+func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName string, newParentID string, newParentKey []byte, newName string) error {
+	macOld := hmac.New(sha256.New, oldParentKey)
+	macOld.Write([]byte(oldName))
+	encOldName := hex.EncodeToString(macOld.Sum(nil))
+
+	macNew := hmac.New(sha256.New, newParentKey)
+	macNew.Write([]byte(newName))
+	encNewName := hex.EncodeToString(macNew.Sum(nil))
+
+	req := metadata.RenameRequest{
+		OldParentID: oldParentID,
+		OldName:     encOldName,
+		NewParentID: newParentID,
+		NewName:     encNewName,
+	}
+	body, _ := json.Marshal(req)
+
+	hReq, err := http.NewRequest("POST", c.metaURL+"/v1/meta/rename", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	if err := c.authenticateRequest(hReq); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(hReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("rename failed: %d %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *Client) RemoveEntry(path string) error {
+	dir, name := filepath.Split(strings.TrimRight(path, "/"))
+	parent, parentKey, err := c.ResolvePath(dir)
+	if err != nil {
+		return err
+	}
+	return c.RemoveEntryRaw(parent.ID, parentKey, name)
+}
+
+func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) error {
+	mac := hmac.New(sha256.New, parentKey)
+	mac.Write([]byte(name))
+	encName := hex.EncodeToString(mac.Sum(nil))
+
+	update := metadata.ChildUpdate{ParentID: parentID, Name: encName}
+	body, _ := json.Marshal(update)
+
+	req, err := http.NewRequest("DELETE", c.metaURL+"/v1/meta/directory/"+parentID+"/entry", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("remove entry failed: %d %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *Client) SetAttr(id string, mode *uint32, uid, gid *uint32, size *uint64, mtime *int64) error {
+	req := metadata.SetAttrRequest{
+		InodeID: id,
+		Mode:    mode,
+		UID:     uid,
+		GID:     gid,
+		Size:    size,
+		MTime:   mtime,
+	}
+	body, _ := json.Marshal(req)
+
+	hReq, err := http.NewRequest("POST", c.metaURL+"/v1/meta/setattr", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	if err := c.authenticateRequest(hReq); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(hReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("setattr failed: %d %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *Client) Link(targetPath, linkPath string) error {
+	target, _, err := c.ResolvePath(targetPath)
+	if err != nil {
+		return fmt.Errorf("resolve target: %w", err)
+	}
+
+	dir, name := filepath.Split(strings.TrimRight(linkPath, "/"))
+	parent, parentKey, err := c.ResolvePath(dir)
+	if err != nil {
+		return fmt.Errorf("resolve parent: %w", err)
+	}
+
+	return c.LinkRaw(parent.ID, parentKey, name, target.ID)
+}
+
+func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetID string) error {
+	mac := hmac.New(sha256.New, parentKey)
+	mac.Write([]byte(name))
+	encName := hex.EncodeToString(mac.Sum(nil))
+
+	req := metadata.LinkRequest{
+		ParentID: parentID,
+		Name:     encName,
+		TargetID: targetID,
+	}
+	body, _ := json.Marshal(req)
+
+	hReq, err := http.NewRequest("POST", c.metaURL+"/v1/meta/link", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	if err := c.authenticateRequest(hReq); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(hReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("link failed: %d %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		return fmt.Errorf("cannot create root")
@@ -214,7 +396,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 		return fmt.Errorf("parent is not a directory")
 	}
 
-	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, r, size)
+	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode)
 	return err
 }
 

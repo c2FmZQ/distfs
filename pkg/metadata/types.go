@@ -21,8 +21,9 @@ import (
 type InodeType uint8
 
 const (
-	FileType InodeType = 0
-	DirType  InodeType = 1
+	FileType    InodeType = 0
+	DirType     InodeType = 1
+	SymlinkType InodeType = 2
 )
 
 const RootID = "root-directory-inode-id-0000000000"
@@ -33,7 +34,8 @@ type ChunkEntry struct {
 }
 
 type User struct {
-	ID      string `json:"id"`
+	ID      string `json:"id"` // Still useful for lookup by email/username
+	UID     uint32 `json:"uid"`
 	SignKey []byte `json:"sign_key"`
 	EncKey  []byte `json:"enc_key"`
 	Name    string `json:"name"`
@@ -41,7 +43,8 @@ type User struct {
 
 type Group struct {
 	ID      string          `json:"id"`
-	OwnerID string          `json:"owner_id"`
+	GID     uint32          `json:"gid"`
+	OwnerID string          `json:"owner_id"` // User ID (string)
 	Members map[string]bool `json:"members"`
 	EncKey  []byte          `json:"enc_key"`
 	Lockbox crypto.Lockbox  `json:"lockbox"`
@@ -70,10 +73,16 @@ type Inode struct {
 	ID            string            `json:"id"`
 	ParentID      string            `json:"parent_id"`
 	Type          InodeType         `json:"type"`
-	OwnerID       string            `json:"owner_id"`
-	GroupID       string            `json:"group_id"`
+	OwnerID       string            `json:"owner_id"` // DistFS User ID
+	GroupID       string            `json:"group_id"` // DistFS Group ID
+	UID           uint32            `json:"uid"`      // POSIX UID
+	GID           uint32            `json:"gid"`      // POSIX GID
 	Mode          uint32            `json:"mode"`
 	Size          uint64            `json:"size"`
+	MTime         int64             `json:"mtime"` // Nanoseconds
+	CTime         int64             `json:"ctime"` // Nanoseconds
+	NLink         uint32            `json:"nlink"`
+	SymlinkTarget string            `json:"symlink_target,omitempty"`
 	EncryptedName []byte            `json:"enc_name"`
 	Children      map[string]string `json:"children,omitempty"`
 	ChunkManifest []ChunkEntry      `json:"manifest"`

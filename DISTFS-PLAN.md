@@ -102,6 +102,22 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
+## Phase 8: POSIX Compliance (NFS-style)
+**Goal:** Achieve high-fidelity POSIX compliance to support standard applications.
+
+*   **Step 8.1: Metadata Schema Upgrade**
+    *   **Action:** Replace `OwnerID`/`GroupID` strings with `uint32` UID/GID.
+    *   **Action:** Add `MTime`, `CTime` (excluding `ATime`), `NLink` to `Inode`.
+    *   **Action:** Implement automatic random UID/GID assignment for new users/groups.
+*   **Step 8.2: FUSE Operations Upgrade**
+    *   **Action:** Implement `Rename` (Atomic move).
+    *   **Action:** Implement `Unlink` / `Rmdir` (Deletion).
+    *   **Action:** Implement `Symlink` / `Readlink`.
+    *   **Action:** Implement `Setattr` (`chmod`, `chown`, `truncate`, `utimes`).
+    *   **Action:** Implement `Link` (Hard Links).
+
+---
+
 ## Phase 9: Cluster Management & Maintenance
 **Goal:** Advanced operations.
 
