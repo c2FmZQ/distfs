@@ -47,7 +47,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey)
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 
