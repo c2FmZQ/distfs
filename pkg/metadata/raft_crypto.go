@@ -33,7 +33,7 @@ func NewEncryptedLogStore(store *raftboltdb.BoltStore, keyRing *crypto.KeyRing) 
 }
 
 func (e *EncryptedLogStore) FirstIndex() (uint64, error) { return e.store.FirstIndex() }
-func (e *EncryptedLogStore) LastIndex() (uint64, error) { return e.store.LastIndex() }
+func (e *EncryptedLogStore) LastIndex() (uint64, error)  { return e.store.LastIndex() }
 
 func (e *EncryptedLogStore) GetLog(index uint64, log *raft.Log) error {
 	var encLog raft.Log

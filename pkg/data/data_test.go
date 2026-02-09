@@ -141,15 +141,15 @@ func TestDiskStore_WriteError(t *testing.T) {
 	if err := os.Chmod(tmpDir, 0500); err != nil {
 		t.Skip("Cannot chmod")
 	}
-	
+
 	// Try to write (sharded dir creation should fail)
 	h := sha256.Sum256([]byte("fail"))
 	id := hex.EncodeToString(h[:])
-	
+
 	if err := store.WriteChunk(id, bytes.NewReader([]byte("fail"))); err == nil {
 		t.Error("Expected error writing to readonly dir")
 	}
-	
+
 	os.Chmod(tmpDir, 0755) // Restore
 }
 

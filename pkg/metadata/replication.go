@@ -162,7 +162,7 @@ func (rm *ReplicationMonitor) checkReplication(inode *Inode, activeNodes map[str
 			for i := 0; i < len(activeNodeIDs); i++ {
 				idx := (startIndex + i) % len(activeNodeIDs)
 				candidateID := activeNodeIDs[idx]
-				
+
 				if len(targets) >= needed {
 					break
 				}
@@ -205,7 +205,7 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 	if err != nil {
 		return err
 	}
-	
+
 	// Add Auth Token (System Token)
 	if rm.server.signKey != nil {
 		capToken := CapabilityToken{
@@ -246,10 +246,10 @@ func (rm *ReplicationMonitor) executeRepair(inodeID, chunkID string, source Node
 		NodeIDs: targetIDs,
 	}
 	body, _ := json.Marshal(req)
-	
+
 	cmd := LogCommand{Type: CmdAddChunkReplica, Data: body}
 	b, _ := json.Marshal(cmd)
-	
+
 	f := rm.server.raft.Apply(b, 5*time.Second)
 	if err := f.Error(); err != nil {
 		log.Printf("Failed to apply AddReplica: %v", err)

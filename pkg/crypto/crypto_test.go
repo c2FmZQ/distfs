@@ -71,7 +71,7 @@ func TestLockbox(t *testing.T) {
 
 	// File Key
 	fileKey := []byte("01234567890123456789012345678901") // 32 bytes
-	
+
 	lb := NewLockbox()
 
 	// Add Alice

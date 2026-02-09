@@ -146,7 +146,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
 	log.Printf("FUSE Create: %s", req.Name)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil)
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0)
 	if err != nil {
 		log.Printf("FUSE Create failed: %v", err)
 		return nil, nil, syscall.EIO
@@ -164,7 +164,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	log.Printf("FUSE Mkdir: %s", req.Name)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil)
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0)
 	if err != nil {
 		log.Printf("FUSE Mkdir failed: %v", err)
 		return nil, syscall.EIO
@@ -241,13 +241,14 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 		if err != nil {
 			return syscall.EIO
 		}
-		data, err := h.file.fs.client.ReadFile(h.file.inode.ID, h.file.key)
+		rc, err := h.file.fs.client.ReadFile(h.file.inode.ID, h.file.key)
 		if err != nil {
 			f.Close()
 			os.Remove(f.Name())
 			return syscall.EIO
 		}
-		if _, err := f.Write(data); err != nil {
+		defer rc.Close()
+		if _, err := io.Copy(f, rc); err != nil {
 			f.Close()
 			os.Remove(f.Name())
 			return syscall.EIO
@@ -273,12 +274,12 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		if err != nil {
 			return syscall.EIO
 		}
-		data := make([]byte, info.Size())
-		if _, err := h.tmp.ReadAt(data, 0); err != nil {
+
+		if _, err := h.tmp.Seek(0, io.SeekStart); err != nil {
 			return syscall.EIO
 		}
 
-		_, err = h.file.fs.client.WriteFile(h.file.inode.ID, data)
+		_, err = h.file.fs.client.WriteFile(h.file.inode.ID, h.tmp, info.Size())
 		if err != nil {
 			log.Printf("FUSE Flush commit failed: %v", err)
 			return syscall.EIO

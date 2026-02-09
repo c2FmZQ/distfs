@@ -196,7 +196,7 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
-	
+
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
@@ -345,7 +345,10 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	return inodes, nil
 }
 
-func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, data []byte, encryptedName []byte) error {
+func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte) error {
+	if r == nil {
+		r = bytes.NewReader(nil)
+	}
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
@@ -369,7 +372,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		inode = metadata.Inode{
 			ID:            id,
 			Type:          iType,
-			Size:          uint64(len(data)),
+			Size:          uint64(size),
 			ChunkManifest: nil,
 			Lockbox:       lb,
 			EncryptedName: encryptedName,
@@ -385,11 +388,10 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	}
 
 	var chunkEntries []metadata.ChunkEntry
-	r := bytes.NewReader(data)
 	buf := make([]byte, crypto.ChunkSize)
 
 	for {
-		n, err := r.Read(buf)
+		n, err := io.ReadFull(r, buf)
 		if n > 0 {
 			chunkData := buf[:n]
 			cid, ct, err := crypto.EncryptChunk(fileKey, chunkData)
@@ -421,7 +423,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 			}
 			chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
 		}
-		if err == io.EOF {
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
 			break
 		}
 		if err != nil {
@@ -431,7 +433,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 
 	// Final update using updateInode (uses version check)
 	inode.ChunkManifest = chunkEntries
-	inode.Size = uint64(len(data))
+	inode.Size = uint64(size)
 	_, err = c.updateInode(inode)
 	if err == nil {
 		c.keyMu.Lock()
@@ -442,7 +444,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 }
 
 // WriteFile writes a file. Returns the FileKey used.
-func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
+func (c *Client) WriteFile(id string, r io.Reader, size int64) ([]byte, error) {
 	c.keyMu.RLock()
 	fileKey, ok := c.keyCache[id]
 	c.keyMu.RUnlock()
@@ -462,7 +464,7 @@ func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 		}
 	}
 
-	if err := c.writeInodeContent(id, metadata.FileType, fileKey, data, nil); err != nil {
+	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -504,7 +506,7 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		c.keyCache[id] = fileKey
 		c.keyMu.Unlock()
 	}
-	
+
 	token, _ := c.issueToken(id, nil, "R")
 
 	return &FileReader{
@@ -548,12 +550,12 @@ func (r *FileReader) read(p []byte) (int, error) {
 				break
 			}
 			chunkEntry := r.inode.ChunkManifest[chunkIdx]
-			
+
 			// Unlock during network I/O
 			r.mu.Unlock()
 			ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
 			r.mu.Lock()
-			
+
 			if err != nil {
 				return totalRead, err
 			}
@@ -596,12 +598,12 @@ func (r *FileReader) Stat() *metadata.Inode {
 	return r.inode
 }
 
-func (c *Client) ReadFile(id string, fileKey []byte) ([]byte, error) {
+func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
 	r, err := c.NewReader(id, fileKey)
 	if err != nil {
 		return nil, err
 	}
-	return io.ReadAll(r)
+	return io.NopCloser(r), nil
 }
 
 // GetInode fetches the inode metadata.

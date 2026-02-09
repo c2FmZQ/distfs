@@ -61,13 +61,15 @@ func (s *IntegrityScrubber) scrub() {
 
 		if err != nil {
 			log.Printf("Scrubber: list error: %v", err)
-			continue // WalkDir might return error but continue? Or stop? 
-            // My ListChunks implementation yields error at end usually if WalkDir fails.
-            // But let's log and continue.
+			continue // WalkDir might return error but continue? Or stop?
+			// My ListChunks implementation yields error at end usually if WalkDir fails.
+			// But let's log and continue.
 		}
-        
-        // If ID is empty (error case yielded empty string), skip.
-        if id == "" { continue }
+
+		// If ID is empty (error case yielded empty string), skip.
+		if id == "" {
+			continue
+		}
 
 		if err := s.verifyChunk(id); err != nil {
 			log.Printf("CORRUPTION DETECTED: Chunk %s: %v", id, err)

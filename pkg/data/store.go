@@ -31,9 +31,9 @@ type Store interface {
 
 	// HasChunk returns true if the chunk exists.
 	HasChunk(id string) (bool, error)
-    
-    // GetChunkSize returns the size of the chunk in bytes.
-    GetChunkSize(id string) (int64, error)
+
+	// GetChunkSize returns the size of the chunk in bytes.
+	GetChunkSize(id string) (int64, error)
 
 	// DeleteChunk removes the chunk.
 	DeleteChunk(id string) error

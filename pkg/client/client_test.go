@@ -79,7 +79,7 @@ func TestClientIntegration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dataServer := data.NewServer(dataStore, signKey.Public())
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -92,15 +92,20 @@ func TestClientIntegration(t *testing.T) {
 	// 4. Write File (Raw)
 	content := []byte("hello distributed filesystem world")
 	fileID := "file-1"
-	key, err := c.WriteFile(fileID, content)
+	key, err := c.WriteFile(fileID, bytes.NewReader(content), int64(len(content)))
 	if err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
 	// 5. Read File (Raw)
-	readBack, err := c.ReadFile(fileID, key)
+	rc, err := c.ReadFile(fileID, key)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
+	}
+	readBack, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatalf("ReadFile read failed: %v", err)
 	}
 
 	if string(readBack) != string(content) {
@@ -113,7 +118,7 @@ func TestClientIntegration(t *testing.T) {
 	}
 
 	fileName := "/file-2.txt"
-	if err := c.CreateFile(fileName, content); err != nil {
+	if err := c.CreateFile(fileName, bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
@@ -184,7 +189,7 @@ func TestReplication(t *testing.T) {
 		dir := t.TempDir()
 		store, _ := data.NewDiskStore(dir)
 		stores[i] = store
-		server := data.NewServer(store, signKey.Public())
+		server := data.NewServer(store, signKey.Public(), nil)
 		ts := httptest.NewServer(server)
 		nodes[i] = ts
 		defer ts.Close()
@@ -207,7 +212,7 @@ func TestReplication(t *testing.T) {
 
 	// 4. Write
 	content := []byte("replicated data")
-	_, err = c.WriteFile("repl-file", content)
+	_, err = c.WriteFile("repl-file", bytes.NewReader(content), int64(len(content)))
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -272,7 +277,7 @@ func TestDirectories(t *testing.T) {
 
 	dataDir := t.TempDir()
 	dataStore, _ := data.NewDiskStore(dataDir)
-	dataServer := data.NewServer(dataStore, signKey.Public())
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -307,7 +312,7 @@ func TestDirectories(t *testing.T) {
 
 	// Create File
 	content := []byte("file content")
-	if err := c.CreateFile("/a/b/f.txt", content); err != nil {
+	if err := c.CreateFile("/a/b/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
@@ -318,9 +323,14 @@ func TestDirectories(t *testing.T) {
 	}
 
 	// Read
-	readBack, err := c.ReadFile(inode.ID, key)
+	rc, err := c.ReadFile(inode.ID, key)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
+	}
+	readBack, err := io.ReadAll(rc)
+	rc.Close()
+	if err != nil {
+		t.Fatalf("ReadFile read failed: %v", err)
 	}
 	if string(readBack) != string(content) {
 		t.Errorf("Content mismatch")
@@ -368,7 +378,7 @@ func TestReplicationRepair(t *testing.T) {
 	// 2. Start ONE Data Node initially
 	dataDir1 := t.TempDir()
 	store1, _ := data.NewDiskStore(dataDir1)
-	server1 := data.NewServer(store1, signKey.Public())
+	server1 := data.NewServer(store1, signKey.Public(), nil)
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
 
@@ -383,7 +393,7 @@ func TestReplicationRepair(t *testing.T) {
 	c = c.WithServerKey(serverKEM.EncapsulationKey())
 
 	content := []byte("repair me")
-	_, err = c.WriteFile("repair-file", content) // Raw write
+	_, err = c.WriteFile("repair-file", bytes.NewReader(content), int64(len(content))) // Raw write
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -402,13 +412,13 @@ func TestReplicationRepair(t *testing.T) {
 	// 4. Start 2 more Data Nodes
 	dataDir2 := t.TempDir()
 	store2, _ := data.NewDiskStore(dataDir2)
-	server2 := data.NewServer(store2, signKey.Public())
+	server2 := data.NewServer(store2, signKey.Public(), nil)
 	ts2 := httptest.NewServer(server2)
 	defer ts2.Close()
 
 	dataDir3 := t.TempDir()
 	store3, _ := data.NewDiskStore(dataDir3)
-	server3 := data.NewServer(store3, signKey.Public())
+	server3 := data.NewServer(store3, signKey.Public(), nil)
 	ts3 := httptest.NewServer(server3)
 	defer ts3.Close()
 

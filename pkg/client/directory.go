@@ -130,14 +130,14 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 }
 
 func (c *Client) Mkdir(path string) error {
-	return c.addEntry(path, metadata.DirType, nil)
+	return c.addEntry(path, metadata.DirType, nil, 0)
 }
 
-func (c *Client) CreateFile(path string, data []byte) error {
-	return c.addEntry(path, metadata.FileType, data)
+func (c *Client) CreateFile(path string, r io.Reader, size int64) error {
+	return c.addEntry(path, metadata.FileType, r, size)
 }
 
-func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, data []byte) (*metadata.Inode, []byte, error) {
+func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64) (*metadata.Inode, []byte, error) {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
@@ -155,7 +155,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	var newInode *metadata.Inode
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(newID, iType, newKey, data, encNameBlob); err != nil {
+		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob); err != nil {
 			return nil, nil, err
 		}
 		newInode, err = c.GetInode(newID)
@@ -197,7 +197,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	return newInode, newKey, nil
 }
 
-func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) error {
+func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64) error {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		return fmt.Errorf("cannot create root")
@@ -214,7 +214,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, data []byte) er
 		return fmt.Errorf("parent is not a directory")
 	}
 
-	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, data)
+	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, r, size)
 	return err
 }
 

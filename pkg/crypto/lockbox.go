@@ -35,7 +35,7 @@ func NewLockbox() Lockbox {
 // AddRecipient adds a user to the lockbox.
 func (l Lockbox) AddRecipient(userID string, pubKey *mlkem.EncapsulationKey768, fileKey []byte) error {
 	secret, kemCT := Encapsulate(pubKey)
-	
+
 	demCT, err := EncryptDEM(secret, fileKey)
 	if err != nil {
 		return err

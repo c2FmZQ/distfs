@@ -200,12 +200,19 @@ func cmdPut(args []string) {
 		log.Fatal("local and remote paths required")
 	}
 	local, remote := args[0], args[1]
-	data, err := os.ReadFile(local)
+	f, err := os.Open(local)
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer f.Close()
+
+	info, err := f.Stat()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	c := loadClient()
-	if err := c.CreateFile(remote, data); err != nil {
+	if err := c.CreateFile(remote, f, info.Size()); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s uploaded to %s.\n", local, remote)
@@ -221,11 +228,19 @@ func cmdGet(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	data, err := c.ReadFile(inode.ID, key)
+	rc, err := c.ReadFile(inode.ID, key)
 	if err != nil {
 		log.Fatal(err)
 	}
-	if err := os.WriteFile(local, data, 0644); err != nil {
+	defer rc.Close()
+
+	out, err := os.Create(local)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, rc); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s downloaded to %s.\n", remote, local)

@@ -47,7 +47,7 @@ func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
 	if err != nil {
 		return err
 	}
-	
+
 	// Absolute path for Write/Rename (since os.Root doesn't support Rename easily)
 	absPath := filepath.Join(s.baseDir, rel)
 	dir := filepath.Dir(absPath)
@@ -62,11 +62,11 @@ func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
 		return err
 	}
 	tmpName := f.Name()
-    
-    // Clean up temp file on failure (or success if rename fails)
-    // If rename succeeds, file is gone (moved), Remove fails (ignore).
-    // If we defer Remove, it runs after Rename.
-    defer os.Remove(tmpName) 
+
+	// Clean up temp file on failure (or success if rename fails)
+	// If rename succeeds, file is gone (moved), Remove fails (ignore).
+	// If we defer Remove, it runs after Rename.
+	defer os.Remove(tmpName)
 
 	if _, err := io.Copy(f, data); err != nil {
 		f.Close()

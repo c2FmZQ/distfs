@@ -67,13 +67,13 @@ func main() {
 
 func loadClient(conf Config) *client.Client {
 	c := client.NewClient(conf.MetaURL, conf.DataURL)
-	
+
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
-	
+
 	skBytes, _ := hex.DecodeString(conf.SignKey)
 	sk := crypto.UnmarshalIdentityKey(skBytes)
-	
+
 	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
 	svKey, _ := crypto.UnmarshalEncapsulationKey(svKeyBytes)
 

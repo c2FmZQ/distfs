@@ -97,7 +97,7 @@ func TestKeyRotation(t *testing.T) {
 	//   Logs from BEFORE snapshot 1 are compacted.
 	//   Logs AFTER snapshot 2 (Log 3) are present.
 	//   Log 3 is encrypted with Gen 3 key.
-	
+
 	// We need to ensure the KeyRing was persisted.
 	node.Shutdown()
 
@@ -116,7 +116,7 @@ func TestKeyRotation(t *testing.T) {
 	// Actually snapshots contain accumulated state.
 	// Snap 2 contains inode-1 and inode-2.
 	// Log replay adds inode-3.
-	
+
 	err = node2.FSM.db.View(func(tx *bolt.Tx) error { // bolt imported in test file? need import
 		b := tx.Bucket([]byte("inodes"))
 		if b.Get([]byte("inode-1")) == nil {

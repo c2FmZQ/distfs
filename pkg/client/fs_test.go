@@ -72,7 +72,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 
 	dataDir := t.TempDir()
 	dataStore, _ := data.NewDiskStore(dataDir)
-	dataServer := data.NewServer(dataStore, signKey.Public())
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -103,10 +103,10 @@ func TestDistFS_ReadDir(t *testing.T) {
 	if err := c.Mkdir("/docs"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.CreateFile("/docs/plan.txt", []byte("Plan A")); err != nil {
+	if err := c.CreateFile("/docs/plan.txt", bytes.NewReader([]byte("Plan A")), 6); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.CreateFile("/docs/notes.md", []byte("Note B")); err != nil {
+	if err := c.CreateFile("/docs/notes.md", bytes.NewReader([]byte("Note B")), 6); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.Mkdir("/images"); err != nil {
