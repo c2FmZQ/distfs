@@ -33,6 +33,21 @@ func (c *Client) FS() *DistFS {
 	return &DistFS{client: c}
 }
 
+func (d *DistFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	f, err := d.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	rdf, ok := f.(fs.ReadDirFile)
+	if !ok {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fmt.Errorf("not a directory")}
+	}
+
+	return rdf.ReadDir(-1)
+}
+
 func (d *DistFS) Open(name string) (fs.File, error) {
 	inode, key, err := d.client.ResolvePath(name)
 	if err != nil {

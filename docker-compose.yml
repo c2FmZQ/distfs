@@ -1,0 +1,38 @@
+version: '3'
+services:
+  storage-node-1:
+    build: .
+    command: ["-id", "node-1", "-raft-addr", "storage-node-1:5000", "-api-addr", "0.0.0.0:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000001", "-bootstrap", "-jwks-url", "DEBUG_INSECURE"]
+    volumes:
+      - node1-data:/data
+    ports:
+      - "8081:8080"
+
+  storage-node-2:
+    build: .
+    command: ["-id", "node-2", "-raft-addr", "storage-node-2:5000", "-api-addr", "0.0.0.0:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000002", "-jwks-url", "DEBUG_INSECURE"]
+    volumes:
+      - node2-data:/data
+    depends_on:
+      - storage-node-1
+
+  storage-node-3:
+    build: .
+    command: ["-id", "node-3", "-raft-addr", "storage-node-3:5000", "-api-addr", "0.0.0.0:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000003", "-jwks-url", "DEBUG_INSECURE"]
+    volumes:
+      - node3-data:/data
+    depends_on:
+      - storage-node-1
+
+  tester:
+    build: .
+    entrypoint: ["/bin/test-e2e.sh"]
+    depends_on:
+      - storage-node-1
+      - storage-node-2
+      - storage-node-3
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:

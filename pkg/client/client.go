@@ -223,6 +223,15 @@ func (c *Client) downloadChunk(id string, token string) ([]byte, error) {
 	return io.ReadAll(resp.Body)
 }
 
+type APIError struct {
+	StatusCode int
+	Message    string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("api error: %d %s", e.StatusCode, e.Message)
+}
+
 func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	data, err := json.Marshal(inode)
 	if err != nil {
@@ -240,11 +249,11 @@ func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("create inode failed: %d %s", resp.StatusCode, string(b))
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
-	
+
 	var created metadata.Inode
 	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
 		return nil, err
@@ -271,9 +280,9 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("update inode failed: %d %s", resp.StatusCode, string(b))
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
-	
+
 	var updated metadata.Inode
 	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
 		return nil, err
@@ -294,7 +303,8 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get inode failed: %d", resp.StatusCode)
+		b, _ := io.ReadAll(resp.Body)
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 	var inode metadata.Inode
 	if err := json.NewDecoder(resp.Body).Decode(&inode); err != nil {
@@ -338,17 +348,33 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		}
 	}
 
-	inode := metadata.Inode{
-		ID:            id,
-		Type:          iType,
-		Size:          uint64(len(data)),
-		ChunkManifest: nil,
-		Lockbox:       lb,
-		EncryptedName: encryptedName,
-		OwnerID:       c.userID,
-	}
-	created, err := c.createInode(inode)
-	if err != nil {
+	var inode metadata.Inode
+	// Try to get existing inode
+	existing, err := c.getInode(id)
+	if err == nil {
+		inode = *existing
+		// We preserve existing ID, Owner, etc.
+		// We will replace ChunkManifest and Size.
+		// We update Lockbox/EncryptedName in case they changed?
+		inode.Lockbox = lb
+		inode.EncryptedName = encryptedName
+	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+		// Assume not found, create new
+		inode = metadata.Inode{
+			ID:            id,
+			Type:          iType,
+			Size:          uint64(len(data)),
+			ChunkManifest: nil,
+			Lockbox:       lb,
+			EncryptedName: encryptedName,
+			OwnerID:       c.userID,
+		}
+		created, err := c.createInode(inode)
+		if err != nil {
+			return err
+		}
+		inode = *created
+	} else {
 		return err
 	}
 
@@ -398,11 +424,13 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	}
 
 	// Final update using updateInode (uses version check)
-	created.ChunkManifest = chunkEntries
-	_, err = c.updateInode(*created)
+	inode.ChunkManifest = chunkEntries
+	inode.Size = uint64(len(data))
+	_, err = c.updateInode(inode)
 	return err
 }
 
+// WriteFile writes a file. Returns the FileKey used.
 func (c *Client) WriteFile(id string, data []byte) ([]byte, error) {
 	fileKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, fileKey); err != nil {

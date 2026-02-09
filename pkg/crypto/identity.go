@@ -49,6 +49,18 @@ func (k *IdentityKey) Public() []byte {
 	return p
 }
 
+// MarshalPrivate serializes the private key.
+func (k *IdentityKey) MarshalPrivate() []byte {
+	return k.priv
+}
+
+// UnmarshalIdentityKey deserializes the private key.
+func UnmarshalIdentityKey(b []byte) *IdentityKey {
+	priv := ed25519.PrivateKey(b)
+	pub := priv.Public().(ed25519.PublicKey)
+	return &IdentityKey{priv: priv, pub: pub}
+}
+
 // VerifySignature checks the signature against the public key.
 func VerifySignature(pubKey []byte, msg, sig []byte) bool {
 	if len(pubKey) != ed25519.PublicKeySize {

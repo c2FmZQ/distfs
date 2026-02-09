@@ -32,3 +32,23 @@ func Encapsulate(pubKey *mlkem.EncapsulationKey768) ([]byte, []byte) {
 func Decapsulate(privKey *mlkem.DecapsulationKey768, ciphertext []byte) ([]byte, error) {
 	return privKey.Decapsulate(ciphertext)
 }
+
+// MarshalDecapsulationKey serializes the private key.
+func MarshalDecapsulationKey(dk *mlkem.DecapsulationKey768) []byte {
+	return dk.Bytes()
+}
+
+// UnmarshalDecapsulationKey deserializes the private key.
+func UnmarshalDecapsulationKey(b []byte) (*mlkem.DecapsulationKey768, error) {
+	return mlkem.NewDecapsulationKey768(b)
+}
+
+// MarshalEncapsulationKey serializes the public key.
+func MarshalEncapsulationKey(ek *mlkem.EncapsulationKey768) []byte {
+	return ek.Bytes()
+}
+
+// UnmarshalEncapsulationKey deserializes the public key.
+func UnmarshalEncapsulationKey(b []byte) (*mlkem.EncapsulationKey768, error) {
+	return mlkem.NewEncapsulationKey768(b)
+}

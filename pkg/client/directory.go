@@ -61,6 +61,11 @@ func (c *Client) EnsureRoot() error {
 		OwnerID:  c.userID,
 	}
 	_, err = c.createInode(inode)
+	if err != nil {
+		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
+			return nil
+		}
+	}
 	return err
 }
 
@@ -69,7 +74,13 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 	rootInode, err := c.getInode(metadata.RootID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to get root inode: %w", err)
+		if err := c.EnsureRoot(); err != nil {
+			return nil, nil, fmt.Errorf("failed to ensure root inode: %w", err)
+		}
+		rootInode, err = c.getInode(metadata.RootID)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to get root inode after creation: %w", err)
+		}
 	}
 
 	if c.decKey == nil {
