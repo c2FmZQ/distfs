@@ -124,7 +124,7 @@ func cmdRegister(args []string) {
 	conf := loadConfig()
 	skBytes, _ := hex.DecodeString(conf.SignKey)
 	sk := crypto.UnmarshalIdentityKey(skBytes)
-	
+
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
 
@@ -153,13 +153,13 @@ func cmdRegister(args []string) {
 func loadClient() *client.Client {
 	conf := loadConfig()
 	c := client.NewClient(conf.MetaURL, conf.DataURL)
-	
+
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
-	
+
 	skBytes, _ := hex.DecodeString(conf.SignKey)
 	sk := crypto.UnmarshalIdentityKey(skBytes)
-	
+
 	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
 	svKey, _ := crypto.UnmarshalEncapsulationKey(svKeyBytes)
 

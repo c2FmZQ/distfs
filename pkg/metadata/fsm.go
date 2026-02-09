@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -417,6 +418,24 @@ func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 		fsm.OnSnapshot()
 	}
 	return &MetadataSnapshot{db: fsm.db}, nil
+}
+
+func (fsm *MetadataFSM) ValidateNode(address string) error {
+	return fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				// Address in FSM is full URL (e.g. http://1.2.3.4:8080)
+				// Target might be host:port or URL.
+				if strings.Contains(n.Address, address) {
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("node address %s not found in registry", address)
+	})
 }
 
 func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {

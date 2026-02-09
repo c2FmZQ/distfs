@@ -37,14 +37,15 @@ import (
 
 func main() {
 	var (
-		nodeID    = flag.String("id", "", "Node ID")
-		raftAddr  = flag.String("raft-addr", "127.0.0.1:5000", "Raft internal address")
-		apiAddr   = flag.String("api-addr", "127.0.0.1:8080", "HTTP API address")
-		apiURL    = flag.String("api-url", "", "Reachable API URL for this node")
-		dataDir   = flag.String("data-dir", "data", "Directory for storage")
-		masterKey = flag.String("master-key", "", "32-byte hex master key")
-		bootstrap = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
-		jwksURL   = flag.String("jwks-url", "", "JWKS URL for auth")
+		nodeID     = flag.String("id", "", "Node ID")
+		raftAddr   = flag.String("raft-addr", "127.0.0.1:5000", "Raft internal address")
+		apiAddr    = flag.String("api-addr", "127.0.0.1:8080", "HTTP API address")
+		apiURL     = flag.String("api-url", "", "Reachable API URL for this node")
+		dataDir    = flag.String("data-dir", "data", "Directory for storage")
+		masterKey  = flag.String("master-key", "", "32-byte hex master key")
+		bootstrap  = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
+		jwksURL    = flag.String("jwks-url", "", "JWKS URL for auth")
+		raftSecret = flag.String("raft-secret", "", "Shared secret for cluster operations")
 	)
 	flag.Parse()
 
@@ -99,17 +100,14 @@ func main() {
 	}
 
 	// 3. Initialize Servers
-	if *jwksURL == "DEBUG_INSECURE" {
-		log.Println("WARNING: Running in DEBUG_INSECURE mode. JWT validation is disabled!")
-	}
-	metaServer := metadata.NewServer(rn.Raft, rn.FSM, *jwksURL, nodeKey, signKey)
-	
+	metaServer := metadata.NewServer(rn.Raft, rn.FSM, *jwksURL, nodeKey, signKey, *raftSecret)
+
 	chunkDir := filepath.Join(baseDir, "chunks")
 	store, err := data.NewDiskStore(chunkDir)
 	if err != nil {
 		log.Fatalf("failed to init data store: %v", err)
 	}
-	dataServer := data.NewServer(store, signKey.Public())
+	dataServer := data.NewServer(store, signKey.Public(), rn.FSM)
 
 	// 4. Combined Router
 	mux := http.NewServeMux()
@@ -121,7 +119,7 @@ func main() {
 	mux.Handle("/v1/user/", metaServer)
 	mux.Handle("/v1/group/", metaServer)
 	mux.Handle("/v1/node", metaServer)
-	
+
 	// Data handlers
 	mux.Handle("/v1/data/", dataServer)
 
@@ -133,7 +131,7 @@ func main() {
 			RaftAddress: *raftAddr,
 			Status:      metadata.NodeStatusActive,
 		}
-		
+
 		// Wait for cluster ready
 		time.Sleep(2 * time.Second)
 		ticker := time.NewTicker(30 * time.Second)
@@ -142,7 +140,13 @@ func main() {
 				node.LastHeartbeat = time.Now().Unix()
 				body, _ := json.Marshal(node)
 				// Use internal loopback for registration (will forward if needed)
-				resp, err := http.Post("http://localhost:"+strings.Split(*apiAddr, ":")[1]+"/v1/node", "application/json", bytes.NewReader(body))
+				req, _ := http.NewRequest("POST", "http://localhost:"+strings.Split(*apiAddr, ":")[1]+"/v1/node", bytes.NewReader(body))
+				req.Header.Set("Content-Type", "application/json")
+				if *raftSecret != "" {
+					req.Header.Set("X-Raft-Secret", *raftSecret)
+				}
+
+				resp, err := http.DefaultClient.Do(req)
 				if err != nil {
 					log.Printf("Heartbeat failed: %v", err)
 				} else {
@@ -152,7 +156,6 @@ func main() {
 			<-ticker.C
 		}
 	}()
-
 	log.Printf("Storage Node %s starting API on %s", *nodeID, *apiAddr)
 	srv := &http.Server{Addr: *apiAddr, Handler: mux}
 

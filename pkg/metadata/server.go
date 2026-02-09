@@ -46,13 +46,15 @@ type Server struct {
 	nodeKey *mlkem.DecapsulationKey768
 	signKey *crypto.IdentityKey
 
+	raftSecret string
+
 	nonceCache map[string]time.Time
 	nonceMu    sync.Mutex
 
 	replMonitor *ReplicationMonitor
 }
 
-func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey) *Server {
+func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey, raftSecret string) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -67,6 +69,7 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 		jwksURL:    jwksURL,
 		nodeKey:    nodeKey,
 		signKey:    signKey,
+		raftSecret: raftSecret,
 		nonceCache: make(map[string]time.Time),
 	}
 	s.replMonitor = NewReplicationMonitor(s)
@@ -106,10 +109,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/v1/node" && r.Method == http.MethodPost {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		s.handleRegisterNode(w, r)
 		return
 	}
 	if r.URL.Path == "/v1/cluster/join" && r.Method == http.MethodPost {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		s.handleClusterJoin(w, r)
 		return
 	}
@@ -437,44 +448,26 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var email string
-	if s.jwksURL == "DEBUG_INSECURE" {
-		// Attempt to extract email from JWT without verification
-		parts := strings.Split(req.JWT, ".")
-		if len(parts) > 1 {
-			b, _ := base64.RawStdEncoding.DecodeString(parts[1])
-			if b == nil {
-				// Try RawURLEncoding which is standard for JWT
-				b, _ = base64.RawURLEncoding.DecodeString(parts[1])
-			}
-			var claims map[string]interface{}
-			json.Unmarshal(b, &claims)
-			email, _ = claims["email"].(string)
-		}
-		if email == "" {
-			email = "test@example.com"
-		}
-	} else {
-		s.jwks.Ready(r.Context())
-		token, err := jwt.Parse(req.JWT, func(token *jwt.Token) (interface{}, error) {
-			kid, _ := token.Header["kid"].(string)
-			return s.jwks.GetKey(kid)
-		})
+	s.jwks.Ready(r.Context())
+	token, err := jwt.Parse(req.JWT, func(token *jwt.Token) (interface{}, error) {
+		kid, _ := token.Header["kid"].(string)
+		return s.jwks.GetKey(kid)
+	})
 
-		if err != nil || !token.Valid {
-			http.Error(w, "invalid jwt: "+err.Error(), http.StatusUnauthorized)
-			return
-		}
+	if err != nil || !token.Valid {
+		http.Error(w, "invalid jwt: "+err.Error(), http.StatusUnauthorized)
+		return
+	}
 
-		claims, ok := token.Claims.(jwt.MapClaims)
-		if !ok {
-			http.Error(w, "invalid claims", http.StatusUnauthorized)
-			return
-		}
-		email, _ = claims["email"].(string)
-		if email == "" {
-			http.Error(w, "jwt missing email", http.StatusUnauthorized)
-			return
-		}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		http.Error(w, "invalid claims", http.StatusUnauthorized)
+		return
+	}
+	email, _ = claims["email"].(string)
+	if email == "" {
+		http.Error(w, "jwt missing email", http.StatusUnauthorized)
+		return
 	}
 
 	user := User{
@@ -705,4 +698,11 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, dat
 	}
 
 	w.WriteHeader(successCode)
+}
+
+func (s *Server) checkRaftSecret(r *http.Request) bool {
+	if s.raftSecret == "" {
+		return true // Open if not configured (NOT RECOMMENDED for prod)
+	}
+	return r.Header.Get("X-Raft-Secret") == s.raftSecret
 }

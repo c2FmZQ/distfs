@@ -29,13 +29,18 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+type Validator interface {
+	ValidateNode(address string) error
+}
+
 type Server struct {
 	store      Store
 	metaPubKey []byte
+	validator  Validator
 }
 
-func NewServer(store Store, metaPubKey []byte) *Server {
-	return &Server{store: store, metaPubKey: metaPubKey}
+func NewServer(store Store, metaPubKey []byte, validator Validator) *Server {
+	return &Server{store: store, metaPubKey: metaPubKey, validator: validator}
 }
 
 // ServeHTTP needs a slightly better router
@@ -201,6 +206,12 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) replicate(id, target, remaining, token string) error {
+	if s.validator != nil {
+		if err := s.validator.ValidateNode(target); err != nil {
+			return fmt.Errorf("invalid replication target: %w", err)
+		}
+	}
+
 	rc, err := s.store.ReadChunk(id)
 	if err != nil {
 		return err

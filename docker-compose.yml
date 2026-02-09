@@ -1,28 +1,38 @@
 version: '3'
 services:
+  test-auth:
+    build: .
+    entrypoint: ["/bin/test-auth", "-addr", ":8080"]
+    ports:
+      - "8090:8080"
+
   storage-node-1:
     build: .
-    command: ["-id", "node-1", "-raft-addr", "storage-node-1:5000", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-1:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000001", "-bootstrap", "-jwks-url", "DEBUG_INSECURE"]
+    command: ["-id", "node-1", "-raft-addr", "storage-node-1:5000", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-1:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000001", "-bootstrap", "-jwks-url", "http://test-auth:8080/jwks.json", "-raft-secret", "supersecret"]
     volumes:
       - node1-data:/data
     ports:
       - "8081:8080"
+    depends_on:
+      - test-auth
 
   storage-node-2:
     build: .
-    command: ["-id", "node-2", "-raft-addr", "storage-node-2:5000", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-2:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000002", "-jwks-url", "DEBUG_INSECURE"]
+    command: ["-id", "node-2", "-raft-addr", "storage-node-2:5000", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-2:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000002", "-jwks-url", "http://test-auth:8080/jwks.json", "-raft-secret", "supersecret"]
     volumes:
       - node2-data:/data
     depends_on:
       - storage-node-1
+      - test-auth
 
   storage-node-3:
     build: .
-    command: ["-id", "node-3", "-raft-addr", "storage-node-3:5000", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-3:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000003", "-jwks-url", "DEBUG_INSECURE"]
+    command: ["-id", "node-3", "-raft-addr", "storage-node-3:5000", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-3:8080", "-master-key", "0000000000000000000000000000000000000000000000000000000000000003", "-jwks-url", "http://test-auth:8080/jwks.json", "-raft-secret", "supersecret"]
     volumes:
       - node3-data:/data
     depends_on:
       - storage-node-1
+      - test-auth
 
   tester:
     build: .
@@ -31,6 +41,7 @@ services:
       - storage-node-1
       - storage-node-2
       - storage-node-3
+      - test-auth
     volumes:
       - client-config:/root/.distfs
 
@@ -41,6 +52,7 @@ services:
       - storage-node-1
       - storage-node-2
       - storage-node-3
+      - test-auth
     cap_add:
       - SYS_ADMIN
     devices:

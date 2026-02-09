@@ -39,8 +39,8 @@ while true; do
 done
 
 echo "Joining nodes to cluster..."
-wget -qO- --timeout=5 --post-data '{"id":"node-2","address":"storage-node-2:5000"}' $LEADER_URL/v1/cluster/join || echo "node-2 already joined"
-wget -qO- --timeout=5 --post-data '{"id":"node-3","address":"storage-node-3:5000"}' $LEADER_URL/v1/cluster/join || echo "node-3 already joined"
+wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data '{"id":"node-2","address":"storage-node-2:5000"}' $LEADER_URL/v1/cluster/join || echo "node-2 already joined"
+wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data '{"id":"node-3","address":"storage-node-3:5000"}' $LEADER_URL/v1/cluster/join || echo "node-3 already joined"
 
 echo "Waiting for cluster stability..."
 sleep 5
@@ -49,8 +49,10 @@ if [ ! -f /root/.distfs/config.json ]; then
   echo "Initializing distfs..."
   distfs init -meta $LEADER_URL -id test@example.com
   echo "Registering user..."
-  DUMMY_JWT="header.eyJlbWFpbCI6InRlc3RAZXhhbXBsZS5jb20ifQ.sig"
-  distfs register -jwt "$DUMMY_JWT"
+  
+  # Fetch real JWT from test-auth
+  JWT=$(wget -qO- "http://test-auth:8080/mint?email=test@example.com")
+  distfs register -jwt "$JWT"
 fi
 
 echo "Creating directory..."
