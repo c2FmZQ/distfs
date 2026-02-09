@@ -32,8 +32,9 @@ var (
 )
 
 type MetadataFSM struct {
-	db   *bolt.DB
-	path string
+	db         *bolt.DB
+	path       string
+	OnSnapshot func()
 }
 
 func NewMetadataFSM(path string) (*MetadataFSM, error) {
@@ -412,6 +413,9 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 }
 
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
+	if fsm.OnSnapshot != nil {
+		fsm.OnSnapshot()
+	}
 	return &MetadataSnapshot{db: fsm.db}, nil
 }
 

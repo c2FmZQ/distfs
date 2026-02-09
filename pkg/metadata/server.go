@@ -23,6 +23,8 @@ import (
 	"io"
 	"math/rand"
 	"net/http"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -93,6 +95,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleGetNodeKey(w, r)
 		return
 	}
+
+	// For all other requests, if we are not the leader, forward to the leader.
+	if s.forwardIfNecessary(w, r) {
+		return
+	}
+
 	if r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost {
 		s.handleRegisterUser(w, r)
 		return
@@ -170,6 +178,52 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	http.NotFound(w, r)
+}
+
+func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool {
+	if s.raft.State() == raft.Leader {
+		return false
+	}
+
+	leaderAddr, _ := s.raft.LeaderWithID()
+	if leaderAddr == "" {
+		http.Error(w, "no leader", http.StatusServiceUnavailable)
+		return true
+	}
+
+	// Find Leader API Address in FSM
+	var leaderNode Node
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				if n.RaftAddress == string(leaderAddr) {
+					leaderNode = n
+					return nil
+				}
+			}
+		}
+		return fmt.Errorf("leader not registered")
+	})
+
+	if err != nil || leaderNode.Address == "" {
+		// If leader is not in FSM, we can't forward.
+		// Fallback: return 503 so client retries.
+		http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
+		return true
+	}
+
+	target, err := url.Parse(leaderNode.Address)
+	if err != nil {
+		http.Error(w, "invalid leader address", http.StatusInternalServerError)
+		return true
+	}
+
+	proxy := httputil.NewSingleHostReverseProxy(target)
+	proxy.ServeHTTP(w, r)
+	return true
 }
 
 func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {

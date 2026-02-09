@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 )
@@ -29,6 +30,7 @@ type RaftNode struct {
 	Raft      *raft.Raft
 	FSM       *MetadataFSM
 	Transport raft.Transport
+	LogStore  *raftboltdb.BoltStore
 }
 
 func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, error) {
@@ -51,16 +53,22 @@ func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, err
 		return nil, err
 	}
 
-	// Log Store (Encrypted)
+	// Log Store (Encrypted with KeyRing)
+	keyRingPath := filepath.Join(baseDir, "keyring.bin")
+	var kr *crypto.KeyRing
+	if b, err := os.ReadFile(keyRingPath); err == nil {
+		kr, _ = crypto.UnmarshalKeyRing(b)
+	} else {
+		kr = crypto.NewKeyRing(masterKey)
+		os.WriteFile(keyRingPath, kr.Marshal(), 0600)
+	}
+
 	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(baseDir, "raft-log.bolt"))
 	if err != nil {
 		return nil, fmt.Errorf("bolt store: %w", err)
 	}
 
-	logStore, err := NewEncryptedLogStore(boltStore, masterKey)
-	if err != nil {
-		return nil, fmt.Errorf("encrypted log store: %w", err)
-	}
+	logStore := NewEncryptedLogStore(boltStore, kr)
 
 	// Stable Store (Plain BoltStore)
 	stableStore := boltStore
@@ -78,13 +86,19 @@ func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, err
 		return nil, fmt.Errorf("new fsm: %w", err)
 	}
 
+	fsm.OnSnapshot = func() {
+		kr.Rotate()
+		os.WriteFile(keyRingPath, kr.Marshal(), 0600)
+	}
+
 	r, err := raft.NewRaft(config, fsm, logStore, stableStore, snapStore, transport)
 	if err != nil {
 		fsm.Close()
+		boltStore.Close()
 		return nil, fmt.Errorf("new raft: %w", err)
 	}
 
-	return &RaftNode{Raft: r, FSM: fsm, Transport: transport}, nil
+	return &RaftNode{Raft: r, FSM: fsm, Transport: transport, LogStore: boltStore}, nil
 }
 
 func (n *RaftNode) Shutdown() error {
@@ -92,5 +106,6 @@ func (n *RaftNode) Shutdown() error {
 	if err := f.Error(); err != nil {
 		return err
 	}
+	n.LogStore.Close()
 	return n.FSM.Close()
 }

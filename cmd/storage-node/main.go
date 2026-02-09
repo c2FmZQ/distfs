@@ -15,15 +15,19 @@
 package main
 
 import (
+	"bytes"
 	"crypto/mlkem"
 	"encoding/hex"
+	"encoding/json"
 	"flag"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
@@ -36,6 +40,7 @@ func main() {
 		nodeID    = flag.String("id", "", "Node ID")
 		raftAddr  = flag.String("raft-addr", "127.0.0.1:5000", "Raft internal address")
 		apiAddr   = flag.String("api-addr", "127.0.0.1:8080", "HTTP API address")
+		apiURL    = flag.String("api-url", "", "Reachable API URL for this node")
 		dataDir   = flag.String("data-dir", "data", "Directory for storage")
 		masterKey = flag.String("master-key", "", "32-byte hex master key")
 		bootstrap = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
@@ -45,6 +50,10 @@ func main() {
 
 	if *nodeID == "" {
 		log.Fatal("-id is required")
+	}
+
+	if *apiURL == "" {
+		*apiURL = "http://" + *apiAddr
 	}
 
 	mKeyStr := *masterKey
@@ -115,6 +124,34 @@ func main() {
 	
 	// Data handlers
 	mux.Handle("/v1/data/", dataServer)
+
+	// 5. Registration & Heartbeat
+	go func() {
+		node := metadata.Node{
+			ID:          *nodeID,
+			Address:     *apiURL,
+			RaftAddress: *raftAddr,
+			Status:      metadata.NodeStatusActive,
+		}
+		
+		// Wait for cluster ready
+		time.Sleep(2 * time.Second)
+		ticker := time.NewTicker(30 * time.Second)
+		for {
+			if rn.Raft.Leader() != "" {
+				node.LastHeartbeat = time.Now().Unix()
+				body, _ := json.Marshal(node)
+				// Use internal loopback for registration (will forward if needed)
+				resp, err := http.Post("http://localhost:"+strings.Split(*apiAddr, ":")[1]+"/v1/node", "application/json", bytes.NewReader(body))
+				if err != nil {
+					log.Printf("Heartbeat failed: %v", err)
+				} else {
+					resp.Body.Close()
+				}
+			}
+			<-ticker.C
+		}
+	}()
 
 	log.Printf("Storage Node %s starting API on %s", *nodeID, *apiAddr)
 	srv := &http.Server{Addr: *apiAddr, Handler: mux}

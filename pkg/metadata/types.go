@@ -57,7 +57,8 @@ const (
 
 type Node struct {
 	ID            string     `json:"id"`
-	Address       string     `json:"address"`
+	Address       string     `json:"address"` // API Address
+	RaftAddress   string     `json:"raft_address"`
 	Status        NodeStatus `json:"status"`
 	PublicKey     []byte     `json:"public_key"`
 	LastHeartbeat int64      `json:"last_heartbeat"`

@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	"encoding/binary"
 	"fmt"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/hashicorp/raft"
@@ -23,15 +24,12 @@ import (
 
 // EncryptedLogStore wraps a LogStore with encryption.
 type EncryptedLogStore struct {
-	store     *raftboltdb.BoltStore
-	masterKey []byte
+	store   *raftboltdb.BoltStore
+	keyRing *crypto.KeyRing
 }
 
-func NewEncryptedLogStore(store *raftboltdb.BoltStore, masterKey []byte) (*EncryptedLogStore, error) {
-	if len(masterKey) != 32 {
-		return nil, fmt.Errorf("master key must be 32 bytes")
-	}
-	return &EncryptedLogStore{store: store, masterKey: masterKey}, nil
+func NewEncryptedLogStore(store *raftboltdb.BoltStore, keyRing *crypto.KeyRing) *EncryptedLogStore {
+	return &EncryptedLogStore{store: store, keyRing: keyRing}
 }
 
 func (e *EncryptedLogStore) FirstIndex() (uint64, error) { return e.store.FirstIndex() }
@@ -43,10 +41,15 @@ func (e *EncryptedLogStore) GetLog(index uint64, log *raft.Log) error {
 		return err
 	}
 	// Decrypt Data
-	if len(encLog.Data) > 0 {
-		plain, err := crypto.DecryptDEM(e.masterKey, encLog.Data)
+	if len(encLog.Data) > 4 {
+		gen := binary.BigEndian.Uint32(encLog.Data[:4])
+		key, ok := e.keyRing.Get(gen)
+		if !ok {
+			return fmt.Errorf("key generation %d not found for log %d", gen, index)
+		}
+		plain, err := crypto.DecryptDEM(key, encLog.Data[4:])
 		if err != nil {
-			return fmt.Errorf("failed to decrypt log %d: %w", index, err)
+			return fmt.Errorf("failed to decrypt log %d (gen %d): %w", index, gen, err)
 		}
 		encLog.Data = plain
 	}
@@ -60,14 +63,20 @@ func (e *EncryptedLogStore) StoreLog(log *raft.Log) error {
 
 func (e *EncryptedLogStore) StoreLogs(logs []*raft.Log) error {
 	encLogs := make([]*raft.Log, len(logs))
+	key, gen := e.keyRing.Current()
+
 	for i, l := range logs {
 		cp := *l // shallow copy
 		if len(cp.Data) > 0 {
-			ct, err := crypto.EncryptDEM(e.masterKey, cp.Data)
+			ct, err := crypto.EncryptDEM(key, cp.Data)
 			if err != nil {
 				return err
 			}
-			cp.Data = ct
+			// Prefix with generation ID
+			data := make([]byte, 4+len(ct))
+			binary.BigEndian.PutUint32(data[:4], gen)
+			copy(data[4:], ct)
+			cp.Data = data
 		}
 		encLogs[i] = &cp
 	}
