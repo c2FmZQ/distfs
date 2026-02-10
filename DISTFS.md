@@ -165,6 +165,40 @@ Communication uses JSON over HTTP/2 (or gRPC).
     *   **Client Auth:** Client authenticates with Metadata Server via Sealed Tokens (signed/encrypted) proving identity.
     *   **Chunk Access:** Client authenticates with Data Nodes via Signed Capability Tokens issued by Metadata Server.
 
-## 7. Cluster Management
-*   **Roles:** Nodes can be Voters (Raft quorum) or NonVoters (Data-only or Read-only Metadata).
-*   **Forwarding:** Requests to Followers are forwarded to the Leader.
+## 7. Cluster Architecture & Operations
+
+### 7.1 Network Topology & Ports
+The backend utilizes three primary ports for its operations, ensuring separation of concerns:
+1.  **Public HTTP Port (`--addr`):** Client-facing API port (default `:8080`).
+2.  **Internal HTTP Port (`--cluster-addr`):** Dedicated mTLS-secured API for inter-node communication (default `:9090`).
+3.  **Raft Port (`--raft-bind`):** Internal TCP transport for Raft consensus traffic (default `:8081`).
+
+**Port Advertisement:**
+To support containerized and NATed environments, nodes must explicitly advertise their public addresses:
+*   `--cluster-advertise`: Public `host:port` for the internal cluster API.
+*   **`--raft-advertise`**: Public `host:port` for Raft traffic.
+
+### 7.2 Node Identity & Security (Zero-Trust)
+The cluster employs a **Zero-Trust security model** where no node is inherently trusted.
+*   **Node Key:** Each node generates a persistent **Ed25519 private key** (`node.key`) on first startup.
+*   **Node ID:** The unique Raft Node ID is derived from the first 8 bytes of the public key.
+*   **Mutual TLS (mTLS):** All inter-node communication (Cluster API and Raft) is secured via mTLS. Nodes exchange self-signed certificates signed by their `node.key`. Connections are only accepted if the peer's public key is in the authorized `NodeMeta` list.
+
+### 7.3 Trust Bootstrapping (TOFU)
+To solve the initial trust problem, new nodes use **Trust On First Use (TOFU)**:
+1.  **Fresh State:** A node with no history enters TOFU mode.
+2.  **Temporary Trust:** It temporarily accepts a connection from an unknown peer (assumed to be the Cluster Leader).
+3.  **State Acquisition:** The node receives the authoritative `NodeMeta` (list of trusted public keys) from the Leader.
+4.  **Strict Mode:** Upon initialization, the node permanently switches to **Strict Mode**, enforcing the authorized key list for all future connections.
+
+### 7.4 Cluster Management Dashboard
+The `/api/cluster` endpoint provides a dashboard for operators.
+*   **Access Control:** Protected by a **Raft Secret** (configured via `--raft-secret`). This secret acts as a password for administrative actions.
+*   **Capabilities:**
+    *   View Cluster Status (Leader, Peers, Versions).
+    *   **Add Node:** Join new nodes by specifying their Address and Public Key (or relying on TOFU).
+    *   **Remove Node:** Decommission failed nodes.
+
+### 7.5 Request Forwarding
+*   Write requests sent to Follower nodes are automatically forwarded to the Leader via the Internal Cluster API.
+*   Read requests can be served locally by Followers (using Read-Index for consistency).

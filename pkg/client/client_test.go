@@ -35,7 +35,8 @@ func TestClientIntegration(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaKey := make([]byte, 32)
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -149,7 +150,8 @@ func TestReplication(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaKey := make([]byte, 32)
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -243,7 +245,8 @@ func TestDirectories(t *testing.T) {
 	// Setup Cluster (Single node fine for logic)
 	metaDir := t.TempDir()
 	metaKey := make([]byte, 32)
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -343,7 +346,8 @@ func TestReplicationRepair(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaKey := make([]byte, 32)
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -457,7 +461,8 @@ func TestReadAhead(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaKey := make([]byte, 32)
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -577,7 +582,8 @@ func TestGarbageCollection(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaKey := make([]byte, 32)
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", metaDir, metaKey)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -119,15 +119,26 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 ---
 
 ## Phase 9: Cluster Management & Maintenance
-**Goal:** Advanced operations.
+**Goal:** Implement advanced operations, security, and the management dashboard.
 
-*   **Step 9.1: Cluster API**
-    *   **Action:** `GET /v1/cluster/status`.
-    *   **Action:** `POST /v1/cluster/join` (Add Voter/NonVoter).
-*   **Step 9.2: Key Rotation**
+*   **Step 9.1: Network Configuration**
+    *   **Action:** Implement flags for `--cluster-addr`, `--raft-bind`, `--cluster-advertise`, and `--raft-advertise`.
+    *   **Action:** Configure separate listeners for Public and Internal APIs.
+*   **Step 9.2: Node Identity & mTLS**
+    *   **Action:** Implement `NodeKey` generation (Ed25519) and persistence (`node.key`).
+    *   **Action:** Implement dynamic self-signed certificate generation using `NodeKey`.
+    *   **Action:** Implement `RaftTransport` using mTLS.
+*   **Step 9.3: Trust Bootstrapping (TOFU)**
+    *   **Action:** Implement `NodeMeta` storage in FSM (list of trusted keys).
+    *   **Action:** Implement TOFU logic for fresh nodes to accept initial connection from Leader.
+*   **Step 9.4: Cluster Management API & Dashboard**
+    *   **Action:** Implement `RaftSecret` middleware protection.
+    *   **Action:** Implement `POST /api/cluster/join` (Add Node) and `POST /api/cluster/remove`.
+    *   **Action:** Implement `GET /api/cluster` (Dashboard HTML/JSON).
+*   **Step 9.5: Request Forwarding**
+    *   **Action:** Forward write requests from Follower to Leader via Internal Cluster API.
+*   **Step 9.6: Key Rotation**
     *   **Action:** Implement Log Key Rotation on Snapshot.
-*   **Step 9.3: Request Forwarding**
-    *   **Action:** Forward write requests from Follower to Leader.
 
 ---
 

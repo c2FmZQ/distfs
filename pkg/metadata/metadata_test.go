@@ -27,13 +27,16 @@ import (
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
 	tmpDir := t.TempDir()
 	key := make([]byte, 32)
+	nodeKey, _ := crypto.GenerateIdentityKey()
 
-	node, err := NewRaftNode("node1", "127.0.0.1:0", tmpDir, key)
+	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, key, nodeKey)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}

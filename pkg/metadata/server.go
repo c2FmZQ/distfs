@@ -137,6 +137,20 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if strings.HasPrefix(r.URL.Path, "/api/cluster") {
+		if !s.checkRaftSecret(r) {
+			// Check query param or form value for browser access?
+			// For simplicity, we require header or maybe "secret" query param.
+			secret := r.URL.Query().Get("secret")
+			if secret != s.raftSecret {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		s.handleClusterDashboard(w, r)
+		return
+	}
+
 	// For all other requests, if we are not the leader, forward to the leader.
 	if s.forwardIfNecessary(w, r) {
 		return
@@ -273,7 +287,12 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 		return true
 	}
 
-	target, err := url.Parse(leaderNode.Address)
+	targetAddr := leaderNode.Address
+	if leaderNode.ClusterAddress != "" {
+		targetAddr = leaderNode.ClusterAddress
+	}
+
+	target, err := url.Parse(targetAddr)
 	if err != nil {
 		http.Error(w, "invalid leader address", http.StatusInternalServerError)
 		return true

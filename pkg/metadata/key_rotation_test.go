@@ -9,14 +9,17 @@ import (
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 func TestKeyRotation(t *testing.T) {
 	tmpDir := t.TempDir()
 	key := make([]byte, 32) // Generation 1 key
+	nodeKey, _ := crypto.GenerateIdentityKey()
 
 	// 1. Start Node
-	node, err := NewRaftNode("node1", "127.0.0.1:0", tmpDir, key)
+	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, key, nodeKey)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -102,7 +105,7 @@ func TestKeyRotation(t *testing.T) {
 	node.Shutdown()
 
 	// 8. Recover
-	node2, err := NewRaftNode("node1", string(node.Transport.LocalAddr()), tmpDir, key)
+	node2, err := NewRaftNode("node1", string(node.Transport.LocalAddr()), "", tmpDir, key, nodeKey)
 	if err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}

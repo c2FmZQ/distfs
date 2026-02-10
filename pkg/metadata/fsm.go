@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -68,6 +69,38 @@ func (fsm *MetadataFSM) Close() error {
 		return fsm.db.Close()
 	}
 	return nil
+}
+
+func (fsm *MetadataFSM) IsInitialized() bool {
+	var initialized bool
+	fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		stats := b.Stats()
+		if stats.KeyN > 0 {
+			initialized = true
+		}
+		return nil
+	})
+	return initialized
+}
+
+func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
+	var trusted bool
+	fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				if bytes.Equal(n.PublicKey, pubKey) {
+					trusted = true
+					return nil
+				}
+			}
+		}
+		return nil
+	})
+	return trusted
 }
 
 type CommandType uint8

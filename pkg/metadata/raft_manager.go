@@ -15,6 +15,8 @@
 package metadata
 
 import (
+	"crypto/ed25519"
+	"crypto/x509"
 	"fmt"
 	"net"
 	"os"
@@ -33,26 +35,75 @@ type RaftNode struct {
 	LogStore  *raftboltdb.BoltStore
 }
 
-func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, error) {
+func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, masterKey []byte, nodeKey *crypto.IdentityKey) (*RaftNode, error) {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
 	config.NoSnapshotRestoreOnStart = true
 
-	// Transport
-	addrTCP, err := net.ResolveTCPAddr("tcp", addr)
+	// 1. Generate Self-Signed Cert
+	cert, err := GenerateSelfSignedCert(nodeKey)
 	if err != nil {
-		return nil, fmt.Errorf("resolve addr: %w", err)
-	}
-	transport, err := raft.NewTCPTransport(addr, addrTCP, 3, 10*time.Second, os.Stderr)
-	if err != nil {
-		return nil, fmt.Errorf("transport: %w", err)
+		return nil, fmt.Errorf("generate cert: %w", err)
 	}
 
-	// Stores
+	// 2. Setup FSM (Needed for verification closure)
 	if err := os.MkdirAll(baseDir, 0700); err != nil {
 		return nil, err
 	}
+	dbPath := filepath.Join(baseDir, "fsm.bolt")
+	fsm, err := NewMetadataFSM(dbPath)
+	if err != nil {
+		return nil, fmt.Errorf("new fsm: %w", err)
+	}
 
+	// 3. Transport (mTLS)
+	verifyPeer := func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("no certificates presented")
+		}
+		// Parse peer cert
+		peerCert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return fmt.Errorf("parse peer cert: %w", err)
+		}
+		
+		// Extract Public Key (Ed25519)
+		edPub, ok := peerCert.PublicKey.(ed25519.PublicKey)
+		if !ok {
+			return fmt.Errorf("peer key is not Ed25519")
+		}
+
+		// TOFU / Strict Mode Logic
+		if !fsm.IsInitialized() {
+			// TOFU Mode: Accept anyone (typically Leader)
+			return nil
+		}
+
+		if !fsm.IsTrusted(edPub) {
+			return fmt.Errorf("peer not authorized")
+		}
+
+		return nil
+	}
+
+	var advertise net.Addr
+	if advertiseAddr != "" {
+		advertise, err = net.ResolveTCPAddr("tcp", advertiseAddr)
+		if err != nil {
+			return nil, fmt.Errorf("resolve advertise: %w", err)
+		}
+	}
+
+	tlsConfig := NewServerTLSConfig(cert, verifyPeer)
+	streamLayer, err := NewTLSStreamLayer(bindAddr, advertise, tlsConfig)
+	if err != nil {
+		fsm.Close()
+		return nil, fmt.Errorf("tls listener: %w", err)
+	}
+
+	transport := raft.NewNetworkTransport(streamLayer, 3, 10*time.Second, os.Stderr)
+
+	// 4. Stores
 	// Log Store (Encrypted with KeyRing)
 	keyRingPath := filepath.Join(baseDir, "keyring.bin")
 	var kr *crypto.KeyRing
@@ -65,6 +116,8 @@ func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, err
 
 	boltStore, err := raftboltdb.NewBoltStore(filepath.Join(baseDir, "raft-log.bolt"))
 	if err != nil {
+		streamLayer.Close()
+		fsm.Close()
 		return nil, fmt.Errorf("bolt store: %w", err)
 	}
 
@@ -76,14 +129,10 @@ func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, err
 	// Snapshot Store (File)
 	snapStore, err := raft.NewFileSnapshotStore(baseDir, 3, os.Stderr)
 	if err != nil {
+		boltStore.Close()
+		streamLayer.Close()
+		fsm.Close()
 		return nil, fmt.Errorf("snapshot store: %w", err)
-	}
-
-	// FSM (BoltDB)
-	dbPath := filepath.Join(baseDir, "fsm.bolt")
-	fsm, err := NewMetadataFSM(dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("new fsm: %w", err)
 	}
 
 	fsm.OnSnapshot = func() {
@@ -95,6 +144,7 @@ func NewRaftNode(nodeID, addr, baseDir string, masterKey []byte) (*RaftNode, err
 	if err != nil {
 		fsm.Close()
 		boltStore.Close()
+		streamLayer.Close() // Close listener if raft fails
 		return nil, fmt.Errorf("new raft: %w", err)
 	}
 
