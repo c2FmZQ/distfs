@@ -33,6 +33,11 @@ type ChunkEntry struct {
 	Nodes []string `json:"nodes"`
 }
 
+type ChunkPage struct {
+	ID     string       `json:"id"`
+	Chunks []ChunkEntry `json:"chunks"`
+}
+
 type User struct {
 	ID      string `json:"id"` // Still useful for lookup by email/username
 	UID     uint32 `json:"uid"`
@@ -85,7 +90,8 @@ type Inode struct {
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 	EncryptedName []byte            `json:"enc_name"`
 	Children      map[string]string `json:"children,omitempty"`
-	ChunkManifest []ChunkEntry      `json:"manifest"`
+	ChunkManifest []ChunkEntry      `json:"manifest,omitempty"`
+	ChunkPages    []string          `json:"chunk_pages,omitempty"`
 	Lockbox       crypto.Lockbox    `json:"lockbox"`
 	Version       uint64            `json:"version"`
 }

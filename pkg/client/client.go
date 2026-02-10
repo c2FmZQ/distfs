@@ -44,10 +44,14 @@ type Client struct {
 }
 
 func NewClient(metaAddr, dataAddr string) *Client {
+	t := &http.Transport{
+		MaxIdleConns:        100,
+		MaxIdleConnsPerHost: 100,
+	}
 	return &Client{
 		metaURL:    metaAddr,
 		dataURL:    dataAddr,
-		httpClient: &http.Client{},
+		httpClient: &http.Client{Transport: t},
 		keyCache:   make(map[string][]byte),
 	}
 }
@@ -471,6 +475,12 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 	return fileKey, nil
 }
 
+type readAheadResult struct {
+	data  []byte
+	err   error
+	ready chan struct{}
+}
+
 type FileReader struct {
 	client          *Client
 	inode           *metadata.Inode
@@ -480,6 +490,9 @@ type FileReader struct {
 	currentChunk    []byte
 	token           string
 	mu              sync.Mutex
+
+	readAhead   map[int64]readAheadResult
+	readAheadMu sync.Mutex
 }
 
 func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
@@ -517,7 +530,40 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		offset:          0,
 		currentChunkIdx: -1,
 		token:           token,
+		readAhead:       make(map[int64]readAheadResult),
 	}, nil
+}
+
+func (r *FileReader) triggerPrefetch(idx int64) {
+	if idx < 0 || idx >= int64(len(r.inode.ChunkManifest)) {
+		return
+	}
+
+	r.readAheadMu.Lock()
+	if _, exists := r.readAhead[idx]; exists {
+		r.readAheadMu.Unlock()
+		return
+	}
+	res := readAheadResult{ready: make(chan struct{})}
+	r.readAhead[idx] = res
+	r.readAheadMu.Unlock()
+
+	go func() {
+		chunkEntry := r.inode.ChunkManifest[idx]
+		ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
+		var pt []byte
+		if err == nil {
+			pt, err = crypto.DecryptChunk(r.fileKey, ct)
+		}
+
+		r.readAheadMu.Lock()
+		res := r.readAhead[idx]
+		res.data = pt
+		res.err = err
+		close(res.ready)
+		r.readAhead[idx] = res
+		r.readAheadMu.Unlock()
+	}()
 }
 
 func (r *FileReader) Read(p []byte) (int, error) {
@@ -543,27 +589,70 @@ func (r *FileReader) read(p []byte) (int, error) {
 		chunkIdx := r.offset / chunkSize
 		chunkOffset := r.offset % chunkSize
 
+		// Detect seek/random access and clear cache
+		if r.currentChunkIdx != -1 && chunkIdx != r.currentChunkIdx+1 && chunkIdx != r.currentChunkIdx {
+			r.readAheadMu.Lock()
+			// Clear cache to prevent leaks during random access
+			for k := range r.readAhead {
+				delete(r.readAhead, k)
+			}
+			r.readAheadMu.Unlock()
+		}
+
 		var pt []byte
 		if chunkIdx == r.currentChunkIdx && r.currentChunk != nil {
 			pt = r.currentChunk
 		} else {
-			if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
-				break
+			// Trigger prefetch for next few chunks
+			for i := int64(1); i <= 3; i++ {
+				r.triggerPrefetch(chunkIdx + i)
 			}
-			chunkEntry := r.inode.ChunkManifest[chunkIdx]
 
-			// Unlock during network I/O
-			r.mu.Unlock()
-			ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
-			r.mu.Lock()
+			// Check Cache
+			r.readAheadMu.Lock()
+			res, exists := r.readAhead[chunkIdx]
+			r.readAheadMu.Unlock()
 
-			if err != nil {
-				return totalRead, err
+			if exists {
+				// Wait for it
+				r.mu.Unlock()
+				<-res.ready
+				r.mu.Lock()
+
+				r.readAheadMu.Lock()
+				res = r.readAhead[chunkIdx]
+				r.readAheadMu.Unlock()
+
+				if res.err != nil {
+					return totalRead, res.err
+				}
+				pt = res.data
+			} else {
+				if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
+					break
+				}
+				chunkEntry := r.inode.ChunkManifest[chunkIdx]
+
+				// Unlock during network I/O
+				r.mu.Unlock()
+				ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
+				r.mu.Lock()
+
+				if err != nil {
+					return totalRead, err
+				}
+				pt, err = crypto.DecryptChunk(r.fileKey, ct)
+				if err != nil {
+					return totalRead, err
+				}
 			}
-			pt, err = crypto.DecryptChunk(r.fileKey, ct)
-			if err != nil {
-				return totalRead, err
-			}
+
+			// Cleanup old
+			r.readAheadMu.Lock()
+			delete(r.readAhead, chunkIdx-1)
+			delete(r.readAhead, chunkIdx-2)
+			r.readAheadMu.Unlock()
+
 			r.currentChunk = pt
 			r.currentChunkIdx = chunkIdx
 		}

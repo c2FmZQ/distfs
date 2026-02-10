@@ -48,7 +48,7 @@ func NewMetadataFSM(path string) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -87,6 +87,7 @@ const (
 	CmdRename          CommandType = 12
 	CmdSetAttr         CommandType = 13
 	CmdLink            CommandType = 14
+	CmdGCRemove        CommandType = 15
 )
 
 type LogCommand struct {
@@ -161,6 +162,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applySetAttr(cmd.Data)
 	case CmdLink:
 		return fsm.applyLink(cmd.Data)
+	case CmdGCRemove:
+		return fsm.applyGCRemove(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -195,11 +198,7 @@ func (fsm *MetadataFSM) applyCreateInode(data []byte) interface{} {
 			return ErrExists
 		}
 		inode.Version = 1
-		encoded, err := json.Marshal(inode)
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(inode.ID), encoded)
+		return saveInodeWithPages(tx, &inode)
 	})
 	if err != nil {
 		return err
@@ -228,12 +227,28 @@ func (fsm *MetadataFSM) applyUpdateInode(data []byte) interface{} {
 			return ErrConflict
 		}
 
+		oldPages := existing.ChunkPages
+
 		inode.Version++
-		encoded, err := json.Marshal(inode)
-		if err != nil {
+		if err := saveInodeWithPages(tx, &inode); err != nil {
 			return err
 		}
-		return b.Put([]byte(inode.ID), encoded)
+
+		// Clean up orphaned pages (pages in old but not in new)
+		if len(oldPages) > 0 {
+			newPagesMap := make(map[string]bool)
+			for _, pid := range inode.ChunkPages {
+				newPagesMap[pid] = true
+			}
+
+			pb := tx.Bucket([]byte("chunk_pages"))
+			for _, pid := range oldPages {
+				if !newPagesMap[pid] {
+					pb.Delete([]byte(pid))
+				}
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return err
@@ -245,6 +260,18 @@ func (fsm *MetadataFSM) applyDeleteInode(data []byte) interface{} {
 	id := string(data)
 	return fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(id))
+		if v != nil {
+			var inode Inode
+			if err := json.Unmarshal(v, &inode); err == nil {
+				if len(inode.ChunkPages) > 0 {
+					pb := tx.Bucket([]byte("chunk_pages"))
+					for _, pid := range inode.ChunkPages {
+						pb.Delete([]byte(pid))
+					}
+				}
+			}
+		}
 		return b.Delete([]byte(id))
 	})
 }
@@ -435,12 +462,12 @@ func (fsm *MetadataFSM) applyLink(data []byte) interface{} {
 		target.Version++
 
 		// 5. Save
-		bParent, _ := json.Marshal(parent)
-		b.Put([]byte(parent.ID), bParent)
-		bTarget, _ := json.Marshal(target)
-		b.Put([]byte(target.ID), bTarget)
-
-		return nil
+		// Parent doesn't need pagination for Children map yet (Phase 10.1 is ChunkManifest)
+		// But target might be large file?
+		if err := saveInodeWithPages(tx, &parent); err != nil {
+			return err
+		}
+		return saveInodeWithPages(tx, &target)
 	})
 }
 
@@ -480,11 +507,7 @@ func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
 		inode.CTime = time.Now().UnixNano()
 		inode.Version++
 
-		encoded, err := json.Marshal(inode)
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(inode.ID), encoded)
+		return saveInodeWithPages(tx, &inode)
 	})
 }
 
@@ -542,9 +565,11 @@ func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
 					}
 					if target.NLink == 0 {
 						b.Delete([]byte(target.ID))
+						enqueueGC(tx, &target)
 					} else {
-						bT, _ := json.Marshal(target)
-						b.Put([]byte(target.ID), bT)
+						if err := saveInodeWithPages(tx, &target); err != nil {
+							return err
+						}
 					}
 				}
 			}
@@ -567,18 +592,21 @@ func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
 			if err := json.Unmarshal(vChild, &child); err == nil {
 				child.ParentID = req.NewParentID
 				child.Version++
-				bChild, _ := json.Marshal(child)
-				b.Put([]byte(child.ID), bChild)
+				if err := saveInodeWithPages(tx, &child); err != nil {
+					return err
+				}
 			}
 		}
 
 		// 6. Save
-		bOld, _ := json.Marshal(oldParent)
-		b.Put([]byte(oldParent.ID), bOld)
+		if err := saveInodeWithPages(tx, &oldParent); err != nil {
+			return err
+		}
 
 		if req.NewParentID != req.OldParentID {
-			bNew, _ := json.Marshal(newParent)
-			b.Put([]byte(newParent.ID), bNew)
+			if err := saveInodeWithPages(tx, &newParent); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -617,11 +645,7 @@ func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
 		inode.Children[update.Name] = update.ChildID
 		inode.Version++
 
-		encoded, err := json.Marshal(inode)
-		if err != nil {
-			return err
-		}
-		return b.Put([]byte(inode.ID), encoded)
+		return saveInodeWithPages(tx, &inode)
 	})
 	if err != nil {
 		return err
@@ -672,8 +696,9 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		// 5. Remove from Parent
 		delete(parent.Children, update.Name)
 		parent.Version++
-		bParent, _ := json.Marshal(parent)
-		ib.Put([]byte(parent.ID), bParent)
+		if err := saveInodeWithPages(tx, &parent); err != nil {
+			return err
+		}
 
 		// 6. Update Child
 		if child.NLink > 0 {
@@ -684,10 +709,12 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		if child.NLink == 0 {
 			// Delete Inode
 			ib.Delete([]byte(child.ID))
-			// TODO: Cleanup chunks (Garbage Collection)
+			// Cleanup chunks (Garbage Collection)
+			enqueueGC(tx, &child)
 		} else {
-			bChild, _ := json.Marshal(child)
-			ib.Put([]byte(child.ID), bChild)
+			if err := saveInodeWithPages(tx, &child); err != nil {
+				return err
+			}
 		}
 
 		return nil
@@ -709,6 +736,11 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 		}
 
 		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+
+		// Load manifest to find chunk
+		if err := loadInodeWithPages(tx, &inode); err != nil {
 			return err
 		}
 
@@ -734,11 +766,7 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 
 		if updated {
 			inode.Version++
-			encoded, err := json.Marshal(inode)
-			if err != nil {
-				return err
-			}
-			return b.Put([]byte(inode.ID), encoded)
+			return saveInodeWithPages(tx, &inode)
 		}
 		return nil
 	})
@@ -746,6 +774,14 @@ func (fsm *MetadataFSM) applyAddChunkReplica(data []byte) interface{} {
 		return err
 	}
 	return &inode
+}
+
+func (fsm *MetadataFSM) applyGCRemove(data []byte) interface{} {
+	chunkID := string(data)
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("garbage_collection"))
+		return b.Delete([]byte(chunkID))
+	})
 }
 
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
@@ -841,4 +877,89 @@ func uint32ToBytes(v uint32) []byte {
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint32(b, v)
 	return b
+}
+
+const ChunkPageSize = 1000
+
+func saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+	// If manifest is large, split it
+	if len(inode.ChunkManifest) > ChunkPageSize {
+		var pageIDs []string
+		for i := 0; i < len(inode.ChunkManifest); i += ChunkPageSize {
+			end := i + ChunkPageSize
+			if end > len(inode.ChunkManifest) {
+				end = len(inode.ChunkManifest)
+			}
+			page := ChunkPage{
+				ID:     fmt.Sprintf("%s-page-%d", inode.ID, len(pageIDs)),
+				Chunks: inode.ChunkManifest[i:end],
+			}
+			pageIDs = append(pageIDs, page.ID)
+
+			b := tx.Bucket([]byte("chunk_pages"))
+			encoded, err := json.Marshal(page)
+			if err != nil {
+				return err
+			}
+			if err := b.Put([]byte(page.ID), encoded); err != nil {
+				return err
+			}
+		}
+		inode.ChunkPages = pageIDs
+		inode.ChunkManifest = nil
+	} else if len(inode.ChunkPages) > 0 && len(inode.ChunkManifest) <= ChunkPageSize && inode.ChunkManifest != nil {
+		// Was large, now small. Cleanup old pages.
+		pb := tx.Bucket([]byte("chunk_pages"))
+		for _, pid := range inode.ChunkPages {
+			pb.Delete([]byte(pid))
+		}
+		inode.ChunkPages = nil
+	}
+
+	b := tx.Bucket([]byte("inodes"))
+	encoded, err := json.Marshal(inode)
+	if err != nil {
+		return err
+	}
+	return b.Put([]byte(inode.ID), encoded)
+}
+
+func loadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+	if len(inode.ChunkPages) > 0 && len(inode.ChunkManifest) == 0 {
+		pb := tx.Bucket([]byte("chunk_pages"))
+		for _, pid := range inode.ChunkPages {
+			v := pb.Get([]byte(pid))
+			if v != nil {
+				var page ChunkPage
+				if err := json.Unmarshal(v, &page); err == nil {
+					inode.ChunkManifest = append(inode.ChunkManifest, page.Chunks...)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func enqueueGC(tx *bolt.Tx, inode *Inode) error {
+	// Ensure we have the manifest loaded
+	if err := loadInodeWithPages(tx, inode); err != nil {
+		return err
+	}
+	
+	// Delete pages if they exist
+	if len(inode.ChunkPages) > 0 {
+		pb := tx.Bucket([]byte("chunk_pages"))
+		for _, pid := range inode.ChunkPages {
+			pb.Delete([]byte(pid))
+		}
+	}
+
+	b := tx.Bucket([]byte("garbage_collection"))
+	for _, chunk := range inode.ChunkManifest {
+		nodesJSON, _ := json.Marshal(chunk.Nodes)
+		if err := b.Put([]byte(chunk.ID), nodesJSON); err != nil {
+			return err
+		}
+	}
+	return nil
 }

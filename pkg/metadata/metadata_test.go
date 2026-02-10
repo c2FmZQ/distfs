@@ -177,7 +177,10 @@ func TestFSMRestore(t *testing.T) {
 
 	inode := Inode{ID: "restore-test"}
 	data, _ := json.Marshal(inode)
-	fsm.applyUpdateInode(data)
+	resp := fsm.applyCreateInode(data)
+	if err, ok := resp.(error); ok {
+		t.Fatalf("applyCreateInode failed: %v", err)
+	}
 
 	// Snapshot
 	snap, _ := fsm.Snapshot()
@@ -244,3 +247,82 @@ func (m *MockSink) Write(p []byte) (int, error) { return m.buf.Write(p) }
 func (m *MockSink) Close() error                { return nil }
 func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
+
+func TestChunkPagination(t *testing.T) {
+	node, ts := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// Create Inode with many chunks
+	chunkCount := ChunkPageSize + 50 // 1050
+	manifest := make([]ChunkEntry, chunkCount)
+	for i := 0; i < chunkCount; i++ {
+		manifest[i] = ChunkEntry{ID: fmt.Sprintf("chunk-%d", i), Nodes: []string{"n1"}}
+	}
+
+	inode := Inode{
+		ID:            "paginated-file",
+		Type:          FileType,
+		ChunkManifest: manifest,
+	}
+	body, _ := json.Marshal(inode)
+
+	// POST /v1/meta/inode
+	resp, err := http.Post(ts.URL+"/v1/meta/inode", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("POST status %d", resp.StatusCode)
+	}
+
+	// Verify via API (Transparent Reconstruction)
+	resp, err = http.Get(ts.URL + "/v1/meta/inode/paginated-file")
+	if err != nil {
+		t.Fatalf("GET failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET status %d", resp.StatusCode)
+	}
+
+	var got Inode
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		t.Fatalf("Decode failed: %v", err)
+	}
+
+	if len(got.ChunkManifest) != chunkCount {
+		t.Errorf("Expected %d chunks, got %d", chunkCount, len(got.ChunkManifest))
+	}
+	if got.ChunkManifest[chunkCount-1].ID != fmt.Sprintf("chunk-%d", chunkCount-1) {
+		t.Errorf("Last chunk ID mismatch")
+	}
+
+	// Verify Internal Storage (BoltDB)
+	// We need to access FSM directly
+	err = node.FSM.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte("paginated-file"))
+		var stored Inode
+		json.Unmarshal(v, &stored)
+
+		if stored.ChunkManifest != nil {
+			return fmt.Errorf("Stored manifest should be nil")
+		}
+		if len(stored.ChunkPages) == 0 {
+			return fmt.Errorf("Stored chunk_pages should not be empty")
+		}
+
+		// Check pages bucket
+		pb := tx.Bucket([]byte("chunk_pages"))
+		for _, pid := range stored.ChunkPages {
+			if pb.Get([]byte(pid)) == nil {
+				return fmt.Errorf("Page %s not found", pid)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Errorf("Internal verification failed: %v", err)
+	}
+}
+

@@ -156,7 +156,7 @@ func TestDiskStore_WriteError(t *testing.T) {
 func TestAPI(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, _ := NewDiskStore(tmpDir)
-	server := NewServer(store)
+	server := NewServer(store, nil, nil)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

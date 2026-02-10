@@ -69,6 +69,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handlePut(w, r, chunkID)
 		case http.MethodGet:
 			s.handleGet(w, r, chunkID)
+		case http.MethodDelete:
+			s.handleDelete(w, r, chunkID)
 		default:
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		}
@@ -117,13 +119,15 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) err
 		return fmt.Errorf("token expired")
 	}
 
-	if !strings.Contains(cap.Mode, requiredMode) {
-		if requiredMode == "R" && !strings.Contains(cap.Mode, "R") {
-			return fmt.Errorf("read permission denied")
+	hasPermission := false
+	for _, m := range strings.Split(cap.Mode, "") {
+		if m == requiredMode {
+			hasPermission = true
+			break
 		}
-		if requiredMode == "W" && !strings.Contains(cap.Mode, "W") {
-			return fmt.Errorf("write permission denied")
-		}
+	}
+	if !hasPermission {
+		return fmt.Errorf("permission denied: required %s, got %s", requiredMode, cap.Mode)
 	}
 
 	allowed := false
@@ -138,6 +142,23 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) err
 	}
 
 	return nil
+}
+
+func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, id string) {
+	if err := s.authenticate(r, id, "D"); err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	if err := s.store.DeleteChunk(id); err != nil {
+		if os.IsNotExist(err) {
+			http.NotFound(w, r)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id string) {

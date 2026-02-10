@@ -52,6 +52,7 @@ type Server struct {
 	nonceMu    sync.Mutex
 
 	replMonitor *ReplicationMonitor
+	gcWorker    *GCWorker
 }
 
 func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey, raftSecret string) *Server {
@@ -74,6 +75,8 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 	}
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
+	s.gcWorker = NewGCWorker(s)
+	s.gcWorker.Start()
 	return s
 }
 
@@ -81,11 +84,46 @@ func (s *Server) Shutdown() {
 	if s.replMonitor != nil {
 		s.replMonitor.Stop()
 	}
+	if s.gcWorker != nil {
+		s.gcWorker.Stop()
+	}
+}
+
+func (s *Server) generateSelfToken(chunks []string, mode string) (string, error) {
+	if s.signKey == nil {
+		return "", fmt.Errorf("no signing key")
+	}
+
+	capToken := CapabilityToken{
+		Chunks: chunks,
+		Mode:   mode,
+		Exp:    time.Now().Add(10 * time.Minute).Unix(),
+	}
+
+	payload, _ := json.Marshal(capToken)
+	sig := s.signKey.Sign(payload)
+
+	signed := SignedAuthToken{
+		Payload:   payload,
+		Signature: sig,
+	}
+
+	b, err := json.Marshal(signed)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
 }
 
 func (s *Server) ForceReplicationScan() {
 	if s.replMonitor != nil {
 		s.replMonitor.Scan()
+	}
+}
+
+func (s *Server) ForceGCScan() {
+	if s.gcWorker != nil {
+		s.gcWorker.runGC()
 	}
 }
 
@@ -401,7 +439,10 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		if v == nil {
 			return fmt.Errorf("inode not found")
 		}
-		return json.Unmarshal(v, &inode)
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+		return loadInodeWithPages(tx, &inode)
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -544,9 +585,18 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 		if v == nil {
 			return os.ErrNotExist
 		}
-		data = make([]byte, len(v))
-		copy(data, v)
-		return nil
+		
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+		if err := loadInodeWithPages(tx, &inode); err != nil {
+			return err
+		}
+		
+		var err error
+		data, err = json.Marshal(inode)
+		return err
 	})
 
 	if err != nil {
@@ -589,7 +639,9 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 			if v != nil {
 				var inode Inode
 				if err := json.Unmarshal(v, &inode); err == nil {
-					result = append(result, &inode)
+					if err := loadInodeWithPages(tx, &inode); err == nil {
+						result = append(result, &inode)
+					}
 				}
 			}
 		}
@@ -684,22 +736,15 @@ func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType Co
 }
 
 func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, data []byte, successCode int) {
-	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
-		return
-	}
-
-	cmd := LogCommand{Type: cmdType, Data: data}
-	b, _ := json.Marshal(cmd)
-
-	f := s.raft.Apply(b, 5*time.Second)
-	if err := f.Error(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	resp := f.Response()
-	if err, ok := resp.(error); ok && err != nil {
+	resp, err := s.applyRaftCommand(cmdType, data)
+	if err != nil {
+		if w == nil {
+			return
+		}
+		if err.Error() == "not leader" {
+			http.Error(w, "not leader", http.StatusServiceUnavailable)
+			return
+		}
 		switch err {
 		case ErrConflict, ErrExists:
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -711,14 +756,35 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, dat
 		return
 	}
 
-	if resp != nil {
-		w.Header().Set("Content-Type", "application/json")
+	if w != nil {
+		if resp != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(successCode)
+			json.NewEncoder(w).Encode(resp)
+			return
+		}
 		w.WriteHeader(successCode)
-		json.NewEncoder(w).Encode(resp)
-		return
+	}
+}
+
+func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
+	if s.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("not leader")
 	}
 
-	w.WriteHeader(successCode)
+	cmd := LogCommand{Type: cmdType, Data: data}
+	b, _ := json.Marshal(cmd)
+
+	f := s.raft.Apply(b, 5*time.Second)
+	if err := f.Error(); err != nil {
+		return nil, err
+	}
+
+	resp := f.Response()
+	if err, ok := resp.(error); ok && err != nil {
+		return nil, err
+	}
+	return resp, nil
 }
 
 func (s *Server) checkRaftSecret(r *http.Request) bool {

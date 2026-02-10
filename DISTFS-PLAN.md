@@ -128,3 +128,17 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement Log Key Rotation on Snapshot.
 *   **Step 9.3: Request Forwarding**
     *   **Action:** Forward write requests from Follower to Leader.
+
+---
+
+## Phase 10: Performance & Lifecycle Management
+**Goal:** Optimize scalability and reclaim storage.
+
+*   **Step 10.1: Chunk Manifest Pagination**
+    *   **Action:** [Done] Refactor `Inode` to store `ChunkManifest` as a list of reference IDs.
+    *   **Action:** [Done] Implement `ChunkPage` storage in FSM to support 100GB+ files.
+*   **Step 10.2: Parallel Read-Ahead**
+    *   **Action:** [Done] Implement a background worker in `FileReader` to pre-fetch upcoming chunks.
+*   **Step 10.3: Data Garbage Collection (GC)**
+    *   **Action:** [Done] Add `DELETE /v1/data/{chunk_id}` to the Data Node API.
+    *   **Action:** [Done] Implement a metadata-driven GC worker that identifies and deletes unreferenced chunks from Data Nodes.
