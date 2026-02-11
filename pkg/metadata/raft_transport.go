@@ -51,7 +51,9 @@ func NewTLSStreamLayer(bindAddr string, advertise net.Addr, config *tls.Config) 
 // Dial implements the StreamLayer interface.
 func (t *TLSStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
-	return tls.DialWithDialer(dialer, "tcp", string(address), t.config)
+	clientConfig := t.config.Clone()
+	clientConfig.InsecureSkipVerify = true
+	return tls.DialWithDialer(dialer, "tcp", string(address), clientConfig)
 }
 
 // Accept implements the net.Listener interface.

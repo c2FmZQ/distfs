@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
@@ -24,20 +25,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
+	"strings"
 
+	"github.com/c2FmZQ/distfs/pkg/auth"
 	"github.com/c2FmZQ/distfs/pkg/client"
+	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
-
-type Config struct {
-	MetaURL   string `json:"meta_url"`
-	DataURL   string `json:"data_url"`
-	UserID    string `json:"user_id"`
-	EncKey    string `json:"enc_key"`    // Hex private KEM
-	SignKey   string `json:"sign_key"`   // Hex private sign
-	ServerKey string `json:"server_key"` // Hex public KEM
-}
 
 func main() {
 	if len(os.Args) < 2 {
@@ -99,7 +93,7 @@ func cmdInit(args []string) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
 
-	conf := Config{
+	conf := config.Config{
 		MetaURL:   *metaURL,
 		DataURL:   *metaURL, // Assume unified by default
 		UserID:    *userID,
@@ -108,20 +102,58 @@ func cmdInit(args []string) {
 		ServerKey: hex.EncodeToString(sKey),
 	}
 
-	saveConfig(conf)
+	if err := config.Save(conf, config.DefaultPath()); err != nil {
+		log.Fatal(err)
+	}
 	fmt.Printf("Config initialized for %s. Server key: %s\n", *userID, hex.EncodeToString(sKey[:8]))
 }
 
 func cmdRegister(args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
 	jwt := fs.String("jwt", "", "OIDC JWT for registration")
+	clientID := fs.String("client-id", "", "The client ID")
+	scopes := fs.String("scopes", "", "The scopes to request (comma separated)")
+	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
+	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
+	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
+	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
 	fs.Parse(args)
 
 	if *jwt == "" {
-		log.Fatal("-jwt is required")
+		if *clientID == "" || *authEndpoint == "" || *tokenEndpoint == "" {
+			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required")
+		}
+
+		var scopeList []string
+		if *scopes != "" {
+			for _, s := range strings.Split(*scopes, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					scopeList = append(scopeList, s)
+				}
+			}
+		}
+
+		ctx := context.Background()
+		token, err := auth.GetToken(ctx, auth.Config{
+			ClientID:      *clientID,
+			AuthEndpoint:  *authEndpoint,
+			TokenEndpoint: *tokenEndpoint,
+			Scopes:        scopeList,
+			ShowQR:        *qrCode,
+			Browser:       *browser,
+		})
+		if err != nil {
+			log.Fatalf("device auth failed: %v", err)
+		}
+		*jwt = token.AccessToken
 	}
 
-	conf := loadConfig()
+	conf, err := config.Load(config.DefaultPath())
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	skBytes, _ := hex.DecodeString(conf.SignKey)
 	sk := crypto.UnmarshalIdentityKey(skBytes)
 
@@ -151,7 +183,11 @@ func cmdRegister(args []string) {
 }
 
 func loadClient() *client.Client {
-	conf := loadConfig()
+	conf, err := config.Load(config.DefaultPath())
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	c := client.NewClient(conf.MetaURL, conf.DataURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
@@ -244,22 +280,4 @@ func cmdGet(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s downloaded to %s.\n", remote, local)
-}
-
-func saveConfig(c Config) {
-	dir := filepath.Join(os.Getenv("HOME"), ".distfs")
-	os.MkdirAll(dir, 0700)
-	b, _ := json.MarshalIndent(c, "", "  ")
-	os.WriteFile(filepath.Join(dir, "config.json"), b, 0600)
-}
-
-func loadConfig() Config {
-	dir := filepath.Join(os.Getenv("HOME"), ".distfs")
-	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
-	if err != nil {
-		log.Fatalf("config not found, run 'distfs init': %v", err)
-	}
-	var c Config
-	json.Unmarshal(b, &c)
-	return c
 }

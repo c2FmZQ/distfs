@@ -103,6 +103,25 @@ func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
 	return trusted
 }
 
+func (fsm *MetadataFSM) GetNodeIDByRaftAddress(addr string) (string, error) {
+	var id string
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				if n.RaftAddress == addr {
+					id = n.ID
+					return nil
+				}
+			}
+		}
+		return ErrNotFound
+	})
+	return id, err
+}
+
 type CommandType uint8
 
 const (
@@ -978,7 +997,7 @@ func enqueueGC(tx *bolt.Tx, inode *Inode) error {
 	if err := loadInodeWithPages(tx, inode); err != nil {
 		return err
 	}
-	
+
 	// Delete pages if they exist
 	if len(inode.ChunkPages) > 0 {
 		pb := tx.Bucket([]byte("chunk_pages"))

@@ -604,7 +604,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 		if v == nil {
 			return os.ErrNotExist
 		}
-		
+
 		var inode Inode
 		if err := json.Unmarshal(v, &inode); err != nil {
 			return err
@@ -612,7 +612,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 		if err := loadInodeWithPages(tx, &inode); err != nil {
 			return err
 		}
-		
+
 		var err error
 		data, err = json.Marshal(inode)
 		return err

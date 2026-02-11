@@ -2,40 +2,58 @@
 package main
 
 import (
+	"bytes"
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
+	"strings"
 	"syscall"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
+	"github.com/c2FmZQ/distfs/pkg/auth"
 	"github.com/c2FmZQ/distfs/pkg/client"
+	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	distfuse "github.com/c2FmZQ/distfs/pkg/fuse"
 )
 
-type Config struct {
-	MetaURL   string `json:"meta_url"`
-	DataURL   string `json:"data_url"`
-	UserID    string `json:"user_id"`
-	EncKey    string `json:"enc_key"`
-	SignKey   string `json:"sign_key"`
-	ServerKey string `json:"server_key"`
-}
-
 func main() {
 	mountpoint := flag.String("mount", "", "Mount point")
+
+	// Registration flags
+	doRegister := flag.Bool("register", false, "Register user with server")
+	jwt := flag.String("jwt", "", "OIDC JWT for registration")
+	clientID := flag.String("client-id", "", "The client ID")
+	scopes := flag.String("scopes", "", "The scopes to request (comma separated)")
+	authEndpoint := flag.String("auth-endpoint", "", "The authorization endpoint")
+	tokenEndpoint := flag.String("token-endpoint", "", "The token endpoint")
+	qrCode := flag.Bool("qr", false, "Show a QR code of the verification URL")
+	browser := flag.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
+
 	flag.Parse()
+
+	if *doRegister {
+		performRegistration(*jwt, *clientID, *scopes, *authEndpoint, *tokenEndpoint, *qrCode, *browser)
+		if *mountpoint == "" {
+			return
+		}
+	}
 
 	if *mountpoint == "" {
 		log.Fatal("-mount is required")
 	}
 
-	conf := loadConfig()
+	conf, err := config.Load(config.DefaultPath())
+	if err != nil {
+		log.Fatal(err)
+	}
 	c := loadClient(conf)
 
 	conn, err := fuse.Mount(
@@ -65,7 +83,7 @@ func main() {
 	}
 }
 
-func loadClient(conf Config) *client.Client {
+func loadClient(conf *config.Config) *client.Client {
 	c := client.NewClient(conf.MetaURL, conf.DataURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
@@ -80,13 +98,66 @@ func loadClient(conf Config) *client.Client {
 	return c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 }
 
-func loadConfig() Config {
-	dir := filepath.Join(os.Getenv("HOME"), ".distfs")
-	b, err := os.ReadFile(filepath.Join(dir, "config.json"))
-	if err != nil {
-		log.Fatalf("config not found, run 'distfs init': %v", err)
+func performRegistration(jwt, clientID, scopes, authEndpoint, tokenEndpoint string, qrCode bool, browser string) {
+	if jwt == "" {
+		if clientID == "" || authEndpoint == "" || tokenEndpoint == "" {
+			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required for registration")
+		}
+
+		var scopeList []string
+		if scopes != "" {
+			for _, s := range strings.Split(scopes, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					scopeList = append(scopeList, s)
+				}
+			}
+		}
+
+		ctx := context.Background()
+		token, err := auth.GetToken(ctx, auth.Config{
+			ClientID:      clientID,
+			AuthEndpoint:  authEndpoint,
+			TokenEndpoint: tokenEndpoint,
+			Scopes:        scopeList,
+			ShowQR:        qrCode,
+			Browser:       browser,
+		})
+		if err != nil {
+			log.Fatalf("device auth failed: %v", err)
+		}
+		jwt = token.AccessToken
 	}
-	var c Config
-	json.Unmarshal(b, &c)
-	return c
+
+	conf, err := config.Load(config.DefaultPath())
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	skBytes, _ := hex.DecodeString(conf.SignKey)
+	sk := crypto.UnmarshalIdentityKey(skBytes)
+
+	dkBytes, _ := hex.DecodeString(conf.EncKey)
+	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
+
+	req := map[string]interface{}{
+		"jwt":      jwt,
+		"sign_key": sk.Public(),
+		"enc_key":  dk.EncapsulationKey().Bytes(),
+		"name":     conf.UserID,
+	}
+	body, _ := json.Marshal(req)
+
+	resp, err := http.Post(conf.MetaURL+"/v1/user/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		b, _ := io.ReadAll(resp.Body)
+		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	log.Println("User registered successfully.")
 }

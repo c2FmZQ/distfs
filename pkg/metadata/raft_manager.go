@@ -66,7 +66,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, masterKey []by
 		if err != nil {
 			return fmt.Errorf("parse peer cert: %w", err)
 		}
-		
+
 		// Extract Public Key (Ed25519)
 		edPub, ok := peerCert.PublicKey.(ed25519.PublicKey)
 		if !ok {

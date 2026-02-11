@@ -68,8 +68,8 @@ func GenerateSelfSignedCert(key *crypto.IdentityKey) (*tls.Certificate, error) {
 // It requires a callback to verify peer certificates against authorized nodes (NodeMeta).
 func NewServerTLSConfig(cert *tls.Certificate, verifyPeer func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error) *tls.Config {
 	return &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-		ClientAuth:   tls.RequireAnyClientCert, // We verify manually in VerifyPeerCertificate
+		Certificates:          []tls.Certificate{*cert},
+		ClientAuth:            tls.RequireAnyClientCert, // We verify manually in VerifyPeerCertificate
 		VerifyPeerCertificate: verifyPeer,
 		MinVersion:            tls.VersionTLS13,
 	}
@@ -84,7 +84,7 @@ func NewClientTLSConfig(cert *tls.Certificate) *tls.Config {
 			// In strict mode, we'd check against NodeMeta.
 			// For now, we trust connection if we trust the key.
 			// The caller (Transport) should probably handle this or we inject logic here.
-			return nil 
+			return nil
 		},
 		MinVersion: tls.VersionTLS13,
 	}

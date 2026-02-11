@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+export DISTFS_PASSWORD=testpassword
 
 echo "Waiting for storage-node-1 API to be ready..."
 MAX_RETRIES=60
@@ -17,7 +18,7 @@ echo "Waiting for cluster leader..."
 COUNT=0
 LEADER_URL=""
 while true; do
-  STATUS=$(wget -qO- --timeout=2 http://storage-node-1:8080/v1/cluster/status 2>&1 || true)
+  STATUS=$(wget -qO- --timeout=2 --header "X-Raft-Secret: supersecret" http://storage-node-1:8080/api/cluster/status 2>&1 || true)
   if echo "$STATUS" | grep -q '"state":"Leader"'; then
     echo "storage-node-1 is Leader"
     LEADER_URL="http://storage-node-1:8080"
@@ -39,8 +40,8 @@ while true; do
 done
 
 echo "Joining nodes to cluster..."
-wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data '{"id":"node-2","address":"storage-node-2:5000"}' $LEADER_URL/v1/cluster/join || echo "node-2 already joined"
-wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data '{"id":"node-3","address":"storage-node-3:5000"}' $LEADER_URL/v1/cluster/join || echo "node-3 already joined"
+wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data '{"id":"node-2","address":"storage-node-2:5000"}' $LEADER_URL/api/cluster/join || echo "node-2 already joined"
+wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data '{"id":"node-3","address":"storage-node-3:5000"}' $LEADER_URL/api/cluster/join || echo "node-3 already joined"
 
 echo "Waiting for cluster stability..."
 sleep 5

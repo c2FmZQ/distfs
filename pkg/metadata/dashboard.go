@@ -41,7 +41,7 @@ func (s *Server) handleClusterDashboard(w http.ResponseWriter, r *http.Request) 
 		s.handleClusterRemove(w, r)
 		return
 	}
-	
+
 	http.NotFound(w, r)
 }
 

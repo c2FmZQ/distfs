@@ -83,7 +83,7 @@ func main() {
 		// Let's change behavior: if -id is not provided, use `data-dir` as the node's base.
 		// If -id IS provided, use `data-dir/id`.
 	}
-	
+
 	// Adjust baseDir logic
 	if flag.Lookup("id").Value.String() == "" { // Check if flag was actually set
 		// ID derived, use dataDir directly?
@@ -97,13 +97,13 @@ func main() {
 	if err := os.MkdirAll(baseDir, 0700); err != nil {
 		log.Fatal(err)
 	}
-	
+
 	// Reload key from correct dir
 	raftKey, err = metadata.LoadOrGenerateNodeKey(filepath.Join(baseDir, "node.key"))
 	if err != nil {
 		log.Fatalf("failed to load node key: %v", err)
 	}
-	
+
 	// Finalize ID
 	derivedID := metadata.NodeIDFromKey(raftKey)
 	if *nodeID == "" {
@@ -179,19 +179,19 @@ func main() {
 	publicMux.Handle("/v1/meta/key", metaServer)
 	publicMux.Handle("/v1/user/", metaServer)
 	publicMux.Handle("/v1/group/", metaServer)
-	publicMux.Handle("/v1/data/", dataServer) // Data access
+	publicMux.Handle("/v1/data/", dataServer)    // Data access
 	publicMux.Handle("/api/cluster", metaServer) // Dashboard & Management
 	publicMux.Handle("/api/cluster/", metaServer)
 
 	// 5. Internal Router (Cluster)
 	clusterMux := http.NewServeMux()
-	clusterMux.Handle("/v1/node", metaServer) // Registration
+	clusterMux.Handle("/v1/node", metaServer)     // Registration
 	clusterMux.Handle("/v1/cluster/", metaServer) // Management
 	// Forwarding endpoints are currently on /v1/meta, so we might need to expose them here too?
 	// Ideally forwarding happens to the internal API.
 	// For now, exposing meta on internal too for forwarding.
-	clusterMux.Handle("/v1/meta/", metaServer) 
-	clusterMux.Handle("/v1/user/", metaServer) // Forwarded writes
+	clusterMux.Handle("/v1/meta/", metaServer)
+	clusterMux.Handle("/v1/user/", metaServer)  // Forwarded writes
 	clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
 
 	// 6. Registration & Heartbeat
@@ -238,7 +238,7 @@ func main() {
 	}()
 
 	log.Printf("Storage Node %s starting Public API on %s, Cluster API on %s", *nodeID, *apiAddr, *clusterAddr)
-	
+
 	// Start Public Server
 	publicSrv := &http.Server{Addr: *apiAddr, Handler: publicMux}
 	go func() {

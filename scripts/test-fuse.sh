@@ -1,5 +1,6 @@
 #!/bin/sh
 # Comprehensive POSIX Compliance Test for DistFS FUSE
+export DISTFS_PASSWORD=testpassword
 
 echo "Waiting for client configuration..."
 MAX_RETRIES=120

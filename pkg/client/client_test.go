@@ -684,5 +684,3 @@ func TestGarbageCollection(t *testing.T) {
 		t.Error("Chunk was not garbage collected")
 	}
 }
-
-

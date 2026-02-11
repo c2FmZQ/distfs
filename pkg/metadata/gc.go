@@ -140,7 +140,7 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 	// Design decision: If a node is unreachable, we keep it in queue?
 	// Ideally yes. But for simplicity in Phase 10, we remove if we attempted.
 	// Real-world: Separate "failed" queue or retry count.
-	
+
 	if success {
 		// Remove from DB via Raft (Wait, GC table is part of FSM state!)
 		// We shouldn't modify DB directly in worker. We must apply a Command.
@@ -162,14 +162,14 @@ func (g *GCWorker) deleteFromNode(address, chunkID, token string) error {
 		return err
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
-	
+
 	client := &http.Client{Timeout: 5 * time.Second}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
