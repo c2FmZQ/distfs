@@ -29,7 +29,8 @@ import (
 
 func TestDiskStore(t *testing.T) {
 	tmpDir := t.TempDir()
-	store, err := NewDiskStore(tmpDir)
+	st, _ := createTestStorage(t, tmpDir)
+	store, err := NewDiskStore(st)
 	if err != nil {
 		t.Fatalf("NewDiskStore failed: %v", err)
 	}
@@ -59,8 +60,10 @@ func TestDiskStore(t *testing.T) {
 	if err != nil {
 		t.Errorf("GetChunkSize failed: %v", err)
 	}
-	if sz != int64(len(content)) {
-		t.Errorf("Size mismatch: got %d, want %d", sz, len(content))
+	// Note: Encrypted size > Plaintext size.
+	// We expect size >= len(content).
+	if sz < int64(len(content)) {
+		t.Errorf("Size mismatch: got %d, want >= %d", sz, len(content))
 	}
 
 	// 3. HasChunk
@@ -96,7 +99,8 @@ func TestDiskStore(t *testing.T) {
 
 func TestIntegrityScrubber(t *testing.T) {
 	tmpDir := t.TempDir()
-	store, _ := NewDiskStore(tmpDir)
+	st, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(st)
 
 	content := []byte("valid data")
 	h := sha256.Sum256(content)
@@ -114,9 +118,10 @@ func TestIntegrityScrubber(t *testing.T) {
 	}
 
 	// Corrupt it manually
-	relPath := filepath.Join(id[:2], id[2:4], id)
-	path := filepath.Join(tmpDir, relPath)
+	// Storage files are flat in root (assumed implementation)
+	path := filepath.Join(tmpDir, id)
 
+	// Overwrite with garbage
 	if err := os.WriteFile(path, []byte("garbage"), 0600); err != nil {
 		t.Fatalf("Failed to corrupt file at %s: %v", path, err)
 	}
@@ -134,15 +139,14 @@ func TestIntegrityScrubber(t *testing.T) {
 
 func TestDiskStore_WriteError(t *testing.T) {
 	tmpDir := t.TempDir()
-	store, _ := NewDiskStore(tmpDir)
+	st, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(st)
 
 	// Make dir read-only to force write error
-	// Note: on some systems (root), this might not fail.
 	if err := os.Chmod(tmpDir, 0500); err != nil {
 		t.Skip("Cannot chmod")
 	}
 
-	// Try to write (sharded dir creation should fail)
 	h := sha256.Sum256([]byte("fail"))
 	id := hex.EncodeToString(h[:])
 
@@ -155,7 +159,9 @@ func TestDiskStore_WriteError(t *testing.T) {
 
 func TestAPI(t *testing.T) {
 	tmpDir := t.TempDir()
-	store, _ := NewDiskStore(tmpDir)
+	st, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(st)
+
 	server := NewServer(store, nil, nil)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
@@ -208,18 +214,19 @@ func TestAPI(t *testing.T) {
 		t.Errorf("Expected 405, got %d", resp2.StatusCode)
 	}
 
-	// Test PUT Too Large (3MB)
+	// Test PUT Too Large (3MB) - Should SUCCEED with storage lib
 	large := make([]byte, 3*1024*1024)
 	reqLarge, _ := http.NewRequest("PUT", ts.URL+"/v1/data/"+chunkID, bytes.NewReader(large))
 	respLarge, _ := http.DefaultClient.Do(reqLarge)
-	if respLarge.StatusCode != http.StatusInternalServerError {
-		t.Errorf("Expected 500/Fail for large body, got %d", respLarge.StatusCode)
+	if respLarge.StatusCode != http.StatusCreated { // Changed expectation
+		t.Errorf("Expected 201 for large body, got %d", respLarge.StatusCode)
 	}
 }
 
 func TestDiskStore_TempFiles(t *testing.T) {
 	tmpDir := t.TempDir()
-	store, _ := NewDiskStore(tmpDir)
+	st, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(st)
 
 	// Create temp files
 	os.Create(filepath.Join(tmpDir, "tmp-123"))

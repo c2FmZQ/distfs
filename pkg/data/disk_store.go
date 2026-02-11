@@ -1,102 +1,82 @@
 // Copyright 2026 TTBT Enterprises LLC
-// ... License ...
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//      http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package data
 
 import (
 	"fmt"
 	"io"
-	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+
+	"github.com/c2FmZQ/storage"
 )
 
-// DiskStore implements Store using the local filesystem.
+// DiskStore implements Store using github.com/c2FmZQ/storage for encryption at rest.
 type DiskStore struct {
-	baseDir string
-	root    *os.Root // Used for safe reads
+	st *storage.Storage
+	mu sync.Mutex // Serialize writes to avoid potential concurrency issues in storage lib
 }
 
-func NewDiskStore(baseDir string) (*DiskStore, error) {
-	if err := os.MkdirAll(baseDir, 0750); err != nil {
-		return nil, fmt.Errorf("failed to create base dir: %w", err)
-	}
-	root, err := os.OpenRoot(baseDir)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open root: %w", err)
-	}
-	return &DiskStore{baseDir: baseDir, root: root}, nil
+func NewDiskStore(st *storage.Storage) (*DiskStore, error) {
+	return &DiskStore{st: st}, nil
 }
 
 func (s *DiskStore) Close() error {
-	return s.root.Close()
-}
-
-func (s *DiskStore) relPath(id string) (string, error) {
-	if !validChunkID.MatchString(id) {
-		return "", fmt.Errorf("invalid chunk id format")
-	}
-	// Sharding: 2 levels: ab/cd/abcdef...
-	return filepath.Join(id[:2], id[2:4], id), nil
+	return nil
 }
 
 func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
-	rel, err := s.relPath(id)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !validChunkID.MatchString(id) {
+		return fmt.Errorf("invalid chunk id format")
+	}
+
+	// Idempotency: If chunk exists, don't overwrite.
+	// This avoids race conditions with concurrent uploads of identical chunks (e.g. zeros).
+	if exists, _ := s.HasChunk(id); exists {
+		return nil
+	}
+
+	wc, err := s.st.OpenBlobWrite(id, id)
 	if err != nil {
 		return err
 	}
 
-	// Absolute path for Write/Rename (since os.Root doesn't support Rename easily)
-	absPath := filepath.Join(s.baseDir, rel)
-	dir := filepath.Dir(absPath)
-
-	if err := os.MkdirAll(dir, 0750); err != nil {
+	if _, err := io.Copy(wc, data); err != nil {
+		wc.Close()
 		return err
 	}
-
-	// Create unique temp file in the same directory to ensure same filesystem for Rename
-	f, err := os.CreateTemp(dir, "tmp-*")
-	if err != nil {
-		return err
-	}
-	tmpName := f.Name()
-
-	// Clean up temp file on failure (or success if rename fails)
-	// If rename succeeds, file is gone (moved), Remove fails (ignore).
-	// If we defer Remove, it runs after Rename.
-	defer os.Remove(tmpName)
-
-	if _, err := io.Copy(f, data); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		return err
-	}
-	f.Close()
-
-	return os.Rename(tmpName, absPath)
+	return wc.Close()
 }
 
 func (s *DiskStore) ReadChunk(id string) (io.ReadCloser, error) {
-	rel, err := s.relPath(id)
-	if err != nil {
-		return nil, err
+	if !validChunkID.MatchString(id) {
+		return nil, fmt.Errorf("invalid chunk id format")
 	}
-	// Use os.Root for safe open
-	return s.root.Open(rel)
+	return s.st.OpenBlobRead(id)
 }
 
 func (s *DiskStore) HasChunk(id string) (bool, error) {
-	rel, err := s.relPath(id)
-	if err != nil {
-		return false, err
-	}
-	_, err = s.root.Stat(rel)
+	rc, err := s.st.OpenBlobRead(id)
 	if err == nil {
+		rc.Close()
 		return true, nil
 	}
 	if os.IsNotExist(err) {
@@ -106,29 +86,55 @@ func (s *DiskStore) HasChunk(id string) (bool, error) {
 }
 
 func (s *DiskStore) GetChunkSize(id string) (int64, error) {
-	rel, err := s.relPath(id)
+	rc, err := s.st.OpenBlobRead(id)
 	if err != nil {
 		return 0, err
 	}
-	fi, err := s.root.Stat(rel)
+	defer rc.Close()
+
+	size, err := rc.Seek(0, io.SeekEnd)
 	if err != nil {
 		return 0, err
 	}
-	return fi.Size(), nil
+	return size, nil
 }
 
 func (s *DiskStore) DeleteChunk(id string) error {
-	rel, err := s.relPath(id)
-	if err != nil {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	found := false
+	var path string
+
+	err := filepath.WalkDir(s.st.Dir(), func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Name() == id {
+			found = true
+			path = p
+			return fmt.Errorf("stop")
+		}
+		return nil
+	})
+
+	if found && path != "" {
+		return os.Remove(path)
+	}
+	if err != nil && err.Error() != "stop" {
 		return err
 	}
-	return s.root.Remove(rel)
+
+	return fmt.Errorf("chunk not found or deletion failed")
 }
 
 // ListChunks returns an iterator.
 func (s *DiskStore) ListChunks() iter.Seq2[string, error] {
 	return func(yield func(string, error) bool) {
-		err := filepath.WalkDir(s.baseDir, func(path string, d fs.DirEntry, err error) error {
+		err := filepath.WalkDir(s.st.Dir(), func(path string, d os.DirEntry, err error) error {
 			if err != nil {
 				return err
 			}
@@ -136,19 +142,17 @@ func (s *DiskStore) ListChunks() iter.Seq2[string, error] {
 				return nil
 			}
 			name := d.Name()
-			if strings.HasPrefix(name, "tmp-") { // Ignore temp files
+			if strings.HasSuffix(name, ".tmp") {
 				return nil
 			}
-			// Only yield if name looks like a chunk ID?
-			// Since we shard, the filename IS the ID (e.g. abcdef...)
 			if validChunkID.MatchString(name) {
 				if !yield(name, nil) {
-					return fs.SkipAll
+					return fmt.Errorf("stop")
 				}
 			}
 			return nil
 		})
-		if err != nil {
+		if err != nil && err.Error() != "stop" {
 			yield("", err)
 		}
 	}

@@ -15,7 +15,6 @@
 package metadata
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/json"
@@ -24,8 +23,10 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/c2FmZQ/storage"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -40,9 +41,13 @@ type MetadataFSM struct {
 	db         *bolt.DB
 	path       string
 	OnSnapshot func()
+
+	st      *storage.Storage
+	trusted map[string]bool // PubKey(bytes) -> true
+	mu      sync.RWMutex
 }
 
-func NewMetadataFSM(path string) (*MetadataFSM, error) {
+func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, err
@@ -61,7 +66,15 @@ func NewMetadataFSM(path string) (*MetadataFSM, error) {
 		db.Close()
 		return nil, err
 	}
-	return &MetadataFSM{db: db, path: path}, nil
+
+	fsm := &MetadataFSM{
+		db:      db,
+		path:    path,
+		st:      st,
+		trusted: make(map[string]bool),
+	}
+	fsm.loadTrustState()
+	return fsm, nil
 }
 
 func (fsm *MetadataFSM) Close() error {
@@ -71,36 +84,49 @@ func (fsm *MetadataFSM) Close() error {
 	return nil
 }
 
-func (fsm *MetadataFSM) IsInitialized() bool {
-	var initialized bool
-	fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		stats := b.Stats()
-		if stats.KeyN > 0 {
-			initialized = true
+type TrustData struct {
+	Keys []string `json:"keys"` // Hex encoded pub keys
+}
+
+func (fsm *MetadataFSM) loadTrustState() {
+	if fsm.st == nil {
+		return
+	}
+	var td TrustData
+	if err := fsm.st.ReadDataFile("trust.bin", &td); err == nil {
+		fsm.mu.Lock()
+		for _, k := range td.Keys {
+			fsm.trusted[k] = true
 		}
-		return nil
-	})
-	return initialized
+		fsm.mu.Unlock()
+	}
+}
+
+func (fsm *MetadataFSM) saveTrustState() {
+	if fsm.st == nil {
+		return
+	}
+	fsm.mu.RLock()
+	var keys []string
+	for k := range fsm.trusted {
+		keys = append(keys, k)
+	}
+	fsm.mu.RUnlock()
+
+	td := TrustData{Keys: keys}
+	fsm.st.SaveDataFile("trust.bin", td)
+}
+
+func (fsm *MetadataFSM) IsInitialized() bool {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return len(fsm.trusted) > 0
 }
 
 func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
-	var trusted bool
-	fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
-				if bytes.Equal(n.PublicKey, pubKey) {
-					trusted = true
-					return nil
-				}
-			}
-		}
-		return nil
-	})
-	return trusted
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return fsm.trusted[string(pubKey)]
 }
 
 func (fsm *MetadataFSM) GetNodeIDByRaftAddress(addr string) (string, error) {
@@ -349,6 +375,11 @@ func (fsm *MetadataFSM) applyRegisterNode(data []byte) interface{} {
 	if err := json.Unmarshal(data, &node); err != nil {
 		return err
 	}
+
+	fsm.mu.Lock()
+	fsm.trusted[string(node.PublicKey)] = true
+	fsm.mu.Unlock()
+	fsm.saveTrustState()
 
 	return fsm.db.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("nodes"))
@@ -905,7 +936,15 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 		return err
 	}
 
-	return fsm.reopen()
+	// Restore trust state from DB (since we wiped trust.bin?)
+	// No, trust state is in trust.bin.
+	// But if we restore from snapshot, snapshot doesn't contain trust state (BoltDB only).
+	// Raft Snapshot should contain trust state?
+	// If trusted keys are in "nodes" bucket, we can rebuild trust state from DB.
+	// We should do that here.
+	fsm.reopen()
+	fsm.rebuildTrustCache()
+	return nil
 }
 
 func (fsm *MetadataFSM) reopen() error {
@@ -915,6 +954,33 @@ func (fsm *MetadataFSM) reopen() error {
 	}
 	fsm.db = db
 	return nil
+}
+
+func (fsm *MetadataFSM) rebuildTrustCache() {
+	fsm.mu.Lock()
+	defer fsm.mu.Unlock()
+	fsm.trusted = make(map[string]bool)
+
+	fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				fsm.trusted[string(n.PublicKey)] = true
+			}
+		}
+		return nil
+	})
+
+	// We should also persist it to trust.bin to match
+	keys := make([]string, 0, len(fsm.trusted))
+	for k := range fsm.trusted {
+		keys = append(keys, k)
+	}
+	if fsm.st != nil {
+		fsm.st.SaveDataFile("trust.bin", TrustData{Keys: keys})
+	}
 }
 
 type MetadataSnapshot struct {
@@ -1013,7 +1079,7 @@ func enqueueGC(tx *bolt.Tx, inode *Inode) error {
 	if err := loadInodeWithPages(tx, inode); err != nil {
 		return err
 	}
-	
+
 	// Delete pages if they exist
 	if len(inode.ChunkPages) > 0 {
 		pb := tx.Bucket([]byte("chunk_pages"))

@@ -17,7 +17,6 @@ package main
 import (
 	"bytes"
 	"crypto/mlkem"
-	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"log"
@@ -32,6 +31,8 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"github.com/c2FmZQ/storage"
+	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
 )
 
@@ -45,51 +46,16 @@ func main() {
 		clusterAddr      = flag.String("cluster-addr", "127.0.0.1:9090", "Internal Cluster API address")
 		clusterAdvertise = flag.String("cluster-advertise", "", "Public Cluster API address (host:port)")
 		dataDir          = flag.String("data-dir", "data", "Directory for storage")
-		masterKey        = flag.String("master-key", "", "32-byte hex master key")
+		masterKey        = flag.String("master-key", "", "Master passphrase (overrides env)")
 		bootstrap        = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
 		jwksURL          = flag.String("jwks-url", "", "JWKS URL for auth")
 		raftSecret       = flag.String("raft-secret", "", "Shared secret for cluster operations")
 	)
 	flag.Parse()
 
-	baseDir := filepath.Join(*dataDir, "default") // Temp default if ID unknown
-	if *nodeID != "" {
-		baseDir = filepath.Join(*dataDir, *nodeID)
-	}
-	if err := os.MkdirAll(baseDir, 0700); err != nil {
-		log.Fatal(err)
-	}
-
-	// 0. Load Node Identity Key (Ed25519)
-	raftKey, err := metadata.LoadOrGenerateNodeKey(filepath.Join(baseDir, "node.key"))
-	if err != nil {
-		log.Fatalf("failed to load node key: %v", err)
-	}
-
-	if *nodeID == "" {
-		*nodeID = metadata.NodeIDFromKey(raftKey)
-		// Re-evaluate baseDir with derived ID?
-		// If we used "default", we might want to move it or just use the derived ID for logical ID.
-		// For simplicity, let's stick to the directory we created, or maybe we should have derived ID before creating directory?
-		// But we need directory to store the key. Chicken and egg.
-		// "Upon a node's first startup, if it doesn't already exist, a persistent Ed25519 private key (node.key) is generated."
-		// "in the node's data directory".
-		// Ideally `data-dir` is the root, and we don't necessarily need a subdirectory named after ID if ID is derived from key inside it.
-		// But existing logic uses `filepath.Join(*dataDir, *nodeID)`.
-		// If ID is not provided, we can't form the path.
-		// Let's assume if ID is missing, we look in `*dataDir` directly?
-		// Or we require ID for directory structure but key derives ID?
-		// "The node's unique Raft Node ID is then automatically derived".
-		// Let's change behavior: if -id is not provided, use `data-dir` as the node's base.
-		// If -id IS provided, use `data-dir/id`.
-	}
-
 	// Adjust baseDir logic
-	if flag.Lookup("id").Value.String() == "" { // Check if flag was actually set
-		// ID derived, use dataDir directly?
-		// Or creates a subfolder based on derived ID?
-		// If we use dataDir directly, multiple nodes on same FS needs different data-dirs.
-		// Let's assume data-dir IS the node's dir if ID is omitted.
+	var baseDir string
+	if flag.Lookup("id").Value.String() == "" {
 		baseDir = *dataDir
 	} else {
 		baseDir = filepath.Join(*dataDir, *nodeID)
@@ -98,8 +64,40 @@ func main() {
 		log.Fatal(err)
 	}
 
-	// Reload key from correct dir
-	raftKey, err = metadata.LoadOrGenerateNodeKey(filepath.Join(baseDir, "node.key"))
+	// 0. Initialize Encryption
+	passphrase := *masterKey
+	if passphrase == "" {
+		passphrase = os.Getenv("DISTFS_MASTER_KEY")
+	}
+	if passphrase == "" {
+		log.Fatal("-master-key or DISTFS_MASTER_KEY environment variable is required")
+	}
+
+	// Load or Create Master Key
+	mkPath := filepath.Join(baseDir, "master.key")
+	var mk storage_crypto.MasterKey
+	var err error
+
+	if _, err := os.Stat(mkPath); err == nil {
+		mk, err = storage_crypto.ReadMasterKey([]byte(passphrase), mkPath)
+		if err != nil {
+			log.Fatalf("failed to read master key: %v", err)
+		}
+	} else {
+		mk, err = storage_crypto.CreateMasterKey()
+		if err != nil {
+			log.Fatalf("failed to create master key: %v", err)
+		}
+		if err := mk.Save([]byte(passphrase), mkPath); err != nil {
+			log.Fatalf("failed to save master key: %v", err)
+		}
+	}
+
+	// Open Storage
+	st := storage.New(baseDir, mk)
+
+	// 1. Load Node Identity Key (Ed25519)
+	raftKey, err := metadata.LoadOrGenerateNodeKey(st, "node.key")
 	if err != nil {
 		log.Fatalf("failed to load node key: %v", err)
 	}
@@ -109,8 +107,6 @@ func main() {
 	if *nodeID == "" {
 		*nodeID = derivedID
 	} else {
-		// Optional: Verify provided ID matches derived?
-		// For now, trust flag if provided, but maybe warn.
 		if *nodeID != derivedID {
 			log.Printf("Warning: Provided Node ID %s does not match derived ID %s", *nodeID, derivedID)
 		}
@@ -126,21 +122,8 @@ func main() {
 		*apiURL = "http://" + *apiAddr
 	}
 
-	mKeyStr := *masterKey
-	if mKeyStr == "" {
-		mKeyStr = os.Getenv("DISTFS_MASTER_KEY")
-	}
-	if mKeyStr == "" {
-		log.Fatal("-master-key or DISTFS_MASTER_KEY environment variable is required")
-	}
-
-	mKey, err := hex.DecodeString(mKeyStr)
-	if err != nil || len(mKey) != 32 {
-		log.Fatal("master-key must be a 32-byte hex string")
-	}
-
-	// 1. Initialize Metadata Role (Raft)
-	rn, err := metadata.NewRaftNode(*nodeID, *raftBind, *raftAdvertise, baseDir, mKey, raftKey)
+	// 2. Initialize Metadata Role (Raft)
+	rn, err := metadata.NewRaftNode(*nodeID, *raftBind, *raftAdvertise, baseDir, st, raftKey)
 	if err != nil {
 		log.Fatalf("failed to init raft node: %v", err)
 	}
@@ -157,23 +140,30 @@ func main() {
 		})
 	}
 
-	// 2. Initialize Keys for API
-	nodeKey, signKey, err := loadOrGenerateKeys(baseDir)
+	// 3. Initialize Keys for API
+	nodeKey, signKey, err := loadOrGenerateKeys(st)
 	if err != nil {
 		log.Fatalf("failed to init keys: %v", err)
 	}
 
-	// 3. Initialize Servers
+	// 4. Initialize Servers
 	metaServer := metadata.NewServer(rn.Raft, rn.FSM, *jwksURL, nodeKey, signKey, *raftSecret)
 
+	// DiskStore uses separate storage instance rooted at chunks/
 	chunkDir := filepath.Join(baseDir, "chunks")
-	store, err := data.NewDiskStore(chunkDir)
-	if err != nil {
-		log.Fatalf("failed to init data store: %v", err)
+	if err := os.MkdirAll(chunkDir, 0700); err != nil {
+		log.Fatal(err)
 	}
+	stChunks := storage.New(chunkDir, mk)
+
+	store, err := data.NewDiskStore(stChunks)
+	if err != nil {
+		log.Fatalf("failed to init disk store: %v", err)
+	}
+
 	dataServer := data.NewServer(store, signKey.Public(), rn.FSM)
 
-	// 4. Combined Router (Public)
+	// 5. Combined Router (Public)
 	publicMux := http.NewServeMux()
 	publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 	publicMux.Handle("/v1/meta/key", metaServer)
@@ -183,18 +173,15 @@ func main() {
 	publicMux.Handle("/api/cluster", metaServer) // Dashboard & Management
 	publicMux.Handle("/api/cluster/", metaServer)
 
-	// 5. Internal Router (Cluster)
+	// 6. Internal Router (Cluster)
 	clusterMux := http.NewServeMux()
 	clusterMux.Handle("/v1/node", metaServer)     // Registration
 	clusterMux.Handle("/v1/cluster/", metaServer) // Management
-	// Forwarding endpoints are currently on /v1/meta, so we might need to expose them here too?
-	// Ideally forwarding happens to the internal API.
-	// For now, exposing meta on internal too for forwarding.
 	clusterMux.Handle("/v1/meta/", metaServer)
 	clusterMux.Handle("/v1/user/", metaServer)  // Forwarded writes
 	clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
 
-	// 6. Registration & Heartbeat
+	// 7. Registration & Heartbeat
 	go func() {
 		clusterURL := *clusterAdvertise
 		if !strings.HasPrefix(clusterURL, "http") {
@@ -216,9 +203,6 @@ func main() {
 			if rn.Raft.Leader() != "" {
 				node.LastHeartbeat = time.Now().Unix()
 				body, _ := json.Marshal(node)
-				// Use internal loopback for registration (will forward if needed)
-				// Actually we should use the Cluster API address if possible, or loopback to cluster port.
-				// Assuming localhost access to cluster port is fine.
 				target := "http://localhost:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
 				req, _ := http.NewRequest("POST", target, bytes.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
@@ -267,26 +251,34 @@ func main() {
 	clusterSrv.Close()
 }
 
-func loadOrGenerateKeys(baseDir string) (*mlkem.DecapsulationKey768, *crypto.IdentityKey, error) {
-	kemKeyPath := filepath.Join(baseDir, "kem.key")
-	signKeyPath := filepath.Join(baseDir, "sign.key")
+func loadOrGenerateKeys(st *storage.Storage) (*mlkem.DecapsulationKey768, *crypto.IdentityKey, error) {
+	kemKeyName := "kem.key"
+	signKeyName := "sign.key"
 
 	var nodeKey *mlkem.DecapsulationKey768
 	var signKey *crypto.IdentityKey
 
-	if b, err := os.ReadFile(kemKeyPath); err == nil {
-		nodeKey, _ = crypto.UnmarshalDecapsulationKey(b)
+	// Load KEM Key
+	var kemData KeyData
+	if err := st.ReadDataFile(kemKeyName, &kemData); err == nil {
+		nodeKey, _ = crypto.UnmarshalDecapsulationKey(kemData.Bytes)
 	} else {
 		nodeKey, _ = crypto.GenerateEncryptionKey()
-		os.WriteFile(kemKeyPath, crypto.MarshalDecapsulationKey(nodeKey), 0600)
+		st.SaveDataFile(kemKeyName, KeyData{Bytes: crypto.MarshalDecapsulationKey(nodeKey)})
 	}
 
-	if b, err := os.ReadFile(signKeyPath); err == nil {
-		signKey = crypto.UnmarshalIdentityKey(b)
+	// Load Sign Key
+	var signData KeyData
+	if err := st.ReadDataFile(signKeyName, &signData); err == nil {
+		signKey = crypto.UnmarshalIdentityKey(signData.Bytes)
 	} else {
 		signKey, _ = crypto.GenerateIdentityKey()
-		os.WriteFile(signKeyPath, signKey.MarshalPrivate(), 0600)
+		st.SaveDataFile(signKeyName, KeyData{Bytes: signKey.MarshalPrivate()})
 	}
 
 	return nodeKey, signKey, nil
+}
+
+type KeyData struct {
+	Bytes []byte `json:"bytes"`
 }

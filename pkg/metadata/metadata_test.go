@@ -25,18 +25,25 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/storage"
+	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
-
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
 	tmpDir := t.TempDir()
-	key := make([]byte, 32)
+
+	mk, err := storage_crypto.CreateAESMasterKeyForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := storage.New(tmpDir, mk)
+
 	nodeKey, _ := crypto.GenerateIdentityKey()
 
-	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, key, nodeKey)
+	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -171,8 +178,11 @@ func TestIdentityRegistry(t *testing.T) {
 
 func TestFSMRestore(t *testing.T) {
 	tmpDir := t.TempDir()
+	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
+	st := storage.New(tmpDir, mk)
+
 	dbPath := filepath.Join(tmpDir, "fsm.bolt")
-	fsm, err := NewMetadataFSM(dbPath)
+	fsm, err := NewMetadataFSM(dbPath, st)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +204,9 @@ func TestFSMRestore(t *testing.T) {
 	}
 
 	// New FSM
-	fsm2, err := NewMetadataFSM(filepath.Join(tmpDir, "fsm2.bolt"))
+	tmpDir2 := t.TempDir()
+	st2 := storage.New(tmpDir2, mk) // different dir
+	fsm2, err := NewMetadataFSM(filepath.Join(tmpDir2, "fsm2.bolt"), st2)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +233,10 @@ func TestFSMRestore(t *testing.T) {
 
 func TestFSM_Errors(t *testing.T) {
 	tmpDir := t.TempDir()
-	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"))
+	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
+	st := storage.New(tmpDir, mk)
+
+	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"), st)
 	defer fsm.Close()
 
 	// Invalid JSON

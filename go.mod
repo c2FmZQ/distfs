@@ -17,7 +17,10 @@ require (
 require (
 	github.com/armon/go-metrics v0.4.1 // indirect
 	github.com/boltdb/bolt v1.3.1 // indirect
+	github.com/c2FmZQ/storage v0.3.2 // indirect
+	github.com/c2FmZQ/tpm v0.4.3 // indirect
 	github.com/fatih/color v1.16.0 // indirect
+	github.com/google/go-tpm v0.9.8 // indirect
 	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
 	github.com/hashicorp/go-hclog v1.6.3 // indirect
 	github.com/hashicorp/go-immutable-radix v1.0.0 // indirect

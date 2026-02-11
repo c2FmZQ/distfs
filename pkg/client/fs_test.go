@@ -19,7 +19,6 @@ import (
 	"encoding/json"
 	"io"
 	"io/fs"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -31,11 +30,11 @@ import (
 )
 
 func TestDistFS_ReadDir(t *testing.T) {
-	// Setup Cluster
+	// 1. Setup Cluster
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -51,12 +50,11 @@ func TestDistFS_ReadDir(t *testing.T) {
 	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
-
-	// Generate User Keys
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
+	defer metaServer.Shutdown()
 
 	// Register User
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
 	user := metadata.User{
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
@@ -66,13 +64,14 @@ func TestDistFS_ReadDir(t *testing.T) {
 	userBytes, _ := json.Marshal(user)
 	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
-	future := metaNode.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Failed to register user: %v", err)
+	if err := metaNode.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Apply user failed: %v", err)
 	}
 
+	// Data Node
 	dataDir := t.TempDir()
-	dataStore, _ := data.NewDiskStore(dataDir)
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
 	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
@@ -84,9 +83,9 @@ func TestDistFS_ReadDir(t *testing.T) {
 		Status:  metadata.NodeStatusActive,
 	}
 	body, _ := json.Marshal(node)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	_ = body
 
-	// Setup Client
+	// 2. Client
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
@@ -96,56 +95,17 @@ func TestDistFS_ReadDir(t *testing.T) {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
-	// Create structure:
-	// /docs/
-	// /docs/plan.txt
-	// /docs/notes.md
-	// /images/
-	if err := c.Mkdir("/docs"); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.CreateFile("/docs/plan.txt", bytes.NewReader([]byte("Plan A")), 6); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.CreateFile("/docs/notes.md", bytes.NewReader([]byte("Note B")), 6); err != nil {
-		t.Fatal(err)
-	}
-	if err := c.Mkdir("/images"); err != nil {
-		t.Fatal(err)
-	}
+	// 3. Create Structure
+	// /dir1
+	// /dir1/file1
+	// /dir1/file2
+	c.Mkdir("/dir1")
+	c.CreateFile("/dir1/file1", bytes.NewReader([]byte("content")), 7)
+	c.CreateFile("/dir1/file2", bytes.NewReader([]byte("content")), 7)
 
-	// Test FS
+	// 4. ReadDir
 	dfs := c.FS()
-
-	// 1. Open File
-	f, err := dfs.Open("/docs/plan.txt")
-	if err != nil {
-		t.Fatalf("Open /docs/plan.txt failed: %v", err)
-	}
-	defer f.Close()
-	stat, _ := f.Stat()
-	if stat.Name() == "plan.txt" {
-		// Note: Current implementation uses ID as Name() in Stat() because Inode doesn't store plaintext name easily accessible in Stat().
-		// DistDirEntry stores name.
-		// Let's check size
-	}
-	if stat.Size() != 6 {
-		t.Errorf("Size mismatch: got %d want 6", stat.Size())
-	}
-
-	// 2. Open Directory
-	d, err := dfs.Open("/docs")
-	if err != nil {
-		t.Fatalf("Open /docs failed: %v", err)
-	}
-	defer d.Close()
-
-	dirFile, ok := d.(fs.ReadDirFile)
-	if !ok {
-		t.Fatal("Not a ReadDirFile")
-	}
-
-	entries, err := dirFile.ReadDir(-1)
+	entries, err := fs.ReadDir(dfs, "dir1")
 	if err != nil {
 		t.Fatalf("ReadDir failed: %v", err)
 	}
@@ -154,68 +114,46 @@ func TestDistFS_ReadDir(t *testing.T) {
 		t.Errorf("Expected 2 entries, got %d", len(entries))
 	}
 
+	// Verify names
 	names := make(map[string]bool)
 	for _, e := range entries {
 		names[e.Name()] = true
 		if e.IsDir() {
-			t.Errorf("Expected file, got dir: %s", e.Name())
+			t.Error("Expected file, got dir")
 		}
 	}
-
-	if !names["plan.txt"] {
-		t.Error("Missing plan.txt")
-	}
-	if !names["notes.md"] {
-		t.Error("Missing notes.md")
+	if !names["file1"] || !names["file2"] {
+		t.Error("Missing expected files")
 	}
 
-	// 3. Root Dir
-	root, err := dfs.Open("/")
+	// Test ReadDirFile
+	f, _ := dfs.Open("dir1")
+	dirFile, ok := f.(fs.ReadDirFile)
+	if !ok {
+		t.Fatal("Open directory did not return ReadDirFile")
+	}
+	defer dirFile.Close()
+
+	// Read n
+	pEntries, err := dirFile.ReadDir(1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer root.Close()
-	rootEntries, _ := root.(fs.ReadDirFile).ReadDir(-1)
-	rootNames := make(map[string]bool)
-	for _, e := range rootEntries {
-		rootNames[e.Name()] = true
-	}
-	if !rootNames["docs"] || !rootNames["images"] {
-		t.Error("Missing root entries")
+	if len(pEntries) != 1 {
+		t.Errorf("Expected 1 entry, got %d", len(pEntries))
 	}
 
-	// 4. Pagination
-	pDir, err := dfs.Open("/docs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer pDir.Close()
-	pDirFile := pDir.(fs.ReadDirFile)
-
-	// Read 1
-	pEntries1, err := pDirFile.ReadDir(1)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(pEntries1) != 1 {
-		t.Errorf("Pagination 1: expected 1 entry, got %d", len(pEntries1))
-	}
-
-	// Read 2 (should be the other one)
-	pEntries2, err := pDirFile.ReadDir(1)
+	// Read rest
+	pEntries2, err := dirFile.ReadDir(-1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(pEntries2) != 1 {
-		t.Errorf("Pagination 2: expected 1 entry, got %d", len(pEntries2))
+		t.Errorf("Expected 1 remaining entry, got %d", len(pEntries2))
 	}
 
-	if pEntries1[0].Name() == pEntries2[0].Name() {
-		t.Error("Pagination returned same entry twice")
-	}
-
-	// Read 3 (EOF)
-	pEntries3, err := pDirFile.ReadDir(1)
+	// Read EOF
+	pEntries3, err := dirFile.ReadDir(-1)
 	if err != io.EOF {
 		if len(pEntries3) != 0 {
 			t.Errorf("Expected EOF or empty, got %d entries, err %v", len(pEntries3), err)

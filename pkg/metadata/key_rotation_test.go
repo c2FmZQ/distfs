@@ -7,19 +7,26 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/storage"
+	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
-
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 func TestKeyRotation(t *testing.T) {
 	tmpDir := t.TempDir()
-	key := make([]byte, 32) // Generation 1 key
+
+	mk, err := storage_crypto.CreateAESMasterKeyForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := storage.New(tmpDir, mk)
+
 	nodeKey, _ := crypto.GenerateIdentityKey()
 
 	// 1. Start Node
-	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, key, nodeKey)
+	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -57,8 +64,6 @@ func TestKeyRotation(t *testing.T) {
 	}
 
 	// Wait for snapshot to complete and rotation to happen
-	// The FSM.Snapshot() is called during the snapshot process.
-	// We sleep to ensure persistence.
 	time.Sleep(1 * time.Second)
 
 	// 4. Apply Log 2 (Gen 2)
@@ -86,26 +91,17 @@ func TestKeyRotation(t *testing.T) {
 	}
 
 	// 7. Restart Node
-	// This verifies:
-	// - Can load Snapshot (encrypted with old keys? No, snapshots are plain BoltDB backup? Wait.)
-	//   FSM Snapshot is `MetadataSnapshot`, which writes raw BoltDB.
-	//   The Snapshot FILE stored by Raft is encrypted by `EncryptedLogStore`?
-	//   No, `EncryptedLogStore` only encrypts LOGS.
-	//   `SnapshotStore` is standard `FileSnapshotStore`.
-	//   Wait! If snapshots are plaintext, then key rotation only protects TRAILING logs.
-	//   The Plan says "Implement Log Key Rotation on Snapshot".
-	//   It doesn't explicitly say Snapshots must be encrypted (though `skorekeeper` might have).
-	//   However, if I restart, I replay logs.
-	//   The logs on disk are encrypted. I need to be able to decrypt them.
-	//   Logs from BEFORE snapshot 1 are compacted.
-	//   Logs AFTER snapshot 2 (Log 3) are present.
-	//   Log 3 is encrypted with Gen 3 key.
-
-	// We need to ensure the KeyRing was persisted.
 	node.Shutdown()
 
 	// 8. Recover
-	node2, err := NewRaftNode("node1", string(node.Transport.LocalAddr()), "", tmpDir, key, nodeKey)
+	// Reuse storage instance (simulating persistent storage)
+	// Actually we should create a new storage instance with same master key if we want to simulate restart?
+	// Storage object is in-memory handle.
+	// But files are on disk.
+	// We can reuse `st` if it wasn't closed (it doesn't have Close).
+	// NewRaftNode takes `st`.
+
+	node2, err := NewRaftNode("node1", string(node.Transport.LocalAddr()), "", tmpDir, st, nodeKey)
 	if err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}
@@ -115,12 +111,7 @@ func TestKeyRotation(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// 9. Verify State
-	// We should see ALL inodes (1 from snap1, 2 from snap2, 3 from log replay)
-	// Actually snapshots contain accumulated state.
-	// Snap 2 contains inode-1 and inode-2.
-	// Log replay adds inode-3.
-
-	err = node2.FSM.db.View(func(tx *bolt.Tx) error { // bolt imported in test file? need import
+	err = node2.FSM.db.View(func(tx *bolt.Tx) error { // bolt imported
 		b := tx.Bucket([]byte("inodes"))
 		if b.Get([]byte("inode-1")) == nil {
 			return fmt.Errorf("inode-1 missing (lost during snapshot 1?)")

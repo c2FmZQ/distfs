@@ -16,16 +16,21 @@ package metadata
 
 import (
 	"encoding/hex"
-	"os"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/storage"
 )
 
-// LoadOrGenerateNodeKey loads the Ed25519 node key from the given path,
+type KeyData struct {
+	Bytes []byte `json:"bytes"`
+}
+
+// LoadOrGenerateNodeKey loads the Ed25519 node key from storage,
 // or generates a new one if it doesn't exist.
-func LoadOrGenerateNodeKey(path string) (*crypto.IdentityKey, error) {
-	if b, err := os.ReadFile(path); err == nil {
-		return crypto.UnmarshalIdentityKey(b), nil
+func LoadOrGenerateNodeKey(st *storage.Storage, name string) (*crypto.IdentityKey, error) {
+	var kd KeyData
+	if err := st.ReadDataFile(name, &kd); err == nil {
+		return crypto.UnmarshalIdentityKey(kd.Bytes), nil
 	}
 
 	key, err := crypto.GenerateIdentityKey()
@@ -33,7 +38,8 @@ func LoadOrGenerateNodeKey(path string) (*crypto.IdentityKey, error) {
 		return nil, err
 	}
 
-	if err := os.WriteFile(path, key.MarshalPrivate(), 0600); err != nil {
+	kd.Bytes = key.MarshalPrivate()
+	if err := st.SaveDataFile(name, kd); err != nil {
 		return nil, err
 	}
 
@@ -41,15 +47,13 @@ func LoadOrGenerateNodeKey(path string) (*crypto.IdentityKey, error) {
 }
 
 // NodeIDFromKey derives the Raft Node ID from the public key.
-// The ID is the first 16 characters (8 bytes) of the hex-encoded SHA-256 hash of the public key.
-// Wait, plan says: "derived from the first 8 bytes of the corresponding Ed25519 public key (hex-encoded)."
-// "first 8 bytes of the public key" -> hex encoded -> 16 chars.
 func NodeIDFromKey(key *crypto.IdentityKey) string {
-	pub := key.Public()
-	// Plan: "first 8 bytes of the corresponding Ed25519 public key (hex-encoded)"
-	// So take first 8 bytes of pub key, then hex encode.
+	return NodeIDFromPublicKey(key.Public())
+}
+
+// NodeIDFromPublicKey derives the Raft Node ID from the raw public key bytes.
+func NodeIDFromPublicKey(pub []byte) string {
 	if len(pub) < 8 {
-		// Should not happen for Ed25519 (32 bytes)
 		return hex.EncodeToString(pub)
 	}
 	return hex.EncodeToString(pub[:8])

@@ -28,15 +28,26 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"github.com/c2FmZQ/storage"
+	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
 )
+
+func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_crypto.MasterKey) {
+	mk, err := storage_crypto.CreateAESMasterKeyForTest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := storage.New(dir, mk)
+	return st, mk
+}
 
 func TestClientIntegration(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,10 +89,9 @@ func TestClientIntegration(t *testing.T) {
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
-	dataStore, err := data.NewDiskStore(dataDir)
-	if err != nil {
-		t.Fatal(err)
-	}
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
+
 	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
@@ -149,9 +159,9 @@ func TestClientIntegration(t *testing.T) {
 func TestReplication(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +201,8 @@ func TestReplication(t *testing.T) {
 	stores := make([]data.Store, 3)
 	for i := 0; i < 3; i++ {
 		dir := t.TempDir()
-		store, _ := data.NewDiskStore(dir)
+		st, _ := createTestStorage(t, dir)
+		store, _ := data.NewDiskStore(st)
 		stores[i] = store
 		server := data.NewServer(store, signKey.Public(), nil)
 		ts := httptest.NewServer(server)
@@ -244,9 +255,9 @@ func TestReplication(t *testing.T) {
 func TestDirectories(t *testing.T) {
 	// Setup Cluster (Single node fine for logic)
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +292,8 @@ func TestDirectories(t *testing.T) {
 	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
 
 	dataDir := t.TempDir()
-	dataStore, _ := data.NewDiskStore(dataDir)
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
 	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
@@ -345,9 +357,9 @@ func TestDirectories(t *testing.T) {
 func TestReplicationRepair(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -383,7 +395,8 @@ func TestReplicationRepair(t *testing.T) {
 
 	// 2. Start ONE Data Node initially
 	dataDir1 := t.TempDir()
-	store1, _ := data.NewDiskStore(dataDir1)
+	st1, _ := createTestStorage(t, dataDir1)
+	store1, _ := data.NewDiskStore(st1)
 	server1 := data.NewServer(store1, signKey.Public(), nil)
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
@@ -417,13 +430,15 @@ func TestReplicationRepair(t *testing.T) {
 
 	// 4. Start 2 more Data Nodes
 	dataDir2 := t.TempDir()
-	store2, _ := data.NewDiskStore(dataDir2)
+	st2, _ := createTestStorage(t, dataDir2)
+	store2, _ := data.NewDiskStore(st2)
 	server2 := data.NewServer(store2, signKey.Public(), nil)
 	ts2 := httptest.NewServer(server2)
 	defer ts2.Close()
 
 	dataDir3 := t.TempDir()
-	store3, _ := data.NewDiskStore(dataDir3)
+	st3, _ := createTestStorage(t, dataDir3)
+	store3, _ := data.NewDiskStore(st3)
 	server3 := data.NewServer(store3, signKey.Public(), nil)
 	ts3 := httptest.NewServer(server3)
 	defer ts3.Close()
@@ -460,9 +475,9 @@ func TestReplicationRepair(t *testing.T) {
 func TestReadAhead(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -496,7 +511,8 @@ func TestReadAhead(t *testing.T) {
 
 	// 2. Setup Data Node with Tracking
 	dataDir := t.TempDir()
-	dataStore, _ := data.NewDiskStore(dataDir)
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
 	realHandler := data.NewServer(dataStore, signKey.Public(), nil)
 
 	requestLog := make([]string, 0)
@@ -581,9 +597,9 @@ func TestReadAhead(t *testing.T) {
 func TestGarbageCollection(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
-	metaKey := make([]byte, 32)
+	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := crypto.GenerateIdentityKey()
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaKey, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -617,7 +633,8 @@ func TestGarbageCollection(t *testing.T) {
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
-	dataStore, _ := data.NewDiskStore(dataDir)
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
 	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()

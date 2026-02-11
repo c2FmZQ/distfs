@@ -35,7 +35,10 @@ The system is designed to scale horizontally, with the following soft limits:
 ### 3.1 The "Trust No One" Model
 *   **Data Privacy:** All file content is encrypted on the Client side using AES-256-GCM before it is sent to any node.
 *   **Metadata Privacy:** Directory names and file names are encrypted. The MetaNode sees the file system as a graph of opaque IDs, not paths like `/home/alice/docs`.
-*   **Node Security:** Leveraging lessons from `skorekeeper`, all data stored on MetaNodes and DataNodes (Raft logs, snapshots, chunk files) is encrypted *at rest* using a **Node-Local Master Key** (AES-GCM). This protects against physical disk theft but does not grant the node access to the E2EE user data.
+*   **Node Security:** Leveraging `github.com/c2FmZQ/storage`, all data stored on MetaNodes and DataNodes (Raft logs, snapshots, chunk files, keys) is encrypted *at rest*.
+    *   **Root Secret:** A `DISTFS_MASTER_KEY` environment variable provides the master passphrase.
+    *   **Master Key:** A `crypto.MasterKey` is derived from this passphrase to decrypt the node-local key store (`data/master.key`).
+    *   **Isolation:** Encryption keys are node-local and never shared across the network.
 *   **Key Rotation:** The encryption key for Raft logs MUST be rotated after every snapshot.
 
 ### 3.2 Key Hierarchy & Cryptography

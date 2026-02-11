@@ -28,7 +28,8 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 **Goal:** Create the unified "dumb" storage layer that stores encrypted blobs.
 
 *   **Step 2.1: Storage Engine**
-    *   **Action:** Implement `Store` interface backed by the local filesystem (`data/chunks/`).
+    *   **Action:** Implement `Store` interface backed by `github.com/c2FmZQ/storage` (`OpenBlobWrite`/`OpenBlobRead`).
+    *   **Action:** Ensure `DISTFS_MASTER_KEY` env var is used to derive the local Master Key.
 *   **Step 2.2: Integrity Scrubber**
     *   **Action:** Implement a background worker that walks the chunk directory.
 *   **Step 2.3: Data API (HTTP/2)**
@@ -40,7 +41,8 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 **Goal:** Port and adapt the distributed consensus engine.
 
 *   **Step 3.1: Raft Infrastructure**
-    *   **Action:** Port `RaftManager`, `EncryptedLogStore`.
+    *   **Action:** Port `RaftManager`, `EncryptedLogStore` using `github.com/c2FmZQ/storage` crypto primitives.
+    *   **Action:** Ensure Raft logs and snapshots are encrypted at rest using the derived Master Key.
 *   **Step 3.2: FSM & Inode Model**
     *   **Action:** Define `Inode` struct.
     *   **Update:** Implement Directory Structure (`Children` map) in FSM.
