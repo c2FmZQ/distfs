@@ -122,6 +122,22 @@ func (fsm *MetadataFSM) GetNodeIDByRaftAddress(addr string) (string, error) {
 	return id, err
 }
 
+func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
+	var node Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &node)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &node, nil
+}
+
 type CommandType uint8
 
 const (
@@ -997,7 +1013,7 @@ func enqueueGC(tx *bolt.Tx, inode *Inode) error {
 	if err := loadInodeWithPages(tx, inode); err != nil {
 		return err
 	}
-
+	
 	// Delete pages if they exist
 	if len(inode.ChunkPages) > 0 {
 		pb := tx.Bucket([]byte("chunk_pages"))
