@@ -390,3 +390,92 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("Internal verification failed: %v", err)
 	}
 }
+
+func TestAccounting(t *testing.T) {
+	node, ts := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create User
+	userID := "acc-user"
+	user := User{ID: userID}
+	userBytes, _ := json.Marshal(user)
+	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	f := node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Create user raft failed: %v", err)
+	}
+	if err, ok := f.Response().(error); ok {
+		t.Fatalf("Create user fsm failed: %v", err)
+	}
+
+	// Helper to check usage
+	checkUsage := func(wantInodes, wantBytes int64) {
+		err := node.FSM.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("users"))
+			v := b.Get([]byte(userID))
+			if v == nil {
+				return fmt.Errorf("user not found")
+			}
+			var u User
+			json.Unmarshal(v, &u)
+			if u.Usage.InodeCount != wantInodes {
+				return fmt.Errorf("inodes: got %d, want %d", u.Usage.InodeCount, wantInodes)
+			}
+			if u.Usage.TotalBytes != wantBytes {
+				return fmt.Errorf("bytes: got %d, want %d", u.Usage.TotalBytes, wantBytes)
+			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
+		}
+	}
+
+	checkUsage(0, 0)
+
+	// 2. Create File
+	inode := Inode{ID: "f1", OwnerID: userID, Size: 100}
+	inodeBytes, _ := json.Marshal(inode)
+	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Create inode raft failed: %v", err)
+	}
+	if err, ok := f.Response().(error); ok {
+		t.Fatalf("Create inode fsm failed: %v", err)
+	}
+
+	checkUsage(1, 100)
+
+	// 3. Update File (Resize)
+	inode.Size = 250
+	inode.Version = 1 // Must match existing version
+	inodeBytes, _ = json.Marshal(inode)
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Update inode raft failed: %v", err)
+	}
+	if err, ok := f.Response().(error); ok {
+		t.Fatalf("Update inode fsm failed: %v", err)
+	}
+
+	checkUsage(1, 250)
+
+	// 4. Delete File
+	cmd = LogCommand{Type: CmdDeleteInode, Data: []byte("f1")}
+	cmdBytes, _ = json.Marshal(cmd)
+	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Delete inode raft failed: %v", err)
+	}
+	if err, ok := f.Response().(error); ok {
+		t.Fatalf("Delete inode fsm failed: %v", err)
+	}
+
+	checkUsage(0, 0)
+}

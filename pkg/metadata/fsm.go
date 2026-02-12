@@ -54,7 +54,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -182,6 +182,7 @@ const (
 	CmdSetAttr         CommandType = 13
 	CmdLink            CommandType = 14
 	CmdGCRemove        CommandType = 15
+	CmdInitSecret      CommandType = 16
 )
 
 type LogCommand struct {
@@ -258,6 +259,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyLink(cmd.Data)
 	case CmdGCRemove:
 		return fsm.applyGCRemove(cmd.Data)
+	case CmdInitSecret:
+		return fsm.applyInitSecret(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -292,7 +295,13 @@ func (fsm *MetadataFSM) applyCreateInode(data []byte) interface{} {
 			return ErrExists
 		}
 		inode.Version = 1
-		return saveInodeWithPages(tx, &inode)
+		if err := saveInodeWithPages(tx, &inode); err != nil {
+			return err
+		}
+		if inode.OwnerID != "" {
+			return updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size))
+		}
+		return nil
 	})
 	if err != nil {
 		return err
@@ -322,10 +331,17 @@ func (fsm *MetadataFSM) applyUpdateInode(data []byte) interface{} {
 		}
 
 		oldPages := existing.ChunkPages
+		diffBytes := int64(inode.Size) - int64(existing.Size)
 
 		inode.Version++
 		if err := saveInodeWithPages(tx, &inode); err != nil {
 			return err
+		}
+
+		if inode.OwnerID != "" && diffBytes != 0 {
+			if err := updateUserUsage(tx, inode.OwnerID, 0, diffBytes); err != nil {
+				return err
+			}
 		}
 
 		// Clean up orphaned pages (pages in old but not in new)
@@ -362,6 +378,11 @@ func (fsm *MetadataFSM) applyDeleteInode(data []byte) interface{} {
 					pb := tx.Bucket([]byte("chunk_pages"))
 					for _, pid := range inode.ChunkPages {
 						pb.Delete([]byte(pid))
+					}
+				}
+				if inode.OwnerID != "" {
+					if err := updateUserUsage(tx, inode.OwnerID, -1, -int64(inode.Size)); err != nil {
+						return err
 					}
 				}
 			}
@@ -596,7 +617,9 @@ func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
 		if req.GID != nil {
 			inode.GID = *req.GID
 		}
+		diffBytes := int64(0)
 		if req.Size != nil {
+			diffBytes = int64(*req.Size) - int64(inode.Size)
 			inode.Size = *req.Size
 		}
 		if req.MTime != nil {
@@ -606,7 +629,13 @@ func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
 		inode.CTime = time.Now().UnixNano()
 		inode.Version++
 
-		return saveInodeWithPages(tx, &inode)
+		if err := saveInodeWithPages(tx, &inode); err != nil {
+			return err
+		}
+		if inode.OwnerID != "" && diffBytes != 0 {
+			return updateUserUsage(tx, inode.OwnerID, 0, diffBytes)
+		}
+		return nil
 	})
 }
 
@@ -665,6 +694,11 @@ func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
 					if target.NLink == 0 {
 						b.Delete([]byte(target.ID))
 						enqueueGC(tx, &target)
+						if target.OwnerID != "" {
+							if err := updateUserUsage(tx, target.OwnerID, -1, -int64(target.Size)); err != nil {
+								return err
+							}
+						}
 					} else {
 						if err := saveInodeWithPages(tx, &target); err != nil {
 							return err
@@ -810,6 +844,11 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 			ib.Delete([]byte(child.ID))
 			// Cleanup chunks (Garbage Collection)
 			enqueueGC(tx, &child)
+			if child.OwnerID != "" {
+				if err := updateUserUsage(tx, child.OwnerID, -1, -int64(child.Size)); err != nil {
+					return err
+				}
+			}
 		} else {
 			if err := saveInodeWithPages(tx, &child); err != nil {
 				return err
@@ -881,6 +920,31 @@ func (fsm *MetadataFSM) applyGCRemove(data []byte) interface{} {
 		b := tx.Bucket([]byte("garbage_collection"))
 		return b.Delete([]byte(chunkID))
 	})
+}
+
+func (fsm *MetadataFSM) applyInitSecret(data []byte) interface{} {
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+		if b.Get([]byte("cluster_secret")) != nil {
+			return ErrExists
+		}
+		return b.Put([]byte("cluster_secret"), data)
+	})
+}
+
+func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
+	var secret []byte
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+		v := b.Get([]byte("cluster_secret"))
+		if v == nil {
+			return ErrNotFound
+		}
+		secret = make([]byte, len(v))
+		copy(secret, v)
+		return nil
+	})
+	return secret, err
 }
 
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
@@ -1096,4 +1160,26 @@ func enqueueGC(tx *bolt.Tx, inode *Inode) error {
 		}
 	}
 	return nil
+}
+
+func updateUserUsage(tx *bolt.Tx, userID string, deltaInodes int64, deltaBytes int64) error {
+	b := tx.Bucket([]byte("users"))
+	v := b.Get([]byte(userID))
+	if v == nil {
+		return nil
+	}
+
+	var user User
+	if err := json.Unmarshal(v, &user); err != nil {
+		return err
+	}
+
+	user.Usage.InodeCount += deltaInodes
+	user.Usage.TotalBytes += deltaBytes
+
+	encoded, err := json.Marshal(user)
+	if err != nil {
+		return err
+	}
+	return b.Put([]byte(userID), encoded)
 }

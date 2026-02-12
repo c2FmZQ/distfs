@@ -38,11 +38,23 @@ type ChunkPage struct {
 	Chunks []ChunkEntry `json:"chunks"`
 }
 
+type UserUsage struct {
+	InodeCount int64 `json:"inodes"`
+	TotalBytes int64 `json:"bytes"`
+}
+
+type UserQuota struct {
+	MaxInodes int64 `json:"max_inodes"`
+	MaxBytes  int64 `json:"max_bytes"`
+}
+
 type User struct {
-	ID      string `json:"id"` // HMAC(email)
-	UID     uint32 `json:"uid"`
-	SignKey []byte `json:"sign_key"`
-	EncKey  []byte `json:"enc_key"`
+	ID      string    `json:"id"` // HMAC(email)
+	UID     uint32    `json:"uid"`
+	SignKey []byte    `json:"sign_key"`
+	EncKey  []byte    `json:"enc_key"`
+	Usage   UserUsage `json:"usage"`
+	Quota   UserQuota `json:"quota"`
 }
 
 type RegisterUserRequest struct {
