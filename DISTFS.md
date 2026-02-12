@@ -164,6 +164,8 @@ Communication uses JSON over HTTP/2 (or gRPC).
 *   **Identity Registry:**
     *   **Users:** `UUID -> Public Keys`.
     *   **Groups:** `UUID -> Public Keys`.
+*   **User Registration:**
+    *   **Federated Identity:** Users must register via `POST /v1/user/register` providing a valid OIDC ID Token (JWT). The system validates the token against the configured Identity Provider (IdP) and maps the `email` claim to a new User ID. Open registration is NOT supported.
 *   **Authentication:**
     *   **Client Auth:** Client authenticates with Metadata Server via Sealed Tokens (signed/encrypted) proving identity.
     *   **Chunk Access:** Client authenticates with Data Nodes via Signed Capability Tokens issued by Metadata Server.

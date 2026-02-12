@@ -89,6 +89,7 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 *   **Step 6.1: Identity Registry**
     *   **Action:** Implement `User` and `Group` in the Raft FSM.
+    *   **Action:** Implement `POST /v1/user/register` (OIDC) and remove `POST /v1/user` (Raw) to enforce federated identity.
 *   **Step 6.2: Authentication**
     *   **Action:** Implement Client-Side Auth (Sealed Tokens) middleware.
 

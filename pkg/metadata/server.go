@@ -144,13 +144,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if strings.HasPrefix(r.URL.Path, "/api/cluster") {
 		if !s.checkRaftSecret(r) {
-			// Check query param or form value for browser access?
-			// For simplicity, we require header or maybe "secret" query param.
-			secret := r.URL.Query().Get("secret")
-			if secret == "" || secret != s.raftSecret {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
 		}
 		s.handleClusterDashboard(w, r)
 		return
@@ -182,6 +177,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Path == "/v1/cluster/status" && r.Method == http.MethodGet {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		s.handleClusterStatus(w, r)
 		return
 	}
@@ -218,9 +217,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
 		s.handleIssueToken(w, r)
-		return
-	} else if r.URL.Path == "/v1/user" && r.Method == http.MethodPost {
-		s.handleCreateUser(w, r)
 		return
 	} else if r.URL.Path == "/v1/group" && r.Method == http.MethodPost {
 		s.handleCreateGroup(w, r)
@@ -716,10 +712,6 @@ func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id st
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 	s.applyCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
-}
-
-func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdCreateUser, 1024*1024, http.StatusCreated)
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
