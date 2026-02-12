@@ -45,6 +45,7 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Ensure Raft logs and snapshots are encrypted at rest using the derived Master Key.
 *   **Step 3.2: FSM & Inode Model**
     *   **Action:** Define `Inode` struct.
+    *   **Action:** Implement `ClusterSecret` generation (Bootstrap) and storage in FSM.
     *   **Update:** Implement Directory Structure (`Children` map) in FSM.
 *   **Step 3.3: LinkSnapshotStore**
     *   **Action:** Port/Adapt Snapshot logic (`MetadataSnapshot`).
@@ -90,6 +91,7 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 6.1: Identity Registry**
     *   **Action:** Implement `User` and `Group` in the Raft FSM.
     *   **Action:** Implement `POST /v1/user/register` (OIDC) and remove `POST /v1/user` (Raw) to enforce federated identity.
+    *   **Action:** Implement "Dark Registry": remove `Name` field from `User` struct and use `HMAC(email)` as User ID. Implement `ClusterSecret` logic in API handler.
 *   **Step 6.2: Authentication**
     *   **Action:** Implement Client-Side Auth (Sealed Tokens) middleware.
 
@@ -137,11 +139,19 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 9.4: Cluster Management API & Dashboard**
     *   **Action:** Implement `RaftSecret` middleware protection.
     *   **Action:** Implement `POST /api/cluster/join` (Add Node) and `POST /api/cluster/remove`.
-    *   **Action:** Implement `GET /api/cluster` (Dashboard HTML/JSON).
+    *   **Action:** Implement `GET /api/cluster` (Dashboard HTML/JSON) using Vanilla JS/CSS for the frontend.
+    *   **Action:** Implement "Blind Lookup" API to resolve Emails to User Hashes.
 *   **Step 9.5: Request Forwarding**
     *   **Action:** Forward write requests from Follower to Leader via Internal Cluster API.
 *   **Step 9.6: Key Rotation**
     *   **Action:** Implement Log Key Rotation on Snapshot.
+*   **Step 9.7: Accounting Engine**
+    *   **Action:** Update FSM `User` struct with `Usage` stats (Atomic Counters).
+    *   **Action:** Add hooks to Inode/Chunk ops to update usage stats in real-time.
+*   **Step 9.8: Quota Enforcement**
+    *   **Action:** Implement `Quota` struct in User model.
+    *   **Action:** Implement Quota Templates (default limits).
+    *   **Action:** Enforce quotas in `CreateInode` and `AllocateChunk` handlers.
 
 ---
 

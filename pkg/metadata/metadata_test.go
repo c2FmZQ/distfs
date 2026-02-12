@@ -479,3 +479,163 @@ func TestAccounting(t *testing.T) {
 
 	checkUsage(0, 0)
 }
+
+func TestDashboardAPI(t *testing.T) {
+	node, ts := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create a User to populate users table
+	user := User{ID: "test-dash-user"}
+	userBytes, _ := json.Marshal(user)
+	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Create user failed: %v", err)
+	}
+
+	// 2. Fetch Users
+	req, _ := http.NewRequest("GET", ts.URL+"/api/cluster/users", nil)
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /api/cluster/users status %d", resp.StatusCode)
+	}
+	var users []User
+	json.NewDecoder(resp.Body).Decode(&users)
+	if len(users) != 1 || users[0].ID != "test-dash-user" {
+		t.Errorf("Unexpected users list: %v", users)
+	}
+
+	// 3. Register Node & Fetch Nodes
+	n := Node{ID: "node1", Status: NodeStatusActive, Address: "1.2.3.4"}
+	nodeBytes, _ := json.Marshal(n)
+	cmd = LogCommand{Type: CmdRegisterNode, Data: nodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Register node failed: %v", err)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/cluster/nodes", nil)
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("GET /api/cluster/nodes status %d", resp.StatusCode)
+	}
+	var nodes []Node
+	json.NewDecoder(resp.Body).Decode(&nodes)
+	if len(nodes) < 1 {
+		t.Errorf("Unexpected nodes list: %v", nodes)
+	}
+
+	// 4. Test Lookup
+	secret := make([]byte, 32)
+	cmd = LogCommand{Type: CmdInitSecret, Data: secret}
+	cmdBytes, _ = json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Init secret failed: %v", err)
+	}
+
+	reqBody := map[string]string{"email": "alice@example.com"}
+	body, _ := json.Marshal(reqBody)
+	req, _ = http.NewRequest("POST", ts.URL+"/api/cluster/lookup", bytes.NewReader(body))
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("POST /api/cluster/lookup status %d", resp.StatusCode)
+	}
+	var res map[string]string
+	json.NewDecoder(resp.Body).Decode(&res)
+	if res["id"] == "" {
+		t.Error("Lookup returned empty ID")
+	}
+}
+
+func TestQuotaEnforcement(t *testing.T) {
+	node, ts := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	userID := "quota-user"
+	user := User{ID: userID}
+	userBytes, _ := json.Marshal(user)
+	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Create user failed: %v", err)
+	}
+
+	// 1. Set Quota (1 Inode, 500 Bytes)
+	maxInodes := int64(1)
+	maxBytes := int64(500)
+	req := SetUserQuotaRequest{
+		UserID:    userID,
+		MaxBytes:  &maxBytes,
+		MaxInodes: &maxInodes,
+	}
+	reqBytes, _ := json.Marshal(req)
+	cmd = LogCommand{Type: CmdSetUserQuota, Data: reqBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Set quota failed: %v", err)
+	}
+
+	// 2. Create File 1 (OK)
+	inode := Inode{ID: "f1", OwnerID: userID, Size: 100}
+	inodeBytes, _ := json.Marshal(inode)
+	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Create file 1 failed: %v", err)
+	}
+
+	// 3. Create File 2 (Fail: Inode Quota)
+	inode2 := Inode{ID: "f2", OwnerID: userID, Size: 100}
+	inodeBytes, _ = json.Marshal(inode2)
+	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	f := node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err, ok := f.Response().(error); !ok || err.Error() != "inode quota exceeded" {
+		t.Errorf("Expected inode quota exceeded, got %v", f.Response())
+	}
+
+	// 4. Update File 1 (Resize to 400 - OK)
+	inode.Size = 400
+	inode.Version = 1
+	inodeBytes, _ = json.Marshal(inode)
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err, ok := node.Raft.Apply(cmdBytes, 5*time.Second).Response().(error); ok && err != nil {
+		t.Fatal(err)
+	}
+
+	// 5. Update File 1 (Resize to 600 - Fail: Storage Quota)
+	inode.Size = 600
+	inode.Version = 2
+	inodeBytes, _ = json.Marshal(inode)
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmdBytes, _ = json.Marshal(cmd)
+	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err, ok := f.Response().(error); !ok || err.Error() != "storage quota exceeded" {
+		t.Errorf("Expected storage quota exceeded, got %v", f.Response())
+	}
+}

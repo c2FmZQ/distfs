@@ -1,0 +1,92 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DistFS Cluster Manager</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <header>
+        <h1>DistFS Manager</h1>
+        <div id="connection-status" class="status-indicator">Disconnected</div>
+    </header>
+
+    <nav>
+        <button onclick="showTab('overview')" class="active">Overview</button>
+        <button onclick="showTab('users')">Users</button>
+        <button onclick="showTab('nodes')">Nodes</button>
+        <button onclick="showTab('tools')">Tools</button>
+    </nav>
+
+    <main>
+        <div id="overview" class="tab-content active">
+            <h2>Cluster Status</h2>
+            <div class="card-grid">
+                <div class="card">
+                    <h3>State</h3>
+                    <div id="raft-state">Loading...</div>
+                </div>
+                <div class="card">
+                    <h3>Leader</h3>
+                    <div id="raft-leader">Loading...</div>
+                </div>
+                <div class="card">
+                    <h3>Commit Index</h3>
+                    <div id="raft-commit">Loading...</div>
+                </div>
+            </div>
+        </div>
+
+        <div id="users" class="tab-content">
+            <h2>User Registry (Shadow)</h2>
+            <p class="desc">Anonymized view of user accounting.</p>
+            <table>
+                <thead>
+                    <tr>
+                        <th>User Hash (ID)</th>
+                        <th>Inodes</th>
+                        <th>Storage Used</th>
+                        <th>Quota</th>
+                    </tr>
+                </thead>
+                <tbody id="users-table">
+                    <tr><td colspan="4">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div id="nodes" class="tab-content">
+            <h2>Storage Nodes</h2>
+            <table>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Address</th>
+                        <th>Status</th>
+                        <th>Last Heartbeat</th>
+                    </tr>
+                </thead>
+                <tbody id="nodes-table">
+                    <tr><td colspan="4">Loading...</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div id="tools" class="tab-content">
+            <h2>Admin Tools</h2>
+            <div class="card">
+                <h3>Blind Lookup</h3>
+                <p>Resolve a plaintext email to its system User ID (Hash).</p>
+                <div class="form-group">
+                    <input type="email" id="lookup-email" placeholder="user@example.com">
+                    <button onclick="performLookup()">Resolve</button>
+                </div>
+                <div id="lookup-result" class="result-box"></div>
+            </div>
+        </div>
+    </main>
+
+    <script src="app.js"></script>
+</body>
+</html>

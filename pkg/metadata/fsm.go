@@ -183,6 +183,7 @@ const (
 	CmdLink            CommandType = 14
 	CmdGCRemove        CommandType = 15
 	CmdInitSecret      CommandType = 16
+	CmdSetUserQuota    CommandType = 17
 )
 
 type LogCommand struct {
@@ -224,6 +225,12 @@ type LinkRequest struct {
 	TargetID string `json:"target_id"`
 }
 
+type SetUserQuotaRequest struct {
+	UserID    string `json:"user_id"`
+	MaxBytes  *int64 `json:"max_bytes,omitempty"`
+	MaxInodes *int64 `json:"max_inodes,omitempty"`
+}
+
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var cmd LogCommand
 	if err := json.Unmarshal(l.Data, &cmd); err != nil {
@@ -261,6 +268,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyGCRemove(cmd.Data)
 	case CmdInitSecret:
 		return fsm.applyInitSecret(cmd.Data)
+	case CmdSetUserQuota:
+		return fsm.applySetUserQuota(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -294,6 +303,13 @@ func (fsm *MetadataFSM) applyCreateInode(data []byte) interface{} {
 		if b.Get([]byte(inode.ID)) != nil {
 			return ErrExists
 		}
+
+		if inode.OwnerID != "" {
+			if err := checkQuota(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+				return err
+			}
+		}
+
 		inode.Version = 1
 		if err := saveInodeWithPages(tx, &inode); err != nil {
 			return err
@@ -332,6 +348,12 @@ func (fsm *MetadataFSM) applyUpdateInode(data []byte) interface{} {
 
 		oldPages := existing.ChunkPages
 		diffBytes := int64(inode.Size) - int64(existing.Size)
+
+		if inode.OwnerID != "" && diffBytes > 0 {
+			if err := checkQuota(tx, inode.OwnerID, 0, diffBytes); err != nil {
+				return err
+			}
+		}
 
 		inode.Version++
 		if err := saveInodeWithPages(tx, &inode); err != nil {
@@ -624,6 +646,12 @@ func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
 		}
 		if req.MTime != nil {
 			inode.MTime = *req.MTime
+		}
+
+		if inode.OwnerID != "" && diffBytes > 0 {
+			if err := checkQuota(tx, inode.OwnerID, 0, diffBytes); err != nil {
+				return err
+			}
 		}
 
 		inode.CTime = time.Now().UnixNano()
@@ -1182,4 +1210,65 @@ func updateUserUsage(tx *bolt.Tx, userID string, deltaInodes int64, deltaBytes i
 		return err
 	}
 	return b.Put([]byte(userID), encoded)
+}
+
+func checkQuota(tx *bolt.Tx, userID string, deltaInodes int64, deltaBytes int64) error {
+	b := tx.Bucket([]byte("users"))
+	v := b.Get([]byte(userID))
+	if v == nil {
+		return nil
+	}
+	var user User
+	if err := json.Unmarshal(v, &user); err != nil {
+		return err
+	}
+
+	if deltaInodes > 0 && user.Quota.MaxInodes > 0 {
+		if user.Usage.InodeCount+deltaInodes > user.Quota.MaxInodes {
+			return fmt.Errorf("inode quota exceeded")
+		}
+	}
+
+	if deltaBytes > 0 && user.Quota.MaxBytes > 0 {
+		if user.Usage.TotalBytes+deltaBytes > user.Quota.MaxBytes {
+			return fmt.Errorf("storage quota exceeded")
+		}
+	}
+	return nil
+}
+
+func (fsm *MetadataFSM) applySetUserQuota(data []byte) interface{} {
+	var req SetUserQuotaRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("users"))
+		v := b.Get([]byte(req.UserID))
+		if v == nil {
+			return ErrNotFound
+		}
+		var user User
+		if err := json.Unmarshal(v, &user); err != nil {
+			return err
+		}
+
+		if req.MaxBytes != nil {
+			user.Quota.MaxBytes = *req.MaxBytes
+		}
+		if req.MaxInodes != nil {
+			user.Quota.MaxInodes = *req.MaxInodes
+		}
+
+		encoded, err := json.Marshal(user)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(req.UserID), encoded)
+	})
+	if err != nil {
+		return err
+	}
+	return nil
 }

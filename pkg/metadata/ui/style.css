@@ -1,0 +1,134 @@
+:root {
+    --bg: #1a1a1a;
+    --card-bg: #2d2d2d;
+    --text: #e0e0e0;
+    --accent: #007bff;
+    --accent-hover: #0056b3;
+    --border: #404040;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    margin: 0;
+    padding: 0;
+}
+
+header {
+    background: var(--card-bg);
+    padding: 1rem 2rem;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--border);
+}
+
+nav {
+    background: #252525;
+    padding: 0.5rem 2rem;
+    border-bottom: 1px solid var(--border);
+}
+
+nav button {
+    background: none;
+    border: none;
+    color: #888;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    font-size: 1rem;
+}
+
+nav button.active {
+    color: var(--text);
+    border-bottom: 2px solid var(--accent);
+}
+
+main {
+    padding: 2rem;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.tab-content {
+    display: none;
+}
+
+.tab-content.active {
+    display: block;
+}
+
+.card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+    gap: 1rem;
+}
+
+.card {
+    background: var(--card-bg);
+    padding: 1.5rem;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+
+table {
+    width: 100%;
+    border-collapse: collapse;
+    background: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+th, td {
+    padding: 1rem;
+    text-align: left;
+    border-bottom: 1px solid var(--border);
+}
+
+th {
+    background: #333;
+    font-weight: 600;
+}
+
+.form-group {
+    display: flex;
+    gap: 1rem;
+    margin: 1rem 0;
+}
+
+input {
+    flex: 1;
+    padding: 0.5rem;
+    background: #111;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 4px;
+}
+
+button {
+    background: var(--accent);
+    color: white;
+    border: none;
+    padding: 0.5rem 1rem;
+    border-radius: 4px;
+    cursor: pointer;
+}
+
+button:hover {
+    background: var(--accent-hover);
+}
+
+.result-box {
+    margin-top: 1rem;
+    padding: 1rem;
+    background: #111;
+    border-radius: 4px;
+    font-family: monospace;
+    word-break: break-all;
+    min-height: 1.5rem;
+}
+
+.desc {
+    color: #888;
+    margin-bottom: 1rem;
+}

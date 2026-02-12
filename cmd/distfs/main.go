@@ -164,7 +164,6 @@ func cmdRegister(args []string) {
 		"jwt":      *jwt,
 		"sign_key": sk.Public(),
 		"enc_key":  dk.EncapsulationKey().Bytes(),
-		"name":     conf.UserID,
 	}
 	body, _ := json.Marshal(req)
 
@@ -179,7 +178,19 @@ func cmdRegister(args []string) {
 		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
 	}
 
-	fmt.Println("User registered successfully.")
+	var user struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		log.Fatalf("failed to decode response: %v", err)
+	}
+
+	conf.UserID = user.ID
+	if err := config.Save(*conf, config.DefaultPath()); err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("User registered successfully. ID: %s\n", user.ID)
 }
 
 func loadClient() *client.Client {

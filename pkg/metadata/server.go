@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
+	"embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -42,6 +43,9 @@ import (
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
+
+//go:embed ui/*
+var uiAssets embed.FS
 
 type Server struct {
 	raft    *raft.Raft

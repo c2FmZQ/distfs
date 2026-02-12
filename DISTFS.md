@@ -45,12 +45,20 @@ The system is designed to scale horizontally, with the following soft limits:
 Users control their identity via an asymmetric key pair using **Post-Quantum Cryptography (PQC)** algorithms (e.g., CRYSTALS-Kyber for encapsulation, CRYSTALS-Dilithium for signatures) to future-proof against quantum threats.
 
 1.  **User Identity Key:** Public key maps to the User ID. Private key signs requests.
-    *   **User ID:** A random UUID assigned by the Cluster Leader upon first registration. This decouples the permanent User ID from the rotateable cryptographic keys.
+    *   **User ID:** Derived from the user's email using a cluster-wide HMAC to ensure privacy.
 2.  **Group Identity Key:** A persistent Public/Private key pair representing a Group. The Group Private Key is shared among group members via the Group Lockbox.
 3.  **File Key (FK):** A random symmetric key generated for *each* file. Encrypts the file content.
 4.  **Lockbox:**
     *   **File Lockbox:** Stores the `File Key` encrypted for the Owner and/or the assigned Group.
     *   **Group Lockbox:** Stores the `Group Private Key` encrypted for each member's Public Key.
+
+### 3.3 Privacy & Identity (The "Dark Registry")
+To minimize PII exposure, the metadata layer operates on opaque identifiers.
+*   **Transient PII:** The server processes user emails (e.g., during OIDC registration) only momentarily in memory.
+*   **Hashed Identifiers:** The persistent User ID is `HMAC-SHA256(Email, ClusterSecret)`.
+    *   **Cluster Secret:** A high-entropy random key generated at cluster bootstrap, stored securely in the Raft FSM, and shared among nodes via mTLS. It never leaves the cluster.
+    *   **Implication:** Logs, snapshots, and disk storage contain no emails or names.
+*   **No Names:** The FSM does **not** store user names (e.g., "Alice"). Users who wish to share their display name must store it in an encrypted file (e.g., `/.profile`) within the file system itself.
 
 ---
 
@@ -60,11 +68,17 @@ This layer reuses the distributed consensus architecture from `skorekeeper`.
 
 ### 4.1 State Machine (FSM)
 The Raft FSM stores the "Inode" table and Directory Structure.
+*   **User Structure:**
+    *   `ID` (HMAC Hash)
+    *   `UID` (POSIX UID)
+    *   `Keys` (Sign/Enc)
+    *   `Usage` (Struct: `TotalBytes`, `InodeCount`)
+    *   `Quota` (Struct: `MaxBytes`, `MaxInodes`)
 *   **Inode Structure:**
     *   `ID` (UUID)
     *   `Type` (File | Directory)
     *   `ParentID` (UUID)
-    *   `OwnerID` (UUID)
+    *   `OwnerID` (HMAC Hash)
     *   `GroupID` (UUID)
     *   `Mode` (Unix Permission Bits, e.g., 0755)
     *   `Size` (File size in bytes)
@@ -162,10 +176,10 @@ Communication uses JSON over HTTP/2 (or gRPC).
 
 ### 6.3 Identity & Authentication
 *   **Identity Registry:**
-    *   **Users:** `UUID -> Public Keys`.
+    *   **Users:** `HMAC(Email) -> Public Keys`. No PII (names/emails) stored.
     *   **Groups:** `UUID -> Public Keys`.
 *   **User Registration:**
-    *   **Federated Identity:** Users must register via `POST /v1/user/register` providing a valid OIDC ID Token (JWT). The system validates the token against the configured Identity Provider (IdP) and maps the `email` claim to a new User ID. Open registration is NOT supported.
+    *   **Federated Identity:** Users must register via `POST /v1/user/register` providing a valid OIDC ID Token (JWT). The server calculates `HMAC(email)` using the internal Cluster Secret and registers the keys against this hash. The email is discarded immediately.
 *   **Authentication:**
     *   **Client Auth:** Client authenticates with Metadata Server via Sealed Tokens (signed/encrypted) proving identity.
     *   **Chunk Access:** Client authenticates with Data Nodes via Signed Capability Tokens issued by Metadata Server.
@@ -197,12 +211,17 @@ To solve the initial trust problem, new nodes use **Trust On First Use (TOFU)**:
 4.  **Strict Mode:** Upon initialization, the node permanently switches to **Strict Mode**, enforcing the authorized key list for all future connections.
 
 ### 7.4 Cluster Management Dashboard
-The `/api/cluster` endpoint provides a dashboard for operators.
-*   **Access Control:** Protected by a **Raft Secret** (configured via `--raft-secret`). This secret acts as a password for administrative actions.
-*   **Capabilities:**
-    *   View Cluster Status (Leader, Peers, Versions).
-    *   **Add Node:** Join new nodes by specifying their Address and Public Key (or relying on TOFU).
-    *   **Remove Node:** Decommission failed nodes.
+The `/api/cluster` endpoint provides a web-based dashboard for operators, built with **Vanilla JS and CSS** (no external frontend dependencies) to ensure lightweight, secure deployment.
+
+*   **Access Control:** Protected by the `X-Raft-Secret` header.
+*   **User Management (Shadow Dashboard):**
+    *   **Accounting:** Real-time view of storage usage (`TotalBytes`, `InodeCount`) per anonymized User ID.
+    *   **Blind Lookup:** An admin tool to resolve a plaintext email to its HMAC Hash (using the server's internal secret) to locate specific user records for support.
+    *   **Quota Management:**
+        *   **Templates:** Operators can define "Quota Templates" (e.g., "Basic", "Pro") with default limits.
+        *   **Enforcement:** The Metadata Layer rejects writes that exceed the user's assigned quota.
+*   **Cluster Health:** View Leader status, peer connectivity, and version information.
+*   **Node Operations:** Add/Remove nodes (Join/Drain).
 
 ### 7.5 Request Forwarding
 *   Write requests sent to Follower nodes are automatically forwarded to the Leader via the Internal Cluster API.
