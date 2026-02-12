@@ -46,7 +46,6 @@ func main() {
 		clusterAddr      = flag.String("cluster-addr", "127.0.0.1:9090", "Internal Cluster API address")
 		clusterAdvertise = flag.String("cluster-advertise", "", "Public Cluster API address (host:port)")
 		dataDir          = flag.String("data-dir", "data", "Directory for storage")
-		masterKey        = flag.String("master-key", "", "Master passphrase (overrides env)")
 		bootstrap        = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
 		jwksURL          = flag.String("jwks-url", "", "JWKS URL for auth")
 		raftSecret       = flag.String("raft-secret", "", "Shared secret for cluster operations")
@@ -65,12 +64,9 @@ func main() {
 	}
 
 	// 0. Initialize Encryption
-	passphrase := *masterKey
+	passphrase := os.Getenv("DISTFS_MASTER_KEY")
 	if passphrase == "" {
-		passphrase = os.Getenv("DISTFS_MASTER_KEY")
-	}
-	if passphrase == "" {
-		log.Fatal("-master-key or DISTFS_MASTER_KEY environment variable is required")
+		log.Fatal("DISTFS_MASTER_KEY environment variable is required")
 	}
 
 	// Load or Create Master Key
