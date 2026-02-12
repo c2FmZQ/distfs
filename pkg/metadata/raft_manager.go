@@ -17,6 +17,7 @@ package metadata
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"fmt"
 	"io"
@@ -32,11 +33,13 @@ import (
 )
 
 type RaftNode struct {
-	Raft      *raft.Raft
-	FSM       *MetadataFSM
-	Transport raft.Transport
-	LogStore  *raftboltdb.BoltStore
-	Storage   *storage.Storage
+	Raft            *raft.Raft
+	FSM             *MetadataFSM
+	Transport       raft.Transport
+	LogStore        *raftboltdb.BoltStore
+	Storage         *storage.Storage
+	ClientTLSConfig *tls.Config
+	ServerTLSConfig *tls.Config
 }
 
 func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *crypto.IdentityKey) (*RaftNode, error) {
@@ -103,6 +106,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	}
 
 	tlsConfig := NewServerTLSConfig(cert, verifyPeer)
+	clientTLSConfig := NewClientTLSConfig(cert, verifyPeer)
 
 	var advertise net.Addr
 	if advertiseAddr != "" {
@@ -165,7 +169,15 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 		return nil, fmt.Errorf("new raft: %w", err)
 	}
 
-	return &RaftNode{Raft: r, FSM: fsm, Transport: transport, LogStore: boltStore, Storage: st}, nil
+	return &RaftNode{
+		Raft:            r,
+		FSM:             fsm,
+		Transport:       transport,
+		LogStore:        boltStore,
+		Storage:         st,
+		ClientTLSConfig: clientTLSConfig,
+		ServerTLSConfig: tlsConfig,
+	}, nil
 }
 
 func (n *RaftNode) Shutdown() error {

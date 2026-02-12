@@ -37,10 +37,16 @@ type Server struct {
 	store      Store
 	metaPubKey []byte
 	validator  Validator
+	client     *http.Client
 }
 
 func NewServer(store Store, metaPubKey []byte, validator Validator) *Server {
-	return &Server{store: store, metaPubKey: metaPubKey, validator: validator}
+	return &Server{
+		store:      store,
+		metaPubKey: metaPubKey,
+		validator:  validator,
+		client:     &http.Client{Timeout: 10 * time.Second},
+	}
 }
 
 // ServeHTTP needs a slightly better router
@@ -252,7 +258,7 @@ func (s *Server) replicate(id, target, remaining, token string) error {
 		req.Header.Set("Authorization", token)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := s.client.Do(req)
 	if err != nil {
 		return err
 	}

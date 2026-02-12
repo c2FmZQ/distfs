@@ -76,16 +76,22 @@ func NewServerTLSConfig(cert *tls.Certificate, verifyPeer func(rawCerts [][]byte
 }
 
 // NewClientTLSConfig creates a TLS config for the client (mTLS).
-func NewClientTLSConfig(cert *tls.Certificate) *tls.Config {
-	return &tls.Config{
-		Certificates:       []tls.Certificate{*cert},
-		InsecureSkipVerify: true, // We verify the peer key manually, not the CA chain (since self-signed)
-		VerifyPeerCertificate: func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			// In strict mode, we'd check against NodeMeta.
-			// For now, we trust connection if we trust the key.
-			// The caller (Transport) should probably handle this or we inject logic here.
-			return nil
-		},
-		MinVersion: tls.VersionTLS13,
+// It accepts an optional verifyPeer callback. If nil, it performs no verification (INSECURE).
+func NewClientTLSConfig(cert *tls.Certificate, verifyPeer func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error) *tls.Config {
+	config := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+		MinVersion:   tls.VersionTLS13,
 	}
+
+	if verifyPeer != nil {
+		config.InsecureSkipVerify = true // Skip standard verification (hostname/CA), rely on verifyPeer
+		config.VerifyPeerCertificate = verifyPeer
+	} else {
+		// Default secure behavior: strict CA/hostname checking.
+		// Since we use self-signed certs without a CA pool in this config, this will likely fail unless RootCAs is set.
+		// For DistFS without explicit verifier, we probably want strict.
+		// But let's leave default behavior (InsecureSkipVerify=false).
+	}
+
+	return config
 }

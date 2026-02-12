@@ -75,271 +75,293 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
 		t.Fatalf("Node did not become leader")
 	}
 
-	server := NewServer(node.Raft, node.FSM, "", nil, nil, "")
-	ts := httptest.NewServer(server)
-	return node, ts
-}
-
-func TestMetadataCluster(t *testing.T) {
-	node, ts := setupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
-
-	// Test Create Inode
-	inode := Inode{
-		ID:      "inode-1",
-		OwnerID: "user-1",
-		Type:    FileType,
+		server := NewServer(node.Raft, node.FSM, "", nil, nil, "testsecret", nil)
+		ts := httptest.NewServer(server)
+		return node, ts
 	}
-	body, _ := json.Marshal(inode)
-
-	resp, err := http.Post(ts.URL+"/v1/meta/inode", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(resp.Body)
-		t.Errorf("POST status %d: %s", resp.StatusCode, body)
-	}
-
-	// Test Get Inode
-	resp, err = http.Get(ts.URL + "/v1/meta/inode/inode-1")
-	if err != nil {
-		t.Fatalf("GET failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GET status %d", resp.StatusCode)
-	}
-
-	var got Inode
-	json.NewDecoder(resp.Body).Decode(&got)
-	if got.ID != "inode-1" {
-		t.Errorf("GET ID mismatch")
-	}
-
-	// Test Delete Inode
-	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
-	resp, err = http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("DELETE failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("DELETE status %d", resp.StatusCode)
-	}
-
-	// Verify Deleted
-	resp, err = http.Get(ts.URL + "/v1/meta/inode/inode-1")
-	if err != nil {
-		t.Fatalf("GET failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusNotFound {
-		t.Errorf("Expected 404 after delete, got %d", resp.StatusCode)
-	}
-}
-
-func TestIdentityRegistry(t *testing.T) {
-	node, ts := setupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
-
-	// Create User
-	user := User{ID: "u1", Name: "Alice"}
-	body, _ := json.Marshal(user)
-	resp, err := http.Post(ts.URL+"/v1/user", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("User Create failed: %d", resp.StatusCode)
-	}
-
-	// Create Group
-	group := Group{ID: "g1", OwnerID: "u1"}
-	body, _ = json.Marshal(group)
-	resp, err = http.Post(ts.URL+"/v1/group", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("Group Create failed: %d", resp.StatusCode)
-	}
-
-	// Register Node
-	n := Node{ID: "node-data-1", Status: NodeStatusActive}
-	body, _ = json.Marshal(n)
-	resp, err = http.Post(ts.URL+"/v1/node", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("Node Register failed: %d", resp.StatusCode)
-	}
-}
-
-func TestFSMRestore(t *testing.T) {
-	tmpDir := t.TempDir()
-	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
-	st := storage.New(tmpDir, mk)
-
-	dbPath := filepath.Join(tmpDir, "fsm.bolt")
-	fsm, err := NewMetadataFSM(dbPath, st)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fsm.Close()
-
-	inode := Inode{ID: "restore-test"}
-	data, _ := json.Marshal(inode)
-	resp := fsm.applyCreateInode(data)
-	if err, ok := resp.(error); ok {
-		t.Fatalf("applyCreateInode failed: %v", err)
-	}
-
-	// Snapshot
-	snap, _ := fsm.Snapshot()
-	var buf bytes.Buffer
-	sink := &MockSink{buf: &buf}
-	if err := snap.Persist(sink); err != nil {
-		t.Fatalf("Persist failed: %v", err)
-	}
-
-	// New FSM
-	tmpDir2 := t.TempDir()
-	st2 := storage.New(tmpDir2, mk) // different dir
-	fsm2, err := NewMetadataFSM(filepath.Join(tmpDir2, "fsm2.bolt"), st2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer fsm2.Close()
-
-	// Restore
-	if err := fsm2.Restore(io.NopCloser(&buf)); err != nil {
-		t.Fatalf("Restore failed: %v", err)
-	}
-
-	// Verify fsm2 has data
-	err = fsm2.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte("restore-test"))
-		if v == nil {
-			return fmt.Errorf("key not found")
+	
+	func TestMetadataCluster(t *testing.T) {
+		node, ts := setupCluster(t)
+		defer node.Shutdown()
+		defer ts.Close()
+	
+		// Test Create Inode
+		inode := Inode{
+			ID:      "inode-1",
+			OwnerID: "user-1",
+			Type:    FileType,
 		}
-		return nil
-	})
-	if err != nil {
-		t.Error(err)
-	}
-}
-
-func TestFSM_Errors(t *testing.T) {
-	tmpDir := t.TempDir()
-	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
-	st := storage.New(tmpDir, mk)
-
-	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"), st)
-	defer fsm.Close()
-
-	// Invalid JSON
-	l := &raft.Log{Data: []byte(`{bad`)}
-	if err := fsm.Apply(l); err == nil {
-		t.Error("Expected error on invalid json")
-	}
-
-	// Unknown Command
-	cmd := LogCommand{Type: 99}
-	b, _ := json.Marshal(cmd)
-	l = &raft.Log{Data: b}
-	resp := fsm.Apply(l)
-	if resp == nil {
-		t.Error("Expected error on unknown command")
-	} else if err, ok := resp.(error); !ok || err.Error() != "unknown command" {
-		t.Errorf("Expected 'unknown command', got %v", resp)
-	}
-}
-
-type MockSink struct {
-	buf *bytes.Buffer
-}
-
-func (m *MockSink) Write(p []byte) (int, error) { return m.buf.Write(p) }
-func (m *MockSink) Close() error                { return nil }
-func (m *MockSink) ID() string                  { return "mock" }
-func (m *MockSink) Cancel() error               { return nil }
-
-func TestChunkPagination(t *testing.T) {
-	node, ts := setupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
-
-	// Create Inode with many chunks
-	chunkCount := ChunkPageSize + 50 // 1050
-	manifest := make([]ChunkEntry, chunkCount)
-	for i := 0; i < chunkCount; i++ {
-		manifest[i] = ChunkEntry{ID: fmt.Sprintf("chunk-%d", i), Nodes: []string{"n1"}}
-	}
-
-	inode := Inode{
-		ID:            "paginated-file",
-		Type:          FileType,
-		ChunkManifest: manifest,
-	}
-	body, _ := json.Marshal(inode)
-
-	// POST /v1/meta/inode
-	resp, err := http.Post(ts.URL+"/v1/meta/inode", "application/json", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("POST failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusCreated {
-		t.Errorf("POST status %d", resp.StatusCode)
-	}
-
-	// Verify via API (Transparent Reconstruction)
-	resp, err = http.Get(ts.URL + "/v1/meta/inode/paginated-file")
-	if err != nil {
-		t.Fatalf("GET failed: %v", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Errorf("GET status %d", resp.StatusCode)
-	}
-
-	var got Inode
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
-		t.Fatalf("Decode failed: %v", err)
-	}
-
-	if len(got.ChunkManifest) != chunkCount {
-		t.Errorf("Expected %d chunks, got %d", chunkCount, len(got.ChunkManifest))
-	}
-	if got.ChunkManifest[chunkCount-1].ID != fmt.Sprintf("chunk-%d", chunkCount-1) {
-		t.Errorf("Last chunk ID mismatch")
-	}
-
-	// Verify Internal Storage (BoltDB)
-	// We need to access FSM directly
-	err = node.FSM.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte("paginated-file"))
-		var stored Inode
-		json.Unmarshal(v, &stored)
-
-		if stored.ChunkManifest != nil {
-			return fmt.Errorf("Stored manifest should be nil")
+		body, _ := json.Marshal(inode)
+	
+		req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST failed: %v", err)
 		}
-		if len(stored.ChunkPages) == 0 {
-			return fmt.Errorf("Stored chunk_pages should not be empty")
+		if resp.StatusCode != http.StatusCreated {
+			body, _ := io.ReadAll(resp.Body)
+			t.Errorf("POST status %d: %s", resp.StatusCode, body)
 		}
-
-		// Check pages bucket
-		pb := tx.Bucket([]byte("chunk_pages"))
-		for _, pid := range stored.ChunkPages {
-			if pb.Get([]byte(pid)) == nil {
-				return fmt.Errorf("Page %s not found", pid)
+	
+		// Test Get Inode
+		req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET status %d", resp.StatusCode)
+		}
+	
+		var got Inode
+		json.NewDecoder(resp.Body).Decode(&got)
+		if got.ID != "inode-1" {
+			t.Errorf("GET ID mismatch")
+		}
+	
+		// Test Delete Inode
+		req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("DELETE failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("DELETE status %d", resp.StatusCode)
+		}
+	
+		// Verify Deleted
+		req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusNotFound {
+			t.Errorf("Expected 404 after delete, got %d", resp.StatusCode)
+		}
+	}
+	
+	func TestIdentityRegistry(t *testing.T) {
+		node, ts := setupCluster(t)
+		defer node.Shutdown()
+		defer ts.Close()
+	
+		// Create User
+		user := User{ID: "u1", Name: "Alice"}
+		body, _ := json.Marshal(user)
+		req, _ := http.NewRequest("POST", ts.URL+"/v1/user", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("User Create failed: %d", resp.StatusCode)
+		}
+	
+		// Create Group
+		group := Group{ID: "g1", OwnerID: "u1"}
+		body, _ = json.Marshal(group)
+		req, _ = http.NewRequest("POST", ts.URL+"/v1/group", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("Group Create failed: %d", resp.StatusCode)
+		}
+	
+		// Register Node
+		n := Node{ID: "node-data-1", Status: NodeStatusActive}
+		body, _ = json.Marshal(n)
+		req, _ = http.NewRequest("POST", ts.URL+"/v1/node", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("Node Register failed: %d", resp.StatusCode)
+		}
+	}
+	
+	func TestFSMRestore(t *testing.T) {
+		tmpDir := t.TempDir()
+		mk, _ := storage_crypto.CreateAESMasterKeyForTest()
+		st := storage.New(tmpDir, mk)
+		
+		dbPath := filepath.Join(tmpDir, "fsm.bolt")
+		fsm, err := NewMetadataFSM(dbPath, st)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fsm.Close()
+	
+		inode := Inode{ID: "restore-test"}
+		data, _ := json.Marshal(inode)
+		resp := fsm.applyCreateInode(data)
+		if err, ok := resp.(error); ok {
+			t.Fatalf("applyCreateInode failed: %v", err)
+		}
+	
+		// Snapshot
+		snap, _ := fsm.Snapshot()
+		var buf bytes.Buffer
+		sink := &MockSink{buf: &buf}
+		if err := snap.Persist(sink); err != nil {
+			t.Fatalf("Persist failed: %v", err)
+		}
+	
+		// New FSM
+		tmpDir2 := t.TempDir()
+		st2 := storage.New(tmpDir2, mk) // different dir
+		fsm2, err := NewMetadataFSM(filepath.Join(tmpDir2, "fsm2.bolt"), st2)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer fsm2.Close()
+	
+		// Restore
+		if err := fsm2.Restore(io.NopCloser(&buf)); err != nil {
+			t.Fatalf("Restore failed: %v", err)
+		}
+	
+		// Verify fsm2 has data
+		err = fsm2.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("inodes"))
+			v := b.Get([]byte("restore-test"))
+			if v == nil {
+				return fmt.Errorf("key not found")
 			}
+			return nil
+		})
+		if err != nil {
+			t.Error(err)
 		}
-		return nil
-	})
-	if err != nil {
-		t.Errorf("Internal verification failed: %v", err)
 	}
-}
+	
+	func TestFSM_Errors(t *testing.T) {
+		tmpDir := t.TempDir()
+		mk, _ := storage_crypto.CreateAESMasterKeyForTest()
+		st := storage.New(tmpDir, mk)
+		
+		fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"), st)
+		defer fsm.Close()
+	
+		// Invalid JSON
+		l := &raft.Log{Data: []byte(`{bad`)}
+		if err := fsm.Apply(l); err == nil {
+			t.Error("Expected error on invalid json")
+		}
+	
+		// Unknown Command
+		cmd := LogCommand{Type: 99}
+		b, _ := json.Marshal(cmd)
+		l = &raft.Log{Data: b}
+		resp := fsm.Apply(l)
+		if resp == nil {
+			t.Error("Expected error on unknown command")
+		} else if err, ok := resp.(error); !ok || err.Error() != "unknown command" {
+			t.Errorf("Expected 'unknown command', got %v", resp)
+		}
+	}
+	
+	type MockSink struct {
+		buf *bytes.Buffer
+	}
+	
+	func (m *MockSink) Write(p []byte) (int, error) { return m.buf.Write(p) }
+	func (m *MockSink) Close() error                { return nil }
+	func (m *MockSink) ID() string                  { return "mock" }
+	func (m *MockSink) Cancel() error               { return nil }
+	
+	func TestChunkPagination(t *testing.T) {
+		node, ts := setupCluster(t)
+		defer node.Shutdown()
+		defer ts.Close()
+	
+		// Create Inode with many chunks
+		chunkCount := ChunkPageSize + 50 // 1050
+		manifest := make([]ChunkEntry, chunkCount)
+		for i := 0; i < chunkCount; i++ {
+			manifest[i] = ChunkEntry{ID: fmt.Sprintf("chunk-%d", i), Nodes: []string{"n1"}}
+		}
+	
+		inode := Inode{
+			ID:            "paginated-file",
+			Type:          FileType,
+			ChunkManifest: manifest,
+		}
+		body, _ := json.Marshal(inode)
+	
+		// POST /v1/meta/inode
+		req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("POST failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusCreated {
+			t.Errorf("POST status %d", resp.StatusCode)
+		}
+	
+		// Verify via API (Transparent Reconstruction)
+		req, _ = http.NewRequest("GET", ts.URL + "/v1/meta/inode/paginated-file", nil)
+		req.Header.Set("X-Raft-Secret", "testsecret")
+		resp, err = http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatalf("GET failed: %v", err)
+		}
+		if resp.StatusCode != http.StatusOK {
+			t.Errorf("GET status %d", resp.StatusCode)
+		}
+	
+		var got Inode
+		if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+			t.Fatalf("Decode failed: %v", err)
+		}
+	
+		if len(got.ChunkManifest) != chunkCount {
+			t.Errorf("Expected %d chunks, got %d", chunkCount, len(got.ChunkManifest))
+		}
+		if got.ChunkManifest[chunkCount-1].ID != fmt.Sprintf("chunk-%d", chunkCount-1) {
+			t.Errorf("Last chunk ID mismatch")
+		}
+	
+		// Verify Internal Storage (BoltDB)
+		// We need to access FSM directly
+		err = node.FSM.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("inodes"))
+			v := b.Get([]byte("paginated-file"))
+			var stored Inode
+			json.Unmarshal(v, &stored)
+	
+			if stored.ChunkManifest != nil {
+				return fmt.Errorf("Stored manifest should be nil")
+			}
+			if len(stored.ChunkPages) == 0 {
+				return fmt.Errorf("Stored chunk_pages should not be empty")
+			}
+	
+			// Check pages bucket
+			pb := tx.Bucket([]byte("chunk_pages"))
+			for _, pid := range stored.ChunkPages {
+				if pb.Get([]byte(pid)) == nil {
+					return fmt.Errorf("Page %s not found", pid)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			t.Errorf("Internal verification failed: %v", err)
+		}
+	}

@@ -52,6 +52,10 @@ func NewTLSStreamLayer(bindAddr string, advertise net.Addr, config *tls.Config) 
 func (t *TLSStreamLayer) Dial(address raft.ServerAddress, timeout time.Duration) (net.Conn, error) {
 	dialer := &net.Dialer{Timeout: timeout}
 	clientConfig := t.config.Clone()
+	// InsecureSkipVerify is true because we use self-signed certificates with Ed25519/Kyber keys
+	// that do not necessarily match the dynamic IP addresses in a containerized environment.
+	// Security is enforced by VerifyPeerCertificate which validates the peer's public key
+	// against the authorized cluster membership (FSM).
 	clientConfig.InsecureSkipVerify = true
 	return tls.DialWithDialer(dialer, "tcp", string(address), clientConfig)
 }

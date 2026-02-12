@@ -147,7 +147,7 @@ func main() {
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(rn.Raft, rn.FSM, *jwksURL, nodeKey, signKey, *raftSecret)
+	metaServer := metadata.NewServer(rn.Raft, rn.FSM, *jwksURL, nodeKey, signKey, *raftSecret, rn.ClientTLSConfig)
 
 	// DiskStore uses separate storage instance rooted at chunks/
 	chunkDir := filepath.Join(baseDir, "chunks")
@@ -210,7 +210,18 @@ func main() {
 					req.Header.Set("X-Raft-Secret", *raftSecret)
 				}
 
-				resp, err := http.DefaultClient.Do(req)
+				// If using mTLS for cluster comms, use ClientTLSConfig
+				client := http.DefaultClient
+				if rn.ClientTLSConfig != nil && strings.HasPrefix(target, "https://") {
+					client = &http.Client{
+						Transport: &http.Transport{
+							TLSClientConfig: rn.ClientTLSConfig,
+						},
+						Timeout: 10 * time.Second,
+					}
+				}
+
+				resp, err := client.Do(req)
 				if err != nil {
 					log.Printf("Heartbeat failed: %v", err)
 				} else {
@@ -231,10 +242,15 @@ func main() {
 		}
 	}()
 
-	// Start Cluster Server
-	clusterSrv := &http.Server{Addr: *clusterAddr, Handler: clusterMux}
+	// Start Cluster Server (mTLS if configured)
+	clusterSrv := &http.Server{
+		Addr:      *clusterAddr,
+		Handler:   clusterMux,
+		TLSConfig: rn.ServerTLSConfig,
+	}
+
 	go func() {
-		if err := clusterSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := clusterSrv.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("cluster listen: %s\n", err)
 		}
 	}()

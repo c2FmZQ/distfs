@@ -17,11 +17,13 @@ package metadata
 import (
 	"context"
 	"crypto/mlkem"
+	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -53,9 +55,11 @@ type Server struct {
 
 	replMonitor *ReplicationMonitor
 	gcWorker    *GCWorker
+
+	clientTLSConfig *tls.Config
 }
 
-func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey, raftSecret string) *Server {
+func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -64,14 +68,15 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 	}
 
 	s := &Server{
-		raft:       r,
-		fsm:        fsm,
-		jwks:       remote,
-		jwksURL:    jwksURL,
-		nodeKey:    nodeKey,
-		signKey:    signKey,
-		raftSecret: raftSecret,
-		nonceCache: make(map[string]time.Time),
+		raft:            r,
+		fsm:             fsm,
+		jwks:            remote,
+		jwksURL:         jwksURL,
+		nodeKey:         nodeKey,
+		signKey:         signKey,
+		raftSecret:      raftSecret,
+		nonceCache:      make(map[string]time.Time),
+		clientTLSConfig: clientTLSConfig,
 	}
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
@@ -142,7 +147,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Check query param or form value for browser access?
 			// For simplicity, we require header or maybe "secret" query param.
 			secret := r.URL.Query().Get("secret")
-			if secret != s.raftSecret {
+			if secret == "" || secret != s.raftSecret {
 				http.Error(w, "unauthorized", http.StatusUnauthorized)
 				return
 			}
@@ -292,6 +297,12 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 		targetAddr = leaderNode.ClusterAddress
 	}
 
+	// Ensure target scheme is https if using ClusterAddress (which implies mTLS)
+	// Or check if s.clientTLSConfig is present
+	if s.clientTLSConfig != nil && !strings.HasPrefix(targetAddr, "https://") {
+		targetAddr = strings.Replace(targetAddr, "http://", "https://", 1)
+	}
+
 	target, err := url.Parse(targetAddr)
 	if err != nil {
 		http.Error(w, "invalid leader address", http.StatusInternalServerError)
@@ -299,6 +310,11 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
+	if s.clientTLSConfig != nil {
+		proxy.Transport = &http.Transport{
+			TLSClientConfig: s.clientTLSConfig,
+		}
+	}
 	proxy.ServeHTTP(w, r)
 	return true
 }
@@ -388,7 +404,12 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 		return nil, fmt.Errorf("replay detected")
 	}
 	s.nonceCache[token.Nonce] = time.Now()
-	if len(s.nonceCache) > 10000 && rand.Intn(100) == 0 {
+	// Using crypto/rand? No, this is for cache cleanup logic, randomness isn't security critical here but good practice.
+	// We should avoid math/rand.
+	// Random cleanup:
+	b := make([]byte, 1)
+	rand.Read(b)
+	if len(s.nonceCache) > 10000 && b[0]%100 == 0 {
 		now := time.Now()
 		for nonce, t := range s.nonceCache {
 			if now.Sub(t) > 6*time.Minute {
@@ -576,8 +597,13 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rand.Seed(time.Now().UnixNano())
-	rand.Shuffle(len(nodes), func(i, j int) { nodes[i], nodes[j] = nodes[j], nodes[i] })
+	// Use crypto/rand for shuffling
+	for i := len(nodes) - 1; i > 0; i-- {
+		b := make([]byte, 8)
+		rand.Read(b)
+		j := int(binary.LittleEndian.Uint64(b) % uint64(i+1))
+		nodes[i], nodes[j] = nodes[j], nodes[i]
+	}
 
 	if len(nodes) > 3 {
 		nodes = nodes[:3]
@@ -808,7 +834,7 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 
 func (s *Server) checkRaftSecret(r *http.Request) bool {
 	if s.raftSecret == "" {
-		return true // Open if not configured (NOT RECOMMENDED for prod)
+		return false // Fail closed
 	}
 	return r.Header.Get("X-Raft-Secret") == s.raftSecret
 }

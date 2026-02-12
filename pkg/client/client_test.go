@@ -42,6 +42,36 @@ func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_cryp
 	return st, mk
 }
 
+func createUser(t *testing.T, raftNode *metadata.RaftNode, user metadata.User) {
+	userBytes, _ := json.Marshal(user)
+	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Create user raft apply failed: %v", err)
+	}
+	if resp := future.Response(); resp != nil {
+		if err, ok := resp.(error); ok {
+			t.Fatalf("Create user fsm failed: %v", err)
+		}
+	}
+}
+
+func registerNode(t *testing.T, metaURL, secret string, node metadata.Node) {
+	body, _ := json.Marshal(node)
+	req, _ := http.NewRequest("POST", metaURL+"/v1/node", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Raft-Secret", secret)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Register node failed: %d", resp.StatusCode)
+	}
+}
+
 func TestClientIntegration(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
@@ -63,7 +93,7 @@ func TestClientIntegration(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -79,13 +109,7 @@ func TestClientIntegration(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Name:    "User One",
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	future := metaNode.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Failed to register user: %v", err)
-	}
+	createUser(t, metaNode, user)
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
@@ -175,7 +199,7 @@ func TestReplication(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -191,10 +215,7 @@ func TestReplication(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Name:    "User One",
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	createUser(t, metaNode, user)
 
 	// 2. Three Data Nodes
 	nodes := make([]*httptest.Server, 3)
@@ -215,8 +236,7 @@ func TestReplication(t *testing.T) {
 			Address: ts.URL,
 			Status:  metadata.NodeStatusActive,
 		}
-		body, _ := json.Marshal(node)
-		http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+		registerNode(t, tsMeta.URL, "testsecret", node)
 	}
 
 	// 3. Client
@@ -270,7 +290,7 @@ func TestDirectories(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -286,10 +306,7 @@ func TestDirectories(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Name:    "User One",
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	createUser(t, metaNode, user)
 
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
@@ -304,8 +321,7 @@ func TestDirectories(t *testing.T) {
 		Address: tsData.URL,
 		Status:  metadata.NodeStatusActive,
 	}
-	body, _ := json.Marshal(node)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	registerNode(t, tsMeta.URL, "testsecret", node)
 
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
@@ -372,7 +388,7 @@ func TestReplicationRepair(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -388,10 +404,7 @@ func TestReplicationRepair(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Name:    "User One",
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	createUser(t, metaNode, user)
 
 	// 2. Start ONE Data Node initially
 	dataDir1 := t.TempDir()
@@ -402,8 +415,7 @@ func TestReplicationRepair(t *testing.T) {
 	defer ts1.Close()
 
 	node1 := metadata.Node{ID: "data-1", Address: ts1.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	body, _ := json.Marshal(node1)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	registerNode(t, tsMeta.URL, "testsecret", node1)
 
 	// 3. Write File (Will have 1 replica)
 	c := NewClient(tsMeta.URL, ts1.URL)
@@ -444,12 +456,10 @@ func TestReplicationRepair(t *testing.T) {
 	defer ts3.Close()
 
 	node2 := metadata.Node{ID: "data-2", Address: ts2.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	body, _ = json.Marshal(node2)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	registerNode(t, tsMeta.URL, "testsecret", node2)
 
 	node3 := metadata.Node{ID: "data-3", Address: ts3.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	body, _ = json.Marshal(node3)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	registerNode(t, tsMeta.URL, "testsecret", node3)
 
 	// 5. Trigger Repair
 	metaServer.ForceReplicationScan()
@@ -490,7 +500,7 @@ func TestReadAhead(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -504,10 +514,7 @@ func TestReadAhead(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Name:    "User One",
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	createUser(t, metaNode, user)
 
 	// 2. Setup Data Node with Tracking
 	dataDir := t.TempDir()
@@ -532,8 +539,7 @@ func TestReadAhead(t *testing.T) {
 		Address: tsData.URL,
 		Status:  metadata.NodeStatusActive,
 	}
-	body, _ := json.Marshal(node)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	registerNode(t, tsMeta.URL, "testsecret", node)
 
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
@@ -612,7 +618,7 @@ func TestGarbageCollection(t *testing.T) {
 
 	serverKEM, _ := crypto.GenerateEncryptionKey()
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "")
+	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -626,10 +632,7 @@ func TestGarbageCollection(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Name:    "User One",
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
+	createUser(t, metaNode, user)
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
@@ -645,8 +648,7 @@ func TestGarbageCollection(t *testing.T) {
 		Address: tsData.URL,
 		Status:  metadata.NodeStatusActive,
 	}
-	body, _ := json.Marshal(node)
-	http.Post(tsMeta.URL+"/v1/node", "application/json", bytes.NewReader(body))
+	registerNode(t, tsMeta.URL, "testsecret", node)
 
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
