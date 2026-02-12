@@ -16,11 +16,14 @@ package metadata
 
 import (
 	"context"
+	"crypto/hmac"
 	"crypto/mlkem"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -522,12 +525,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		JWT     string `json:"jwt"`
-		SignKey []byte `json:"sign_key"`
-		EncKey  []byte `json:"enc_key"`
-		Name    string `json:"name"`
-	}
+	var req RegisterUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -556,11 +554,20 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	secret, err := s.fsm.GetClusterSecret()
+	if err != nil {
+		http.Error(w, "cluster secret not available", http.StatusInternalServerError)
+		return
+	}
+
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(email))
+	userID := hex.EncodeToString(mac.Sum(nil))
+
 	user := User{
-		ID:      email,
+		ID:      userID,
 		SignKey: req.SignKey,
 		EncKey:  req.EncKey,
-		Name:    req.Name,
 	}
 	body, _ := json.Marshal(user)
 

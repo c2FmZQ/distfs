@@ -17,8 +17,10 @@ package main
 import (
 	"bytes"
 	"crypto/mlkem"
+	"crypto/rand"
 	"encoding/json"
 	"flag"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -126,7 +128,7 @@ func main() {
 
 	if *bootstrap {
 		log.Printf("Bootstrapping cluster with node %s at %s", *nodeID, *raftAdvertise)
-		rn.Raft.BootstrapCluster(raft.Configuration{
+		f := rn.Raft.BootstrapCluster(raft.Configuration{
 			Servers: []raft.Server{
 				{
 					ID:      raft.ServerID(*nodeID),
@@ -134,6 +136,41 @@ func main() {
 				},
 			},
 		})
+		if err := f.Error(); err != nil {
+			log.Fatalf("bootstrap failed: %v", err)
+		}
+
+		// Initialize Cluster Secret
+		// Wait for leader election to finalize
+		timeout := time.After(30 * time.Second)
+		ticker := time.NewTicker(500 * time.Millisecond)
+		defer ticker.Stop()
+
+	SecretInitLoop:
+		for {
+			select {
+			case <-timeout:
+				log.Println("Warning: Timed out waiting for leader state during bootstrap; skipping secret init.")
+				break SecretInitLoop
+			case <-ticker.C:
+				if rn.Raft.State() == raft.Leader {
+					_, err := rn.FSM.GetClusterSecret()
+					if err != nil {
+						log.Println("Initializing Cluster Secret...")
+						secret := make([]byte, 32)
+						if _, err := io.ReadFull(rand.Reader, secret); err != nil {
+							log.Fatalf("failed to generate secret: %v", err)
+						}
+						cmd := metadata.LogCommand{Type: metadata.CmdInitSecret, Data: secret}
+						b, _ := json.Marshal(cmd)
+						if err := rn.Raft.Apply(b, 5*time.Second).Error(); err != nil {
+							log.Fatalf("failed to apply secret: %v", err)
+						}
+					}
+					break SecretInitLoop
+				}
+			}
+		}
 	}
 
 	// 3. Initialize Keys for API

@@ -39,11 +39,16 @@ type ChunkPage struct {
 }
 
 type User struct {
-	ID      string `json:"id"` // Still useful for lookup by email/username
+	ID      string `json:"id"` // HMAC(email)
 	UID     uint32 `json:"uid"`
 	SignKey []byte `json:"sign_key"`
 	EncKey  []byte `json:"enc_key"`
-	Name    string `json:"name"`
+}
+
+type RegisterUserRequest struct {
+	JWT     string `json:"jwt"`
+	SignKey []byte `json:"sign_key"`
+	EncKey  []byte `json:"enc_key"`
 }
 
 type Group struct {

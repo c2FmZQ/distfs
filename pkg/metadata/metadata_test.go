@@ -151,7 +151,7 @@ func TestIdentityRegistry(t *testing.T) {
 	defer ts.Close()
 
 	// Create User (via Raft directly, since /v1/user is removed)
-	user := User{ID: "u1", Name: "Alice"}
+	user := User{ID: "u1"}
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
@@ -196,6 +196,25 @@ func TestIdentityRegistry(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("Node Register failed: %d", resp.StatusCode)
+	}
+}
+
+func TestRegisterUserEndpoint(t *testing.T) {
+	_, ts := setupCluster(t)
+	defer ts.Close()
+
+	reqBody := RegisterUserRequest{
+		JWT:     "invalid.token",
+		SignKey: []byte("sign"),
+		EncKey:  []byte("enc"),
+	}
+	body, _ := json.Marshal(reqBody)
+	resp, err := http.Post(ts.URL+"/v1/user/register", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected 401 for invalid JWT, got %d", resp.StatusCode)
 	}
 }
 

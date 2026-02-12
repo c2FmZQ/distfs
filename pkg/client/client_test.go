@@ -107,7 +107,6 @@ func TestClientIntegration(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	createUser(t, metaNode, user)
 
@@ -213,7 +212,6 @@ func TestReplication(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	createUser(t, metaNode, user)
 
@@ -304,7 +302,6 @@ func TestDirectories(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	createUser(t, metaNode, user)
 
@@ -402,7 +399,6 @@ func TestReplicationRepair(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	createUser(t, metaNode, user)
 
@@ -512,7 +508,6 @@ func TestReadAhead(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	createUser(t, metaNode, user)
 
@@ -630,7 +625,6 @@ func TestGarbageCollection(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	createUser(t, metaNode, user)
 
