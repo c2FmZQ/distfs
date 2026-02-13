@@ -45,8 +45,9 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	st := storage.New(tmpDir, mk)
 
 	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeID := fmt.Sprintf("node-%d", time.Now().UnixNano())
 
-	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	node, err := NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -54,7 +55,7 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	cfg := raft.Configuration{
 		Servers: []raft.Server{
 			{
-				ID:      raft.ServerID("node1"),
+				ID:      raft.ServerID(nodeID),
 				Address: node.Transport.LocalAddr(),
 			},
 		},
@@ -96,7 +97,7 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	}
 
 	signKey, _ := crypto.GenerateIdentityKey()
-	server := NewServer("node1", node.Raft, node.FSM, "", signKey, "testsecret", nil, 0)
+	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0)
 	ts := httptest.NewServer(server)
 	return node, ts, signKey, ek.Bytes(), server
 }
@@ -234,6 +235,14 @@ func TestIdentityRegistry(t *testing.T) {
 	defer node.Shutdown()
 	defer ts.Close()
 
+	// Initialize Cluster Secret (needed for Group ID hashing)
+	secret := make([]byte, 32)
+	rand.Read(secret)
+	fSecret := node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
+	if err := fSecret.Error(); err != nil {
+		t.Fatalf("Failed to init secret: %v", err)
+	}
+
 	// Create User (via Raft directly, since /v1/user is removed)
 	userSignKey, _ := crypto.GenerateIdentityKey()
 	user := User{ID: "u1", SignKey: userSignKey.Public()}
@@ -253,7 +262,7 @@ func TestIdentityRegistry(t *testing.T) {
 	// Create Group
 	group := Group{ID: "g1", OwnerID: "u1"}
 	body, _ := json.Marshal(group)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/group", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)

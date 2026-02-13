@@ -52,7 +52,7 @@ func (c *Client) EnsureRoot() error {
 		return err
 	}
 
-	lb := c.createLockbox(rootKey, 0755)
+	lb := c.createLockbox(rootKey, 0755, "")
 	inode := metadata.Inode{
 		ID:       metadata.RootID,
 		Type:     metadata.DirType,
@@ -87,18 +87,9 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 		return nil, nil, fmt.Errorf("client has no identity to unlock root")
 	}
 
-	rootKey, err := rootInode.Lockbox.GetFileKey(c.userID, c.decKey)
+	rootKey, err := c.UnlockInode(rootInode)
 	if err != nil {
-		// World fallback for root
-		if _, exists := rootInode.Lockbox[metadata.WorldID]; exists {
-			wk, werr := c.GetWorldPrivateKey()
-			if werr == nil {
-				rootKey, err = rootInode.Lockbox.GetFileKey(metadata.WorldID, wk)
-			}
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("access denied to root: %w", err)
-		}
+		return nil, nil, fmt.Errorf("access denied to root: %w", err)
 	}
 
 	if path == "" {
@@ -128,18 +119,9 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 			return nil, nil, err
 		}
 
-		key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
+		key, err := c.UnlockInode(inode)
 		if err != nil {
-			// World fallback
-			if _, exists := inode.Lockbox[metadata.WorldID]; exists {
-				wk, werr := c.GetWorldPrivateKey()
-				if werr == nil {
-					key, err = inode.Lockbox.GetFileKey(metadata.WorldID, wk)
-				}
-			}
-			if err != nil {
-				return nil, nil, fmt.Errorf("access denied to %s: %w", part, err)
-			}
+			return nil, nil, fmt.Errorf("access denied to %s: %w", part, err)
 		}
 		currentKey = key
 	}
@@ -159,7 +141,7 @@ func (c *Client) Symlink(target, path string) error {
 	return c.addEntry(path, metadata.SymlinkType, nil, 0, target, 0777)
 }
 
-func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) (*metadata.Inode, []byte, error) {
+func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string) (*metadata.Inode, []byte, error) {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
@@ -179,7 +161,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	if iType == metadata.FileType {
 		// Create empty inode first? No, writeInodeContent handles creation if not found.
 		// BUT we need to pass Mode to writeInodeContent.
-		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob, mode); err != nil {
+		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob, mode, groupID); err != nil {
 			return nil, nil, err
 		}
 		newInode, err = c.GetInode(newID)
@@ -188,7 +170,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 		}
 	} else {
 		// Try to see if it already exists (unlikely for newID, but for completeness)
-		lb := c.createLockbox(newKey, mode)
+		lb := c.createLockbox(newKey, mode, groupID)
 		inode := metadata.Inode{
 			ID:            newID,
 			Type:          iType,
@@ -199,6 +181,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 			Lockbox:       lb,
 			EncryptedName: encNameBlob,
 			OwnerID:       c.userID,
+			GroupID:       groupID,
 			SymlinkTarget: symlinkTarget,
 		}
 		newInode, err = c.createInode(inode)
@@ -399,16 +382,16 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 			if err != nil {
 				return err
 			}
-			return c.writeInodeContent(existingID, metadata.FileType, key, r, size, nil, inode.Mode)
+			return c.writeInodeContent(existingID, metadata.FileType, key, r, size, nil, inode.Mode, inode.GroupID)
 		}
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}
 
-	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode)
+	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID)
 	return err
 }
 
-func (c *Client) createLockbox(key []byte, mode uint32) crypto.Lockbox {
+func (c *Client) createLockbox(key []byte, mode uint32, groupID string) crypto.Lockbox {
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
@@ -417,6 +400,15 @@ func (c *Client) createLockbox(key []byte, mode uint32) crypto.Lockbox {
 		wpk, err := c.GetWorldPublicKey()
 		if err == nil {
 			lb.AddRecipient(metadata.WorldID, wpk, key)
+		}
+	}
+	if groupID != "" && (mode&0060) != 0 {
+		group, err := c.GetGroup(groupID)
+		if err == nil {
+			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+			if err == nil {
+				lb.AddRecipient(groupID, gpk, key)
+			}
 		}
 	}
 	return lb

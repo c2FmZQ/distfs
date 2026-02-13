@@ -80,6 +80,12 @@ func main() {
 		cmdRm(args)
 	case "chmod":
 		cmdChmod(args)
+	case "chgrp":
+		cmdChgrp(args)
+	case "group-create":
+		cmdGroupCreate(args)
+	case "group-add":
+		cmdGroupAdd(args)
 	default:
 		usage()
 	}
@@ -94,6 +100,9 @@ func usage() {
 	fmt.Println("  mkdir <path>                    Create directory")
 	fmt.Println("  rm <path>                       Delete file or directory")
 	fmt.Println("  chmod <mode> <path>             Change permissions")
+	fmt.Println("  chgrp <group_id> <path>         Change group")
+	fmt.Println("  group-create <name>             Create a new group")
+	fmt.Println("  group-add <group_id> <user_id>  Add user to group")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	os.Exit(1)
@@ -298,6 +307,44 @@ func cmdChmod(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Mode of %s changed to %s\n", path, modeStr)
+}
+
+func cmdChgrp(args []string) {
+	if len(args) < 2 {
+		log.Fatal("group_id and path required")
+	}
+	groupID, path := args[0], args[1]
+
+	c := loadClient()
+	if err := c.SetAttr(path, metadata.SetAttrRequest{GroupID: &groupID}); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Group of %s changed to %s\n", path, groupID)
+}
+
+func cmdGroupCreate(args []string) {
+	if len(args) < 1 {
+		log.Fatal("group name required")
+	}
+	name := args[0]
+	c := loadClient()
+	group, err := c.CreateGroup(name)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Group %s created. ID: %s\n", name, group.ID)
+}
+
+func cmdGroupAdd(args []string) {
+	if len(args) < 2 {
+		log.Fatal("group_id and user_id required")
+	}
+	groupID, userID := args[0], args[1]
+	c := loadClient()
+	if err := c.AddUserToGroup(groupID, userID); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("User %s added to group %s\n", userID, groupID)
 }
 
 func cmdPut(args []string) {

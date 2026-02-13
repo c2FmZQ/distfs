@@ -199,6 +199,8 @@ func main() {
 	publicMux.Handle("/v1/user/", metaServer)
 	publicMux.Handle("/v1/group/", metaServer)
 	publicMux.Handle("/v1/cluster/", metaServer)
+	publicMux.Handle("/v1/auth/", metaServer)
+	publicMux.Handle("/v1/login", metaServer)
 	publicMux.Handle("/v1/data/", dataServer)    // Data access
 	publicMux.Handle("/api/cluster", metaServer) // Dashboard & Management
 	publicMux.Handle("/api/cluster/", metaServer)
@@ -211,6 +213,8 @@ func main() {
 	clusterMux.Handle("/v1/meta/", metaServer)
 	clusterMux.Handle("/v1/user/", metaServer)  // Forwarded writes
 	clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
+	clusterMux.Handle("/v1/auth/", metaServer)
+	clusterMux.Handle("/v1/login", metaServer)
 	clusterMux.Handle("/api/debug/", metaServer)
 
 	// 7. Registration & Heartbeat

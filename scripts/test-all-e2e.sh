@@ -16,6 +16,7 @@ sleep 2
 /bin/test-integrity.sh
 /bin/test-public.sh
 /bin/test-writable.sh
+/bin/test-group.sh
 /bin/test-ha.sh
 
 echo "ALL E2E TESTS PASSED"

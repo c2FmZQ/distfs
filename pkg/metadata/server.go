@@ -62,6 +62,9 @@ type Server struct {
 	nonceCache map[string]time.Time
 	nonceMu    sync.Mutex
 
+	challengeCache map[string]string // Base64(Challenge) -> UserID
+	challengeMu    sync.Mutex
+
 	replMonitor *ReplicationMonitor
 	gcWorker    *GCWorker
 	keyWorker   *KeyRotationWorker
@@ -87,6 +90,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 		signKey:             signKey,
 		raftSecret:          raftSecret,
 		nonceCache:          make(map[string]time.Time),
+		challengeCache:      make(map[string]string),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 	}
@@ -222,6 +226,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterUser(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/login" && r.Method == http.MethodPost {
+		s.handleLogin(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost {
+		s.handleAuthChallenge(w, r)
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
+		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
+		s.handleGetUser(w, r, id)
+		return
+	}
 	if r.URL.Path == "/v1/node" && r.Method == http.MethodPost {
 		if !s.checkRaftSecret(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -272,12 +289,26 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
 		s.handleIssueToken(w, r)
 		return
-	} else if r.URL.Path == "/v1/group" && r.Method == http.MethodPost {
+	} else if r.URL.Path == "/v1/group/" && r.Method == http.MethodPost {
 		s.handleCreateGroup(w, r)
 		return
 	} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
+		id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
+		if id == "" {
+			http.NotFound(w, r)
+			return
+		}
+		if strings.HasSuffix(id, "/private") && r.Method == http.MethodGet {
+			id = strings.TrimSuffix(id, "/private")
+			s.handleGetGroupPrivateKey(w, r, id)
+			return
+		}
 		if r.Method == http.MethodPut {
 			s.handleUpdateGroup(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			s.handleGetGroup(w, r, id)
 			return
 		}
 	} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
@@ -404,26 +435,64 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authenticate(r *http.Request) (*User, error) {
+	// Try Session Token first (cheaper)
+	sess := r.Header.Get("Session-Token")
+	if sess != "" {
+		b, err := base64.StdEncoding.DecodeString(sess)
+		if err != nil {
+			log.Printf("AUTH: session token base64 decode failed: %v", err)
+		} else {
+			var st SignedSessionToken
+			if err := json.Unmarshal(b, &st); err != nil {
+				log.Printf("AUTH: session token unmarshal failed: %v", err)
+			} else {
+				// Verify server's signature
+				payload, _ := json.Marshal(st.Token)
+				if crypto.VerifySignature(s.signKey.Public(), payload, st.Signature) {
+					if time.Now().Unix() < st.Token.Expiry {
+						var user User
+						err = s.fsm.db.View(func(tx *bolt.Tx) error {
+							return json.Unmarshal(tx.Bucket([]byte("users")).Get([]byte(st.Token.UserID)), &user)
+						})
+						if err == nil {
+							return &user, nil
+						}
+						log.Printf("AUTH: session token user lookup failed: %v", err)
+					} else {
+						log.Printf("AUTH: session token expired: %v", st.Token.Expiry)
+					}
+				} else {
+					log.Printf("AUTH: session token signature verification failed")
+				}
+			}
+		}
+	}
+
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
+		log.Printf("AUTH: missing or invalid authorization header")
 		return nil, fmt.Errorf("missing auth")
 	}
 	sealed, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Bearer "))
 	if err != nil {
+		log.Printf("AUTH: base64 decode failed: %v", err)
 		return nil, err
 	}
 
 	active, err := s.fsm.GetActiveKey()
 	if err != nil {
+		log.Printf("AUTH: active key not found: %v", err)
 		return nil, fmt.Errorf("active key not found: %v", err)
 	}
 	dk, err := crypto.UnmarshalDecapsulationKey(active.DecKey)
 	if err != nil {
+		log.Printf("AUTH: invalid cluster key %s: %v", active.ID, err)
 		return nil, fmt.Errorf("invalid cluster key %s: %v", active.ID, err)
 	}
 
 	kemSize := mlkem.CiphertextSize768
 	if len(sealed) < kemSize {
+		log.Printf("AUTH: token too short: %d < %d", len(sealed), kemSize)
 		return nil, fmt.Errorf("token too short: %d < %d", len(sealed), kemSize)
 	}
 
@@ -432,31 +501,37 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 
 	ss, err := dk.Decapsulate(kemCT)
 	if err != nil {
+		log.Printf("AUTH: decapsulation failed: %v", err)
 		return nil, fmt.Errorf("decapsulation failed: %v", err)
 	}
 
 	pt, err := crypto.DecryptDEM(ss, demCT)
 	if err != nil {
+		log.Printf("AUTH: decryption failed: %v", err)
 		return nil, fmt.Errorf("decryption failed: %v", err)
 	}
 
 	var signed SignedAuthToken
 	if err := json.Unmarshal(pt, &signed); err != nil {
+		log.Printf("AUTH: signed token unmarshal failed: %v", err)
 		return nil, err
 	}
 
 	var token AuthToken
 	if err := json.Unmarshal(signed.Payload, &token); err != nil {
+		log.Printf("AUTH: token payload unmarshal failed: %v", err)
 		return nil, err
 	}
 
 	if time.Since(time.Unix(token.Time, 0)) > 5*time.Minute {
+		log.Printf("AUTH: token expired: %v vs now %v", time.Unix(token.Time, 0), time.Now())
 		return nil, fmt.Errorf("expired")
 	}
 
 	s.nonceMu.Lock()
 	if _, exists := s.nonceCache[token.Nonce]; exists {
 		s.nonceMu.Unlock()
+		log.Printf("AUTH: replay detected: %s", token.Nonce)
 		return nil, fmt.Errorf("replay detected")
 	}
 	s.nonceCache[token.Nonce] = time.Now()
@@ -473,14 +548,107 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 		return json.Unmarshal(v, &user)
 	})
 	if err != nil {
+		log.Printf("AUTH: user retrieval failed: %v", err)
 		return nil, err
 	}
 
 	if !crypto.VerifySignature(user.SignKey, signed.Payload, signed.Signature) {
+		log.Printf("AUTH: invalid signature for user %s", token.UserID)
 		return nil, fmt.Errorf("invalid signature")
 	}
 
 	return &user, nil
+}
+
+func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
+	var req AuthChallengeRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	challenge := make([]byte, 32)
+	if _, err := rand.Read(challenge); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
+	s.challengeMu.Lock()
+	s.challengeCache[base64.StdEncoding.EncodeToString(challenge)] = req.UserID
+	s.challengeMu.Unlock()
+
+	sig := s.signKey.Sign(challenge)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(AuthChallengeResponse{
+		Challenge: challenge,
+		Signature: sig,
+	})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var solve AuthChallengeSolve
+	if err := json.NewDecoder(r.Body).Decode(&solve); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	s.challengeMu.Lock()
+	cKey := base64.StdEncoding.EncodeToString(solve.Challenge)
+	expectedUID, ok := s.challengeCache[cKey]
+	if ok && expectedUID == solve.UserID {
+		delete(s.challengeCache, cKey)
+	}
+	s.challengeMu.Unlock()
+
+	if !ok || expectedUID != solve.UserID {
+		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
+		return
+	}
+
+	// Verify User signature over challenge
+	var user User
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("users"))
+		v := b.Get([]byte(solve.UserID))
+		if v == nil {
+			return fmt.Errorf("user not found")
+		}
+		return json.Unmarshal(v, &user)
+	})
+	if err != nil {
+		http.Error(w, "user not found", http.StatusUnauthorized)
+		return
+	}
+
+	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Issue a 1-hour session token
+	expiry := time.Now().Add(1 * time.Hour).Unix()
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	st := SessionToken{
+		UserID: user.ID,
+		Expiry: expiry,
+		Nonce:  base64.StdEncoding.EncodeToString(nonce),
+	}
+
+	payload, _ := json.Marshal(st)
+	sig := s.signKey.Sign(payload)
+
+	signed := SignedSessionToken{
+		Token:     st,
+		Signature: sig,
+	}
+
+	b, _ := json.Marshal(signed)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(SessionResponse{
+		Token: base64.StdEncoding.EncodeToString(b),
+	})
 }
 
 func (s *Server) handleGetClusterKey(w http.ResponseWriter, r *http.Request) {
@@ -540,8 +708,22 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 			// Authorized for reading
 		} else if req.Mode == "W" && (inode.Mode&0002) != 0 {
 			// Authorized for writing
+		} else if inode.GroupID != "" {
+			inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
+			if inGroup {
+				if req.Mode == "R" && (inode.Mode&0040) != 0 {
+					// Authorized for group reading
+				} else if req.Mode == "W" && (inode.Mode&0020) != 0 {
+					// Authorized for group writing
+				} else {
+					http.Error(w, "forbidden", http.StatusForbidden)
+					return
+				}
+			} else {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
 		} else {
-			// TODO: Check group
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -617,6 +799,23 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	mac.Write([]byte(email))
 	userID := hex.EncodeToString(mac.Sum(nil))
 
+	// Check if exists
+	var existing User
+	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("users"))
+		v := b.Get([]byte(userID))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &existing)
+	})
+	if err == nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(existing)
+		return
+	}
+
 	user := User{
 		ID:      userID,
 		SignKey: req.SignKey,
@@ -625,6 +824,25 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	body, _ := json.Marshal(user)
 
 	s.applyCommandRaw(w, CmdCreateUser, body, http.StatusCreated)
+}
+
+func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {
+	var user User
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("users"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &user)
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(user)
 }
 
 func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
@@ -784,7 +1002,137 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdCreateGroup, 1024*1024, http.StatusCreated)
+	log.Printf("GROUP: handleCreateGroup ENTERED (Method: %s, Path: %s)", r.Method, r.URL.Path)
+	if s.raft.State() != raft.Leader {
+		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		Name    string         `json:"name"`
+		EncName []byte         `json:"enc_name"`
+		Lockbox crypto.Lockbox `json:"lockbox"`
+		EncKey  []byte         `json:"enc_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		log.Printf("GROUP: handleCreateGroup decode failed: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		log.Printf("GROUP: handleCreateGroup unauthorized")
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	secret, err := s.fsm.GetClusterSecret()
+	if err != nil {
+		log.Printf("GROUP: handleCreateGroup cluster secret failed: %v", err)
+		http.Error(w, "cluster secret not available", http.StatusInternalServerError)
+		return
+	}
+
+	// 1. Generate unique GID (POSIX)
+	var gid uint32
+	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+		idx := tx.Bucket([]byte("gids"))
+		for {
+			gid = generateID32()
+			if gid < 1000 {
+				continue
+			}
+			if idx.Get(uint32ToBytes(gid)) == nil {
+				return nil
+			}
+		}
+	})
+	if err != nil {
+		log.Printf("GROUP: handleCreateGroup GID allocation failed: %v", err)
+		http.Error(w, "failed to allocate GID", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Hash OwnerID + Name for Secure GroupID
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(fmt.Sprintf("%s:%s", user.ID, req.Name)))
+	groupID := hex.EncodeToString(mac.Sum(nil))
+
+	log.Printf("GROUP: handleCreateGroup creating '%s' (ID: %s, GID: %d) for user %s", req.Name, groupID, gid, user.ID)
+
+	group := Group{
+		ID:            groupID,
+		EncryptedName: req.EncName,
+		GID:           gid,
+		OwnerID:       user.ID,
+		Members:       make(map[string]bool),
+		EncKey:        req.EncKey,
+		Lockbox:       req.Lockbox,
+	}
+	body, _ := json.Marshal(group)
+
+	log.Printf("GROUP: handleCreateGroup applying Raft command for ID=%s", groupID)
+	_, err = s.applyRaftCommand(CmdCreateGroup, body)
+	if err != nil {
+		log.Printf("GROUP: handleCreateGroup raft apply failed: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	w.Write(body)
+	log.Printf("GROUP: handleCreateGroup finished for %s", groupID)
+}
+
+func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id string) {
+	log.Printf("GROUP: handleGetGroup(%s) starting", id)
+	// Must be member to see group?
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		log.Printf("GROUP: handleGetGroup(%s) unauthorized", id)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
+	if err != nil {
+		log.Printf("GROUP: handleGetGroup(%s) membership check failed for user %s: %v", id, user.ID, err)
+		// Check if group exists at all
+		var exists bool
+		s.fsm.db.View(func(tx *bolt.Tx) error {
+			exists = tx.Bucket([]byte("groups")).Get([]byte(id)) != nil
+			return nil
+		})
+		log.Printf("GROUP: handleGetGroup(%s) exists in DB: %v", id, exists)
+
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+	if !inGroup {
+		log.Printf("GROUP: handleGetGroup(%s) forbidden for user %s", id, user.ID)
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var group Group
+	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &group)
+	})
+	if err != nil {
+		log.Printf("GROUP: handleGetGroup(%s) retrieval failed: %v", id, err)
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(group)
 }
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
@@ -911,7 +1259,56 @@ func (s *Server) checkWritePermission(user *User, inodeID string) error {
 	if (inode.Mode & 0002) != 0 {
 		return nil
 	}
+	if inode.GroupID != "" {
+		inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
+		if inGroup && (inode.Mode&0020) != 0 {
+			return nil
+		}
+	}
 	return fmt.Errorf("forbidden")
+}
+
+func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request, id string) {
+	user, err := s.authenticate(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
+	if err != nil {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+	if !inGroup {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var group Group
+	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &group)
+	})
+	if err != nil {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+
+	// Group Private Key is stored in group.Lockbox, encrypted for each member.
+	entry, ok := group.Lockbox[user.ID]
+	if !ok {
+		// Should not happen if IsUserInGroup returned true, but for safety:
+		http.Error(w, "user not in group lockbox", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entry)
 }
 
 func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {

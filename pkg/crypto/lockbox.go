@@ -48,11 +48,13 @@ func (l Lockbox) AddRecipient(userID string, pubKey *mlkem.EncapsulationKey768, 
 	return nil
 }
 
+var ErrRecipientNotFound = fmt.Errorf("recipient not in lockbox")
+
 // GetFileKey retrieves the file key for a user.
 func (l Lockbox) GetFileKey(userID string, privKey *mlkem.DecapsulationKey768) ([]byte, error) {
 	entry, ok := l[userID]
 	if !ok {
-		return nil, fmt.Errorf("user %s not in lockbox", userID)
+		return nil, ErrRecipientNotFound
 	}
 
 	secret, err := Decapsulate(privKey, entry.KEMCiphertext)

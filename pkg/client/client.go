@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"crypto/mlkem"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,34 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
+
+func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
+	c.keyMu.RLock()
+	sk := c.serverKey
+	c.keyMu.RUnlock()
+	if sk != nil {
+		return sk, nil
+	}
+
+	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/key")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch server key: %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	pk, err := crypto.UnmarshalEncapsulationKey(b)
+	if err != nil {
+		return nil, err
+	}
+
+	c.keyMu.Lock()
+	c.serverKey = pk
+	c.keyMu.Unlock()
+	return pk, nil
+}
 
 type Client struct {
 	metaURL    string
@@ -44,6 +73,12 @@ type Client struct {
 
 	worldPublic  *mlkem.EncapsulationKey768
 	worldPrivate *mlkem.DecapsulationKey768
+	groupKeys    map[string]*mlkem.DecapsulationKey768
+
+	sessionToken  string
+	sessionExpiry time.Time
+	sessionMu     *sync.RWMutex
+	loginMu       *sync.Mutex
 }
 
 func NewClient(metaAddr, dataAddr string) *Client {
@@ -56,6 +91,9 @@ func NewClient(metaAddr, dataAddr string) *Client {
 		dataURL:    dataAddr,
 		httpClient: &http.Client{Transport: t},
 		keyCache:   make(map[string][]byte),
+		groupKeys:  make(map[string]*mlkem.DecapsulationKey768),
+		sessionMu:  &sync.RWMutex{},
+		loginMu:    &sync.Mutex{},
 	}
 }
 
@@ -79,7 +117,111 @@ func (c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client {
 	return &c2
 }
 
+func (c *Client) Login() error {
+	// 1. Get Challenge
+	reqData := metadata.AuthChallengeRequest{UserID: c.userID}
+	b, _ := json.Marshal(reqData)
+	resp, err := c.httpClient.Post(c.metaURL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("challenge request failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	var challengeRes metadata.AuthChallengeResponse
+	if err := json.NewDecoder(resp.Body).Decode(&challengeRes); err != nil {
+		return err
+	}
+
+	// 2. Verify server signature over challenge
+	// (Skipped for now as we don't have server's sign public key readily available in Client)
+
+	// 3. Solve Challenge (Sign it)
+	sig := c.signKey.Sign(challengeRes.Challenge)
+
+	solve := metadata.AuthChallengeSolve{
+		UserID:    c.userID,
+		Challenge: challengeRes.Challenge,
+		Signature: sig,
+	}
+	b, _ = json.Marshal(solve)
+
+	resp, err = c.httpClient.Post(c.metaURL+"/v1/login", "application/json", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("login failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	var res metadata.SessionResponse
+	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+		return err
+	}
+
+	c.sessionMu.Lock()
+	c.sessionToken = res.Token
+	c.sessionExpiry = time.Now().Add(55 * time.Minute) // Buffer
+	c.sessionMu.Unlock()
+	return nil
+}
+
 func (c *Client) authenticateRequest(req *http.Request) error {
+	// 1. Special cases: registration, login, and keys don't need session auth.
+	if strings.HasSuffix(req.URL.Path, "/v1/user/register") ||
+		strings.HasSuffix(req.URL.Path, "/v1/auth/challenge") ||
+		strings.HasSuffix(req.URL.Path, "/v1/login") ||
+		strings.HasSuffix(req.URL.Path, "/v1/meta/key") {
+		if strings.HasSuffix(req.URL.Path, "/v1/user/register") {
+			return c.authenticatePQC(req)
+		}
+		return nil
+	}
+
+	// If no identity is configured, we can't authenticate.
+	if c.userID == "" || c.signKey == nil || c.decKey == nil {
+		return nil
+	}
+
+	// 2. For all other requests, use the Session Token.
+	c.sessionMu.RLock()
+	token := c.sessionToken
+	expiry := c.sessionExpiry
+	c.sessionMu.RUnlock()
+
+	// If token is missing or about to expire, perform a login handshake.
+	if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
+		// Acquire login lock to serialize handshakes
+		c.loginMu.Lock()
+		defer c.loginMu.Unlock()
+
+		// Double check under RLock after acquiring loginMu
+		c.sessionMu.RLock()
+		token = c.sessionToken
+		expiry = c.sessionExpiry
+		c.sessionMu.RUnlock()
+
+		if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
+			if err := c.Login(); err != nil {
+				return fmt.Errorf("session login failed: %w", err)
+			}
+			c.sessionMu.RLock()
+			token = c.sessionToken
+			c.sessionMu.RUnlock()
+		}
+	}
+
+	req.Header.Set("Session-Token", token)
+	return nil
+}
+
+func (c *Client) authenticatePQC(req *http.Request) error {
 	if c.signKey == nil || c.serverKey == nil {
 		return fmt.Errorf("client keys (sign/server) not configured")
 	}
@@ -91,38 +233,27 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 
 	token := metadata.AuthToken{
 		UserID: c.userID,
-		Time:   time.Now().Unix(),
+		Time:   time.Now().UnixNano(),
 		Nonce:  base64.StdEncoding.EncodeToString(nonce),
 	}
-
-	payload, err := json.Marshal(token)
-	if err != nil {
-		return err
-	}
+	payload, _ := json.Marshal(token)
 
 	sig := c.signKey.Sign(payload)
+
 	signed := metadata.SignedAuthToken{
 		Payload:   payload,
 		Signature: sig,
 	}
+	signedB, _ := json.Marshal(signed)
 
-	signedBytes, err := json.Marshal(signed)
-	if err != nil {
-		return err
-	}
-
-	// Encrypt (KEM+DEM)
 	ss, kemCT := crypto.Encapsulate(c.serverKey)
-	demCT, err := crypto.EncryptDEM(ss, signedBytes)
+	demCT, err := crypto.EncryptDEM(ss, signedB)
 	if err != nil {
 		return err
 	}
 
-	// Token = KEM + DEM
 	fullToken := append(kemCT, demCT...)
-	tokenStr := base64.StdEncoding.EncodeToString(fullToken)
-
-	req.Header.Set("Authorization", "Bearer "+tokenStr)
+	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(fullToken))
 	return nil
 }
 
@@ -131,7 +262,9 @@ func (c *Client) allocateNodes() ([]metadata.Node, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.authenticateRequest(req)
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -253,7 +386,9 @@ func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.authenticateRequest(req)
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -282,7 +417,9 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.authenticateRequest(req)
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -307,7 +444,9 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.authenticateRequest(req)
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -334,7 +473,9 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	c.authenticateRequest(req)
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := c.httpClient.Do(req)
@@ -352,7 +493,7 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	return inodes, nil
 }
 
-func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32) error {
+func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32, groupID string) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
@@ -377,22 +518,18 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, fileKey)
 			}
 		}
+		if groupID != "" && (mode&0060) != 0 {
+			group, err := c.GetGroup(groupID)
+			if err == nil {
+				gpk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				inode.Lockbox.AddRecipient(groupID, gpk, fileKey)
+			}
+		}
 		if encryptedName != nil {
 			inode.EncryptedName = encryptedName
 		}
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-		lb := crypto.NewLockbox()
-		if c.decKey != nil {
-			if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
-				return err
-			}
-		}
-		if (mode & 0004) != 0 {
-			wpk, err := c.GetWorldPublicKey()
-			if err == nil {
-				lb.AddRecipient(metadata.WorldID, wpk, fileKey)
-			}
-		}
+		lb := c.createLockbox(fileKey, mode, groupID)
 
 		// Assume not found, create new
 		inode = metadata.Inode{
@@ -404,6 +541,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 			Lockbox:       lb,
 			EncryptedName: encryptedName,
 			OwnerID:       c.userID,
+			GroupID:       groupID,
 		}
 		created, err := c.createInode(inode)
 		if err != nil {
@@ -476,10 +614,12 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 	fileKey, ok := c.keyCache[id]
 	c.keyMu.RUnlock()
 
+	var groupID string
 	if !ok {
 		if inode, err := c.GetInode(id); err == nil {
 			if key, err := c.UnlockInode(inode); err == nil {
 				fileKey = key
+				groupID = inode.GroupID
 			}
 		}
 	}
@@ -491,7 +631,7 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 		}
 	}
 
-	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil, mode); err != nil {
+	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil, mode, groupID); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -734,22 +874,100 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 		return nil, fmt.Errorf("client has no identity to unlock file")
 	}
 
+	var lastErr error
+
 	// 1. Try personal access
 	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 	if err == nil {
 		return key, nil
 	}
+	lastErr = err
 
-	// 2. Try world access if personal failed
-	if _, exists := inode.Lockbox[metadata.WorldID]; exists {
-		wk, err := c.GetWorldPrivateKey()
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch world key: %w", err)
+	// 2. Try group access if personal failed
+	if inode.GroupID != "" {
+		if _, exists := inode.Lockbox[inode.GroupID]; exists {
+			gk, gerr := c.GetGroupPrivateKey(inode.GroupID)
+			if gerr == nil {
+				key, err = inode.Lockbox.GetFileKey(inode.GroupID, gk)
+				if err == nil {
+					return key, nil
+				}
+				lastErr = err
+			} else {
+				lastErr = gerr
+			}
 		}
-		return inode.Lockbox.GetFileKey(metadata.WorldID, wk)
 	}
 
-	return nil, err
+	// 3. Try world access if group failed
+	if _, exists := inode.Lockbox[metadata.WorldID]; exists {
+		wk, err := c.GetWorldPrivateKey()
+		if err == nil {
+			key, err = inode.Lockbox.GetFileKey(metadata.WorldID, wk)
+			if err == nil {
+				return key, nil
+			}
+			lastErr = err
+		} else {
+			lastErr = err
+		}
+	}
+
+	if lastErr == nil {
+		lastErr = fmt.Errorf("access denied: no applicable recipient in lockbox")
+	}
+	return nil, lastErr
+}
+
+func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768, error) {
+	c.keyMu.RLock()
+	gk, ok := c.groupKeys[groupID]
+	c.keyMu.RUnlock()
+	if ok {
+		return gk, nil
+	}
+
+	req, err := http.NewRequest("GET", c.metaURL+"/v1/group/"+groupID+"/private", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch group private key: %d", resp.StatusCode)
+	}
+
+	var entry crypto.LockboxEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entry); err != nil {
+		return nil, err
+	}
+
+	// Group Private Key is encrypted for Client's identity
+	secret, err := crypto.Decapsulate(c.decKey, entry.KEMCiphertext)
+	if err != nil {
+		return nil, fmt.Errorf("group key decapsulate failed: %w", err)
+	}
+	privBytes, err := crypto.DecryptDEM(secret, entry.DEMCiphertext)
+	if err != nil {
+		return nil, fmt.Errorf("group key decrypt failed: %w", err)
+	}
+
+	gk, err = crypto.UnmarshalDecapsulationKey(privBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	c.keyMu.Lock()
+	c.groupKeys[groupID] = gk
+	c.keyMu.Unlock()
+	return gk, nil
 }
 
 func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
@@ -837,6 +1055,165 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 	return wk, nil
 }
 
+func (c *Client) GetGroup(id string) (*metadata.Group, error) {
+	req, err := http.NewRequest("GET", c.metaURL+"/v1/group/"+id, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get group failed: %d", resp.StatusCode)
+	}
+
+	var group metadata.Group
+	if err := json.NewDecoder(resp.Body).Decode(&group); err != nil {
+		return nil, err
+	}
+	return &group, nil
+}
+
+func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
+	dk, _ := crypto.GenerateEncryptionKey()
+	pk := dk.EncapsulationKey().Bytes()
+	priv := crypto.MarshalDecapsulationKey(dk)
+
+	lb := crypto.NewLockbox()
+	// Encrypt group private key for the creator (owner)
+	if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), priv); err != nil {
+		return nil, err
+	}
+
+	// Encrypt Group Name using Group Key (DEM)
+	// Group private key is 64 bytes (mlkem), but DEM needs 32 bytes.
+	// We hash the private key to get a 32-byte symmetric key.
+	h := sha256.Sum256(priv)
+	encName, err := crypto.EncryptDEM(h[:], []byte(name))
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt group name: %w", err)
+	}
+
+	reqData := map[string]interface{}{
+		"name":     name, // Server needs plaintext to compute GroupID = HMAC(Owner:Name)
+		"enc_name": encName,
+		"enc_key":  pk,
+		"lockbox":  lb,
+	}
+
+	data, _ := json.Marshal(reqData)
+	url := c.metaURL + "/v1/group/"
+	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("create group failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	var created metadata.Group
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		return nil, err
+	}
+	return &created, nil
+}
+
+func (c *Client) AddUserToGroup(groupID, userID string) error {
+	group, err := c.GetGroup(groupID)
+	if err != nil {
+		return err
+	}
+
+	// We need the user's public key.
+	// We need a GET /v1/user/{id} API.
+	user, err := c.GetUser(userID)
+	if err != nil {
+		return err
+	}
+
+	// Decrypt group private key using our identity
+	gk, err := c.GetGroupPrivateKey(groupID)
+	if err != nil {
+		return err
+	}
+	priv := crypto.MarshalDecapsulationKey(gk)
+
+	// Add new member to lockbox
+	userEK, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+	if err != nil {
+		return err
+	}
+	if err := group.Lockbox.AddRecipient(userID, userEK, priv); err != nil {
+		return err
+	}
+
+	group.Members[userID] = true
+
+	data, _ := json.Marshal(group)
+	req, err := http.NewRequest("PUT", c.metaURL+"/v1/group/"+groupID, bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("update group failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	return nil
+}
+
+func (c *Client) GetUser(id string) (*metadata.User, error) {
+	req, err := http.NewRequest("GET", c.metaURL+"/v1/user/"+id, nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("get user failed: %d", resp.StatusCode)
+	}
+
+	var user metadata.User
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
 func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 	inode, key, err := c.ResolvePath(path)
 	if err != nil {
@@ -847,14 +1224,29 @@ func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 
 func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
 	var err error
-	// 1. Handle Cryptographic Access (World)
-	if attr.Mode != nil {
+	// 1. Handle Cryptographic Access (World & Group)
+	if attr.Mode != nil || attr.GroupID != nil {
 		oldMode := inode.Mode
-		newMode := *attr.Mode
+		newMode := inode.Mode
+		if attr.Mode != nil {
+			newMode = *attr.Mode
+		}
+
+		oldGroupID := inode.GroupID
+		newGroupID := inode.GroupID
+		if attr.GroupID != nil {
+			newGroupID = *attr.GroupID
+		}
 
 		worldReadOld := (oldMode & 0004) != 0
 		worldReadNew := (newMode & 0004) != 0
 
+		groupRWOld := (oldMode & 0060) != 0
+		groupRWNew := (newMode & 0060) != 0
+
+		groupChanged := oldGroupID != newGroupID
+
+		updated := false
 		if worldReadOld != worldReadNew {
 			if worldReadNew {
 				wpk, err := c.GetWorldPublicKey()
@@ -867,7 +1259,33 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 			} else {
 				delete(inode.Lockbox, metadata.WorldID)
 			}
+			updated = true
+		}
+
+		if (groupRWOld != groupRWNew || groupChanged) && newGroupID != "" {
+			if groupRWNew {
+				group, err := c.GetGroup(newGroupID)
+				if err == nil {
+					gk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
+					if err := inode.Lockbox.AddRecipient(newGroupID, gk, key); err != nil {
+						return err
+					}
+					updated = true
+				}
+			} else {
+				delete(inode.Lockbox, newGroupID)
+				updated = true
+			}
+		} else if groupRWNew && oldGroupID != "" && groupChanged {
+			// Remove old group from lockbox if it was there
+			delete(inode.Lockbox, oldGroupID)
+			updated = true
+		}
+
+		if updated {
 			// Update the full Inode to persist Lockbox change
+			inode.Mode = newMode
+			inode.GroupID = newGroupID
 			_, err = c.updateInode(*inode)
 			if err != nil {
 				return err

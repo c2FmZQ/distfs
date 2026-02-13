@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -222,6 +223,7 @@ type SetAttrRequest struct {
 	Mode    *uint32 `json:"mode,omitempty"`
 	UID     *uint32 `json:"uid,omitempty"`
 	GID     *uint32 `json:"gid,omitempty"`
+	GroupID *string `json:"group_id,omitempty"`
 	Size    *uint64 `json:"size,omitempty"`
 	MTime   *int64  `json:"mtime,omitempty"`
 }
@@ -505,48 +507,46 @@ func (fsm *MetadataFSM) applyCreateUser(data []byte) interface{} {
 func (fsm *MetadataFSM) applyCreateGroup(data []byte) interface{} {
 	var group Group
 	if err := json.Unmarshal(data, &group); err != nil {
+		log.Printf("FSM: applyCreateGroup unmarshal failed: %v", err)
 		return err
 	}
 
+	log.Printf("FSM: applyCreateGroup for ID %s (GID %d)", group.ID, group.GID)
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		gb := tx.Bucket([]byte("groups"))
 		idx := tx.Bucket([]byte("gids"))
 
 		if gb.Get([]byte(group.ID)) != nil {
+			log.Printf("FSM: group %s already exists", group.ID)
 			return ErrExists
 		}
 
-		// Allocate unique GID if not provided or 0
-		if group.GID == 0 {
-			for {
-				gid := generateID32()
-				if gid < 1000 {
-					continue // Reserve low GIDs
-				}
-				if idx.Get(uint32ToBytes(gid)) == nil {
-					group.GID = gid
-					break
-				}
-			}
-		} else {
-			// If GID provided, check if already taken
-			if existing := idx.Get(uint32ToBytes(group.GID)); existing != nil {
-				return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
-			}
+		// Ensure GID is unique
+		if existing := idx.Get(uint32ToBytes(group.GID)); existing != nil {
+			log.Printf("FSM: GID %d already assigned to %s", group.GID, string(existing))
+			return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
 		}
 
 		encoded, err := json.Marshal(group)
 		if err != nil {
+			log.Printf("FSM: group %s marshal failed: %v", group.ID, err)
 			return err
 		}
 
 		if err := gb.Put([]byte(group.ID), encoded); err != nil {
+			log.Printf("FSM: failed to save group %s: %v", group.ID, err)
 			return err
 		}
-		return idx.Put(uint32ToBytes(group.GID), []byte(group.ID))
+		if err := idx.Put(uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
+			log.Printf("FSM: failed to save GID %d: %v", group.GID, err)
+			return err
+		}
+		log.Printf("FSM: group %s (GID %d) saved successfully", group.ID, group.GID)
+		return nil
 	})
 
 	if err != nil {
+		log.Printf("FSM: applyCreateGroup transaction failed: %v", err)
 		return err
 	}
 	return &group
@@ -656,6 +656,9 @@ func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
 		}
 		if req.GID != nil {
 			inode.GID = *req.GID
+		}
+		if req.GroupID != nil {
+			inode.GroupID = *req.GroupID
 		}
 		diffBytes := int64(0)
 		if req.Size != nil {
@@ -1406,4 +1409,42 @@ func (fsm *MetadataFSM) GetWorldIdentity() (*WorldIdentity, error) {
 		return nil, err
 	}
 	return &world, nil
+}
+
+func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
+	log.Printf("FSM: IsUserInGroup checking groupID=%s for userID=%s", groupID, userID)
+	var group Group
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(groupID))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &group)
+	})
+	if err != nil {
+		return false, err
+	}
+	return group.Members[userID] || group.OwnerID == userID, nil
+}
+
+func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
+	var group Group
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &group)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &group, nil
+}
+
+func (fsm *MetadataFSM) UpdateGroup(group Group) error {
+	// Actually, applyUpdateGroup handles it via Raft.
+	return nil
 }

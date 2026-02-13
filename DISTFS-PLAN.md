@@ -206,3 +206,18 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update MetaNode to allow non-owners to write to Inodes if world-write bit (`0002`) is set.
 *   **Step 12.6: World-Writable Client Logic**
     *   **Action:** Ensure Client can use World Private Key to unlock File Keys for write operations.
+
+---
+
+## Phase 13: Group-Based Sharing
+**Goal:** Implement cryptographic group sharing.
+
+*   **Step 13.1: Group Authorization**
+    *   **Action:** Update `handleIssueToken` and `checkWritePermission` in MetaNode to verify user membership in `inode.GroupID`.
+*   **Step 13.2: Group Key Retrieval**
+    *   **Action:** Implement `GET /v1/group/{id}/private` to retrieve the Group Private Key (encapsulated for the requester).
+*   **Step 13.3: Client Group Logic**
+    *   **Action:** Update `UnlockInode` to attempt group-based decryption if personal access fails.
+    *   **Action:** Implement memory caching for Group Private Keys.
+*   **Step 13.4: Group Management CLI**
+    *   **Action:** Implement `chgrp` and `group-create`/`group-add` commands.

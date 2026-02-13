@@ -167,7 +167,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
 	log.Printf("FUSE Create: %s", req.Name)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode))
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), d.inode.GroupID)
 	if err != nil {
 		log.Printf("FUSE Create failed: %v", err)
 		return nil, nil, syscall.EIO
@@ -185,7 +185,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	log.Printf("FUSE Mkdir: %s", req.Name)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode))
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), d.inode.GroupID)
 	if err != nil {
 		log.Printf("FUSE Mkdir failed: %v", err)
 		return nil, syscall.EIO
@@ -219,7 +219,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 
 func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
 	log.Printf("FUSE Symlink: %s -> %s", req.NewName, req.Target)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777)
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, d.inode.GroupID)
 	if err != nil {
 		log.Printf("FUSE Symlink failed: %v", err)
 		return nil, syscall.EIO

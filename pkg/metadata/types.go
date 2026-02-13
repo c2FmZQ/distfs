@@ -65,12 +65,13 @@ type RegisterUserRequest struct {
 }
 
 type Group struct {
-	ID      string          `json:"id"`
-	GID     uint32          `json:"gid"`
-	OwnerID string          `json:"owner_id"` // User ID (string)
-	Members map[string]bool `json:"members"`
-	EncKey  []byte          `json:"enc_key"`
-	Lockbox crypto.Lockbox  `json:"lockbox"`
+	ID            string          `json:"id"`
+	EncryptedName []byte          `json:"enc_name"`
+	GID           uint32          `json:"gid"`
+	OwnerID       string          `json:"owner_id"` // User ID (string)
+	Members       map[string]bool `json:"members"`
+	EncKey        []byte          `json:"enc_key"`
+	Lockbox       crypto.Lockbox  `json:"lockbox"`
 }
 
 type NodeStatus string
@@ -119,6 +120,36 @@ type AuthToken struct {
 	UserID string `json:"uid"`
 	Time   int64  `json:"ts"`
 	Nonce  string `json:"nonce"`
+}
+
+type AuthChallengeRequest struct {
+	UserID string `json:"uid"`
+}
+
+type AuthChallengeResponse struct {
+	Challenge []byte `json:"challenge"` // Random bytes
+	Signature []byte `json:"sig"`       // Server signature over Challenge
+}
+
+type AuthChallengeSolve struct {
+	UserID    string `json:"uid"`
+	Challenge []byte `json:"challenge"`
+	Signature []byte `json:"sig"` // User signature over Challenge
+}
+
+type SessionToken struct {
+	UserID string `json:"uid"`
+	Expiry int64  `json:"exp"`
+	Nonce  string `json:"nonce"`
+}
+
+type SignedSessionToken struct {
+	Token     SessionToken `json:"token"`
+	Signature []byte       `json:"sig"`
+}
+
+type SessionResponse struct {
+	Token string `json:"token"` // Base64(SignedSessionToken)
 }
 
 type SignedAuthToken struct {
