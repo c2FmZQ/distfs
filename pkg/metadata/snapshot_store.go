@@ -126,9 +126,8 @@ type StorageSnapshotSink struct {
 func (s *StorageSnapshotSink) Write(p []byte) (int, error) {
 	if s.wc == nil {
 		var err error
-		finalName := "snapshot-data-" + s.id
-		tempName := finalName + ".tmp"
-		s.wc, err = s.st.OpenBlobWrite(tempName, finalName)
+		name := "snapshot-data-" + s.id
+		s.wc, err = s.st.OpenBlobWrite(name, name)
 		if err != nil {
 			return 0, err
 		}
@@ -148,9 +147,8 @@ func (s *StorageSnapshotSink) Close() error {
 	}
 
 	// Save Meta
-	finalName := "snapshot-meta-" + s.id
-	tempName := finalName + ".tmp"
-	wc, err := s.st.OpenBlobWrite(tempName, finalName)
+	name := "snapshot-meta-" + s.id
+	wc, err := s.st.OpenBlobWrite(name, name)
 	if err != nil {
 		return err
 	}

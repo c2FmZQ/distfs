@@ -16,6 +16,7 @@ package client
 
 import (
 	"bytes"
+	"crypto/mlkem"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -57,6 +58,40 @@ func createUser(t *testing.T, raftNode *metadata.RaftNode, user metadata.User) {
 	}
 }
 
+func waitLeader(t *testing.T, r *raft.Raft) {
+	leader := false
+	for i := 0; i < 50; i++ {
+		if r.State() == raft.Leader {
+			leader = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !leader {
+		t.Fatal("Node did not become leader")
+	}
+}
+
+func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) *mlkem.EncapsulationKey768 {
+	waitLeader(t, raftNode.Raft)
+	dk, _ := crypto.GenerateEncryptionKey()
+	ek := dk.EncapsulationKey()
+	key := metadata.ClusterKey{
+		ID:        "key-1",
+		EncKey:    ek.Bytes(),
+		DecKey:    dk.Bytes(),
+		CreatedAt: time.Now().Unix(),
+	}
+	keyBytes, _ := json.Marshal(key)
+	cmd := metadata.LogCommand{Type: metadata.CmdRotateKey, Data: keyBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
+	}
+	return dk.EncapsulationKey()
+}
+
 func registerNode(t *testing.T, metaURL, secret string, node metadata.Node) {
 	body, _ := json.Marshal(node)
 	req, _ := http.NewRequest("POST", metaURL+"/v1/node", bytes.NewReader(body))
@@ -89,11 +124,11 @@ func TestClientIntegration(t *testing.T) {
 	})
 
 	// Wait for leader
-	time.Sleep(2 * time.Second)
+	waitLeader(t, metaNode.Raft)
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -123,7 +158,7 @@ func TestClientIntegration(t *testing.T) {
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	// 4. Write File (Raw)
 	content := []byte("hello distributed filesystem world")
@@ -194,11 +229,22 @@ func TestReplication(t *testing.T) {
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
 
-	time.Sleep(2 * time.Second)
+	// Wait for leader
+	leader := false
+	for i := 0; i < 50; i++ {
+		if metaNode.Raft.State() == raft.Leader {
+			leader = true
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if !leader {
+		t.Fatal("Node did not become leader")
+	}
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -241,7 +287,7 @@ func TestReplication(t *testing.T) {
 	c := NewClient(tsMeta.URL, nodes[0].URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	// 4. Write
 	content := []byte("replicated data")
@@ -284,11 +330,11 @@ func TestDirectories(t *testing.T) {
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
-	time.Sleep(2 * time.Second)
+	waitLeader(t, metaNode.Raft)
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -323,7 +369,7 @@ func TestDirectories(t *testing.T) {
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	// Ensure Root
 	if err := c.EnsureRoot(); err != nil {
@@ -381,11 +427,11 @@ func TestReplicationRepair(t *testing.T) {
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
-	time.Sleep(2 * time.Second)
+	waitLeader(t, metaNode.Raft)
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -417,7 +463,7 @@ func TestReplicationRepair(t *testing.T) {
 	c := NewClient(tsMeta.URL, ts1.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	content := []byte("repair me")
 	_, err = c.WriteFile("repair-file", bytes.NewReader(content), int64(len(content)), 0644) // Raw write
@@ -492,11 +538,11 @@ func TestReadAhead(t *testing.T) {
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
-	time.Sleep(2 * time.Second)
+	waitLeader(t, metaNode.Raft)
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -539,7 +585,7 @@ func TestReadAhead(t *testing.T) {
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	// 3. Create File with 5 Chunks
 	dataSize := 5 * 1024 * 1024
@@ -609,11 +655,11 @@ func TestGarbageCollection(t *testing.T) {
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
-	time.Sleep(2 * time.Second)
+	waitLeader(t, metaNode.Raft)
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "testsecret", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -647,7 +693,7 @@ func TestGarbageCollection(t *testing.T) {
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	// 3. Create File
 	if err := c.EnsureRoot(); err != nil {
@@ -693,7 +739,63 @@ func TestGarbageCollection(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	if !deleted {
-		t.Error("Chunk was not garbage collected")
+	        if !deleted {
+	                t.Error("Chunk was not garbage collected")
+	        }
 	}
-}
+	
+	func TestResolvePathComplex(t *testing.T) {
+		metaDir := t.TempDir()
+		metaSt, _ := createTestStorage(t, metaDir)
+		nodeKey, _ := crypto.GenerateIdentityKey()
+		metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
+		defer metaNode.Shutdown()
+		metaNode.Raft.BootstrapCluster(raft.Configuration{
+			Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
+		})
+		waitLeader(t, metaNode.Raft)
+	
+		serverEK := bootstrapCluster(t, metaNode)
+		signKey, _ := crypto.GenerateIdentityKey()
+		metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
+		metaServer.StopKeyRotation()
+		tsMeta := httptest.NewServer(metaServer)
+		defer tsMeta.Close()
+	
+		dk, _ := crypto.GenerateEncryptionKey()
+		userSignKey, _ := crypto.GenerateIdentityKey()
+		createUser(t, metaNode, metadata.User{
+			ID: "user-1", SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
+		})
+	
+		dataDir := t.TempDir()
+		dataSt, _ := createTestStorage(t, dataDir)
+		dataStore, _ := data.NewDiskStore(dataSt)
+		dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+		tsData := httptest.NewServer(dataServer)
+		defer tsData.Close()
+		registerNode(t, tsMeta.URL, "testsecret", metadata.Node{
+			ID: "d1", Address: tsData.URL, Status: metadata.NodeStatusActive,
+		})
+	
+		c := NewClient(tsMeta.URL, tsData.URL)
+		c = c.WithIdentity("user-1", dk)
+		c = c.WithSignKey(userSignKey)
+		c = c.WithServerKey(serverEK)
+	
+		if err := c.EnsureRoot(); err != nil { t.Fatal(err) }
+	
+		c.Mkdir("/a")
+		c.Mkdir("/a/b")
+		c.Mkdir("/a/b/c")
+		content := []byte("data")
+		c.CreateFile("/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
+	
+		inode, _, err := c.ResolvePath("/a/b/c/file.txt")
+		if err != nil { t.Fatalf("Resolve failed: %v", err) }
+		if inode.ID == "" { t.Error("Empty ID") }
+	
+		_, _, err = c.ResolvePath("/missing")
+		if err == nil { t.Error("Expected error") }
+	}
+	

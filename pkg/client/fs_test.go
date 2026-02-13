@@ -16,6 +16,7 @@ package client
 
 import (
 	"bytes"
+	"crypto/mlkem"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -28,6 +29,25 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/hashicorp/raft"
 )
+
+func bootstrapClusterFS(t *testing.T, raftNode *metadata.RaftNode) *mlkem.EncapsulationKey768 {
+	dk, _ := crypto.GenerateEncryptionKey()
+	ek := dk.EncapsulationKey()
+	key := metadata.ClusterKey{
+		ID:        "key-1",
+		EncKey:    ek.Bytes(),
+		DecKey:    dk.Bytes(),
+		CreatedAt: time.Now().Unix(),
+	}
+	keyBytes, _ := json.Marshal(key)
+	cmd := metadata.LogCommand{Type: metadata.CmdRotateKey, Data: keyBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
+	}
+	return dk.EncapsulationKey()
+}
 
 func TestDistFS_ReadDir(t *testing.T) {
 	// 1. Setup Cluster
@@ -45,9 +65,9 @@ func TestDistFS_ReadDir(t *testing.T) {
 	})
 	time.Sleep(2 * time.Second)
 
-	serverKEM, _ := crypto.GenerateEncryptionKey()
+	serverEK := bootstrapClusterFS(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer(metaNode.Raft, metaNode.FSM, "", serverKEM, signKey, "", nil)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -59,7 +79,6 @@ func TestDistFS_ReadDir(t *testing.T) {
 		ID:      "user-1",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
-		Name:    "User One",
 	}
 	userBytes, _ := json.Marshal(user)
 	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
@@ -76,20 +95,11 @@ func TestDistFS_ReadDir(t *testing.T) {
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
-	// Register Data Node
-	node := metadata.Node{
-		ID:      "data-1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
-	}
-	body, _ := json.Marshal(node)
-	_ = body
-
 	// 2. Client
 	c := NewClient(tsMeta.URL, tsData.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverKEM.EncapsulationKey())
+	c = c.WithServerKey(serverEK)
 
 	if err := c.EnsureRoot(); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)

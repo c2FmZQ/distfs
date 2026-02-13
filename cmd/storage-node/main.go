@@ -176,7 +176,7 @@ func main() {
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *jwksURL, signKey, *raftSecret, rn.ClientTLSConfig)
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *jwksURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour)
 
 	// DiskStore uses separate storage instance rooted at chunks/
 	chunkDir := filepath.Join(baseDir, "chunks")

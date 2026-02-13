@@ -66,9 +66,10 @@ type Server struct {
 	keyWorker   *KeyRotationWorker
 
 	clientTLSConfig *tls.Config
+	keyRotationInterval time.Duration
 }
 
-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -86,6 +87,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 		raftSecret:      raftSecret,
 		nonceCache:      make(map[string]time.Time),
 		clientTLSConfig: clientTLSConfig,
+		keyRotationInterval: keyRotationInterval,
 	}
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
@@ -143,6 +145,13 @@ func (s *Server) ForceReplicationScan() {
 func (s *Server) ForceGCScan() {
 	if s.gcWorker != nil {
 		s.gcWorker.runGC()
+	}
+}
+
+func (s *Server) StopKeyRotation() {
+	if s.keyWorker != nil {
+		s.keyWorker.Stop()
+		s.keyWorker = nil
 	}
 }
 
@@ -376,16 +385,16 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 
 	active, err := s.fsm.GetActiveKey()
 	if err != nil {
-		return nil, fmt.Errorf("active key not found")
+		return nil, fmt.Errorf("active key not found: %v", err)
 	}
 	dk, err := crypto.UnmarshalDecapsulationKey(active.DecKey)
 	if err != nil {
-		return nil, fmt.Errorf("invalid cluster key")
+		return nil, fmt.Errorf("invalid cluster key %s: %v", active.ID, err)
 	}
 
 	kemSize := mlkem.CiphertextSize768
 	if len(sealed) < kemSize {
-		return nil, fmt.Errorf("token too short")
+		return nil, fmt.Errorf("token too short: %d < %d", len(sealed), kemSize)
 	}
 
 	kemCT := sealed[:kemSize]
@@ -421,19 +430,6 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 		return nil, fmt.Errorf("replay detected")
 	}
 	s.nonceCache[token.Nonce] = time.Now()
-	// Using crypto/rand? No, this is for cache cleanup logic, randomness isn't security critical here but good practice.
-	// We should avoid math/rand.
-	// Random cleanup:
-	b := make([]byte, 1)
-	rand.Read(b)
-	if len(s.nonceCache) > 10000 && b[0]%100 == 0 {
-		now := time.Now()
-		for nonce, t := range s.nonceCache {
-			if now.Sub(t) > 6*time.Minute {
-				delete(s.nonceCache, nonce)
-			}
-		}
-	}
 	s.nonceMu.Unlock()
 
 	var user User

@@ -128,7 +128,7 @@ func (s *DiskStore) DeleteChunk(id string) error {
 		return err
 	}
 
-	return fmt.Errorf("chunk not found or deletion failed")
+	return os.ErrNotExist
 }
 
 // ListChunks returns an iterator.

@@ -145,3 +145,91 @@ func TestChunkEncryption(t *testing.T) {
 		t.Error("Decrypted data mismatch")
 	}
 }
+
+func TestKEM_Errors(t *testing.T) {
+	dk, _ := GenerateEncryptionKey()
+	
+	// Too short ciphertext
+	_, err := Decapsulate(dk, make([]byte, 10))
+	if err == nil {
+		t.Error("Decapsulate should fail for short ciphertext")
+	}
+
+	// Invalid keys
+	_, err = UnmarshalDecapsulationKey(make([]byte, 10))
+	if err == nil {
+		t.Error("UnmarshalDecapsulationKey should fail for bad data")
+	}
+	_, err = UnmarshalEncapsulationKey(make([]byte, 10))
+	if err == nil {
+		t.Error("UnmarshalEncapsulationKey should fail for bad data")
+	}
+}
+
+func TestDEM_Errors(t *testing.T) {
+	key := make([]byte, 32)
+	
+	// Too short
+	_, err := DecryptDEM(key, make([]byte, 5))
+	if err == nil {
+		t.Error("DecryptDEM should fail for short data")
+	}
+
+	// Invalid key size
+	_, err = EncryptDEM(make([]byte, 10), []byte("data"))
+	if err == nil {
+		t.Error("EncryptDEM should fail for bad key size")
+	}
+}
+
+func TestKeyRing(t *testing.T) {
+	initial := make([]byte, 32)
+	kr := NewKeyRing(initial)
+	
+	k, gen := kr.Current()
+	if gen != 1 || string(k) != string(initial) {
+		t.Errorf("Initial keyring mismatch: gen=%d", gen)
+	}
+
+	// Rotate
+	newGen, err := kr.Rotate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newGen != 2 {
+		t.Errorf("Expected gen 2, got %d", newGen)
+	}
+
+	k2, gen2 := kr.Current()
+	if gen2 != 2 || string(k2) == string(initial) {
+		t.Error("Key not rotated")
+	}
+
+	// Get old
+	kOld, ok := kr.Get(1)
+	if !ok || string(kOld) != string(initial) {
+		t.Error("Failed to get old key")
+	}
+
+	// Marshal/Unmarshal
+	data := kr.Marshal()
+	kr2, err := UnmarshalKeyRing(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	
+	if kr2.current != kr.current {
+		t.Error("Unmarshal current mismatch")
+	}
+	
+	kBack, _ := kr2.Get(1)
+	if string(kBack) != string(initial) {
+		t.Error("Unmarshal key mismatch")
+	}
+
+	// Unmarshal error
+	_, err = UnmarshalKeyRing(make([]byte, 2))
+	if err == nil {
+		t.Error("UnmarshalKeyRing should fail for short data")
+	}
+}

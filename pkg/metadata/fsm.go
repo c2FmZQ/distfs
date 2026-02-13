@@ -192,6 +192,11 @@ type LogCommand struct {
 	Data []byte      `json:"data"`
 }
 
+func (c LogCommand) Marshal() []byte {
+	b, _ := json.Marshal(c)
+	return b
+}
+
 type ChildUpdate struct {
 	ParentID string `json:"parent_id"`
 	Name     string `json:"name"`

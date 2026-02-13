@@ -30,10 +30,14 @@ type KeyRotationWorker struct {
 }
 
 func NewKeyRotationWorker(s *Server) *KeyRotationWorker {
+	interval := s.keyRotationInterval
+	if interval == 0 {
+		interval = 24 * time.Hour
+	}
 	return &KeyRotationWorker{
 		server:   s,
 		stopChan: make(chan struct{}),
-		interval: 24 * time.Hour,
+		interval: interval,
 	}
 }
 
@@ -63,6 +67,9 @@ func (w *KeyRotationWorker) run() {
 }
 
 func (w *KeyRotationWorker) checkAndRotate() {
+	if w.interval < 0 {
+		return
+	}
 	if w.server.raft.State() != raft.Leader {
 		return
 	}
@@ -75,7 +82,7 @@ func (w *KeyRotationWorker) checkAndRotate() {
 		return
 	}
 
-	if time.Since(time.Unix(0, active.CreatedAt)) > w.interval {
+	if time.Since(time.Unix(active.CreatedAt, 0)) > w.interval {
 		w.rotate()
 	}
 }
@@ -90,7 +97,7 @@ func (w *KeyRotationWorker) rotate() {
 		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
 		EncKey:    key.EncapsulationKey().Bytes(),
 		DecKey:    key.Bytes(),
-		CreatedAt: time.Now().UnixNano(),
+		CreatedAt: time.Now().Unix(),
 	}
 
 	data, _ := json.Marshal(clusterKey)

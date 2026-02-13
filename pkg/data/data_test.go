@@ -240,3 +240,74 @@ func TestDiskStore_TempFiles(t *testing.T) {
 		t.Errorf("ListChunks should ignore tmp files, got %d", count)
 	}
 }
+
+func TestDiskStore_EdgeCases(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(st)
+
+	id := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+
+	// Read missing
+	_, err := store.ReadChunk(id)
+	if err == nil {
+		t.Error("ReadChunk should fail for missing chunk")
+	}
+
+	// Size missing
+	_, err = store.GetChunkSize(id)
+	if err == nil {
+		t.Error("GetChunkSize should fail for missing chunk")
+	}
+
+	// Delete missing
+	err = store.DeleteChunk(id)
+	if err == nil {
+		t.Error("DeleteChunk should fail for missing chunk")
+	}
+
+	// Invalid ID formats
+	badID := "too-short"
+	if err := store.WriteChunk(badID, nil); err == nil {
+		t.Error("WriteChunk should fail for bad ID")
+	}
+	if _, err := store.ReadChunk(badID); err == nil {
+		t.Error("ReadChunk should fail for bad ID")
+	}
+}
+
+func TestAPI_Delete(t *testing.T) {
+	tmpDir := t.TempDir()
+	st, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(st)
+
+	server := NewServer(store, nil, nil)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	id := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	store.WriteChunk(id, bytes.NewReader([]byte("data")))
+
+	// DELETE
+	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/data/"+id, nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("DELETE failed: %d", resp.StatusCode)
+	}
+
+	// Verify gone
+	has, _ := store.HasChunk(id)
+	if has {
+		t.Error("Chunk still exists after DELETE")
+	}
+
+	// DELETE missing
+	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/data/"+id, nil)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected 404 for missing DELETE, got %d", resp.StatusCode)
+	}
+}

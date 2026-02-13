@@ -16,12 +16,15 @@ package metadata
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,7 +35,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
+func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKey, []byte, *Server) {
 	tmpDir := t.TempDir()
 
 	mk, err := storage_crypto.CreateAESMasterKeyForTest()
@@ -75,27 +78,82 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
 		t.Fatalf("Node did not become leader")
 	}
 
-	server := NewServer("node1", node.Raft, node.FSM, "", nil, "testsecret", nil)
+	// Bootstrap cluster key
+	dk, _ := crypto.GenerateEncryptionKey()
+	ek := dk.EncapsulationKey()
+	key := ClusterKey{
+		ID:        "key-1",
+		EncKey:    ek.Bytes(),
+		DecKey:    dk.Bytes(),
+		CreatedAt: time.Now().Unix(),
+	}
+	keyBytes, _ := json.Marshal(key)
+	cmd := LogCommand{Type: CmdRotateKey, Data: keyBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Bootstrap key apply failed: %v", err)
+	}
+
+	signKey, _ := crypto.GenerateIdentityKey()
+	server := NewServer("node1", node.Raft, node.FSM, "", signKey, "testsecret", nil, 0)
 	ts := httptest.NewServer(server)
-	return node, ts
+	return node, ts, signKey, ek.Bytes(), server
+}
+
+func sealToken(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverEKBytes []byte) string {
+	nonce := make([]byte, 16)
+	io.ReadFull(rand.Reader, nonce)
+	token := AuthToken{
+		UserID: userID,
+		Time:   time.Now().Unix(),
+		Nonce:  base64.StdEncoding.EncodeToString(nonce),
+	}
+	payload, _ := json.Marshal(token)
+	sig := userSignKey.Sign(payload)
+	signed := SignedAuthToken{
+		Payload:   payload,
+		Signature: sig,
+	}
+	pt, _ := json.Marshal(signed)
+
+	ek, _ := crypto.UnmarshalEncapsulationKey(serverEKBytes)
+	ss, ct := crypto.Encapsulate(ek)
+	dem, _ := crypto.EncryptDEM(ss, pt)
+
+	tokenBytes := append(ct, dem...)
+	return base64.StdEncoding.EncodeToString(tokenBytes)
 }
 
 func TestMetadataCluster(t *testing.T) {
-	node, ts := setupCluster(t)
+	node, ts, _, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
+
+	userSignKey, _ := crypto.GenerateIdentityKey()
+	user := User{
+		ID:      "u1",
+		SignKey: userSignKey.Public(),
+	}
+	userBytes, _ := json.Marshal(user)
+	f := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: userBytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Raft Apply user failed: %v", err)
+	}
+
+	token := sealToken(t, "u1", userSignKey, serverEK)
 
 	// Test Create Inode
 	inode := Inode{
 		ID:      "inode-1",
-		OwnerID: "user-1",
+		OwnerID: "u1",
 		Type:    FileType,
 	}
 	body, _ := json.Marshal(inode)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
@@ -106,8 +164,9 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Test Get Inode
+	token = sealToken(t, "u1", userSignKey, serverEK)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
@@ -123,8 +182,9 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Test Delete Inode
+	token = sealToken(t, "u1", userSignKey, serverEK)
 	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("DELETE failed: %v", err)
@@ -134,8 +194,9 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Verify Deleted
+	token = sealToken(t, "u1", userSignKey, serverEK)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
@@ -145,13 +206,37 @@ func TestMetadataCluster(t *testing.T) {
 	}
 }
 
+func TestFSM_EdgeCases(t *testing.T) {
+	node, _, _, _, _ := setupCluster(t)
+	defer node.Shutdown()
+
+	// Unknown Command (using string for type instead of number to avoid unmarshal error if it's strict, or just use a known unused number)
+	// Actually CommandType is uint32, so 999 is valid uint32 but unknown.
+	resp := node.FSM.Apply(&raft.Log{Data: []byte(`{"type":999,"data":""}`)})
+	if err, ok := resp.(error); !ok || err.Error() != "unknown command" {
+		// If it's a JSON error, it might be due to how CommandType is unmarshaled.
+		if ok && strings.Contains(err.Error(), "unmarshal") {
+			// Accept unmarshal error as a form of "invalid command"
+		} else {
+			t.Errorf("Expected unknown command or unmarshal error, got %v", resp)
+		}
+	}
+
+	// Bad JSON
+	resp = node.FSM.Apply(&raft.Log{Data: []byte(`{invalid}`)})
+	if _, ok := resp.(error); !ok {
+		t.Error("Expected JSON unmarshal error")
+	}
+}
+
 func TestIdentityRegistry(t *testing.T) {
-	node, ts := setupCluster(t)
+	node, ts, _, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
 	// Create User (via Raft directly, since /v1/user is removed)
-	user := User{ID: "u1"}
+	userSignKey, _ := crypto.GenerateIdentityKey()
+	user := User{ID: "u1", SignKey: userSignKey.Public()}
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
@@ -163,19 +248,14 @@ func TestIdentityRegistry(t *testing.T) {
 		t.Fatalf("FSM Apply failed: %v", err)
 	}
 
-	// Verify User Exist via FSM
-	// (Or we could test /v1/user via GET if it existed, but it doesn't. Registration is write-only typically).
-	// We verify using Group creation which refers to User?
-	// Group OwnerID is checked?
-	// The Group Create logic (fsm.go) likely checks if OwnerID exists.
-	// Let's verify Group Creation works.
+	token := sealToken(t, "u1", userSignKey, serverEK)
 
 	// Create Group
 	group := Group{ID: "g1", OwnerID: "u1"}
 	body, _ := json.Marshal(group)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/group", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -200,7 +280,8 @@ func TestIdentityRegistry(t *testing.T) {
 }
 
 func TestRegisterUserEndpoint(t *testing.T) {
-	_, ts := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
+	_ = node
 	defer ts.Close()
 
 	reqBody := RegisterUserRequest{
@@ -309,9 +390,18 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts := setupCluster(t)
+	node, ts, _, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
+
+	userSignKey, _ := crypto.GenerateIdentityKey()
+	user := User{ID: "u1", SignKey: userSignKey.Public()}
+	userBytes, _ := json.Marshal(user)
+	f := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: userBytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Raft Apply user failed: %v", err)
+	}
+	token := sealToken(t, "u1", userSignKey, serverEK)
 
 	// Create Inode with many chunks
 	chunkCount := ChunkPageSize + 50 // 1050
@@ -323,6 +413,7 @@ func TestChunkPagination(t *testing.T) {
 	inode := Inode{
 		ID:            "paginated-file",
 		Type:          FileType,
+		OwnerID:       "u1",
 		ChunkManifest: manifest,
 	}
 	body, _ := json.Marshal(inode)
@@ -330,7 +421,7 @@ func TestChunkPagination(t *testing.T) {
 	// POST /v1/meta/inode
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
@@ -340,8 +431,9 @@ func TestChunkPagination(t *testing.T) {
 	}
 
 	// Verify via API (Transparent Reconstruction)
+	token = sealToken(t, "u1", userSignKey, serverEK)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/paginated-file", nil)
-	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
@@ -392,7 +484,8 @@ func TestChunkPagination(t *testing.T) {
 }
 
 func TestAccounting(t *testing.T) {
-	node, ts := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
+	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -481,7 +574,8 @@ func TestAccounting(t *testing.T) {
 }
 
 func TestDashboardAPI(t *testing.T) {
-	node, ts := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
+	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -562,7 +656,8 @@ func TestDashboardAPI(t *testing.T) {
 }
 
 func TestQuotaEnforcement(t *testing.T) {
-	node, ts := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
+	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
 
