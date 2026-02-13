@@ -660,6 +660,9 @@ func (fsm *MetadataFSM) applySetAttr(data []byte) interface{} {
 		if req.GroupID != nil {
 			inode.GroupID = *req.GroupID
 		}
+		if req.GroupID != nil {
+			inode.GroupID = *req.GroupID
+		}
 		diffBytes := int64(0)
 		if req.Size != nil {
 			diffBytes = int64(*req.Size) - int64(inode.Size)

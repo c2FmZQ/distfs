@@ -1262,28 +1262,33 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 			updated = true
 		}
 
-		if (groupRWOld != groupRWNew || groupChanged) && newGroupID != "" {
-			if groupRWNew {
-				group, err := c.GetGroup(newGroupID)
-				if err == nil {
-					gk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
-					if err := inode.Lockbox.AddRecipient(newGroupID, gk, key); err != nil {
-						return err
-					}
-					updated = true
-				}
-			} else {
-				delete(inode.Lockbox, newGroupID)
+		// Handle Group Access Synchronization
+		if groupChanged || groupRWOld != groupRWNew {
+			// If group changed or was removed, delete the OLD recipient from the lockbox
+			if oldGroupID != "" {
+				delete(inode.Lockbox, oldGroupID)
 				updated = true
 			}
-		} else if groupRWNew && oldGroupID != "" && groupChanged {
-			// Remove old group from lockbox if it was there
-			delete(inode.Lockbox, oldGroupID)
-			updated = true
+
+			// If we HAVE a new group and the new mode allows group access, add it
+			if newGroupID != "" && groupRWNew {
+				group, err := c.GetGroup(newGroupID)
+				if err != nil {
+					return fmt.Errorf("failed to fetch new group info: %w", err)
+				}
+				gk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				if err != nil {
+					return fmt.Errorf("failed to unmarshal group public key: %w", err)
+				}
+				if err := inode.Lockbox.AddRecipient(newGroupID, gk, key); err != nil {
+					return err
+				}
+				updated = true
+			}
 		}
 
 		if updated {
-			// Update the full Inode to persist Lockbox change
+			// Update the local inode state before sending to server
 			inode.Mode = newMode
 			inode.GroupID = newGroupID
 			_, err = c.updateInode(*inode)
