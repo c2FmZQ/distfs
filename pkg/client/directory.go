@@ -187,6 +187,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 			return nil, nil, err
 		}
 	} else {
+		// Try to see if it already exists (unlikely for newID, but for completeness)
 		lb := c.createLockbox(newKey, mode)
 		inode := metadata.Inode{
 			ID:            newID,
@@ -380,6 +381,27 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 
 	if parentInode.Type != metadata.DirType {
 		return fmt.Errorf("parent is not a directory")
+	}
+
+	// Check if it already exists
+	mac := hmac.New(sha256.New, parentKey)
+	mac.Write([]byte(name))
+	encName := hex.EncodeToString(mac.Sum(nil))
+
+	if existingID, ok := parentInode.Children[encName]; ok {
+		if iType == metadata.FileType {
+			// Update existing file content
+			inode, err := c.GetInode(existingID)
+			if err != nil {
+				return err
+			}
+			key, err := c.UnlockInode(inode)
+			if err != nil {
+				return err
+			}
+			return c.writeInodeContent(existingID, metadata.FileType, key, r, size, nil, inode.Mode)
+		}
+		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}
 
 	_, _, err = c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode)

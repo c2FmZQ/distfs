@@ -15,6 +15,8 @@ COPY scripts/test-stress.sh /bin/test-stress.sh
 COPY scripts/test-gc.sh /bin/test-gc.sh
 COPY scripts/test-integrity.sh /bin/test-integrity.sh
 COPY scripts/test-public.sh /bin/test-public.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh
+COPY scripts/test-writable.sh /bin/test-writable.sh
+COPY scripts/test-all-e2e.sh /bin/test-all-e2e.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-writable.sh /bin/test-all-e2e.sh
 
 ENTRYPOINT ["/bin/storage-node"]

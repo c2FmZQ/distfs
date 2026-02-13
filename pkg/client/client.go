@@ -356,31 +356,44 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
-	lb := crypto.NewLockbox()
-	if c.decKey != nil {
-		if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
-			return err
-		}
-	}
-	if (mode & 0004) != 0 {
-		wpk, err := c.GetWorldPublicKey()
-		if err == nil {
-			lb.AddRecipient(metadata.WorldID, wpk, fileKey)
-		}
-	}
 
 	var inode metadata.Inode
 	// Try to get existing inode
 	existing, err := c.getInode(id)
 	if err == nil {
 		inode = *existing
-		// We preserve existing ID, Owner, etc.
-		// We will replace ChunkManifest and Size.
-		inode.Lockbox = lb
+		// Preserve existing Lockbox entries if possible
+		if inode.Lockbox == nil {
+			inode.Lockbox = crypto.NewLockbox()
+		}
+		if c.decKey != nil {
+			if err := inode.Lockbox.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
+				return err
+			}
+		}
+		if (mode & 0004) != 0 {
+			wpk, err := c.GetWorldPublicKey()
+			if err == nil {
+				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, fileKey)
+			}
+		}
 		if encryptedName != nil {
 			inode.EncryptedName = encryptedName
 		}
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+		lb := crypto.NewLockbox()
+		if c.decKey != nil {
+			if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
+				return err
+			}
+		}
+		if (mode & 0004) != 0 {
+			wpk, err := c.GetWorldPublicKey()
+			if err == nil {
+				lb.AddRecipient(metadata.WorldID, wpk, fileKey)
+			}
+		}
+
 		// Assume not found, create new
 		inode = metadata.Inode{
 			ID:            id,
@@ -720,7 +733,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 	if c.decKey == nil {
 		return nil, fmt.Errorf("client has no identity to unlock file")
 	}
-	
+
 	// 1. Try personal access
 	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 	if err == nil {

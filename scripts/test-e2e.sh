@@ -105,6 +105,8 @@ if [ ! -f /root/.distfs/config.json ]; then
   # Fetch real JWT from test-auth
   JWT=$(wget -qO- "http://test-auth:8080/mint?email=test@example.com")
   distfs register -jwt "$JWT"
+  echo "Making root world-writable for concurrent tests..."
+  distfs chmod 0777 /
 fi
 
 echo "Creating directory..."

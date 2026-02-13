@@ -202,3 +202,7 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement memory caching for decrypted World Private Key.
 *   **Step 12.4: FUSE & CLI Publishing**
     *   **Action:** Update `chmod` handler to automatically add/remove `world` recipient in Lockbox based on permission bits.
+*   **Step 12.5: World-Writable Server Auth**
+    *   **Action:** Update MetaNode to allow non-owners to write to Inodes if world-write bit (`0002`) is set.
+*   **Step 12.6: World-Writable Client Logic**
+    *   **Action:** Ensure Client can use World Private Key to unlock File Keys for write operations.

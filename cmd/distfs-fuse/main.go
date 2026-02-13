@@ -14,6 +14,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
@@ -22,6 +23,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	distfuse "github.com/c2FmZQ/distfs/pkg/fuse"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 func main() {
@@ -42,6 +44,8 @@ func main() {
 
 	if *doRegister {
 		performRegistration(*configPath, *jwt, *clientID, *scopes, *authEndpoint, *tokenEndpoint, *qrCode, *browser)
+		// Small delay for Raft propagation
+		time.Sleep(2 * time.Second)
 		if *mountpoint == "" {
 			return
 		}
@@ -160,5 +164,19 @@ func performRegistration(configPath, jwt, clientID, scopes, authEndpoint, tokenE
 		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
 	}
 
-	log.Println("User registered successfully.")
+	var user metadata.User
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		log.Fatalf("failed to decode user response: %v", err)
+	}
+
+	conf.UserID = user.ID
+	if err := config.Save(*conf, configPath); err != nil {
+		log.Fatalf("failed to save config: %v", err)
+	}
+
+	if resp.StatusCode == http.StatusOK {
+		log.Println("User already registered. ID:", user.ID)
+	} else {
+		log.Println("User registered successfully. ID:", user.ID)
+	}
 }

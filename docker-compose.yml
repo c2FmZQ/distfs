@@ -39,20 +39,9 @@ services:
       - storage-node-1
       - test-auth
 
-  tester:
+  e2e-runner:
     build: .
-    entrypoint: ["/bin/test-e2e.sh"]
-    depends_on:
-      - storage-node-1
-      - storage-node-2
-      - storage-node-3
-      - test-auth
-    volumes:
-      - client-config:/root/.distfs
-
-  fuse-tester:
-    build: .
-    entrypoint: ["/bin/test-fuse.sh"]
+    entrypoint: ["/bin/test-all-e2e.sh"]
     depends_on:
       - storage-node-1
       - storage-node-2
@@ -64,51 +53,11 @@ services:
       - /dev/fuse:/dev/fuse
     security_opt:
       - apparmor:unconfined
-    volumes:
-      - client-config:/root/.distfs
-
-  ha-tester:
-    build: .
-    entrypoint: ["/bin/test-ha.sh"]
-    depends_on:
-      - tester
-    volumes:
-      - client-config:/root/.distfs
-
-  gc-tester:
-    build: .
-    entrypoint: ["/bin/test-gc.sh"]
-    depends_on:
-      - tester
-    volumes:
-      - client-config:/root/.distfs
-
-  stress-tester:
-    build: .
-    entrypoint: ["/bin/test-stress.sh"]
-    depends_on:
-      - tester
-    volumes:
-      - client-config:/root/.distfs
-
-  integrity-tester:
-    build: .
-    entrypoint: ["/bin/test-integrity.sh"]
-    depends_on:
-      - tester
-    volumes:
-      - client-config:/root/.distfs
-      - node1-data:/data
-
-  public-tester:
-    build: .
-    entrypoint: ["/bin/test-public.sh"]
-    depends_on:
-      - tester
     environment:
       - DISTFS_PASSWORD=testpassword
     volumes:
       - client-config:/root/.distfs
+      - node1-data:/data
 
 volumes:
   node1-data:

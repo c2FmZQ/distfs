@@ -12,8 +12,8 @@ CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
 
 # 2. Cleanup existing environment
 echo "Cleaning up Docker environment..."
-docker compose down -v
+docker compose down -v --remove-orphans
 
 # 3. Run tests
 echo "Starting E2E and FUSE tests..."
-docker compose up --build --abort-on-container-exit
+docker compose up --build --exit-code-from e2e-runner

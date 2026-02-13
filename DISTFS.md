@@ -54,7 +54,7 @@ Users control their identity via an asymmetric key pair using **Post-Quantum Cry
 5.  **Lockbox:**
     *   **File Lockbox:** Stores the `File Key` encrypted for the Owner and/or the assigned Group.
     *   **Group Lockbox:** Stores the `Group Private Key` encrypted for each member's Public Key.
-    *   **World Lockbox:** Special entry for ID `world`. Allows all registered users to retrieve the World Private Key (encrypted for them) to decrypt "public" files.
+    *   **World Lockbox:** Special entry for ID `world`. Allows all registered users to retrieve the World Private Key (encrypted for them) to decrypt or modify "world-accessible" files.
 
 ### 3.3 Privacy & Identity (The "Dark Registry")
 To minimize PII exposure, the metadata layer operates on opaque identifiers.

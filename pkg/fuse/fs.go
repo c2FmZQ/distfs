@@ -30,14 +30,23 @@ func NewFS(c *client.Client) *FS {
 }
 
 func (f *FS) Root() (fs.Node, error) {
-	if err := f.client.EnsureRoot(); err != nil {
-		return nil, err
+	var err error
+	var inode *metadata.Inode
+	var key []byte
+
+	// Retry root resolution to handle Raft propagation delays after registration
+	for i := 0; i < 30; i++ {
+		if err = f.client.EnsureRoot(); err == nil {
+			inode, key, err = f.client.ResolvePath("/")
+			if err == nil {
+				return &Dir{fs: f, inode: inode, key: key}, nil
+			}
+		}
+		log.Printf("FUSE Root initialization failed (attempt %d/30): %v", i+1, err)
+		time.Sleep(1 * time.Second)
 	}
-	inode, key, err := f.client.ResolvePath("/")
-	if err != nil {
-		return nil, err
-	}
-	return &Dir{fs: f, inode: inode, key: key}, nil
+
+	return nil, err
 }
 
 type Dir struct {

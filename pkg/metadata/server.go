@@ -467,6 +467,7 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 		b := tx.Bucket([]byte("users"))
 		v := b.Get([]byte(token.UserID))
 		if v == nil {
+			log.Printf("AUTH: User %s not found in 'users' bucket", token.UserID)
 			return fmt.Errorf("user not found")
 		}
 		return json.Unmarshal(v, &user)
@@ -534,9 +535,11 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if inode.OwnerID != user.ID {
-		// World Readable?
+		// World Readable/Writable?
 		if req.Mode == "R" && (inode.Mode&0004) != 0 {
 			// Authorized for reading
+		} else if req.Mode == "W" && (inode.Mode&0002) != 0 {
+			// Authorized for writing
 		} else {
 			// TODO: Check group
 			http.Error(w, "forbidden", http.StatusForbidden)
@@ -760,6 +763,15 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id string) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := s.checkWritePermission(user, id); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	s.applyCommand(w, r, CmdUpdateInode, 10*1024*1024, http.StatusOK)
 }
 
@@ -792,6 +804,15 @@ func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id string) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := s.checkWritePermission(user, id); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	var update ChildUpdate
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -803,6 +824,15 @@ func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id string) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := s.checkWritePermission(user, id); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	var update ChildUpdate
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
@@ -859,6 +889,29 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, dat
 		}
 		w.WriteHeader(successCode)
 	}
+}
+
+func (s *Server) checkWritePermission(user *User, inodeID string) error {
+	var inode Inode
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(inodeID))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &inode)
+	})
+	if err != nil {
+		return err
+	}
+
+	if inode.OwnerID == user.ID {
+		return nil
+	}
+	if (inode.Mode & 0002) != 0 {
+		return nil
+	}
+	return fmt.Errorf("forbidden")
 }
 
 func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
