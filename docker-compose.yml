@@ -67,6 +67,39 @@ services:
     volumes:
       - client-config:/root/.distfs
 
+  ha-tester:
+    build: .
+    entrypoint: ["/bin/test-ha.sh"]
+    depends_on:
+      - tester
+    volumes:
+      - client-config:/root/.distfs
+
+  gc-tester:
+    build: .
+    entrypoint: ["/bin/test-gc.sh"]
+    depends_on:
+      - ha-tester
+    volumes:
+      - client-config:/root/.distfs
+
+  stress-tester:
+    build: .
+    entrypoint: ["/bin/test-stress.sh"]
+    depends_on:
+      - gc-tester
+    volumes:
+      - client-config:/root/.distfs
+
+  integrity-tester:
+    build: .
+    entrypoint: ["/bin/test-integrity.sh"]
+    depends_on:
+      - stress-tester
+    volumes:
+      - client-config:/root/.distfs
+      - node1-data:/data
+
 volumes:
   node1-data:
   node2-data:

@@ -26,6 +26,7 @@ import (
 
 func main() {
 	mountpoint := flag.String("mount", "", "Mount point")
+	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
 
 	// Registration flags
 	doRegister := flag.Bool("register", false, "Register user with server")
@@ -40,7 +41,7 @@ func main() {
 	flag.Parse()
 
 	if *doRegister {
-		performRegistration(*jwt, *clientID, *scopes, *authEndpoint, *tokenEndpoint, *qrCode, *browser)
+		performRegistration(*configPath, *jwt, *clientID, *scopes, *authEndpoint, *tokenEndpoint, *qrCode, *browser)
 		if *mountpoint == "" {
 			return
 		}
@@ -50,7 +51,7 @@ func main() {
 		log.Fatal("-mount is required")
 	}
 
-	conf, err := config.Load(config.DefaultPath())
+	conf, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -98,7 +99,7 @@ func loadClient(conf *config.Config) *client.Client {
 	return c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 }
 
-func performRegistration(jwt, clientID, scopes, authEndpoint, tokenEndpoint string, qrCode bool, browser string) {
+func performRegistration(configPath, jwt, clientID, scopes, authEndpoint, tokenEndpoint string, qrCode bool, browser string) {
 	if jwt == "" {
 		if clientID == "" || authEndpoint == "" || tokenEndpoint == "" {
 			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required for registration")
@@ -129,7 +130,7 @@ func performRegistration(jwt, clientID, scopes, authEndpoint, tokenEndpoint stri
 		jwt = token.AccessToken
 	}
 
-	conf, err := config.Load(config.DefaultPath())
+	conf, err := config.Load(configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -154,7 +155,7 @@ func performRegistration(jwt, clientID, scopes, authEndpoint, tokenEndpoint stri
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
 	}

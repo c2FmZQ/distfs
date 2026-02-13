@@ -171,3 +171,17 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 10.3: Data Garbage Collection (GC)**
     *   **Action:** [Done] Add `DELETE /v1/data/{chunk_id}` to the Data Node API.
     *   **Action:** [Done] Implement a metadata-driven GC worker that identifies and deletes unreferenced chunks from Data Nodes.
+
+---
+
+## Phase 11: E2E & Reliability
+**Goal:** Harden the system against failures and verify correctness at scale.
+
+*   **Step 11.1: High-Availability (HA) Failure Simulation**
+    *   **Action:** Implement E2E tests that kill storage nodes during active operations.
+*   **Step 11.2: Concurrency & Stress Testing**
+    *   **Action:** Implement multi-client write/read stress tests.
+*   **Step 11.3: Data Integrity E2E**
+    *   **Action:** Verify that the Integrity Scrubber and Replication Repair work together to recover from chunk corruption.
+*   **Step 11.4: Garbage Collection Verification**
+    *   **Action:** End-to-end verification that deleting a file eventually reclaims disk space on data nodes.

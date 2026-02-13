@@ -202,6 +202,7 @@ func main() {
 	publicMux.Handle("/v1/data/", dataServer)    // Data access
 	publicMux.Handle("/api/cluster", metaServer) // Dashboard & Management
 	publicMux.Handle("/api/cluster/", metaServer)
+	publicMux.Handle("/api/debug/", metaServer)
 
 	// 6. Internal Router (Cluster)
 	clusterMux := http.NewServeMux()
@@ -210,6 +211,7 @@ func main() {
 	clusterMux.Handle("/v1/meta/", metaServer)
 	clusterMux.Handle("/v1/user/", metaServer)  // Forwarded writes
 	clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
+	clusterMux.Handle("/api/debug/", metaServer)
 
 	// 7. Registration & Heartbeat
 	go func() {

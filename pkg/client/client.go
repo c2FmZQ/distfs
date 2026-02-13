@@ -713,3 +713,29 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 	}
 	return inode.Lockbox.GetFileKey(c.userID, c.decKey)
 }
+
+func (c *Client) Remove(path string) error {
+	inode, _, err := c.ResolvePath(path)
+	if err != nil {
+		return err
+	}
+
+	req, err := http.NewRequest("DELETE", c.metaURL+"/v1/meta/inode/"+inode.ID, nil)
+	if err != nil {
+		return err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		b, _ := io.ReadAll(resp.Body)
+		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	}
+	return nil
+}

@@ -37,10 +37,13 @@ func TestDashboard_UsersNodes(t *testing.T) {
 	found := false
 	for _, u := range users {
 		if u.ID == "dash-u1" {
-			found = true; break
+			found = true
+			break
 		}
 	}
-	if !found { t.Error("dash-u1 not found") }
+	if !found {
+		t.Error("dash-u1 not found")
+	}
 
 	// 3. GET /api/cluster/nodes
 	req, _ = http.NewRequest("GET", ts.URL+"/api/cluster/nodes", nil)
@@ -51,10 +54,13 @@ func TestDashboard_UsersNodes(t *testing.T) {
 	found = false
 	for _, nd := range nodes {
 		if nd.ID == "dash-n1" {
-			found = true; break
+			found = true
+			break
 		}
 	}
-	if !found { t.Error("dash-n1 not found") }
+	if !found {
+		t.Error("dash-n1 not found")
+	}
 }
 
 func TestDashboard_Lookup(t *testing.T) {

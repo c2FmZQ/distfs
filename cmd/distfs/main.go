@@ -33,13 +33,33 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
+var (
+	configPath = flag.String("config", config.DefaultPath(), "Path to config file")
+)
+
 func main() {
-	if len(os.Args) < 2 {
+	flag.Usage = usage
+	// Need to parse global flags first, but distfs <cmd> <args> makes it tricky with standard flag pkg.
+	// We'll use a simple manual check for -config before the command.
+
+	cmdIdx := 1
+	for i, arg := range os.Args {
+		if i == 0 {
+			continue
+		}
+		if arg == "-config" && i+1 < len(os.Args) {
+			*configPath = os.Args[i+1]
+			cmdIdx = i + 2
+			break
+		}
+	}
+
+	if len(os.Args) < cmdIdx+1 {
 		usage()
 	}
 
-	command := os.Args[1]
-	args := os.Args[2:]
+	command := os.Args[cmdIdx]
+	args := os.Args[cmdIdx+1:]
 
 	switch command {
 	case "init":
@@ -54,18 +74,21 @@ func main() {
 		cmdPut(args)
 	case "get":
 		cmdGet(args)
+	case "rm":
+		cmdRm(args)
 	default:
 		usage()
 	}
 }
 
 func usage() {
-	fmt.Println("Usage: distfs <command> [args]")
+	fmt.Println("Usage: distfs [-config <path>] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  init -meta <url> -id <user_id>  Initialize client config")
 	fmt.Println("  register -jwt <jwt>             Register user with server")
 	fmt.Println("  ls <path>                       List directory")
 	fmt.Println("  mkdir <path>                    Create directory")
+	fmt.Println("  rm <path>                       Delete file or directory")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	os.Exit(1)
@@ -102,7 +125,7 @@ func cmdInit(args []string) {
 		ServerKey: hex.EncodeToString(sKey),
 	}
 
-	if err := config.Save(conf, config.DefaultPath()); err != nil {
+	if err := config.Save(conf, *configPath); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Config initialized for %s. Server key: %s\n", *userID, hex.EncodeToString(sKey[:8]))
@@ -149,7 +172,7 @@ func cmdRegister(args []string) {
 		*jwt = token.AccessToken
 	}
 
-	conf, err := config.Load(config.DefaultPath())
+	conf, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -173,7 +196,7 @@ func cmdRegister(args []string) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
 		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
 	}
@@ -186,7 +209,7 @@ func cmdRegister(args []string) {
 	}
 
 	conf.UserID = user.ID
-	if err := config.Save(*conf, config.DefaultPath()); err != nil {
+	if err := config.Save(*conf, *configPath); err != nil {
 		log.Fatal(err)
 	}
 
@@ -194,7 +217,7 @@ func cmdRegister(args []string) {
 }
 
 func loadClient() *client.Client {
-	conf, err := config.Load(config.DefaultPath())
+	conf, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -240,6 +263,18 @@ func cmdMkdir(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Directory %s created.\n", path)
+}
+
+func cmdRm(args []string) {
+	if len(args) < 1 {
+		log.Fatal("path required")
+	}
+	path := args[0]
+	c := loadClient()
+	if err := c.Remove(path); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Removed %s\n", path)
 }
 
 func cmdPut(args []string) {

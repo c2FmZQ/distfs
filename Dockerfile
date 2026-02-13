@@ -10,6 +10,10 @@ COPY bin/distfs-fuse /bin/distfs-fuse
 COPY bin/test-auth /bin/test-auth
 COPY scripts/test-e2e.sh /bin/test-e2e.sh
 COPY scripts/test-fuse.sh /bin/test-fuse.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh
+COPY scripts/test-ha.sh /bin/test-ha.sh
+COPY scripts/test-stress.sh /bin/test-stress.sh
+COPY scripts/test-gc.sh /bin/test-gc.sh
+COPY scripts/test-integrity.sh /bin/test-integrity.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh
 
 ENTRYPOINT ["/bin/storage-node"]

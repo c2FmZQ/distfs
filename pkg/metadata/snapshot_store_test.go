@@ -23,7 +23,7 @@ func TestSnapshotStore(t *testing.T) {
 	}
 	content := []byte("snapshot data")
 	sink.Write(content)
-	
+
 	if sink.ID() == "" {
 		t.Error("Empty sink ID")
 	}
@@ -65,7 +65,7 @@ func TestSnapshotStore_Errors(t *testing.T) {
 	if err := sink.Cancel(); err != nil {
 		t.Errorf("Cancel failed: %v", err)
 	}
-	
+
 	// List (empty)
 	snaps, _ := store.List()
 	if len(snaps) != 0 {

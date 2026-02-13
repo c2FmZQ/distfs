@@ -21,7 +21,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	n1 := Node{ID: "n1", Address: "http://127.0.0.1:1111", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	n2 := Node{ID: "n2", Address: "http://127.0.0.1:2222", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	n3 := Node{ID: "n3", Address: "http://127.0.0.1:3333", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	
+
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal(), 5*time.Second)
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)

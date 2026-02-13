@@ -148,7 +148,7 @@ func TestChunkEncryption(t *testing.T) {
 
 func TestKEM_Errors(t *testing.T) {
 	dk, _ := GenerateEncryptionKey()
-	
+
 	// Too short ciphertext
 	_, err := Decapsulate(dk, make([]byte, 10))
 	if err == nil {
@@ -168,7 +168,7 @@ func TestKEM_Errors(t *testing.T) {
 
 func TestDEM_Errors(t *testing.T) {
 	key := make([]byte, 32)
-	
+
 	// Too short
 	_, err := DecryptDEM(key, make([]byte, 5))
 	if err == nil {
@@ -185,7 +185,7 @@ func TestDEM_Errors(t *testing.T) {
 func TestKeyRing(t *testing.T) {
 	initial := make([]byte, 32)
 	kr := NewKeyRing(initial)
-	
+
 	k, gen := kr.Current()
 	if gen != 1 || string(k) != string(initial) {
 		t.Errorf("Initial keyring mismatch: gen=%d", gen)
@@ -217,11 +217,11 @@ func TestKeyRing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	
+
 	if kr2.current != kr.current {
 		t.Error("Unmarshal current mismatch")
 	}
-	
+
 	kBack, _ := kr2.Get(1)
 	if string(kBack) != string(initial) {
 		t.Error("Unmarshal key mismatch")

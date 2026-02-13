@@ -739,63 +739,70 @@ func TestGarbageCollection(t *testing.T) {
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	        if !deleted {
-	                t.Error("Chunk was not garbage collected")
-	        }
+	if !deleted {
+		t.Error("Chunk was not garbage collected")
 	}
-	
-	func TestResolvePathComplex(t *testing.T) {
-		metaDir := t.TempDir()
-		metaSt, _ := createTestStorage(t, metaDir)
-		nodeKey, _ := crypto.GenerateIdentityKey()
-		metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
-		defer metaNode.Shutdown()
-		metaNode.Raft.BootstrapCluster(raft.Configuration{
-			Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-		})
-		waitLeader(t, metaNode.Raft)
-	
-		serverEK := bootstrapCluster(t, metaNode)
-		signKey, _ := crypto.GenerateIdentityKey()
-		metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
-		metaServer.StopKeyRotation()
-		tsMeta := httptest.NewServer(metaServer)
-		defer tsMeta.Close()
-	
-		dk, _ := crypto.GenerateEncryptionKey()
-		userSignKey, _ := crypto.GenerateIdentityKey()
-		createUser(t, metaNode, metadata.User{
-			ID: "user-1", SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
-		})
-	
-		dataDir := t.TempDir()
-		dataSt, _ := createTestStorage(t, dataDir)
-		dataStore, _ := data.NewDiskStore(dataSt)
-		dataServer := data.NewServer(dataStore, signKey.Public(), nil)
-		tsData := httptest.NewServer(dataServer)
-		defer tsData.Close()
-		registerNode(t, tsMeta.URL, "testsecret", metadata.Node{
-			ID: "d1", Address: tsData.URL, Status: metadata.NodeStatusActive,
-		})
-	
-		c := NewClient(tsMeta.URL, tsData.URL)
-		c = c.WithIdentity("user-1", dk)
-		c = c.WithSignKey(userSignKey)
-		c = c.WithServerKey(serverEK)
-	
-		if err := c.EnsureRoot(); err != nil { t.Fatal(err) }
-	
-		c.Mkdir("/a")
-		c.Mkdir("/a/b")
-		c.Mkdir("/a/b/c")
-		content := []byte("data")
-		c.CreateFile("/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
-	
-		inode, _, err := c.ResolvePath("/a/b/c/file.txt")
-		if err != nil { t.Fatalf("Resolve failed: %v", err) }
-		if inode.ID == "" { t.Error("Empty ID") }
-	
-		_, _, err = c.ResolvePath("/missing")
-		if err == nil { t.Error("Expected error") }
+}
+
+func TestResolvePathComplex(t *testing.T) {
+	metaDir := t.TempDir()
+	metaSt, _ := createTestStorage(t, metaDir)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
+	defer metaNode.Shutdown()
+	metaNode.Raft.BootstrapCluster(raft.Configuration{
+		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
+	})
+	waitLeader(t, metaNode.Raft)
+
+	serverEK := bootstrapCluster(t, metaNode)
+	signKey, _ := crypto.GenerateIdentityKey()
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
+	metaServer.StopKeyRotation()
+	tsMeta := httptest.NewServer(metaServer)
+	defer tsMeta.Close()
+
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+	createUser(t, metaNode, metadata.User{
+		ID: "user-1", SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
+	})
+
+	dataDir := t.TempDir()
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+	tsData := httptest.NewServer(dataServer)
+	defer tsData.Close()
+	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{
+		ID: "d1", Address: tsData.URL, Status: metadata.NodeStatusActive,
+	})
+
+	c := NewClient(tsMeta.URL, tsData.URL)
+	c = c.WithIdentity("user-1", dk)
+	c = c.WithSignKey(userSignKey)
+	c = c.WithServerKey(serverEK)
+
+	if err := c.EnsureRoot(); err != nil {
+		t.Fatal(err)
 	}
-	
+
+	c.Mkdir("/a")
+	c.Mkdir("/a/b")
+	c.Mkdir("/a/b/c")
+	content := []byte("data")
+	c.CreateFile("/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
+
+	inode, _, err := c.ResolvePath("/a/b/c/file.txt")
+	if err != nil {
+		t.Fatalf("Resolve failed: %v", err)
+	}
+	if inode.ID == "" {
+		t.Error("Empty ID")
+	}
+
+	_, _, err = c.ResolvePath("/missing")
+	if err == nil {
+		t.Error("Expected error")
+	}
+}

@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -65,7 +66,7 @@ type Server struct {
 	gcWorker    *GCWorker
 	keyWorker   *KeyRotationWorker
 
-	clientTLSConfig *tls.Config
+	clientTLSConfig     *tls.Config
 	keyRotationInterval time.Duration
 }
 
@@ -78,15 +79,15 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 	}
 
 	s := &Server{
-		nodeID:          nodeID,
-		raft:            r,
-		fsm:             fsm,
-		jwks:            remote,
-		jwksURL:         jwksURL,
-		signKey:         signKey,
-		raftSecret:      raftSecret,
-		nonceCache:      make(map[string]time.Time),
-		clientTLSConfig: clientTLSConfig,
+		nodeID:              nodeID,
+		raft:                r,
+		fsm:                 fsm,
+		jwks:                remote,
+		jwksURL:             jwksURL,
+		signKey:             signKey,
+		raftSecret:          raftSecret,
+		nonceCache:          make(map[string]time.Time),
+		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 	}
 	s.replMonitor = NewReplicationMonitor(s)
@@ -180,6 +181,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleClusterStatus(w, r)
+		return
+	}
+
+	if r.URL.Path == "/api/debug/suicide" && r.Method == http.MethodPost {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.handleSuicide(w, r)
+		return
+	}
+
+	if r.URL.Path == "/api/debug/scrub" && r.Method == http.MethodPost {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.ForceReplicationScan()
+		w.WriteHeader(http.StatusOK)
 		return
 	}
 
@@ -851,4 +871,14 @@ func (s *Server) checkRaftSecret(r *http.Request) bool {
 		return false // Fail closed
 	}
 	return r.Header.Get("X-Raft-Secret") == s.raftSecret
+}
+
+func (s *Server) handleSuicide(w http.ResponseWriter, r *http.Request) {
+	log.Printf("CRITICAL: Suicide requested via debug API")
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Goodbye cruel world\n"))
+	go func() {
+		time.Sleep(500 * time.Millisecond)
+		os.Exit(1)
+	}()
 }

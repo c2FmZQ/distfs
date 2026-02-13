@@ -67,7 +67,7 @@ func TestReplicateEndpoint(t *testing.T) {
 	tmpDir0 := t.TempDir()
 	st0, _ := createTestStorage(t, tmpDir0)
 	store0, _ := NewDiskStore(st0)
-	
+
 	tmpDir1 := t.TempDir()
 	st1, _ := createTestStorage(t, tmpDir1)
 	store1, _ := NewDiskStore(st1)
