@@ -25,12 +25,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/c2FmZQ/distfs/pkg/auth"
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 var (
@@ -76,6 +78,8 @@ func main() {
 		cmdGet(args)
 	case "rm":
 		cmdRm(args)
+	case "chmod":
+		cmdChmod(args)
 	default:
 		usage()
 	}
@@ -89,6 +93,7 @@ func usage() {
 	fmt.Println("  ls <path>                       List directory")
 	fmt.Println("  mkdir <path>                    Create directory")
 	fmt.Println("  rm <path>                       Delete file or directory")
+	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	os.Exit(1)
@@ -275,6 +280,24 @@ func cmdRm(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Removed %s\n", path)
+}
+
+func cmdChmod(args []string) {
+	if len(args) < 2 {
+		log.Fatal("mode and path required")
+	}
+	modeStr, path := args[0], args[1]
+	mode, err := strconv.ParseUint(modeStr, 8, 32)
+	if err != nil {
+		log.Fatalf("invalid mode: %v", err)
+	}
+
+	c := loadClient()
+	m32 := uint32(mode)
+	if err := c.SetAttr(path, metadata.SetAttrRequest{Mode: &m32}); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Mode of %s changed to %s\n", path, modeStr)
 }
 
 func cmdPut(args []string) {

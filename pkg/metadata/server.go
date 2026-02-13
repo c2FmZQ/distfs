@@ -166,6 +166,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/v1/meta/key/world" && r.Method == http.MethodGet {
+		s.handleGetWorldPublicKey(w, r)
+		return
+	}
+
+	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
+		s.handleGetWorldPrivateKey(w, r)
+		return
+	}
+
 	if strings.HasPrefix(r.URL.Path, "/api/cluster") {
 		if !s.checkRaftSecret(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -524,9 +534,14 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if inode.OwnerID != user.ID {
-		// TODO: Check group
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
+		// World Readable?
+		if req.Mode == "R" && (inode.Mode&0004) != 0 {
+			// Authorized for reading
+		} else {
+			// TODO: Check group
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 
 	// Construct Token
@@ -881,4 +896,83 @@ func (s *Server) handleSuicide(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		os.Exit(1)
 	}()
+}
+
+func (s *Server) handleGetWorldPublicKey(w http.ResponseWriter, r *http.Request) {
+	world, err := s.fsm.GetWorldIdentity()
+	if err != nil {
+		if err == ErrNotFound && s.raft.State() == raft.Leader {
+			s.checkAndInitWorld()
+			world, err = s.fsm.GetWorldIdentity()
+		}
+		if err != nil {
+			http.Error(w, "world identity not available", http.StatusNotFound)
+			return
+		}
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Write(world.Public)
+}
+
+func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request) {
+	user, err := s.authenticate(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	world, err := s.fsm.GetWorldIdentity()
+	if err != nil {
+		http.Error(w, "world identity not initialized", http.StatusNotFound)
+		return
+	}
+
+	// Encapsulate World Private Key using user's Public EncKey
+	userEK, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+	if err != nil {
+		http.Error(w, "invalid user encryption key", http.StatusInternalServerError)
+		return
+	}
+
+	ss, kemCT := crypto.Encapsulate(userEK)
+	demCT, err := crypto.EncryptDEM(ss, world.Private)
+	if err != nil {
+		http.Error(w, "encryption failed", http.StatusInternalServerError)
+		return
+	}
+
+	resp := map[string]string{
+		"kem": base64.StdEncoding.EncodeToString(kemCT),
+		"dem": base64.StdEncoding.EncodeToString(demCT),
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) checkAndInitWorld() {
+	_, err := s.fsm.GetWorldIdentity()
+	if err == nil {
+		return
+	}
+
+	log.Printf("Initializing World Identity...")
+	dk, _ := crypto.GenerateEncryptionKey()
+	pk := dk.EncapsulationKey().Bytes()
+	priv := crypto.MarshalDecapsulationKey(dk)
+
+	world := WorldIdentity{
+		Public:  pk,
+		Private: priv,
+	}
+
+	data, _ := json.Marshal(world)
+	cmd := LogCommand{
+		Type: CmdInitWorld,
+		Data: data,
+	}
+
+	future := s.raft.Apply(cmd.Marshal(), 10*time.Second)
+	if err := future.Error(); err != nil {
+		log.Printf("Failed to init world identity: %v", err)
+	}
 }

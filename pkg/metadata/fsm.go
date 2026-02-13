@@ -185,6 +185,7 @@ const (
 	CmdInitSecret      CommandType = 16
 	CmdSetUserQuota    CommandType = 17
 	CmdRotateKey       CommandType = 18
+	CmdInitWorld       CommandType = 19
 )
 
 type LogCommand struct {
@@ -285,6 +286,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applySetUserQuota(cmd.Data)
 	case CmdRotateKey:
 		return fsm.applyRotateKey(cmd.Data)
+	case CmdInitWorld:
+		return fsm.applyInitWorld(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -1372,4 +1375,35 @@ func (fsm *MetadataFSM) GetKey(id string) (*ClusterKey, error) {
 		return nil, err
 	}
 	return &key, nil
+}
+
+func (fsm *MetadataFSM) applyInitWorld(data []byte) interface{} {
+	var world WorldIdentity
+	if err := json.Unmarshal(data, &world); err != nil {
+		return err
+	}
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+		if b.Get([]byte("world_identity")) != nil {
+			return ErrExists
+		}
+		encoded, _ := json.Marshal(world)
+		return b.Put([]byte("world_identity"), encoded)
+	})
+}
+
+func (fsm *MetadataFSM) GetWorldIdentity() (*WorldIdentity, error) {
+	var world WorldIdentity
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+		v := b.Get([]byte("world_identity"))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &world)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &world, nil
 }

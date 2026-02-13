@@ -220,7 +220,7 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 
 func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	log.Printf("FUSE Setattr Dir: %s", d.inode.ID)
-	return setAttr(d.fs.client, d.inode, req, &resp.Attr)
+	return setAttr(d.fs.client, d.inode, d.key, req, &resp.Attr)
 }
 
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
@@ -280,7 +280,7 @@ func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
 	log.Printf("FUSE Setattr File: %s", f.inode.ID)
-	return setAttr(f.fs.client, f.inode, req, &resp.Attr)
+	return setAttr(f.fs.client, f.inode, f.key, req, &resp.Attr)
 }
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
@@ -400,7 +400,7 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	return nil
 }
 
-func setAttr(c *client.Client, inode *metadata.Inode, req *fuse.SetattrRequest, respAttr *fuse.Attr) error {
+func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse.SetattrRequest, respAttr *fuse.Attr) error {
 	var mode *uint32
 	if req.Valid.Mode() {
 		m := uint32(req.Mode)
@@ -424,8 +424,16 @@ func setAttr(c *client.Client, inode *metadata.Inode, req *fuse.SetattrRequest, 
 		mtime = &mt
 	}
 
-	err := c.SetAttr(inode.ID, mode, uid, gid, size, mtime)
+	err := c.SetAttrByID(inode, inodeKey, metadata.SetAttrRequest{
+		InodeID: inode.ID,
+		Mode:    mode,
+		UID:     uid,
+		GID:     gid,
+		Size:    size,
+		MTime:   mtime,
+	})
 	if err != nil {
+		log.Printf("FUSE Setattr failed: %v", err)
 		return syscall.EIO
 	}
 

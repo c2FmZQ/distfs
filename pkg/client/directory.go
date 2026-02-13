@@ -52,7 +52,7 @@ func (c *Client) EnsureRoot() error {
 		return err
 	}
 
-	lb := c.createLockbox(rootKey)
+	lb := c.createLockbox(rootKey, 0755)
 	inode := metadata.Inode{
 		ID:       metadata.RootID,
 		Type:     metadata.DirType,
@@ -89,7 +89,16 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 	rootKey, err := rootInode.Lockbox.GetFileKey(c.userID, c.decKey)
 	if err != nil {
-		return nil, nil, fmt.Errorf("access denied to root: %w", err)
+		// World fallback for root
+		if _, exists := rootInode.Lockbox[metadata.WorldID]; exists {
+			wk, werr := c.GetWorldPrivateKey()
+			if werr == nil {
+				rootKey, err = rootInode.Lockbox.GetFileKey(metadata.WorldID, wk)
+			}
+		}
+		if err != nil {
+			return nil, nil, fmt.Errorf("access denied to root: %w", err)
+		}
 	}
 
 	if path == "" {
@@ -121,7 +130,16 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 		key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 		if err != nil {
-			return nil, nil, fmt.Errorf("access denied to %s: %w", part, err)
+			// World fallback
+			if _, exists := inode.Lockbox[metadata.WorldID]; exists {
+				wk, werr := c.GetWorldPrivateKey()
+				if werr == nil {
+					key, err = inode.Lockbox.GetFileKey(metadata.WorldID, wk)
+				}
+			}
+			if err != nil {
+				return nil, nil, fmt.Errorf("access denied to %s: %w", part, err)
+			}
 		}
 		currentKey = key
 	}
@@ -130,11 +148,11 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 }
 
 func (c *Client) Mkdir(path string) error {
-	return c.addEntry(path, metadata.DirType, nil, 0, "", 0755)
+	return c.addEntry(path, metadata.DirType, nil, 0, "", 0700)
 }
 
 func (c *Client) CreateFile(path string, r io.Reader, size int64) error {
-	return c.addEntry(path, metadata.FileType, r, size, "", 0644)
+	return c.addEntry(path, metadata.FileType, r, size, "", 0600)
 }
 
 func (c *Client) Symlink(target, path string) error {
@@ -169,7 +187,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 			return nil, nil, err
 		}
 	} else {
-		lb := c.createLockbox(newKey)
+		lb := c.createLockbox(newKey, mode)
 		inode := metadata.Inode{
 			ID:            newID,
 			Type:          iType,
@@ -299,38 +317,6 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	return nil
 }
 
-func (c *Client) SetAttr(id string, mode *uint32, uid, gid *uint32, size *uint64, mtime *int64) error {
-	req := metadata.SetAttrRequest{
-		InodeID: id,
-		Mode:    mode,
-		UID:     uid,
-		GID:     gid,
-		Size:    size,
-		MTime:   mtime,
-	}
-	body, _ := json.Marshal(req)
-
-	hReq, err := http.NewRequest("POST", c.metaURL+"/v1/meta/setattr", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	if err := c.authenticateRequest(hReq); err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(hReq)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("setattr failed: %d %s", resp.StatusCode, string(b))
-	}
-	return nil
-}
-
 func (c *Client) Link(targetPath, linkPath string) error {
 	target, _, err := c.ResolvePath(targetPath)
 	if err != nil {
@@ -400,10 +386,16 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 	return err
 }
 
-func (c *Client) createLockbox(key []byte) crypto.Lockbox {
+func (c *Client) createLockbox(key []byte, mode uint32) crypto.Lockbox {
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
+	}
+	if (mode & 0004) != 0 {
+		wpk, err := c.GetWorldPublicKey()
+		if err == nil {
+			lb.AddRecipient(metadata.WorldID, wpk, key)
+		}
 	}
 	return lb
 }

@@ -6,7 +6,10 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating ha directory..."
-distfs mkdir /ha || echo "ha dir already exists"
+until distfs mkdir /ha; do
+    echo "Retrying ha mkdir..."
+    sleep 1
+done
 
 echo "Uploading test file..."
 echo "ha-resilience-data" > /tmp/ha.txt

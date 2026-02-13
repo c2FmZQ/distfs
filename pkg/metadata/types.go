@@ -27,6 +27,7 @@ const (
 )
 
 const RootID = "root-directory-inode-id-0000000000"
+const WorldID = "world"
 
 type ChunkEntry struct {
 	ID    string   `json:"id"`
@@ -129,4 +130,9 @@ type CapabilityToken struct {
 	Chunks []string `json:"chunks"`
 	Mode   string   `json:"mode"` // "R" or "W"
 	Exp    int64    `json:"exp"`
+}
+
+type WorldIdentity struct {
+	Public  []byte `json:"public"`
+	Private []byte `json:"private"`
 }

@@ -41,6 +41,9 @@ type Client struct {
 	serverKey  *mlkem.EncapsulationKey768
 	keyCache   map[string][]byte
 	keyMu      sync.RWMutex
+
+	worldPublic  *mlkem.EncapsulationKey768
+	worldPrivate *mlkem.DecapsulationKey768
 }
 
 func NewClient(metaAddr, dataAddr string) *Client {
@@ -357,6 +360,12 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	if c.decKey != nil {
 		if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
 			return err
+		}
+	}
+	if (mode & 0004) != 0 {
+		wpk, err := c.GetWorldPublicKey()
+		if err == nil {
+			lb.AddRecipient(metadata.WorldID, wpk, fileKey)
 		}
 	}
 
@@ -711,7 +720,178 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 	if c.decKey == nil {
 		return nil, fmt.Errorf("client has no identity to unlock file")
 	}
-	return inode.Lockbox.GetFileKey(c.userID, c.decKey)
+	
+	// 1. Try personal access
+	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
+	if err == nil {
+		return key, nil
+	}
+
+	// 2. Try world access if personal failed
+	if _, exists := inode.Lockbox[metadata.WorldID]; exists {
+		wk, err := c.GetWorldPrivateKey()
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch world key: %w", err)
+		}
+		return inode.Lockbox.GetFileKey(metadata.WorldID, wk)
+	}
+
+	return nil, err
+}
+
+func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
+	c.keyMu.RLock()
+	wp := c.worldPublic
+	c.keyMu.RUnlock()
+	if wp != nil {
+		return wp, nil
+	}
+
+	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/key/world")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch world pub key: %d", resp.StatusCode)
+	}
+	b, _ := io.ReadAll(resp.Body)
+	pk, err := crypto.UnmarshalEncapsulationKey(b)
+	if err != nil {
+		return nil, err
+	}
+
+	c.keyMu.Lock()
+	c.worldPublic = pk
+	c.keyMu.Unlock()
+	return pk, nil
+}
+
+func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
+	c.keyMu.RLock()
+	wp := c.worldPrivate
+	c.keyMu.RUnlock()
+	if wp != nil {
+		return wp, nil
+	}
+
+	req, err := http.NewRequest("GET", c.metaURL+"/v1/meta/key/world/private", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch world private key: %d", resp.StatusCode)
+	}
+
+	var data struct {
+		KEM string `json:"kem"`
+		DEM string `json:"dem"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return nil, err
+	}
+
+	kemCT, _ := base64.StdEncoding.DecodeString(data.KEM)
+	demCT, _ := base64.StdEncoding.DecodeString(data.DEM)
+
+	// Decrypt using Client's identity
+	ss, err := crypto.Decapsulate(c.decKey, kemCT)
+	if err != nil {
+		return nil, fmt.Errorf("world key decapsulate failed: %w", err)
+	}
+	privBytes, err := crypto.DecryptDEM(ss, demCT)
+	if err != nil {
+		return nil, fmt.Errorf("world key decrypt failed: %w", err)
+	}
+
+	wk, err := crypto.UnmarshalDecapsulationKey(privBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	c.keyMu.Lock()
+	c.worldPrivate = wk
+	c.keyMu.Unlock()
+	return wk, nil
+}
+
+func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
+	inode, key, err := c.ResolvePath(path)
+	if err != nil {
+		return err
+	}
+	return c.SetAttrByID(inode, key, attr)
+}
+
+func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
+	var err error
+	// 1. Handle Cryptographic Access (World)
+	if attr.Mode != nil {
+		oldMode := inode.Mode
+		newMode := *attr.Mode
+
+		worldReadOld := (oldMode & 0004) != 0
+		worldReadNew := (newMode & 0004) != 0
+
+		if worldReadOld != worldReadNew {
+			if worldReadNew {
+				wpk, err := c.GetWorldPublicKey()
+				if err != nil {
+					return err
+				}
+				if err := inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key); err != nil {
+					return err
+				}
+			} else {
+				delete(inode.Lockbox, metadata.WorldID)
+			}
+			// Update the full Inode to persist Lockbox change
+			_, err = c.updateInode(*inode)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	// 2. Push remaining attributes to FSM SetAttr handler
+	attr.InodeID = inode.ID
+	var data []byte
+	data, err = json.Marshal(attr)
+	if err != nil {
+		return err
+	}
+
+	var hReq *http.Request
+	hReq, err = http.NewRequest("POST", c.metaURL+"/v1/meta/setattr", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	if err = c.authenticateRequest(hReq); err != nil {
+		return err
+	}
+	hReq.Header.Set("Content-Type", "application/json")
+
+	var resp *http.Response
+	resp, err = c.httpClient.Do(hReq)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	}
+
+	return nil
 }
 
 func (c *Client) Remove(path string) error {

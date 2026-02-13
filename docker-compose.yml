@@ -79,7 +79,7 @@ services:
     build: .
     entrypoint: ["/bin/test-gc.sh"]
     depends_on:
-      - ha-tester
+      - tester
     volumes:
       - client-config:/root/.distfs
 
@@ -87,7 +87,7 @@ services:
     build: .
     entrypoint: ["/bin/test-stress.sh"]
     depends_on:
-      - gc-tester
+      - tester
     volumes:
       - client-config:/root/.distfs
 
@@ -95,10 +95,20 @@ services:
     build: .
     entrypoint: ["/bin/test-integrity.sh"]
     depends_on:
-      - stress-tester
+      - tester
     volumes:
       - client-config:/root/.distfs
       - node1-data:/data
+
+  public-tester:
+    build: .
+    entrypoint: ["/bin/test-public.sh"]
+    depends_on:
+      - tester
+    environment:
+      - DISTFS_PASSWORD=testpassword
+    volumes:
+      - client-config:/root/.distfs
 
 volumes:
   node1-data:

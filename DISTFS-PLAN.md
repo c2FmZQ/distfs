@@ -185,3 +185,20 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Verify that the Integrity Scrubber and Replication Repair work together to recover from chunk corruption.
 *   **Step 11.4: Garbage Collection Verification**
     *   **Action:** End-to-end verification that deleting a file eventually reclaims disk space on data nodes.
+
+---
+
+## Phase 12: World-Readable Support
+**Goal:** Enable "public" files within the cluster while maintaining E2EE.
+
+*   **Step 12.1: World Identity Management**
+    *   **Action:** Generate `WorldIdentity` (ML-KEM pair) in FSM if missing.
+    *   **Action:** Implement `GET /v1/meta/key/world` to distribute the Public Key.
+*   **Step 12.2: Private Key Distribution**
+    *   **Action:** Implement `GET /v1/meta/key/world/private` (Authenticated).
+    *   **Action:** Encapsulate World Private Key using requester's `EncKey` before transmission.
+*   **Step 12.3: Client Fallback Logic**
+    *   **Action:** Update `ResolvePath` and `ReadFile` to check for `world` recipient if personal access fails.
+    *   **Action:** Implement memory caching for decrypted World Private Key.
+*   **Step 12.4: FUSE & CLI Publishing**
+    *   **Action:** Update `chmod` handler to automatically add/remove `world` recipient in Lockbox based on permission bits.
