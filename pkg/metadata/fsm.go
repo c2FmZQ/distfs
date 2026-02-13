@@ -184,6 +184,7 @@ const (
 	CmdGCRemove        CommandType = 15
 	CmdInitSecret      CommandType = 16
 	CmdSetUserQuota    CommandType = 17
+	CmdRotateKey       CommandType = 18
 )
 
 type LogCommand struct {
@@ -231,6 +232,13 @@ type SetUserQuotaRequest struct {
 	MaxInodes *int64 `json:"max_inodes,omitempty"`
 }
 
+type ClusterKey struct {
+	ID        string `json:"id"`
+	EncKey    []byte `json:"enc_key"` // Public
+	DecKey    []byte `json:"dec_key"` // Private
+	CreatedAt int64  `json:"created_at"`
+}
+
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var cmd LogCommand
 	if err := json.Unmarshal(l.Data, &cmd); err != nil {
@@ -270,6 +278,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyInitSecret(cmd.Data)
 	case CmdSetUserQuota:
 		return fsm.applySetUserQuota(cmd.Data)
+	case CmdRotateKey:
+		return fsm.applyRotateKey(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -1271,4 +1281,90 @@ func (fsm *MetadataFSM) applySetUserQuota(data []byte) interface{} {
 		return err
 	}
 	return nil
+}
+
+func (fsm *MetadataFSM) applyRotateKey(data []byte) interface{} {
+	var key ClusterKey
+	if err := json.Unmarshal(data, &key); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+
+		encoded, err := json.Marshal(key)
+		if err != nil {
+			return err
+		}
+		if err := b.Put([]byte("epoch_key_"+key.ID), encoded); err != nil {
+			return err
+		}
+
+		if err := b.Put([]byte("active_epoch_key"), []byte(key.ID)); err != nil {
+			return err
+		}
+
+		// Prune
+		var keys []ClusterKey
+		c := b.Cursor()
+		prefix := []byte("epoch_key_")
+		for k, v := c.Seek(prefix); k != nil && strings.HasPrefix(string(k), string(prefix)); k, v = c.Next() {
+			var kStruct ClusterKey
+			if err := json.Unmarshal(v, &kStruct); err == nil {
+				keys = append(keys, kStruct)
+			}
+		}
+
+		if len(keys) > 3 {
+			oldestIdx := -1
+			var oldestTime int64 = 1<<63 - 1
+			for i, k := range keys {
+				if k.CreatedAt < oldestTime {
+					oldestTime = k.CreatedAt
+					oldestIdx = i
+				}
+			}
+			if oldestIdx != -1 {
+				b.Delete([]byte("epoch_key_" + keys[oldestIdx].ID))
+			}
+		}
+
+		return nil
+	})
+}
+
+func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
+	var key ClusterKey
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+		id := b.Get([]byte("active_epoch_key"))
+		if id == nil {
+			return ErrNotFound
+		}
+		v := b.Get([]byte("epoch_key_" + string(id)))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &key, nil
+}
+
+func (fsm *MetadataFSM) GetKey(id string) (*ClusterKey, error) {
+	var key ClusterKey
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("system"))
+		v := b.Get([]byte("epoch_key_" + id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &key)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &key, nil
 }

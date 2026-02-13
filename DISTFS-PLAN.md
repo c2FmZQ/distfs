@@ -152,6 +152,11 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement `Quota` struct in User model.
     *   **Action:** Implement Quota Templates (default limits).
     *   **Action:** Enforce quotas in `CreateInode` and `AllocateChunk` handlers.
+*   **Step 9.9: Cluster Identity (Epoch Keys)**
+    *   **Action:** Implement `CmdRotateKey` in FSM.
+    *   **Action:** Implement `KeyRotationWorker` (Leader only).
+    *   **Action:** Update `/v1/meta/key` to return active Epoch Key.
+    *   **Action:** Update Auth Middleware to use shared Epoch Keys instead of Node Keys.
 
 ---
 

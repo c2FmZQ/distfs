@@ -75,7 +75,7 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server) {
 		t.Fatalf("Node did not become leader")
 	}
 
-	server := NewServer(node.Raft, node.FSM, "", nil, nil, "testsecret", nil)
+	server := NewServer("node1", node.Raft, node.FSM, "", nil, "testsecret", nil)
 	ts := httptest.NewServer(server)
 	return node, ts
 }

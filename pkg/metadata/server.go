@@ -48,11 +48,12 @@ import (
 var uiAssets embed.FS
 
 type Server struct {
+	nodeID  string
 	raft    *raft.Raft
 	fsm     *MetadataFSM
 	jwks    *jwks.Remote
 	jwksURL string
-	nodeKey *mlkem.DecapsulationKey768
+	// nodeKey removed - used for mTLS but not passed to Server for auth anymore
 	signKey *crypto.IdentityKey
 
 	raftSecret string
@@ -62,11 +63,12 @@ type Server struct {
 
 	replMonitor *ReplicationMonitor
 	gcWorker    *GCWorker
+	keyWorker   *KeyRotationWorker
 
 	clientTLSConfig *tls.Config
 }
 
-func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.DecapsulationKey768, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -75,11 +77,11 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 	}
 
 	s := &Server{
+		nodeID:          nodeID,
 		raft:            r,
 		fsm:             fsm,
 		jwks:            remote,
 		jwksURL:         jwksURL,
-		nodeKey:         nodeKey,
 		signKey:         signKey,
 		raftSecret:      raftSecret,
 		nonceCache:      make(map[string]time.Time),
@@ -89,6 +91,8 @@ func NewServer(r *raft.Raft, fsm *MetadataFSM, jwksURL string, nodeKey *mlkem.De
 	s.replMonitor.Start()
 	s.gcWorker = NewGCWorker(s)
 	s.gcWorker.Start()
+	s.keyWorker = NewKeyRotationWorker(s)
+	s.keyWorker.Start()
 	return s
 }
 
@@ -98,6 +102,9 @@ func (s *Server) Shutdown() {
 	}
 	if s.gcWorker != nil {
 		s.gcWorker.Stop()
+	}
+	if s.keyWorker != nil {
+		s.keyWorker.Stop()
 	}
 }
 
@@ -145,7 +152,7 @@ const userContextKey contextKey = "user"
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/meta/key" && r.Method == http.MethodGet {
-		s.handleGetNodeKey(w, r)
+		s.handleGetClusterKey(w, r)
 		return
 	}
 
@@ -155,6 +162,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleClusterDashboard(w, r)
+		return
+	}
+
+	if r.URL.Path == "/v1/cluster/status" && r.Method == http.MethodGet {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.handleClusterStatus(w, r)
 		return
 	}
 
@@ -181,14 +197,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleClusterJoin(w, r)
-		return
-	}
-	if r.URL.Path == "/v1/cluster/status" && r.Method == http.MethodGet {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.handleClusterStatus(w, r)
 		return
 	}
 
@@ -324,7 +332,7 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 
 func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		http.Error(w, "not leader: "+s.raft.State().String(), http.StatusServiceUnavailable)
 		return
 	}
 
@@ -347,6 +355,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	status := map[string]interface{}{
+		"id":     s.nodeID,
 		"state":  s.raft.State().String(),
 		"leader": s.raft.Leader(),
 		"stats":  s.raft.Stats(),
@@ -356,10 +365,6 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authenticate(r *http.Request) (*User, error) {
-	if s.nodeKey == nil {
-		return nil, nil
-	}
-
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
 		return nil, fmt.Errorf("missing auth")
@@ -367,6 +372,15 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	sealed, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Bearer "))
 	if err != nil {
 		return nil, err
+	}
+
+	active, err := s.fsm.GetActiveKey()
+	if err != nil {
+		return nil, fmt.Errorf("active key not found")
+	}
+	dk, err := crypto.UnmarshalDecapsulationKey(active.DecKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cluster key")
 	}
 
 	kemSize := mlkem.CiphertextSize768
@@ -377,7 +391,7 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	kemCT := sealed[:kemSize]
 	demCT := sealed[kemSize:]
 
-	ss, err := s.nodeKey.Decapsulate(kemCT)
+	ss, err := dk.Decapsulate(kemCT)
 	if err != nil {
 		return nil, fmt.Errorf("decapsulation failed: %v", err)
 	}
@@ -442,14 +456,15 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	return &user, nil
 }
 
-func (s *Server) handleGetNodeKey(w http.ResponseWriter, r *http.Request) {
-	if s.nodeKey == nil {
-		http.Error(w, "node key not configured", http.StatusInternalServerError)
+func (s *Server) handleGetClusterKey(w http.ResponseWriter, r *http.Request) {
+	active, err := s.fsm.GetActiveKey()
+	if err != nil {
+		// If bootstrap hasn't happened or no key, return 503
+		http.Error(w, "cluster key not available", http.StatusServiceUnavailable)
 		return
 	}
-	pub := s.nodeKey.EncapsulationKey()
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Write(pub.Bytes())
+	w.Write(active.EncKey)
 }
 
 func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {

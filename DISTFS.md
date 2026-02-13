@@ -46,9 +46,12 @@ Users control their identity via an asymmetric key pair using **Post-Quantum Cry
 
 1.  **User Identity Key:** Public key maps to the User ID. Private key signs requests.
     *   **User ID:** Derived from the user's email using a cluster-wide HMAC to ensure privacy.
-2.  **Group Identity Key:** A persistent Public/Private key pair representing a Group. The Group Private Key is shared among group members via the Group Lockbox.
-3.  **File Key (FK):** A random symmetric key generated for *each* file. Encrypts the file content.
-4.  **Lockbox:**
+2.  **Cluster Identity (Epoch Keys):** The cluster maintains a rotating set of shared PQC KEM keys ("Epoch Keys") stored in the Raft FSM.
+    *   **Shared:** All nodes use the same keys to decrypt client requests, enabling stateless load balancing.
+    *   **Rotating:** Keys rotate periodically (e.g., daily) to provide **Forward Secrecy**. Old keys are securely erased from memory and disk.
+3.  **Group Identity Key:** A persistent Public/Private key pair representing a Group. The Group Private Key is shared among group members via the Group Lockbox.
+4.  **File Key (FK):** A random symmetric key generated for *each* file. Encrypts the file content.
+5.  **Lockbox:**
     *   **File Lockbox:** Stores the `File Key` encrypted for the Owner and/or the assigned Group.
     *   **Group Lockbox:** Stores the `Group Private Key` encrypted for each member's Public Key.
 

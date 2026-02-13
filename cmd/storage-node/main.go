@@ -16,7 +16,6 @@ package main
 
 import (
 	"bytes"
-	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -102,13 +101,10 @@ func main() {
 
 	// Finalize ID
 	derivedID := metadata.NodeIDFromKey(raftKey)
-	if *nodeID == "" {
-		*nodeID = derivedID
-	} else {
-		if *nodeID != derivedID {
-			log.Printf("Warning: Provided Node ID %s does not match derived ID %s", *nodeID, derivedID)
-		}
+	if *nodeID != "" && *nodeID != derivedID {
+		log.Printf("Overriding provided Node ID %s with derived ID %s to ensure mTLS compatibility", *nodeID, derivedID)
 	}
+	*nodeID = derivedID
 
 	if *raftAdvertise == "" {
 		*raftAdvertise = *raftBind
@@ -174,13 +170,13 @@ func main() {
 	}
 
 	// 3. Initialize Keys for API
-	nodeKey, signKey, err := loadOrGenerateKeys(st)
+	signKey, err := loadOrGenerateSignKey(st)
 	if err != nil {
 		log.Fatalf("failed to init keys: %v", err)
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(rn.Raft, rn.FSM, *jwksURL, nodeKey, signKey, *raftSecret, rn.ClientTLSConfig)
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *jwksURL, signKey, *raftSecret, rn.ClientTLSConfig)
 
 	// DiskStore uses separate storage instance rooted at chunks/
 	chunkDir := filepath.Join(baseDir, "chunks")
@@ -202,6 +198,7 @@ func main() {
 	publicMux.Handle("/v1/meta/key", metaServer)
 	publicMux.Handle("/v1/user/", metaServer)
 	publicMux.Handle("/v1/group/", metaServer)
+	publicMux.Handle("/v1/cluster/", metaServer)
 	publicMux.Handle("/v1/data/", dataServer)    // Data access
 	publicMux.Handle("/api/cluster", metaServer) // Dashboard & Management
 	publicMux.Handle("/api/cluster/", metaServer)
@@ -236,7 +233,13 @@ func main() {
 			if rn.Raft.Leader() != "" {
 				node.LastHeartbeat = time.Now().Unix()
 				body, _ := json.Marshal(node)
-				target := "http://localhost:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
+
+				protocol := "http"
+				if rn.ClientTLSConfig != nil {
+					protocol = "https"
+				}
+				target := protocol + "://localhost:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
+
 				req, _ := http.NewRequest("POST", target, bytes.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
 				if *raftSecret != "" {
@@ -245,7 +248,7 @@ func main() {
 
 				// If using mTLS for cluster comms, use ClientTLSConfig
 				client := http.DefaultClient
-				if rn.ClientTLSConfig != nil && strings.HasPrefix(target, "https://") {
+				if rn.ClientTLSConfig != nil {
 					client = &http.Client{
 						Transport: &http.Transport{
 							TLSClientConfig: rn.ClientTLSConfig,
@@ -300,21 +303,10 @@ func main() {
 	clusterSrv.Close()
 }
 
-func loadOrGenerateKeys(st *storage.Storage) (*mlkem.DecapsulationKey768, *crypto.IdentityKey, error) {
-	kemKeyName := "kem.key"
+func loadOrGenerateSignKey(st *storage.Storage) (*crypto.IdentityKey, error) {
 	signKeyName := "sign.key"
 
-	var nodeKey *mlkem.DecapsulationKey768
 	var signKey *crypto.IdentityKey
-
-	// Load KEM Key
-	var kemData KeyData
-	if err := st.ReadDataFile(kemKeyName, &kemData); err == nil {
-		nodeKey, _ = crypto.UnmarshalDecapsulationKey(kemData.Bytes)
-	} else {
-		nodeKey, _ = crypto.GenerateEncryptionKey()
-		st.SaveDataFile(kemKeyName, KeyData{Bytes: crypto.MarshalDecapsulationKey(nodeKey)})
-	}
 
 	// Load Sign Key
 	var signData KeyData
@@ -325,7 +317,7 @@ func loadOrGenerateKeys(st *storage.Storage) (*mlkem.DecapsulationKey768, *crypt
 		st.SaveDataFile(signKeyName, KeyData{Bytes: signKey.MarshalPrivate()})
 	}
 
-	return nodeKey, signKey, nil
+	return signKey, nil
 }
 
 type KeyData struct {
