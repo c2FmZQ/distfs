@@ -25,22 +25,22 @@ fi
 
 # 2. Initialize and Register User
 echo "Initializing and Registering User..."
-/bin/distfs -config "$CONFIG1" init -meta "$META_URL" -id "keysync-user@example.com"
-/bin/distfs -config "$CONFIG1" register -jwt "$JWT"
+/bin/distfs -use-pinentry=false -config "$CONFIG1" init -meta "$META_URL" -id "keysync-user@example.com"
+/bin/distfs -use-pinentry=false -config "$CONFIG1" register -jwt "$JWT"
 
 # 3. Push Keys from Config 1
 echo "Pushing Keys from Config 1..."
 # Use DISTFS_PASSWORD from environment (set in docker-compose.yml)
-/bin/distfs -config "$CONFIG1" keysync push
+/bin/distfs -use-pinentry=false -config "$CONFIG1" keysync push
 
 # 4. Pull Keys to Config 2
 echo "Pulling Keys to Config 2..."
 # We simulate a new device by only knowing the MetaURL and having a JWT.
-/bin/distfs -config "$CONFIG2" keysync pull -meta "$META_URL" -jwt "$JWT"
+/bin/distfs -use-pinentry=false -config "$CONFIG2" keysync pull -meta "$META_URL" -jwt "$JWT"
 
 # 5. Verify Config 2 works
 echo "Verifying Config 2 works..."
 # Ensure we can list root.
-/bin/distfs -config "$CONFIG2" ls / > /dev/null
+/bin/distfs -use-pinentry=false -config "$CONFIG2" ls / > /dev/null
 
 echo "KeySync E2E Test Passed!"

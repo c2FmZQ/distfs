@@ -36,32 +36,22 @@ import (
 )
 
 var (
-	configPath = flag.String("config", config.DefaultPath(), "Path to config file")
+	configPath  = flag.String("config", config.DefaultPath(), "Path to config file")
+	usePinentry = flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
 )
 
 func main() {
 	flag.Usage = usage
-	// Need to parse global flags first, but distfs <cmd> <args> makes it tricky with standard flag pkg.
-	// We'll use a simple manual check for -config before the command.
+	flag.Parse()
 
-	cmdIdx := 1
-	for i, arg := range os.Args {
-		if i == 0 {
-			continue
-		}
-		if arg == "-config" && i+1 < len(os.Args) {
-			*configPath = os.Args[i+1]
-			cmdIdx = i + 2
-			break
-		}
-	}
-
-	if len(os.Args) < cmdIdx+1 {
+	if flag.NArg() == 0 {
 		usage()
 	}
 
-	command := os.Args[cmdIdx]
-	args := os.Args[cmdIdx+1:]
+	config.UsePinentry = *usePinentry
+
+	command := flag.Arg(0)
+	args := flag.Args()[1:]
 
 	switch command {
 	case "init":
@@ -104,7 +94,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Println("Usage: distfs [-config <path>] <command> [args]")
+	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  init -meta <url> -id <user_id>  Initialize client config")
 	fmt.Println("  register -jwt <jwt>             Register user with server")

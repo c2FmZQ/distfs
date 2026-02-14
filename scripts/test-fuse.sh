@@ -11,12 +11,12 @@ until wget -qO- --timeout=2 http://storage-node-1:8080/v1/meta/key > /dev/null 2
 done
 
 echo "Initializing fuse user config..."
-distfs -config /tmp/fuse-config.json init -meta http://storage-node-1:8080 -id fuse-test-user@example.com
+distfs -use-pinentry=false -config /tmp/fuse-config.json init -meta http://storage-node-1:8080 -id fuse-test-user@example.com
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=fuse-test-user@example.com")
 
 echo "Mounting FUSE (with auto-registration)..."
 mkdir -p /mnt/distfs
-/bin/distfs-fuse -config /tmp/fuse-config.json -mount /mnt/distfs -register -jwt "$JWT" > /tmp/fuse.log 2>&1 &
+/bin/distfs-fuse -use-pinentry=false -config /tmp/fuse-config.json -mount /mnt/distfs -register -jwt "$JWT" > /tmp/fuse.log 2>&1 &
 FUSE_PID=$!
 
 echo "Waiting for FUSE mount..."

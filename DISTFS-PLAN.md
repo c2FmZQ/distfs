@@ -267,3 +267,19 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 17.4: CLI Commands**
     *   **Action:** [Done] Add `distfs keysync push`.
     *   **Action:** [Done] Add `distfs keysync pull` (or integrate into `init`).
+    
+    ---
+    
+    ## Phase 18: Secure Passphrase Entry (Pinentry)
+    **Goal:** Integrate `pinentry` support for secure passphrase input.
+    
+    *   **Step 18.1: Library Integration**
+        *   **Action:** Add `github.com/twpayne/go-pinentry` as a dependency.
+    *   **Step 18.2: Secure Pinentry Wrapper**
+        *   **Action:** Implement `GetPasswordSecure` in `pkg/config` that uses `go-pinentry`.
+        *   **Action:** Validate `GPG_TTY` to prevent command injection.
+        *   **Action:** Use conditional compilation with `nopinentry` build tag.
+    *   **Step 18.3: CLI & FUSE Integration**
+        *   **Action:** Add `--use-pinentry` flag to `distfs` and `distfs-fuse`.
+        *   **Action:** Update `config.GetPassword` to use the secure wrapper if enabled.
+    

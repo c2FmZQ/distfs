@@ -99,28 +99,28 @@ sleep 5
 
 if [ ! -f /root/.distfs/config.json ]; then
   echo "Initializing distfs..."
-  distfs init -meta $LEADER_URL -id test@example.com
+  distfs -use-pinentry=false init -meta $LEADER_URL -id test@example.com
   echo "Registering user..."
   
   # Fetch real JWT from test-auth
   JWT=$(wget -qO- "http://test-auth:8080/mint?email=test@example.com")
-  distfs register -jwt "$JWT"
+  distfs -use-pinentry=false register -jwt "$JWT"
   echo "Making root world-writable for concurrent tests..."
-  distfs chmod 0777 /
+  distfs -use-pinentry=false chmod 0777 /
 fi
 
 echo "Creating directory..."
-distfs mkdir /testdir || echo "testdir already exists"
+distfs -use-pinentry=false mkdir /testdir || echo "testdir already exists"
 
 echo "Uploading file..."
 echo "hello from e2e test" > /tmp/hello.txt
-distfs put /tmp/hello.txt /testdir/world.txt
+distfs -use-pinentry=false put /tmp/hello.txt /testdir/world.txt
 
 echo "Listing directory..."
-distfs ls /testdir
+distfs -use-pinentry=false ls /testdir
 
 echo "Downloading file..."
-distfs get /testdir/world.txt /tmp/hello-back.txt
+distfs -use-pinentry=false get /testdir/world.txt /tmp/hello-back.txt
 
 echo "Verifying content..."
 if grep -q "hello from e2e test" /tmp/hello-back.txt; then

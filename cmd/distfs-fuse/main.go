@@ -29,6 +29,7 @@ import (
 func main() {
 	mountpoint := flag.String("mount", "", "Mount point")
 	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
+	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
 
 	// Registration flags
 	doRegister := flag.Bool("register", false, "Register user with server")
@@ -41,6 +42,7 @@ func main() {
 	browser := flag.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
 
 	flag.Parse()
+	config.UsePinentry = *usePinentry
 
 	if *doRegister {
 		performRegistration(*configPath, *jwt, *clientID, *scopes, *authEndpoint, *tokenEndpoint, *qrCode, *browser)

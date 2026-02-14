@@ -159,6 +159,10 @@ func GetPassword(prompt string, confirm bool) ([]byte, error) {
 		return []byte(envPass), nil
 	}
 
+	if UsePinentry {
+		return getPasswordPinentry(prompt, confirm)
+	}
+
 	fmt.Fprint(os.Stderr, prompt)
 	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
 	fmt.Fprintln(os.Stderr)

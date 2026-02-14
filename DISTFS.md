@@ -80,6 +80,13 @@ To support seamless multi-device usage without compromising the "Trust No One" m
     *   **Retrieval (New Device):** The user authenticates via OIDC (JWT). The server returns the blob. The user enters their passphrase locally to decrypt and install their keys.
     *   **Storage/Update (Existing Device):** To prevent unauthorized overwrites, the client must provide a valid `Session-Token` and use **Layer 7 E2EE (Sealing)**. This proves the user already knows the current key before they can change the sync blob.
 
+### 3.6 Secure Passphrase Entry (Pinentry)
+To enhance security during passphrase entry, DistFS supports the **Assuan protocol** via the `pinentry` suite of tools.
+1.  **Standard Protocol:** The client communicates with `pinentry` binaries (e.g., `pinentry-curses`, `pinentry-qt`, `pinentry-mac`) to securely capture user passphrases.
+2.  **Environment Integration:** Supports `GPG_TTY` for terminal-based entry and respects `~/.gnupg/gpg-agent.conf` configurations.
+3.  **Opt-in Usage:** Enabled via the `--use-pinentry` flag in CLI and FUSE tools.
+4.  **Hardened Implementation:** Validates input environments and avoids insecure logging of captured passphrases.
+
 ---
 
 ## 4. Metadata Layer (MetaNodes)

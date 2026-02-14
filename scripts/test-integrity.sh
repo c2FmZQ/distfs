@@ -6,14 +6,14 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating integrity directory..."
-distfs mkdir /integrity || echo "integrity dir already exists"
+distfs -use-pinentry=false mkdir /integrity || echo "integrity dir already exists"
 
 echo "Uploading critical file..."
 echo "integrity-protected-data" > /tmp/crit.txt
-distfs put /tmp/crit.txt /integrity/critical.txt
+distfs -use-pinentry=false put /tmp/crit.txt /integrity/critical.txt
 
 echo "Verifying upload..."
-distfs ls /integrity
+distfs -use-pinentry=false ls /integrity
 
 echo "INJECTING CORRUPTION: Overwriting a chunk on Node 1..."
 CHUNK=$(find /data -type f | grep -v "fsm.bolt" | head -1)
@@ -31,7 +31,7 @@ echo "Waiting for repair..."
 sleep 5
 
 echo "Verifying file is STILL CORRECT (Self-healed from replicas)..."
-distfs get /integrity/critical.txt /tmp/crit-back.txt
+distfs -use-pinentry=false get /integrity/critical.txt /tmp/crit-back.txt
 if diff /tmp/crit.txt /tmp/crit-back.txt; then
     echo "PASS: Data Integrity Self-Healed"
 else

@@ -6,14 +6,14 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating gc directory..."
-distfs mkdir /gc || echo "gc dir already exists"
+distfs -use-pinentry=false mkdir /gc || echo "gc dir already exists"
 
 echo "Uploading file to be deleted..."
 echo "trash data" > /tmp/trash.txt
-distfs put /tmp/trash.txt /gc/trash.txt
+distfs -use-pinentry=false put /tmp/trash.txt /gc/trash.txt
 
 echo "Deleting file..."
-distfs rm /gc/trash.txt
+distfs -use-pinentry=false rm /gc/trash.txt
 
 echo "Waiting for background GC..."
 wget -qO- --header "X-Raft-Secret: supersecret" http://storage-node-1:8080/api/cluster/nodes

@@ -11,6 +11,7 @@ require (
 	github.com/hashicorp/raft v1.7.3
 	github.com/hashicorp/raft-boltdb v0.0.0-20251103221153-05f9dd7a5148
 	github.com/mdp/qrterminal/v3 v3.2.1
+	github.com/twpayne/go-pinentry/v4 v4.0.1
 	go.etcd.io/bbolt v1.4.3
 	golang.org/x/crypto v0.48.0
 	golang.org/x/oauth2 v0.35.0
