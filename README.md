@@ -18,9 +18,73 @@ DistFS utilizes a unified node architecture where each node can perform two role
 1.  **Metadata Role:** Participates in the Raft group to manage inodes and directories.
 2.  **Data Role:** Stores encrypted binary blobs (chunks). Chunks are content-addressed by the hash of their encrypted content.
 
-For more technical details, refer to the [Design Document](DISTFS.md).
+```mermaid
+graph TD
+    subgraph "DistFS Cluster"
+        Node1["Unified Node 1 (Leader)"]
+        Node2["Unified Node 2 (Voter)"]
+        Node3["Unified Node 3 (Voter)"]
+        Node4["Unified Node 4 (Data)"]
+        Node5["Unified Node 5 (Data)"]
+    end
+
+    Client["DistFS Client"] -- "Metadata API (Raft)" --> Node1
+    Client -- "Data API (HTTP/2)" --> Node4
+    Client -- "Data API (HTTP/2)" --> Node5
+
+    Node1 -- "Log Replication" --> Node2
+    Node1 -- "Log Replication" --> Node3
+    Node4 -- "Replication" --> Node5
+```
+
+### Data Flow (Write)
+
+When a user writes a file, the client handles the heavy lifting to maintain zero-knowledge privacy.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant M as MetaNode (Raft)
+    participant D1 as Primary DataNode
+    participant D2 as Secondary DataNode
+
+    Note over C: Encrypt Chunks (AES-GCM)
+    C->>M: POST /v1/meta/allocate (ChunkID)
+    M-->>C: Target Nodes (D1, D2)
+    C->>D1: PUT /v1/data/{ID} (replicas=D2)
+    D1->>D2: Forward Chunk
+    D2-->>D1: ACK
+    D1-->>C: ACK
+    C->>M: PUT /v1/meta/inode (Commit Manifest)
+    M-->>C: Success
+```
 
 ## Security Model
+
+DistFS employs a defense-in-depth strategy to protect user privacy.
+
+```mermaid
+graph LR
+    subgraph "Client Boundary (Trusted)"
+        Keys["PQC Identity & Session Keys"]
+        Plaintext["Plaintext Data"]
+    end
+
+    subgraph "Metadata Layer (Stateless Privacy)"
+        Sealing["Layer 7 Request Sealing"]
+        Anonymization["HMAC Anonymized UserIDs"]
+    end
+
+    subgraph "Storage Layer (Zero-Knowledge)"
+        AES["AES-256-GCM Chunks"]
+        RestEnc["At-Rest Disk Encryption"]
+    end
+
+    Plaintext -- "Encryption" --> AES
+    Keys -- "Signing" --> Sealing
+    Sealing -- "mTLS" --> Anonymization
+    AES -- "Upload" --> RestEnc
+```
 
 *   **Layer 7 E2EE (Sealing):** All metadata requests and responses are wrapped in encrypted envelopes, protecting against inspection by intermediate proxies or load balancers.
 *   **Identity:** User identities are based on PQC sign/encrypt key pairs. User IDs are anonymized using a cluster-wide HMAC secret.
