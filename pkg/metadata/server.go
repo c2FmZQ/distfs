@@ -175,6 +175,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/v1/meta/key/sign" && r.Method == http.MethodGet {
+		s.handleGetServerSignKey(w, r)
+		return
+	}
+
 	if r.URL.Path == "/v1/meta/key/world" && r.Method == http.MethodGet {
 		s.handleGetWorldPublicKey(w, r)
 		return
@@ -773,7 +778,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 	body, _ := json.Marshal(user)
 
-	s.applyCommandRaw(w, CmdCreateUser, body, http.StatusCreated)
+	s.applyCommandRaw(w, r, CmdCreateUser, body, http.StatusCreated)
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -791,8 +796,23 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
+	data, _ := json.Marshal(user)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(user)
+
+	// E2EE?
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
@@ -833,8 +853,23 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 		nodes = nodes[:3]
 	}
 
+	data, _ := json.Marshal(nodes)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(nodes)
+
+	// E2EE?
+	user, _ := r.Context().Value(userContextKey).(*User)
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id string) {
@@ -874,6 +909,20 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	// E2EE?
+	user, _ := r.Context().Value(userContextKey).(*User)
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
 	w.Write(data)
 }
 
@@ -922,8 +971,23 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	data, _ := json.Marshal(result)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
+
+	// E2EE?
+	user, _ := r.Context().Value(userContextKey).(*User)
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
@@ -944,7 +1008,7 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 }
 
 func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
-	s.applyCommandRaw(w, CmdDeleteInode, []byte(id), http.StatusOK)
+	s.applyCommandRaw(w, r, CmdDeleteInode, []byte(id), http.StatusOK)
 }
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
@@ -1081,8 +1145,23 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
+	data, _ := json.Marshal(group)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(group)
+
+	// E2EE?
+	user, _ = r.Context().Value(userContextKey).(*User)
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
@@ -1118,7 +1197,7 @@ func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id strin
 	}
 	update.ParentID = id
 	body, _ := json.Marshal(update)
-	s.applyCommandRaw(w, CmdAddChild, body, http.StatusOK)
+	s.applyCommandRaw(w, r, CmdAddChild, body, http.StatusOK)
 }
 
 func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id string) {
@@ -1138,7 +1217,7 @@ func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id st
 	}
 	update.ParentID = id
 	body, _ := json.Marshal(update)
-	s.applyCommandRaw(w, CmdRemoveChild, body, http.StatusOK)
+	s.applyCommandRaw(w, r, CmdRemoveChild, body, http.StatusOK)
 }
 
 func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
@@ -1154,10 +1233,10 @@ func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType Co
 		return
 	}
 
-	s.applyCommandRaw(w, cmdType, body, successCode)
+	s.applyCommandRaw(w, r, cmdType, body, successCode)
 }
 
-func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, data []byte, successCode int) {
+func (s *Server) applyCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
 	resp, err := s.applyRaftCommand(cmdType, data)
 	if err != nil {
 		if w == nil {
@@ -1180,13 +1259,44 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, cmdType CommandType, dat
 
 	if w != nil {
 		if resp != nil {
+			data, _ := json.Marshal(resp)
 			w.Header().Set("Content-Type", "application/json")
+
+			// E2EE?
+			user, _ := r.Context().Value(userContextKey).(*User)
+			if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+				sealed, err := s.sealResponse(user, data)
+				if err == nil {
+					w.Header().Set("X-DistFS-Sealed", "true")
+					w.WriteHeader(successCode)
+					w.Write(sealed)
+					return
+				}
+			}
+
 			w.WriteHeader(successCode)
-			json.NewEncoder(w).Encode(resp)
+			w.Write(data)
 			return
 		}
 		w.WriteHeader(successCode)
 	}
+}
+
+func (s *Server) sealResponse(user *User, payload []byte) ([]byte, error) {
+	uk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+	if err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user public key")
+	}
+
+	sealed, err := crypto.SealResponse(uk, s.signKey, payload)
+	if err != nil {
+		return nil, fmt.Errorf("failed to seal response: %w", err)
+	}
+
+	res := SealedResponse{
+		Sealed: sealed,
+	}
+	return json.Marshal(res)
 }
 
 func (s *Server) checkWritePermission(user *User, inodeID string) error {
@@ -1257,8 +1367,22 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	data, _ := json.Marshal(entry)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(entry)
+
+	// E2EE?
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
@@ -1296,6 +1420,11 @@ func (s *Server) handleSuicide(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
 		os.Exit(1)
 	}()
+}
+
+func (s *Server) handleGetServerSignKey(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write(s.signKey.Public())
 }
 
 func (s *Server) handleGetWorldPublicKey(w http.ResponseWriter, r *http.Request) {

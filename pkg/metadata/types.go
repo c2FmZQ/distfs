@@ -166,3 +166,7 @@ type SealedRequest struct {
 	UserID string `json:"uid"`
 	Sealed []byte `json:"sealed"`
 }
+
+type SealedResponse struct {
+	Sealed []byte `json:"sealed"`
+}

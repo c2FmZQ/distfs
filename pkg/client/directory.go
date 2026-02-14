@@ -259,10 +259,14 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return fmt.Errorf("rename failed: %d %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -300,10 +304,14 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return fmt.Errorf("remove entry failed: %d %s", resp.StatusCode, string(b))
 	}
 	return nil
@@ -351,10 +359,14 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return fmt.Errorf("link failed: %d %s", resp.StatusCode, string(b))
 	}
 	return nil

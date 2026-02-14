@@ -152,7 +152,7 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 		// However, GC queue is internal state. Does it need to be replicated?
 		// Yes, if leader fails, new leader needs to know what to GC.
 		// So we need a new Raft command: CmdGCRemove.
-		g.server.applyCommandRaw(nil, CmdGCRemove, []byte(chunkID), 0)
+		g.server.applyCommandRaw(nil, nil, CmdGCRemove, []byte(chunkID), 0)
 	}
 }
 

@@ -236,3 +236,16 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 14.3: Client Sealing Integration**
     *   **Action:** Update `Client.sendRequest` (or equivalent) to wrap all outgoing payloads.
     *   **Action:** Transition all handlers to strictly expect sealed requests.
+
+---
+
+## Phase 15: Bidirectional Layer 7 E2EE (Response Privacy)
+**Goal:** Encrypt all server-to-client responses using the client's registered public key.
+
+*   **Step 15.1: Response Sealing Primitives**
+    *   **Action:** Implement `SealResponse` and `OpenResponse` in `pkg/crypto`.
+*   **Step 15.2: Server Response Interceptor**
+    *   **Action:** Implement a response wrapper in `MetadataServer` that seals outgoing JSON.
+    *   **Action:** Use the registered `User.EncKey` for encryption.
+*   **Step 15.3: Client Transparent Unsealing**
+    *   **Action:** Update Client HTTP helpers to automatically unseal responses when the sealed header is present.

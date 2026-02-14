@@ -32,6 +32,30 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+func (c *Client) GetServerSignKey() ([]byte, error) {
+	c.keyMu.RLock()
+	sk := c.serverSignPK
+	c.keyMu.RUnlock()
+	if sk != nil {
+		return sk, nil
+	}
+
+	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/key/sign")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get server sign key: %d", resp.StatusCode)
+	}
+
+	b, _ := io.ReadAll(resp.Body)
+	c.keyMu.Lock()
+	c.serverSignPK = b
+	c.keyMu.Unlock()
+	return b, nil
+}
+
 func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 	c.keyMu.RLock()
 	sk := c.serverKey
@@ -68,6 +92,7 @@ type Client struct {
 	decKey     *mlkem.DecapsulationKey768
 	signKey    *crypto.IdentityKey
 	serverKey  *mlkem.EncapsulationKey768
+	serverSignPK []byte
 	keyCache   map[string][]byte
 	keyMu      sync.RWMutex
 
@@ -246,6 +271,37 @@ func (c *Client) sealBody(req *http.Request, payload []byte) error {
 	return nil
 }
 
+func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
+	if resp.Header.Get("X-DistFS-Sealed") != "true" {
+		return resp.Body, nil
+	}
+
+	defer resp.Body.Close()
+	var sealed metadata.SealedResponse
+	if err := json.NewDecoder(resp.Body).Decode(&sealed); err != nil {
+		return nil, fmt.Errorf("failed to decode sealed response: %w", err)
+	}
+
+	serverSignPK, err := c.GetServerSignKey()
+	if err != nil {
+		return nil, err
+	}
+
+	// 1. Open
+	ts, payload, err := crypto.OpenResponse(c.decKey, serverSignPK, sealed.Sealed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open response: %w", err)
+	}
+
+	// 2. Replay/Staleness Protection
+	now := time.Now().UnixNano()
+	if ts < now-int64(5*time.Minute) || ts > now+int64(5*time.Minute) {
+		return nil, fmt.Errorf("response timestamp out of range")
+	}
+
+	return io.NopCloser(bytes.NewReader(payload)), nil
+}
+
 func (c *Client) allocateNodes() ([]metadata.Node, error) {
 	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/allocate", nil)
 	if err != nil {
@@ -293,13 +349,18 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return "", err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return "", fmt.Errorf("issueToken failed: %d %s", resp.StatusCode, string(b))
 	}
 
-	respBytes, err := io.ReadAll(resp.Body)
+	respBytes, err := io.ReadAll(body)
 	if err != nil {
 		return "", err
 	}
@@ -389,14 +450,19 @@ func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 
 	var created metadata.Inode
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.NewDecoder(body).Decode(&created); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -422,14 +488,19 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 
 	var updated metadata.Inode
-	if err := json.NewDecoder(resp.Body).Decode(&updated); err != nil {
+	if err := json.NewDecoder(body).Decode(&updated); err != nil {
 		return nil, err
 	}
 	return &updated, nil
@@ -448,13 +519,18 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 	var inode metadata.Inode
-	if err := json.NewDecoder(resp.Body).Decode(&inode); err != nil {
+	if err := json.NewDecoder(body).Decode(&inode); err != nil {
 		return nil, err
 	}
 	return &inode, nil
@@ -480,12 +556,17 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("get inodes failed: %d", resp.StatusCode)
 	}
 	var inodes []*metadata.Inode
-	if err := json.NewDecoder(resp.Body).Decode(&inodes); err != nil {
+	if err := json.NewDecoder(body).Decode(&inodes); err != nil {
 		return nil, err
 	}
 	return inodes, nil
@@ -1122,14 +1203,19 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return nil, fmt.Errorf("create group failed: %d %s", resp.StatusCode, string(b))
 	}
 
 	var created metadata.Group
-	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+	if err := json.NewDecoder(body).Decode(&created); err != nil {
 		return nil, err
 	}
 	return &created, nil
@@ -1182,9 +1268,14 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return fmt.Errorf("update group failed: %d %s", resp.StatusCode, string(b))
 	}
 
@@ -1325,9 +1416,14 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
+		b, _ := io.ReadAll(body)
 		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 

@@ -67,11 +67,10 @@ To minimize PII exposure, the metadata layer operates on opaque identifiers.
 ### 3.4 Transport Privacy (Layer 7 E2EE)
 While TLS (Layer 4) protects the connection, DistFS implements **Layer 7 End-to-End Encryption** for all metadata operations to ensure that infrastructure components (load balancers, WAFs, or malicious proxies) cannot observe or tamper with the file system structure.
 
-1.  **Sealed Requests:** All requests from the Client to the Metadata Server are wrapped in a `SealedRequest` envelope:
-    *   **Encapsulation:** The request payload is encrypted using the active **Cluster Public Key** (ML-KEM-768).
-    *   **Signature:** The inner payload is signed by the **Client's Private Signing Key**.
-2.  **Unsealed on Leader:** Only the Raft Cluster Leader (possessing the corresponding private key) can decrypt and verify the request. Decryption happens in memory immediately before processing.
-3.  **Replay Protection:** Each sealed request includes a high-resolution timestamp. The server maintains a sliding-window nonce cache and rejects requests older than 2 minutes or those with duplicate timestamps.
+1.  **Sealed Requests:** All mutation and sensitive query requests from the Client to the Metadata Server are wrapped in a `SealedRequest` envelope. The payload is encrypted for the Cluster and signed by the Client.
+2.  **Sealed Responses:** All responses from the Metadata Server to authenticated clients are wrapped in a `SealedResponse` envelope. The payload is encrypted for the specific Client (using their registered public key) and signed by the Server.
+3.  **Unsealed at Edges:** Encryption/Decryption happens exclusively at the Client and the Raft Leader. Intermediate nodes or proxies see only opaque blobs.
+4.  **Replay Protection:** Each sealed envelope includes a high-resolution timestamp and is subject to sliding-window nonce verification.
 
 ---
 
