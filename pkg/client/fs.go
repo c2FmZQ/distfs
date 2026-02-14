@@ -25,14 +25,17 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+// DistFS implements fs.FS and fs.ReadDirFS.
 type DistFS struct {
 	client *Client
 }
 
+// FS returns an fs.FS compatible wrapper around the client.
 func (c *Client) FS() *DistFS {
 	return &DistFS{client: c}
 }
 
+// ReadDir implements fs.ReadDirFS.
 func (d *DistFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	f, err := d.Open(name)
 	if err != nil {
@@ -48,6 +51,7 @@ func (d *DistFS) ReadDir(name string) ([]fs.DirEntry, error) {
 	return rdf.ReadDir(-1)
 }
 
+// Open implements fs.FS.
 func (d *DistFS) Open(name string) (fs.File, error) {
 	inode, key, err := d.client.ResolvePath(name)
 	if err != nil {
@@ -92,8 +96,7 @@ func (f *DistFile) Close() error {
 type DistDir struct {
 	client *Client
 	inode  *metadata.Inode
-	key    []byte // The key for this directory (used to unlock children?) No, parent key is not used to unlock children directly.
-	// But we need the client identity to unlock children's lockboxes.
+	key    []byte // The symmetric key for this directory.
 	offset     int
 	sortedKeys []string
 }
@@ -181,6 +184,7 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	return entries, nil
 }
 
+// DistDirEntry implements fs.DirEntry.
 type DistDirEntry struct {
 	inode *metadata.Inode
 	name  string
@@ -198,6 +202,7 @@ func (e *DistDirEntry) Info() (fs.FileInfo, error) {
 	return &DistFileInfo{inode: e.inode}, nil
 }
 
+// DistFileInfo implements fs.FileInfo.
 type DistFileInfo struct {
 	inode *metadata.Inode
 }

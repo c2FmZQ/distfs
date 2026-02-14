@@ -38,6 +38,8 @@ var (
 	ErrConflict = errors.New("version conflict")
 )
 
+// MetadataFSM implements the Raft Finite State Machine for the metadata layer.
+// It manages the Inode table, User registry, and other cluster state using BoltDB.
 type MetadataFSM struct {
 	db         *bolt.DB
 	path       string
@@ -48,6 +50,7 @@ type MetadataFSM struct {
 	mu      sync.RWMutex
 }
 
+// NewMetadataFSM creates a new FSM backed by a BoltDB file at the given path.
 func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
@@ -78,6 +81,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	return fsm, nil
 }
 
+// Close closes the underlying BoltDB.
 func (fsm *MetadataFSM) Close() error {
 	if fsm.db != nil {
 		return fsm.db.Close()
@@ -165,6 +169,7 @@ func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
 	return &node, nil
 }
 
+// CommandType identifies the type of operation in the Raft log.
 type CommandType uint8
 
 const (
@@ -189,6 +194,7 @@ const (
 	CmdInitWorld       CommandType = 19
 )
 
+// LogCommand is the structure stored in the Raft log.
 type LogCommand struct {
 	Type CommandType `json:"type"`
 	Data []byte      `json:"data"`
@@ -247,6 +253,7 @@ type ClusterKey struct {
 	CreatedAt int64  `json:"created_at"`
 }
 
+// Apply applies a Raft log entry to the FSM.
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var cmd LogCommand
 	if err := json.Unmarshal(l.Data, &cmd); err != nil {
@@ -622,8 +629,6 @@ func (fsm *MetadataFSM) applyLink(data []byte) interface{} {
 		target.Version++
 
 		// 5. Save
-		// Parent doesn't need pagination for Children map yet (Phase 10.1 is ChunkManifest)
-		// But target might be large file?
 		if err := saveInodeWithPages(tx, &parent); err != nil {
 			return err
 		}
@@ -999,6 +1004,7 @@ func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
 	return secret, err
 }
 
+// Snapshot returns a snapshot of the current state.
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	if fsm.OnSnapshot != nil {
 		fsm.OnSnapshot()
@@ -1024,6 +1030,7 @@ func (fsm *MetadataFSM) ValidateNode(address string) error {
 	})
 }
 
+// Restore restores the FSM from a snapshot.
 func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
 
@@ -1052,12 +1059,7 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 		return err
 	}
 
-	// Restore trust state from DB (since we wiped trust.bin?)
-	// No, trust state is in trust.bin.
-	// But if we restore from snapshot, snapshot doesn't contain trust state (BoltDB only).
-	// Raft Snapshot should contain trust state?
-	// If trusted keys are in "nodes" bucket, we can rebuild trust state from DB.
-	// We should do that here.
+	// Rebuild the in-memory trust cache and persist it to trust.bin after restoring from snapshot.
 	fsm.reopen()
 	fsm.rebuildTrustCache()
 	return nil
@@ -1129,6 +1131,7 @@ func uint32ToBytes(v uint32) []byte {
 	return b
 }
 
+// ChunkPageSize is the maximum number of chunks stored in a single inode before pagination occurs.
 const ChunkPageSize = 1000
 
 func saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {

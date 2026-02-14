@@ -21,10 +21,12 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+// FS implements the fuse.FS interface for DistFS.
 type FS struct {
 	client *client.Client
 }
 
+// NewFS creates a new FUSE file system.
 func NewFS(c *client.Client) *FS {
 	return &FS{client: c}
 }
@@ -49,6 +51,7 @@ func (f *FS) Root() (fs.Node, error) {
 	return nil, err
 }
 
+// Dir implements both fs.Node and fs.Handle for directories.
 type Dir struct {
 	fs    *FS
 	inode *metadata.Inode
@@ -249,6 +252,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	return old, nil
 }
 
+// File implements both fs.Node and fs.Handle for files.
 type File struct {
 	fs    *FS
 	inode *metadata.Inode
@@ -303,6 +307,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	return &FileHandle{file: f, reader: reader}, nil
 }
 
+// FileHandle manages the state of an open file, including buffering writes to a temporary file.
 type FileHandle struct {
 	file   *File
 	reader *client.FileReader

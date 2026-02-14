@@ -15,6 +15,7 @@ type KeyRing struct {
 	current uint32
 }
 
+// NewKeyRing creates a new keyring with an initial key.
 func NewKeyRing(initialKey []byte) *KeyRing {
 	return &KeyRing{
 		keys:    map[uint32][]byte{1: initialKey},
@@ -70,6 +71,7 @@ func (kr *KeyRing) Marshal() []byte {
 	return b
 }
 
+// UnmarshalKeyRing deserializes a keyring.
 func UnmarshalKeyRing(data []byte) (*KeyRing, error) {
 	if len(data) < 4 {
 		return nil, fmt.Errorf("invalid keyring data")

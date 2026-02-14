@@ -84,6 +84,8 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 	return pk, nil
 }
 
+// Client is the primary entry point for interacting with a DistFS cluster.
+// It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
 	metaURL    string
 	dataURL    string
@@ -106,6 +108,7 @@ type Client struct {
 	loginMu       *sync.Mutex
 }
 
+// NewClient creates a new DistFS client.
 func NewClient(metaAddr, dataAddr string) *Client {
 	t := &http.Transport{
 		MaxIdleConns:        100,
@@ -123,6 +126,7 @@ func NewClient(metaAddr, dataAddr string) *Client {
 	}
 }
 
+// WithIdentity returns a new client with the specified user identity.
 func (c *Client) WithIdentity(userID string, key *mlkem.DecapsulationKey768) *Client {
 	c2 := *c
 	c2.userID = userID
@@ -131,18 +135,21 @@ func (c *Client) WithIdentity(userID string, key *mlkem.DecapsulationKey768) *Cl
 	return &c2
 }
 
+// WithSignKey returns a new client with the specified signing key.
 func (c *Client) WithSignKey(key *crypto.IdentityKey) *Client {
 	c2 := *c
 	c2.signKey = key
 	return &c2
 }
 
+// WithServerKey returns a new client with the pre-configured server public key.
 func (c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client {
 	c2 := *c
 	c2.serverKey = key
 	return &c2
 }
 
+// Login performs the challenge-response handshake to obtain a session token.
 func (c *Client) Login() error {
 	// 1. Get Challenge
 	reqData := metadata.AuthChallengeRequest{UserID: c.userID}
@@ -163,7 +170,13 @@ func (c *Client) Login() error {
 	}
 
 	// 2. Verify server signature over challenge
-	// (Skipped for now as we don't have server's sign public key readily available in Client)
+	serverSignPK, err := c.GetServerSignKey()
+	if err != nil {
+		return fmt.Errorf("failed to get server sign key: %w", err)
+	}
+	if !crypto.VerifySignature(serverSignPK, challengeRes.Challenge, challengeRes.Signature) {
+		return fmt.Errorf("invalid server signature on challenge")
+	}
 
 	// 3. Solve Challenge (Sign it)
 	sig := c.signKey.Sign(challengeRes.Challenge)
@@ -941,6 +954,8 @@ func (r *FileReader) Stat() *metadata.Inode {
 	return r.inode
 }
 
+// ReadFile returns a reader for the specified file ID.
+// If fileKey is nil, it attempts to unlock it using the client's identity.
 func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
 	r, err := c.NewReader(id, fileKey)
 	if err != nil {
@@ -1010,6 +1025,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 	return nil, lastErr
 }
 
+// GetGroupPrivateKey retrieves and decrypts the group private key.
 func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768, error) {
 	c.keyMu.RLock()
 	gk, ok := c.groupKeys[groupID]
@@ -1061,6 +1077,7 @@ func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768,
 	return gk, nil
 }
 
+// GetWorldPublicKey fetches the cluster's world public key.
 func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
 	c.keyMu.RLock()
 	wp := c.worldPublic
@@ -1089,6 +1106,7 @@ func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
 	return pk, nil
 }
 
+// GetWorldPrivateKey retrieves and decrypts the cluster's world private key.
 func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 	c.keyMu.RLock()
 	wp := c.worldPrivate
@@ -1146,6 +1164,7 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 	return wk, nil
 }
 
+// GetGroup fetches the group metadata.
 func (c *Client) GetGroup(id string) (*metadata.Group, error) {
 	req, err := http.NewRequest("GET", c.metaURL+"/v1/group/"+id, nil)
 	if err != nil {
@@ -1171,6 +1190,7 @@ func (c *Client) GetGroup(id string) (*metadata.Group, error) {
 	return &group, nil
 }
 
+// CreateGroup creates a new cryptographic group.
 func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	pk := dk.EncapsulationKey().Bytes()
@@ -1233,6 +1253,7 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	return &created, nil
 }
 
+// AddUserToGroup adds a new member to an existing group.
 func (c *Client) AddUserToGroup(groupID, userID string) error {
 	group, err := c.GetGroup(groupID)
 	if err != nil {
@@ -1294,6 +1315,7 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	return nil
 }
 
+// GetUser fetches the user metadata (including public keys).
 func (c *Client) GetUser(id string) (*metadata.User, error) {
 	req, err := http.NewRequest("GET", c.metaURL+"/v1/user/"+id, nil)
 	if err != nil {
@@ -1319,6 +1341,7 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 	return &user, nil
 }
 
+// SetAttr updates the attributes of an inode at the given path.
 func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 	inode, key, err := c.ResolvePath(path)
 	if err != nil {
@@ -1327,6 +1350,7 @@ func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 	return c.SetAttrByID(inode, key, attr)
 }
 
+// SetAttrByID updates the attributes of an inode by ID.
 func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
 	var err error
 	// 1. Handle Cryptographic Access (World & Group)
@@ -1442,6 +1466,7 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	return nil
 }
 
+// Remove deletes an inode at the given path.
 func (c *Client) Remove(path string) error {
 	inode, _, err := c.ResolvePath(path)
 	if err != nil {

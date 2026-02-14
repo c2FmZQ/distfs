@@ -28,6 +28,7 @@ type LockboxEntry struct {
 // Lockbox stores access keys for users. Map UserID -> Entry.
 type Lockbox map[string]LockboxEntry
 
+// NewLockbox creates a new empty lockbox.
 func NewLockbox() Lockbox {
 	return make(Lockbox)
 }

@@ -36,6 +36,7 @@ type DirectoryEntry struct {
 	Type metadata.InodeType `json:"type"`
 }
 
+// EnsureRoot makes sure the root directory inode exists.
 func (c *Client) EnsureRoot() error {
 	_, err := c.getInode(metadata.RootID)
 	if err == nil {
@@ -68,6 +69,7 @@ func (c *Client) EnsureRoot() error {
 	return err
 }
 
+// ResolvePath traverses the directory tree to find the inode and key for a path.
 func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 	path = strings.Trim(path, "/")
 
@@ -128,18 +130,22 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 	return inode, currentKey, nil
 }
 
+// Mkdir creates a new directory.
 func (c *Client) Mkdir(path string) error {
 	return c.addEntry(path, metadata.DirType, nil, 0, "", 0700)
 }
 
+// CreateFile creates a new file with the given content.
 func (c *Client) CreateFile(path string, r io.Reader, size int64) error {
 	return c.addEntry(path, metadata.FileType, r, size, "", 0600)
 }
 
+// Symlink creates a new symbolic link.
 func (c *Client) Symlink(target, path string) error {
 	return c.addEntry(path, metadata.SymlinkType, nil, 0, target, 0777)
 }
 
+// AddEntry adds a new directory entry to the given parent.
 func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string) (*metadata.Inode, []byte, error) {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
@@ -158,8 +164,6 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	var newInode *metadata.Inode
 	if iType == metadata.FileType {
-		// Create empty inode first? No, writeInodeContent handles creation if not found.
-		// BUT we need to pass Mode to writeInodeContent.
 		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob, mode, groupID); err != nil {
 			return nil, nil, err
 		}
@@ -168,7 +172,6 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 			return nil, nil, err
 		}
 	} else {
-		// Try to see if it already exists (unlikely for newID, but for completeness)
 		lb := c.createLockbox(newKey, mode, groupID)
 		inode := metadata.Inode{
 			ID:            newID,
@@ -211,6 +214,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	return newInode, newKey, nil
 }
 
+// Rename moves or renames a directory entry.
 func (c *Client) Rename(oldPath, newPath string) error {
 	oldDir, oldName := filepath.Split(strings.TrimRight(oldPath, "/"))
 	newDir, newName := filepath.Split(strings.TrimRight(newPath, "/"))
@@ -227,6 +231,7 @@ func (c *Client) Rename(oldPath, newPath string) error {
 	return c.RenameRaw(oldParent.ID, oldParentKey, oldName, newParent.ID, newParentKey, newName)
 }
 
+// RenameRaw performs a rename operation using raw IDs and names.
 func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName string, newParentID string, newParentKey []byte, newName string) error {
 	macOld := hmac.New(sha256.New, oldParentKey)
 	macOld.Write([]byte(oldName))
@@ -272,6 +277,7 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 	return nil
 }
 
+// RemoveEntry deletes a directory entry.
 func (c *Client) RemoveEntry(path string) error {
 	dir, name := filepath.Split(strings.TrimRight(path, "/"))
 	parent, parentKey, err := c.ResolvePath(dir)
@@ -281,6 +287,7 @@ func (c *Client) RemoveEntry(path string) error {
 	return c.RemoveEntryRaw(parent.ID, parentKey, name)
 }
 
+// RemoveEntryRaw performs a removal operation using raw IDs and names.
 func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) error {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
@@ -317,6 +324,7 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	return nil
 }
 
+// Link creates a hard link.
 func (c *Client) Link(targetPath, linkPath string) error {
 	target, _, err := c.ResolvePath(targetPath)
 	if err != nil {
@@ -332,6 +340,7 @@ func (c *Client) Link(targetPath, linkPath string) error {
 	return c.LinkRaw(parent.ID, parentKey, name, target.ID)
 }
 
+// LinkRaw performs a linking operation using raw IDs and names.
 func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetID string) error {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))

@@ -58,6 +58,7 @@ func (s *Server) handleClusterDashboard(w http.ResponseWriter, r *http.Request) 
 	http.StripPrefix("/api/cluster/", http.FileServer(http.FS(sub))).ServeHTTP(w, r)
 }
 
+// handleClusterUsers returns a list of all registered users (admin only).
 func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 	var users []User
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -66,9 +67,6 @@ func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var u User
 			if err := json.Unmarshal(v, &u); err == nil {
-				// Redact keys? Not strictly necessary for admin, but safe practice.
-				// u.SignKey = nil
-				// u.EncKey = nil
 				users = append(users, u)
 			}
 		}
@@ -82,6 +80,7 @@ func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(users)
 }
 
+// handleClusterNodes returns a list of all registered storage nodes (admin only).
 func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 	var nodes []Node
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -103,6 +102,7 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(nodes)
 }
 
+// handleClusterLookup resolves an email to its anonymized User ID (admin only).
 func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email string `json:"email"`
@@ -126,6 +126,7 @@ func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"id": hash})
 }
 
+// handleClusterRemove removes a node from the Raft cluster (admin only).
 func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)

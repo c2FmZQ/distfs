@@ -32,6 +32,7 @@ type StorageSnapshotStore struct {
 	st *storage.Storage
 }
 
+// NewStorageSnapshotStore creates a new snapshot store using DistFS storage.
 func NewStorageSnapshotStore(st *storage.Storage) *StorageSnapshotStore {
 	return &StorageSnapshotStore{st: st}
 }
@@ -115,6 +116,7 @@ func (s *StorageSnapshotStore) Open(id string) (*raft.SnapshotMeta, io.ReadClose
 	return &meta, dataRc, nil
 }
 
+// StorageSnapshotSink implements raft.SnapshotSink for streaming to DistFS storage.
 type StorageSnapshotSink struct {
 	st     *storage.Storage
 	id     string

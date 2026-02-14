@@ -25,12 +25,14 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+// GCWorker processes the garbage collection queue to delete unreferenced chunks.
 type GCWorker struct {
 	server *Server
 	stopCh chan struct{}
 	wg     sync.WaitGroup
 }
 
+// NewGCWorker creates a new GC worker.
 func NewGCWorker(s *Server) *GCWorker {
 	return &GCWorker{
 		server: s,
@@ -38,11 +40,13 @@ func NewGCWorker(s *Server) *GCWorker {
 	}
 }
 
+// Start starts the background GC process.
 func (g *GCWorker) Start() {
 	g.wg.Add(1)
 	go g.loop()
 }
 
+// Stop stops the background GC process.
 func (g *GCWorker) Stop() {
 	close(g.stopCh)
 	g.wg.Wait()
@@ -134,24 +138,8 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 		}
 	}
 
-	// If successfully deleted from all known locations (or best effort), remove from GC queue
-	// We might want to keep it if deletion failed, but if node is dead, we might be stuck.
-	// For now, if at least one deletion succeeded or nodes are gone, we remove?
-	// Design decision: If a node is unreachable, we keep it in queue?
-	// Ideally yes. But for simplicity in Phase 10, we remove if we attempted.
-	// Real-world: Separate "failed" queue or retry count.
-
+	// If successfully deleted from all known locations, remove from the persistent GC queue via Raft.
 	if success {
-		// Remove from DB via Raft (Wait, GC table is part of FSM state!)
-		// We shouldn't modify DB directly in worker. We must apply a Command.
-		// But we don't have a CmdDeleteGC.
-		// `CmdDeleteInode` triggers GC enqueue.
-		// We need `CmdGCRemove` or similar.
-		// Or we can just use `db.Update`?
-		// NO! Only FSM.Apply can modify DB if we want consistency across followers.
-		// However, GC queue is internal state. Does it need to be replicated?
-		// Yes, if leader fails, new leader needs to know what to GC.
-		// So we need a new Raft command: CmdGCRemove.
 		g.server.applyCommandRaw(nil, nil, CmdGCRemove, []byte(chunkID), 0)
 	}
 }

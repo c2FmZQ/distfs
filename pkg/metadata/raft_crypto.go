@@ -28,6 +28,7 @@ type EncryptedLogStore struct {
 	keyRing *crypto.KeyRing
 }
 
+// NewEncryptedLogStore creates a new encrypted log store.
 func NewEncryptedLogStore(store *raftboltdb.BoltStore, keyRing *crypto.KeyRing) *EncryptedLogStore {
 	return &EncryptedLogStore{store: store, keyRing: keyRing}
 }

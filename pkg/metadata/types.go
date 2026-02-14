@@ -18,6 +18,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
+// InodeType represents the file type (File, Directory, Symlink).
 type InodeType uint8
 
 const (
@@ -26,29 +27,39 @@ const (
 	SymlinkType InodeType = 2
 )
 
-const RootID = "root-directory-inode-id-0000000000"
-const WorldID = "world"
+const (
+	// RootID is the fixed ID of the root directory.
+	RootID = "root-directory-inode-id-0000000000"
+	// WorldID is the reserved ID for the 'world' recipient in lockboxes.
+	WorldID = "world"
+)
 
+// ChunkEntry represents a single chunk of a file and its location.
 type ChunkEntry struct {
 	ID    string   `json:"id"`
 	Nodes []string `json:"nodes"`
 }
 
+// ChunkPage is a pagination structure for storing large file manifests.
 type ChunkPage struct {
 	ID     string       `json:"id"`
 	Chunks []ChunkEntry `json:"chunks"`
 }
 
+// UserUsage tracks the resource usage of a user.
 type UserUsage struct {
 	InodeCount int64 `json:"inodes"`
 	TotalBytes int64 `json:"bytes"`
 }
 
+// UserQuota defines the resource limits for a user.
 type UserQuota struct {
 	MaxInodes int64 `json:"max_inodes"`
 	MaxBytes  int64 `json:"max_bytes"`
 }
 
+// User represents a registered user in the system.
+// IDs are HMAC(email) to preserve privacy.
 type User struct {
 	ID      string    `json:"id"` // HMAC(email)
 	UID     uint32    `json:"uid"`
@@ -58,12 +69,14 @@ type User struct {
 	Quota   UserQuota `json:"quota"`
 }
 
+// RegisterUserRequest is the payload for user registration.
 type RegisterUserRequest struct {
 	JWT     string `json:"jwt"`
 	SignKey []byte `json:"sign_key"`
 	EncKey  []byte `json:"enc_key"`
 }
 
+// Group represents a user group for sharing access.
 type Group struct {
 	ID            string          `json:"id"`
 	EncryptedName []byte          `json:"enc_name"`
@@ -74,6 +87,7 @@ type Group struct {
 	Lockbox       crypto.Lockbox  `json:"lockbox"`
 }
 
+// NodeStatus indicates the health/lifecycle state of a storage node.
 type NodeStatus string
 
 const (
@@ -82,6 +96,7 @@ const (
 	NodeStatusDraining NodeStatus = "draining"
 )
 
+// Node represents a storage node in the cluster.
 type Node struct {
 	ID             string     `json:"id"`
 	Address        string     `json:"address"`         // Public API Address
@@ -94,6 +109,7 @@ type Node struct {
 	Used           int64      `json:"used"`
 }
 
+// Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID            string            `json:"id"`
 	ParentID      string            `json:"parent_id"`
@@ -116,57 +132,68 @@ type Inode struct {
 	Version       uint64            `json:"version"`
 }
 
+// AuthChallengeRequest initiates the login flow.
 type AuthChallengeRequest struct {
 	UserID string `json:"uid"`
 }
 
+// AuthChallengeResponse contains the challenge from the server.
 type AuthChallengeResponse struct {
 	Challenge []byte `json:"challenge"` // Random bytes
 	Signature []byte `json:"sig"`       // Server signature over Challenge
 }
 
+// AuthChallengeSolve is the user's response to the challenge.
 type AuthChallengeSolve struct {
 	UserID    string `json:"uid"`
 	Challenge []byte `json:"challenge"`
 	Signature []byte `json:"sig"` // User signature over Challenge
 }
 
+// SessionToken is the internal structure of a session token.
 type SessionToken struct {
 	UserID string `json:"uid"`
 	Expiry int64  `json:"exp"`
 	Nonce  string `json:"nonce"`
 }
 
+// SignedSessionToken wraps the session token with a server signature.
 type SignedSessionToken struct {
 	Token     SessionToken `json:"token"`
 	Signature []byte       `json:"sig"`
 }
 
+// SessionResponse returns the encoded session token.
 type SessionResponse struct {
 	Token string `json:"token"` // Base64(SignedSessionToken)
 }
 
+// CapabilityToken grants access to specific chunks on Data Nodes.
 type CapabilityToken struct {
 	Chunks []string `json:"chunks"`
 	Mode   string   `json:"mode"` // "R" or "W"
 	Exp    int64    `json:"exp"`
 }
 
+// SignedAuthToken is a CapabilityToken signed by the Metadata Server.
 type SignedAuthToken struct {
 	Payload   []byte `json:"payload"`
 	Signature []byte `json:"sig"`
 }
 
+// WorldIdentity represents the public/private key pair for the 'world' user.
 type WorldIdentity struct {
 	Public  []byte `json:"public"`
 	Private []byte `json:"private"`
 }
 
+// SealedRequest wraps an encrypted request payload.
 type SealedRequest struct {
 	UserID string `json:"uid"`
 	Sealed []byte `json:"sealed"`
 }
 
+// SealedResponse wraps an encrypted response payload.
 type SealedResponse struct {
 	Sealed []byte `json:"sealed"`
 }

@@ -29,6 +29,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+// ReplicationMonitor periodically scans for under-replicated chunks and initiates repair.
 type ReplicationMonitor struct {
 	server *Server
 	stopCh chan struct{}
@@ -36,6 +37,7 @@ type ReplicationMonitor struct {
 	sem    chan struct{} // Limit concurrent repairs
 }
 
+// NewReplicationMonitor creates a new replication monitor.
 func NewReplicationMonitor(s *Server) *ReplicationMonitor {
 	return &ReplicationMonitor{
 		server: s,
@@ -44,11 +46,13 @@ func NewReplicationMonitor(s *Server) *ReplicationMonitor {
 	}
 }
 
+// Start starts the background monitor.
 func (rm *ReplicationMonitor) Start() {
 	rm.wg.Add(1)
 	go rm.loop()
 }
 
+// Stop stops the background monitor.
 func (rm *ReplicationMonitor) Stop() {
 	close(rm.stopCh)
 	rm.wg.Wait()
@@ -56,7 +60,6 @@ func (rm *ReplicationMonitor) Stop() {
 
 func (rm *ReplicationMonitor) loop() {
 	defer rm.wg.Done()
-	// Run every minute (TBD)
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
 
@@ -70,6 +73,7 @@ func (rm *ReplicationMonitor) loop() {
 	}
 }
 
+// Scan performs a full scan of all inodes to detect under-replicated chunks.
 func (rm *ReplicationMonitor) Scan() {
 	if rm.server.raft.State() != raft.Leader {
 		return
@@ -99,13 +103,10 @@ func (rm *ReplicationMonitor) Scan() {
 	}
 
 	if len(activeNodeIDs) < 2 {
-		// Need at least 2 nodes to replicate if one is missing?
-		// Or if we have 1 node and want 3, we can't do much if only 1 is active.
 		return
 	}
 
 	// 2. Scan Inodes
-	// Iterate efficiently? accessing bolt bucket directly.
 	err = rm.server.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		return b.ForEach(func(k, v []byte) error {

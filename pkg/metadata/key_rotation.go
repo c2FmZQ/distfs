@@ -23,12 +23,14 @@ import (
 	"github.com/hashicorp/raft"
 )
 
+// KeyRotationWorker periodically rotates the cluster encryption keys (Epoch Keys).
 type KeyRotationWorker struct {
 	server   *Server
 	stopChan chan struct{}
 	interval time.Duration
 }
 
+// NewKeyRotationWorker creates a new key rotation worker.
 func NewKeyRotationWorker(s *Server) *KeyRotationWorker {
 	interval := s.keyRotationInterval
 	if interval == 0 {
@@ -41,10 +43,12 @@ func NewKeyRotationWorker(s *Server) *KeyRotationWorker {
 	}
 }
 
+// Start starts the rotation worker.
 func (w *KeyRotationWorker) Start() {
 	go w.run()
 }
 
+// Stop stops the rotation worker.
 func (w *KeyRotationWorker) Stop() {
 	close(w.stopChan)
 }

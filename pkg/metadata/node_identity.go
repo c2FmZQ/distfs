@@ -21,6 +21,7 @@ import (
 	"github.com/c2FmZQ/storage"
 )
 
+// KeyData is a wrapper for serializing keys to disk.
 type KeyData struct {
 	Bytes []byte `json:"bytes"`
 }

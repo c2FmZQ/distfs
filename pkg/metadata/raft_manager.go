@@ -32,6 +32,7 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb"
 )
 
+// RaftNode wraps the Hashicorp Raft instance and its dependencies.
 type RaftNode struct {
 	Raft            *raft.Raft
 	FSM             *MetadataFSM
@@ -42,6 +43,7 @@ type RaftNode struct {
 	ServerTLSConfig *tls.Config
 }
 
+// NewRaftNode creates and bootstraps a new Raft node with mTLS and encryption.
 func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *crypto.IdentityKey) (*RaftNode, error) {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
@@ -180,6 +182,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	}, nil
 }
 
+// Shutdown stops the Raft node.
 func (n *RaftNode) Shutdown() error {
 	f := n.Raft.Shutdown()
 	if err := f.Error(); err != nil {

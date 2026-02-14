@@ -29,10 +29,13 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+// Validator validates if a replication target is valid.
 type Validator interface {
+	// ValidateNode checks if the address belongs to a registered node.
 	ValidateNode(address string) error
 }
 
+// Server is the HTTP server for the Data Node API.
 type Server struct {
 	store      Store
 	metaPubKey []byte
@@ -40,6 +43,7 @@ type Server struct {
 	client     *http.Client
 }
 
+// NewServer creates a new Data Node API server.
 func NewServer(store Store, metaPubKey []byte, validator Validator) *Server {
 	return &Server{
 		store:      store,
@@ -49,7 +53,8 @@ func NewServer(store Store, metaPubKey []byte, validator Validator) *Server {
 	}
 }
 
-// ServeHTTP needs a slightly better router
+// ServeHTTP handles incoming HTTP requests for chunks.
+// Supported methods: PUT (upload), GET (download), DELETE (remove), POST (replicate).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if !strings.HasPrefix(r.URL.Path, "/v1/data/") {
 		http.NotFound(w, r)

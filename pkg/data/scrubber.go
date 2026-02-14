@@ -19,6 +19,7 @@ type IntegrityScrubber struct {
 	stopCh chan struct{}
 }
 
+// NewIntegrityScrubber creates a new scrubber that runs at the specified period.
 func NewIntegrityScrubber(store Store, period time.Duration) *IntegrityScrubber {
 	return &IntegrityScrubber{
 		store:  store,
@@ -27,10 +28,12 @@ func NewIntegrityScrubber(store Store, period time.Duration) *IntegrityScrubber 
 	}
 }
 
+// Start starts the background scrubbing process.
 func (s *IntegrityScrubber) Start() {
 	go s.loop()
 }
 
+// Stop stops the background scrubbing process.
 func (s *IntegrityScrubber) Stop() {
 	close(s.stopCh)
 }

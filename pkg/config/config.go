@@ -29,6 +29,7 @@ import (
 	"golang.org/x/term"
 )
 
+// Config represents the client-side configuration.
 type Config struct {
 	MetaURL   string `json:"meta_url"`
 	DataURL   string `json:"data_url"`
@@ -38,20 +39,24 @@ type Config struct {
 	ServerKey string `json:"server_key"`
 }
 
+// EncryptedConfig is the on-disk format for an encrypted configuration file.
 type EncryptedConfig struct {
 	KDF        string `json:"kdf"` // "argon2id"
 	Salt       []byte `json:"salt"`
 	Ciphertext []byte `json:"ciphertext"`
 }
 
+// DefaultDir returns the default directory for DistFS configuration.
 func DefaultDir() string {
 	return filepath.Join(os.Getenv("HOME"), ".distfs")
 }
 
+// DefaultPath returns the default path for the configuration file.
 func DefaultPath() string {
 	return filepath.Join(DefaultDir(), "config.json")
 }
 
+// Save encrypts and saves the configuration to the specified path.
 func Save(c Config, path string) error {
 	password, err := getPassword("Enter passphrase to encrypt config: ", true)
 	if err != nil {
@@ -94,6 +99,7 @@ func Save(c Config, path string) error {
 	return os.WriteFile(path, b, 0600)
 }
 
+// Load decrypts and loads the configuration from the specified path.
 func Load(path string) (*Config, error) {
 	b, err := os.ReadFile(path)
 	if err != nil {

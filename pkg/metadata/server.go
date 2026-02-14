@@ -48,6 +48,8 @@ import (
 //go:embed ui/*
 var uiAssets embed.FS
 
+// Server is the HTTP server for the Metadata Node.
+// It handles client requests and coordinates with the Raft cluster.
 type Server struct {
 	nodeID  string
 	raft    *raft.Raft
@@ -78,6 +80,7 @@ type challengeEntry struct {
 	CreatedAt time.Time
 }
 
+// NewServer creates a new Metadata Server.
 func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
@@ -108,6 +111,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 	return s
 }
 
+// Shutdown stops the server and its background workers.
 func (s *Server) Shutdown() {
 	if s.replMonitor != nil {
 		s.replMonitor.Stop()
@@ -282,9 +286,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			r.Body = io.NopCloser(bytes.NewReader(payload))
 			r.ContentLength = int64(len(payload))
 		} else if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
-			// X-DistFS-Sealed set but no body or GET? 
-			// If it's not a GET, it MUST have a sealed body if header is set.
-			// Actually, let's just allow GETs to skip unsealing but still trigger sealed response.
+			// X-DistFS-Sealed set but no body provided for mutation.
 		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
 			// Enforce E2EE for mutations
 			http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)

@@ -24,6 +24,7 @@ import (
 	"golang.org/x/oauth2"
 )
 
+// Config holds the parameters for the OAuth2 device flow.
 type Config struct {
 	ClientID      string
 	AuthEndpoint  string
@@ -33,6 +34,7 @@ type Config struct {
 	Browser       string
 }
 
+// GetToken executes the OAuth2 device authorization flow.
 func GetToken(ctx context.Context, conf Config) (*oauth2.Token, error) {
 	c := &oauth2.Config{
 		ClientID: conf.ClientID,

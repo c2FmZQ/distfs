@@ -30,6 +30,7 @@ type TLSStreamLayer struct {
 	advertise net.Addr
 }
 
+// NewTLSStreamLayer creates a new stream layer for Raft with mTLS.
 func NewTLSStreamLayer(bindAddr string, advertise net.Addr, config *tls.Config) (*TLSStreamLayer, error) {
 	listener, err := tls.Listen("tcp", bindAddr, config)
 	if err != nil {

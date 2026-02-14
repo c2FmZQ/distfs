@@ -32,10 +32,12 @@ type DiskStore struct {
 	mu sync.Mutex // Serialize writes to avoid potential concurrency issues in storage lib
 }
 
+// NewDiskStore creates a new DiskStore backed by the provided encrypted storage.
 func NewDiskStore(st *storage.Storage) (*DiskStore, error) {
 	return &DiskStore{st: st}, nil
 }
 
+// Close closes the store. Currently a no-op for DiskStore.
 func (s *DiskStore) Close() error {
 	return nil
 }
