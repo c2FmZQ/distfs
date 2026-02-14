@@ -151,7 +151,6 @@ func performRegistration(configPath, jwt, clientID, scopes, authEndpoint, tokenE
 		"jwt":      jwt,
 		"sign_key": sk.Public(),
 		"enc_key":  dk.EncapsulationKey().Bytes(),
-		"name":     conf.UserID,
 	}
 	body, _ := json.Marshal(req)
 

@@ -8,12 +8,12 @@ until wget -qO- --timeout=2 http://storage-node-1:8080/v1/meta/key > /dev/null 2
 done
 
 echo "Initializing Owner (user1)..."
-distfs -use-pinentry=false -config /tmp/u1-public.json init -meta http://storage-node-1:8080 -id user1-public@example.com
+distfs -use-pinentry=false -config /tmp/u1-public.json init -meta http://storage-node-1:8080
 JWT1=$(wget -qO- "http://test-auth:8080/mint?email=user1-public@example.com")
 distfs -use-pinentry=false -config /tmp/u1-public.json register -jwt "$JWT1"
 
 echo "Initializing Reader (user2)..."
-distfs -use-pinentry=false -config /tmp/u2-public.json init -meta http://storage-node-1:8080 -id user2-public@example.com
+distfs -use-pinentry=false -config /tmp/u2-public.json init -meta http://storage-node-1:8080
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-public@example.com")
 distfs -use-pinentry=false -config /tmp/u2-public.json register -jwt "$JWT2"
 

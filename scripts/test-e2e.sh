@@ -99,7 +99,7 @@ sleep 5
 
 if [ ! -f /root/.distfs/config.json ]; then
   echo "Initializing distfs..."
-  distfs -use-pinentry=false init -meta $LEADER_URL -id test@example.com
+  distfs -use-pinentry=false init -meta $LEADER_URL
   echo "Registering user..."
   
   # Fetch real JWT from test-auth

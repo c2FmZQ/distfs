@@ -68,14 +68,16 @@ go build ./cmd/...
 ### 1. Initialize the Client
 Generate your local identity and link to a metadata server.
 ```bash
-./distfs init -meta http://localhost:8080 -id your-email@example.com
+./distfs init -meta http://localhost:8080
 ```
 
 ### 2. Register via OIDC
 Authenticate with an OIDC provider to register your public keys with the cluster.
 ```bash
-./distfs register -jwt <your-id-token>
+# Uses OAuth2 Device Flow by default
+./distfs register -client-id <id> -auth-endpoint <url> -token-endpoint <url>
 ```
+The client will automatically extract your email address from the OIDC token to derive your User ID.
 
 ### 3. File Operations
 ```bash

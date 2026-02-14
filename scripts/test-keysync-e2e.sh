@@ -25,7 +25,7 @@ fi
 
 # 2. Initialize and Register User
 echo "Initializing and Registering User..."
-/bin/distfs -use-pinentry=false -config "$CONFIG1" init -meta "$META_URL" -id "keysync-user@example.com"
+/bin/distfs -use-pinentry=false -config "$CONFIG1" init -meta "$META_URL"
 /bin/distfs -use-pinentry=false -config "$CONFIG1" register -jwt "$JWT"
 
 # 3. Push Keys from Config 1

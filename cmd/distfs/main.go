@@ -96,8 +96,8 @@ func main() {
 func usage() {
 	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] <command> [args]")
 	fmt.Println("Commands:")
-	fmt.Println("  init -meta <url> -id <user_id>  Initialize client config")
-	fmt.Println("  register -jwt <jwt>             Register user with server")
+	fmt.Println("  init -meta <url>                Initialize client config")
+	fmt.Println("  register [flags]                Register user with server")
 	fmt.Println("  keysync push                    Encrypt and upload local keys to server")
 	fmt.Println("  keysync pull -meta <url>        Retrieve and decrypt keys from server")
 	fmt.Println("  ls <path>                       List directory")
@@ -202,12 +202,7 @@ func cmdKeySyncPull(args []string) {
 func cmdInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
-	userID := fs.String("id", "", "User ID (e.g. email)")
 	fs.Parse(args)
-
-	if *userID == "" {
-		log.Fatal("-id is required")
-	}
 
 	// Fetch Server Key
 	resp, err := http.Get(*metaURL + "/v1/meta/key")
@@ -224,7 +219,6 @@ func cmdInit(args []string) {
 	conf := config.Config{
 		MetaURL:   *metaURL,
 		DataURL:   *metaURL, // Assume unified by default
-		UserID:    *userID,
 		EncKey:    hex.EncodeToString(crypto.MarshalDecapsulationKey(dk)),
 		SignKey:   hex.EncodeToString(sk.MarshalPrivate()),
 		ServerKey: hex.EncodeToString(sKey),
@@ -233,19 +227,24 @@ func cmdInit(args []string) {
 	if err := config.Save(conf, *configPath); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Config initialized for %s. Server key: %s\n", *userID, hex.EncodeToString(sKey[:8]))
+	fmt.Printf("Config initialized. Server key: %s\n", hex.EncodeToString(sKey[:8]))
 }
 
 func cmdRegister(args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
 	jwt := fs.String("jwt", "", "OIDC JWT for registration")
 	clientID := fs.String("client-id", "", "The client ID")
-	scopes := fs.String("scopes", "", "The scopes to request (comma separated)")
+	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
 	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
 	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
 	fs.Parse(args)
+
+	conf, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatal(err)
+	}
 
 	if *jwt == "" {
 		if *clientID == "" || *authEndpoint == "" || *tokenEndpoint == "" {
@@ -275,11 +274,6 @@ func cmdRegister(args []string) {
 			log.Fatalf("device auth failed: %v", err)
 		}
 		*jwt = token.AccessToken
-	}
-
-	conf, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatal(err)
 	}
 
 	skBytes, _ := hex.DecodeString(conf.SignKey)
