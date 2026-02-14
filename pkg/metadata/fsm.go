@@ -134,41 +134,6 @@ func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
 	return fsm.trusted[string(pubKey)]
 }
 
-func (fsm *MetadataFSM) GetNodeIDByRaftAddress(addr string) (string, error) {
-	var id string
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
-				if n.RaftAddress == addr {
-					id = n.ID
-					return nil
-				}
-			}
-		}
-		return ErrNotFound
-	})
-	return id, err
-}
-
-func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
-	var node Node
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		v := b.Get([]byte(id))
-		if v == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(v, &node)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &node, nil
-}
-
 // CommandType identifies the type of operation in the Raft log.
 type CommandType uint8
 
@@ -177,7 +142,6 @@ const (
 	CmdUpdateInode     CommandType = 2
 	CmdDeleteInode     CommandType = 3
 	CmdRegisterNode    CommandType = 4
-	CmdHeartbeatNode   CommandType = 5
 	CmdCreateUser      CommandType = 6
 	CmdCreateGroup     CommandType = 7
 	CmdUpdateGroup     CommandType = 8
@@ -267,7 +231,7 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyUpdateInode(cmd.Data)
 	case CmdDeleteInode:
 		return fsm.applyDeleteInode(cmd.Data)
-	case CmdRegisterNode, CmdHeartbeatNode:
+	case CmdRegisterNode:
 		return fsm.applyRegisterNode(cmd.Data)
 	case CmdCreateUser:
 		return fsm.applyCreateUser(cmd.Data)
@@ -1370,22 +1334,6 @@ func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	return &key, nil
 }
 
-func (fsm *MetadataFSM) GetKey(id string) (*ClusterKey, error) {
-	var key ClusterKey
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("system"))
-		v := b.Get([]byte("epoch_key_" + id))
-		if v == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(v, &key)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &key, nil
-}
-
 func (fsm *MetadataFSM) applyInitWorld(data []byte) interface{} {
 	var world WorldIdentity
 	if err := json.Unmarshal(data, &world); err != nil {
@@ -1448,9 +1396,4 @@ func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
 		return nil, err
 	}
 	return &group, nil
-}
-
-func (fsm *MetadataFSM) UpdateGroup(group Group) error {
-	// Actually, applyUpdateGroup handles it via Raft.
-	return nil
 }

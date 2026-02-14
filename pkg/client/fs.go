@@ -94,9 +94,9 @@ func (f *DistFile) Close() error {
 
 // DistDir implements fs.ReadDirFile
 type DistDir struct {
-	client *Client
-	inode  *metadata.Inode
-	key    []byte // The symmetric key for this directory.
+	client     *Client
+	inode      *metadata.Inode
+	key        []byte // The symmetric key for this directory.
 	offset     int
 	sortedKeys []string
 }

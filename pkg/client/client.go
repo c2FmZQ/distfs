@@ -87,16 +87,16 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
-	metaURL    string
-	dataURL    string
-	httpClient *http.Client
-	userID     string
-	decKey     *mlkem.DecapsulationKey768
-	signKey    *crypto.IdentityKey
-	serverKey  *mlkem.EncapsulationKey768
+	metaURL      string
+	dataURL      string
+	httpClient   *http.Client
+	userID       string
+	decKey       *mlkem.DecapsulationKey768
+	signKey      *crypto.IdentityKey
+	serverKey    *mlkem.EncapsulationKey768
 	serverSignPK []byte
-	keyCache   map[string][]byte
-	keyMu      *sync.RWMutex
+	keyCache     map[string][]byte
+	keyMu        *sync.RWMutex
 
 	worldPublic  *mlkem.EncapsulationKey768
 	worldPrivate *mlkem.DecapsulationKey768

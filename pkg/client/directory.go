@@ -30,12 +30,6 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
-type DirectoryEntry struct {
-	Name string             `json:"name"`
-	ID   string             `json:"id"`
-	Type metadata.InodeType `json:"type"`
-}
-
 // EnsureRoot makes sure the root directory inode exists.
 func (c *Client) EnsureRoot() error {
 	_, err := c.getInode(metadata.RootID)
