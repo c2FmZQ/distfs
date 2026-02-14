@@ -17,7 +17,6 @@ package metadata
 import (
 	"bytes"
 	"crypto/rand"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -102,32 +101,46 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	return node, ts, signKey, ek.Bytes(), server
 }
 
-func sealToken(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverEKBytes []byte) string {
-	nonce := make([]byte, 16)
-	io.ReadFull(rand.Reader, nonce)
-	token := AuthToken{
-		UserID: userID,
-		Time:   time.Now().Unix(),
-		Nonce:  base64.StdEncoding.EncodeToString(nonce),
+func loginSession(t *testing.T, ts *httptest.Server, userID string, userSignKey *crypto.IdentityKey) string {
+	// 1. Get Challenge
+	reqData := AuthChallengeRequest{UserID: userID}
+	b, _ := json.Marshal(reqData)
+	resp, err := http.Post(ts.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("challenge request failed: %v", err)
 	}
-	payload, _ := json.Marshal(token)
-	sig := userSignKey.Sign(payload)
-	signed := SignedAuthToken{
-		Payload:   payload,
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("challenge request status: %d", resp.StatusCode)
+	}
+
+	var challengeRes AuthChallengeResponse
+	json.NewDecoder(resp.Body).Decode(&challengeRes)
+
+	// 2. Solve Challenge
+	sig := userSignKey.Sign(challengeRes.Challenge)
+	solve := AuthChallengeSolve{
+		UserID:    userID,
+		Challenge: challengeRes.Challenge,
 		Signature: sig,
 	}
-	pt, _ := json.Marshal(signed)
+	b, _ = json.Marshal(solve)
+	resp, err = http.Post(ts.URL+"/v1/login", "application/json", bytes.NewReader(b))
+	if err != nil {
+		t.Fatalf("login request failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login request status: %d", resp.StatusCode)
+	}
 
-	ek, _ := crypto.UnmarshalEncapsulationKey(serverEKBytes)
-	ss, ct := crypto.Encapsulate(ek)
-	dem, _ := crypto.EncryptDEM(ss, pt)
-
-	tokenBytes := append(ct, dem...)
-	return base64.StdEncoding.EncodeToString(tokenBytes)
+	var sessionRes SessionResponse
+	json.NewDecoder(resp.Body).Decode(&sessionRes)
+	return sessionRes.Token
 }
 
 func TestMetadataCluster(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -142,7 +155,7 @@ func TestMetadataCluster(t *testing.T) {
 		t.Fatalf("Raft Apply user failed: %v", err)
 	}
 
-	token := sealToken(t, "u1", userSignKey, serverEK)
+	token := loginSession(t, ts, "u1", userSignKey)
 
 	// Test Create Inode
 	inode := Inode{
@@ -154,7 +167,7 @@ func TestMetadataCluster(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
@@ -165,9 +178,9 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Test Get Inode
-	token = sealToken(t, "u1", userSignKey, serverEK)
+	token = loginSession(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
@@ -183,9 +196,9 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Test Delete Inode
-	token = sealToken(t, "u1", userSignKey, serverEK)
+	token = loginSession(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("DELETE failed: %v", err)
@@ -195,9 +208,9 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Verify Deleted
-	token = sealToken(t, "u1", userSignKey, serverEK)
+	token = loginSession(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
@@ -231,7 +244,7 @@ func TestFSM_EdgeCases(t *testing.T) {
 }
 
 func TestIdentityRegistry(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -257,14 +270,14 @@ func TestIdentityRegistry(t *testing.T) {
 		t.Fatalf("FSM Apply failed: %v", err)
 	}
 
-	token := sealToken(t, "u1", userSignKey, serverEK)
+	token := loginSession(t, ts, "u1", userSignKey)
 
 	// Create Group
 	group := Group{ID: "g1", OwnerID: "u1"}
 	body, _ := json.Marshal(group)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -399,7 +412,7 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, _, _, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -410,7 +423,7 @@ func TestChunkPagination(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatalf("Raft Apply user failed: %v", err)
 	}
-	token := sealToken(t, "u1", userSignKey, serverEK)
+	token := loginSession(t, ts, "u1", userSignKey)
 
 	// Create Inode with many chunks
 	chunkCount := ChunkPageSize + 50 // 1050
@@ -430,7 +443,7 @@ func TestChunkPagination(t *testing.T) {
 	// POST /v1/meta/inode
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
@@ -440,9 +453,9 @@ func TestChunkPagination(t *testing.T) {
 	}
 
 	// Verify via API (Transparent Reconstruction)
-	token = sealToken(t, "u1", userSignKey, serverEK)
+	token = loginSession(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/paginated-file", nil)
-	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)

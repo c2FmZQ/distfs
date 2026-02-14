@@ -178,9 +178,6 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 		strings.HasSuffix(req.URL.Path, "/v1/auth/challenge") ||
 		strings.HasSuffix(req.URL.Path, "/v1/login") ||
 		strings.HasSuffix(req.URL.Path, "/v1/meta/key") {
-		if strings.HasSuffix(req.URL.Path, "/v1/user/register") {
-			return c.authenticatePQC(req)
-		}
 		return nil
 	}
 
@@ -218,42 +215,6 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 	}
 
 	req.Header.Set("Session-Token", token)
-	return nil
-}
-
-func (c *Client) authenticatePQC(req *http.Request) error {
-	if c.signKey == nil || c.serverKey == nil {
-		return fmt.Errorf("client keys (sign/server) not configured")
-	}
-
-	nonce := make([]byte, 16)
-	if _, err := rand.Read(nonce); err != nil {
-		return err
-	}
-
-	token := metadata.AuthToken{
-		UserID: c.userID,
-		Time:   time.Now().UnixNano(),
-		Nonce:  base64.StdEncoding.EncodeToString(nonce),
-	}
-	payload, _ := json.Marshal(token)
-
-	sig := c.signKey.Sign(payload)
-
-	signed := metadata.SignedAuthToken{
-		Payload:   payload,
-		Signature: sig,
-	}
-	signedB, _ := json.Marshal(signed)
-
-	ss, kemCT := crypto.Encapsulate(c.serverKey)
-	demCT, err := crypto.EncryptDEM(ss, signedB)
-	if err != nil {
-		return err
-	}
-
-	fullToken := append(kemCT, demCT...)
-	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(fullToken))
 	return nil
 }
 

@@ -17,7 +17,6 @@ package metadata
 import (
 	"context"
 	"crypto/hmac"
-	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
@@ -59,10 +58,7 @@ type Server struct {
 
 	raftSecret string
 
-	nonceCache map[string]time.Time
-	nonceMu    sync.Mutex
-
-	challengeCache map[string]string // Base64(Challenge) -> UserID
+	challengeCache map[string]challengeEntry // Base64(Challenge) -> Entry
 	challengeMu    sync.Mutex
 
 	replMonitor *ReplicationMonitor
@@ -71,6 +67,11 @@ type Server struct {
 
 	clientTLSConfig     *tls.Config
 	keyRotationInterval time.Duration
+}
+
+type challengeEntry struct {
+	UserID    string
+	CreatedAt time.Time
 }
 
 func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
@@ -89,8 +90,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 		jwksURL:             jwksURL,
 		signKey:             signKey,
 		raftSecret:          raftSecret,
-		nonceCache:          make(map[string]time.Time),
-		challengeCache:      make(map[string]string),
+		challengeCache:      make(map[string]challengeEntry),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 	}
@@ -435,126 +435,42 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) authenticate(r *http.Request) (*User, error) {
-	// Try Session Token first (cheaper)
 	sess := r.Header.Get("Session-Token")
-	if sess != "" {
-		b, err := base64.StdEncoding.DecodeString(sess)
-		if err != nil {
-			log.Printf("AUTH: session token base64 decode failed: %v", err)
-		} else {
-			var st SignedSessionToken
-			if err := json.Unmarshal(b, &st); err != nil {
-				log.Printf("AUTH: session token unmarshal failed: %v", err)
-			} else {
-				// Verify server's signature
-				payload, _ := json.Marshal(st.Token)
-				if crypto.VerifySignature(s.signKey.Public(), payload, st.Signature) {
-					if time.Now().Unix() < st.Token.Expiry {
-						var user User
-						err = s.fsm.db.View(func(tx *bolt.Tx) error {
-							return json.Unmarshal(tx.Bucket([]byte("users")).Get([]byte(st.Token.UserID)), &user)
-						})
-						if err == nil {
-							return &user, nil
-						}
-						log.Printf("AUTH: session token user lookup failed: %v", err)
-					} else {
-						log.Printf("AUTH: session token expired: %v", st.Token.Expiry)
-					}
-				} else {
-					log.Printf("AUTH: session token signature verification failed")
-				}
-			}
-		}
+	if sess == "" {
+		return nil, fmt.Errorf("missing session token")
 	}
 
-	auth := r.Header.Get("Authorization")
-	if !strings.HasPrefix(auth, "Bearer ") {
-		log.Printf("AUTH: missing or invalid authorization header")
-		return nil, fmt.Errorf("missing auth")
-	}
-	sealed, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(auth, "Bearer "))
+	b, err := base64.StdEncoding.DecodeString(sess)
 	if err != nil {
-		log.Printf("AUTH: base64 decode failed: %v", err)
-		return nil, err
+		return nil, fmt.Errorf("invalid session token encoding")
 	}
 
-	active, err := s.fsm.GetActiveKey()
-	if err != nil {
-		log.Printf("AUTH: active key not found: %v", err)
-		return nil, fmt.Errorf("active key not found: %v", err)
-	}
-	dk, err := crypto.UnmarshalDecapsulationKey(active.DecKey)
-	if err != nil {
-		log.Printf("AUTH: invalid cluster key %s: %v", active.ID, err)
-		return nil, fmt.Errorf("invalid cluster key %s: %v", active.ID, err)
+	var st SignedSessionToken
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, fmt.Errorf("invalid session token format")
 	}
 
-	kemSize := mlkem.CiphertextSize768
-	if len(sealed) < kemSize {
-		log.Printf("AUTH: token too short: %d < %d", len(sealed), kemSize)
-		return nil, fmt.Errorf("token too short: %d < %d", len(sealed), kemSize)
+	// Verify server's signature over the token
+	payload, _ := json.Marshal(st.Token)
+	if !crypto.VerifySignature(s.signKey.Public(), payload, st.Signature) {
+		return nil, fmt.Errorf("invalid session signature")
 	}
 
-	kemCT := sealed[:kemSize]
-	demCT := sealed[kemSize:]
-
-	ss, err := dk.Decapsulate(kemCT)
-	if err != nil {
-		log.Printf("AUTH: decapsulation failed: %v", err)
-		return nil, fmt.Errorf("decapsulation failed: %v", err)
+	if time.Now().Unix() > st.Token.Expiry {
+		return nil, fmt.Errorf("session expired")
 	}
-
-	pt, err := crypto.DecryptDEM(ss, demCT)
-	if err != nil {
-		log.Printf("AUTH: decryption failed: %v", err)
-		return nil, fmt.Errorf("decryption failed: %v", err)
-	}
-
-	var signed SignedAuthToken
-	if err := json.Unmarshal(pt, &signed); err != nil {
-		log.Printf("AUTH: signed token unmarshal failed: %v", err)
-		return nil, err
-	}
-
-	var token AuthToken
-	if err := json.Unmarshal(signed.Payload, &token); err != nil {
-		log.Printf("AUTH: token payload unmarshal failed: %v", err)
-		return nil, err
-	}
-
-	if time.Since(time.Unix(token.Time, 0)) > 5*time.Minute {
-		log.Printf("AUTH: token expired: %v vs now %v", time.Unix(token.Time, 0), time.Now())
-		return nil, fmt.Errorf("expired")
-	}
-
-	s.nonceMu.Lock()
-	if _, exists := s.nonceCache[token.Nonce]; exists {
-		s.nonceMu.Unlock()
-		log.Printf("AUTH: replay detected: %s", token.Nonce)
-		return nil, fmt.Errorf("replay detected")
-	}
-	s.nonceCache[token.Nonce] = time.Now()
-	s.nonceMu.Unlock()
 
 	var user User
 	err = s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(token.UserID))
+		v := b.Get([]byte(st.Token.UserID))
 		if v == nil {
-			log.Printf("AUTH: User %s not found in 'users' bucket", token.UserID)
 			return fmt.Errorf("user not found")
 		}
 		return json.Unmarshal(v, &user)
 	})
 	if err != nil {
-		log.Printf("AUTH: user retrieval failed: %v", err)
 		return nil, err
-	}
-
-	if !crypto.VerifySignature(user.SignKey, signed.Payload, signed.Signature) {
-		log.Printf("AUTH: invalid signature for user %s", token.UserID)
-		return nil, fmt.Errorf("invalid signature")
 	}
 
 	return &user, nil
@@ -574,7 +490,16 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.challengeMu.Lock()
-	s.challengeCache[base64.StdEncoding.EncodeToString(challenge)] = req.UserID
+	// Lazy GC: remove entries older than 2 minutes
+	for k, v := range s.challengeCache {
+		if time.Since(v.CreatedAt) > 2*time.Minute {
+			delete(s.challengeCache, k)
+		}
+	}
+	s.challengeCache[base64.StdEncoding.EncodeToString(challenge)] = challengeEntry{
+		UserID:    req.UserID,
+		CreatedAt: time.Now(),
+	}
 	s.challengeMu.Unlock()
 
 	sig := s.signKey.Sign(challenge)
@@ -595,13 +520,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	s.challengeMu.Lock()
 	cKey := base64.StdEncoding.EncodeToString(solve.Challenge)
-	expectedUID, ok := s.challengeCache[cKey]
-	if ok && expectedUID == solve.UserID {
-		delete(s.challengeCache, cKey)
+	entry, ok := s.challengeCache[cKey]
+	if ok && entry.UserID == solve.UserID {
+		if time.Since(entry.CreatedAt) > 2*time.Minute {
+			delete(s.challengeCache, cKey)
+			ok = false
+		} else {
+			delete(s.challengeCache, cKey)
+		}
 	}
 	s.challengeMu.Unlock()
 
-	if !ok || expectedUID != solve.UserID {
+	if !ok || entry.UserID != solve.UserID {
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}

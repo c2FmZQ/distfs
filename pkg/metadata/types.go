@@ -116,12 +116,6 @@ type Inode struct {
 	Version       uint64            `json:"version"`
 }
 
-type AuthToken struct {
-	UserID string `json:"uid"`
-	Time   int64  `json:"ts"`
-	Nonce  string `json:"nonce"`
-}
-
 type AuthChallengeRequest struct {
 	UserID string `json:"uid"`
 }
@@ -152,15 +146,15 @@ type SessionResponse struct {
 	Token string `json:"token"` // Base64(SignedSessionToken)
 }
 
-type SignedAuthToken struct {
-	Payload   []byte `json:"payload"`
-	Signature []byte `json:"sig"`
-}
-
 type CapabilityToken struct {
 	Chunks []string `json:"chunks"`
 	Mode   string   `json:"mode"` // "R" or "W"
 	Exp    int64    `json:"exp"`
+}
+
+type SignedAuthToken struct {
+	Payload   []byte `json:"payload"`
+	Signature []byte `json:"sig"`
 }
 
 type WorldIdentity struct {
