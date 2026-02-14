@@ -91,7 +91,7 @@ To enhance security during passphrase entry, DistFS supports the **Assuan protoc
 
 ## 4. Metadata Layer (MetaNodes)
 
-This layer reuses the distributed consensus architecture from `skorekeeper`.
+This layer implements a distributed consensus architecture using the Raft protocol.
 
 ### 4.1 State Machine (FSM)
 The Raft FSM stores the "Inode" table and Directory Structure.
@@ -118,7 +118,7 @@ The Raft FSM stores the "Inode" table and Directory Structure.
     *   **Garbage Collection:** Orphaned Inodes and Chunks (not referenced by any live Inode) are garbage collected.
 
 ### 4.2 Persistence & Snapshots
-*   **Engine:** Hashicorp Raft with BoltDB (reusing `skorekeeper` config).
+*   **Engine:** Hashicorp Raft with BoltDB.
 *   **Snapshot Strategy:** Use `MetadataSnapshot` (Streaming BoltDB).
     *   **Fast Startup:** `NoSnapshotRestoreOnStart = true`. MetaNodes rely on disk persistence and only replay trailing logs on startup to ensure fast recovery.
 
