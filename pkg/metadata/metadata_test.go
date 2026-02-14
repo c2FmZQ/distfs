@@ -261,6 +261,78 @@ func TestMetadataCluster(t *testing.T) {
 	}
 }
 
+func TestSecurity_AccessControl(t *testing.T) {
+	node, ts, _, serverEK, _ := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Setup Users
+	u1Dec, _ := crypto.GenerateEncryptionKey()
+	u1Sign, _ := crypto.GenerateIdentityKey()
+	u1 := User{ID: "u1", SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
+	u1Bytes, _ := json.Marshal(u1)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to create u1: %v", err)
+	}
+
+	u2Dec, _ := crypto.GenerateEncryptionKey()
+	u2Sign, _ := crypto.GenerateIdentityKey()
+	u2 := User{ID: "u2", SignKey: u2Sign.Public(), EncKey: u2Dec.EncapsulationKey().Bytes()}
+	u2Bytes, _ := json.Marshal(u2)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u2Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to create u2: %v", err)
+	}
+
+	// 2. User 1 creates a private inode (0600)
+	payload, _ := json.Marshal(Inode{ID: "private-1", OwnerID: "u1", Mode: 0600})
+	body := sealTestRequest(t, "u1", u1Sign, serverEK, payload)
+	token1 := loginSession(t, ts, "u1", u1Sign)
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Session-Token", token1)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Failed to create inode: %d", resp.StatusCode)
+	}
+
+	// 3. User 2 attempts to GET User 1's inode (Should fail)
+	token2 := loginSession(t, ts, "u2", u2Sign)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/private-1", nil)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Session-Token", token2)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 for unauthorized GET, got %d", resp.StatusCode)
+	}
+
+	// 4. User 2 attempts to DELETE User 1's inode (Should fail)
+	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/private-1", nil)
+	req.Header.Set("Session-Token", token2)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 for unauthorized DELETE, got %d", resp.StatusCode)
+	}
+
+	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
+	payload, _ = json.Marshal(Inode{ID: "private-1", Mode: 0777, Version: 1})
+	body = sealTestRequest(t, "u2", u2Sign, serverEK, payload)
+	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/inode/private-1", bytes.NewReader(body))
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Session-Token", token2)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 for unauthorized PUT, got %d", resp.StatusCode)
+	}
+
+	// 6. User 1 successfully deletes their own inode
+	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/private-1", nil)
+	req.Header.Set("Session-Token", token1)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected 200 for authorized DELETE, got %d", resp.StatusCode)
+	}
+}
+
 func TestFSM_EdgeCases(t *testing.T) {
 	node, _, _, _, _ := setupCluster(t)
 	defer node.Shutdown()

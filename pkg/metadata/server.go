@@ -248,11 +248,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthChallenge(w, r)
 		return
 	}
-	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
-		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
-		s.handleGetUser(w, r, id)
-		return
-	}
 	if r.URL.Path == "/v1/node" && r.Method == http.MethodPost {
 		if !s.checkRaftSecret(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -295,6 +290,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		ctx := context.WithValue(r.Context(), userContextKey, user)
 		r = r.WithContext(ctx)
+	}
+
+	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
+		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
+		s.handleGetUser(w, r, id)
+		return
 	}
 
 	if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
@@ -647,11 +648,13 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	// Verify Permission
 	var inode Inode
+	exists := true
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		v := b.Get([]byte(req.InodeID))
 		if v == nil {
-			return fmt.Errorf("inode not found")
+			exists = false
+			return nil
 		}
 		if err := json.Unmarshal(v, &inode); err != nil {
 			return err
@@ -659,23 +662,28 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		return loadInodeWithPages(tx, &inode)
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	if inode.OwnerID != user.ID {
-		// World Readable/Writable?
-		if req.Mode == "R" && (inode.Mode&0004) != 0 {
-			// Authorized for reading
-		} else if req.Mode == "W" && (inode.Mode&0002) != 0 {
-			// Authorized for writing
-		} else if inode.GroupID != "" {
-			inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
-			if inGroup {
-				if req.Mode == "R" && (inode.Mode&0040) != 0 {
-					// Authorized for group reading
-				} else if req.Mode == "W" && (inode.Mode&0020) != 0 {
-					// Authorized for group writing
+	if exists {
+		if inode.OwnerID != user.ID {
+			// World Readable/Writable?
+			if req.Mode == "R" && (inode.Mode&0004) != 0 {
+				// Authorized for reading
+			} else if req.Mode == "W" && (inode.Mode&0002) != 0 {
+				// Authorized for writing
+			} else if inode.GroupID != "" {
+				inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
+				if inGroup {
+					if req.Mode == "R" && (inode.Mode&0040) != 0 {
+						// Authorized for group reading
+					} else if req.Mode == "W" && (inode.Mode&0020) != 0 {
+						// Authorized for group writing
+					} else {
+						http.Error(w, "forbidden", http.StatusForbidden)
+						return
+					}
 				} else {
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
@@ -684,8 +692,11 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
-		} else {
-			http.Error(w, "forbidden", http.StatusForbidden)
+		}
+	} else {
+		// Inode doesn't exist yet. Only allow "W" mode for creation.
+		if req.Mode != "W" {
+			http.Error(w, "inode not found", http.StatusNotFound)
 			return
 		}
 	}
@@ -715,9 +726,9 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	user, _ = r.Context().Value(userContextKey).(*User)
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -878,9 +889,9 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	user, _ := r.Context().Value(userContextKey).(*User)
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -900,6 +911,21 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	}
 	if err := s.raft.VerifyLeader().Error(); err != nil {
 		http.Error(w, "lost leadership", http.StatusServiceUnavailable)
+		return
+	}
+
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := s.checkReadPermission(user, id); err != nil {
+		if err == ErrNotFound {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusForbidden)
+		}
 		return
 	}
 
@@ -932,9 +958,9 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	user, _ := r.Context().Value(userContextKey).(*User)
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -970,10 +996,19 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	result := make([]*Inode, 0, len(ids))
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		for _, id := range ids {
+			if s.checkReadPermission(user, id) != nil {
+				continue // Skip unauthorized inodes in batch fetch
+			}
 			v := b.Get([]byte(id))
 			if v != nil {
 				var inode Inode
@@ -996,9 +1031,9 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	user, _ := r.Context().Value(userContextKey).(*User)
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1022,14 +1057,62 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	if err := s.checkWritePermission(user, id); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		if err == ErrNotFound {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusForbidden)
+		}
 		return
 	}
 	s.applyCommand(w, r, CmdUpdateInode, 10*1024*1024, http.StatusOK)
 }
 
 func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if err := s.checkWritePermission(user, id); err != nil {
+		if err == ErrNotFound {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusForbidden)
+		}
+		return
+	}
 	s.applyCommandRaw(w, r, CmdDeleteInode, []byte(id), http.StatusOK)
+}
+
+func (s *Server) checkReadPermission(user *User, inodeID string) error {
+	var inode Inode
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v := b.Get([]byte(inodeID))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &inode)
+	})
+	if err != nil {
+		return err
+	}
+
+	if inode.OwnerID == user.ID {
+		return nil
+	}
+	// World Read
+	if (inode.Mode & 0004) != 0 {
+		return nil
+	}
+	// Group Read
+	if inode.GroupID != "" {
+		inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
+		if inGroup && (inode.Mode&0040) != 0 {
+			return nil
+		}
+	}
+	return fmt.Errorf("forbidden")
 }
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
@@ -1183,9 +1266,9 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	user, _ = r.Context().Value(userContextKey).(*User)
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1203,11 +1286,61 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdRename, 1024*1024, http.StatusOK)
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req RenameRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.checkWritePermission(user, req.OldParentID); err != nil {
+		http.Error(w, "forbidden (old parent): "+err.Error(), http.StatusForbidden)
+		return
+	}
+	if err := s.checkWritePermission(user, req.NewParentID); err != nil {
+		http.Error(w, "forbidden (new parent): "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	s.applyCommandRaw(w, r, CmdRename, body, http.StatusOK)
 }
 
 func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdSetAttr, 1024*1024, http.StatusOK)
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var req SetAttrRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.checkWritePermission(user, req.InodeID); err != nil {
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	s.applyCommandRaw(w, r, CmdSetAttr, body, http.StatusOK)
 }
 
 func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
@@ -1221,7 +1354,11 @@ func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 	if err := s.checkWritePermission(user, id); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		if err == ErrNotFound {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusForbidden)
+		}
 		return
 	}
 	var update ChildUpdate
@@ -1241,7 +1378,11 @@ func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id st
 		return
 	}
 	if err := s.checkWritePermission(user, id); err != nil {
-		http.Error(w, err.Error(), http.StatusForbidden)
+		if err == ErrNotFound {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusForbidden)
+		}
 		return
 	}
 	var update ChildUpdate

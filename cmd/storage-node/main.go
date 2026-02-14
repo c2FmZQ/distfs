@@ -50,6 +50,8 @@ func main() {
 		bootstrap        = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
 		jwksURL          = flag.String("jwks-url", "", "JWKS URL for auth")
 		raftSecret       = flag.String("raft-secret", "", "Shared secret for cluster operations")
+		tlsCert          = flag.String("tls-cert", "", "TLS certificate for public API")
+		tlsKey           = flag.String("tls-key", "", "TLS key for public API")
 	)
 	flag.Parse()
 
@@ -279,7 +281,13 @@ func main() {
 	// Start Public Server
 	publicSrv := &http.Server{Addr: *apiAddr, Handler: publicMux}
 	go func() {
-		if err := publicSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if *tlsCert != "" && *tlsKey != "" {
+			err = publicSrv.ListenAndServeTLS(*tlsCert, *tlsKey)
+		} else {
+			err = publicSrv.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatalf("public listen: %s\n", err)
 		}
 	}()
