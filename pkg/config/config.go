@@ -25,6 +25,7 @@ import (
 	"syscall"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"golang.org/x/crypto/argon2"
 	"golang.org/x/term"
 )
@@ -39,11 +40,49 @@ type Config struct {
 	ServerKey string `json:"server_key"`
 }
 
-// EncryptedConfig is the on-disk format for an encrypted configuration file.
-type EncryptedConfig struct {
-	KDF        string `json:"kdf"` // "argon2id"
-	Salt       []byte `json:"salt"`
-	Ciphertext []byte `json:"ciphertext"`
+// Encrypt wraps a config into an encrypted blob.
+func Encrypt(c Config, password []byte) (*metadata.KeySyncBlob, error) {
+	salt := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
+		return nil, err
+	}
+
+	key := deriveKey(password, salt)
+
+	plaintext, err := json.Marshal(c)
+	if err != nil {
+		return nil, err
+	}
+
+	ciphertext, err := crypto.EncryptDEM(key, plaintext)
+	if err != nil {
+		return nil, err
+	}
+
+	return &metadata.KeySyncBlob{
+		KDF:        "argon2id",
+		Salt:       salt,
+		Ciphertext: ciphertext,
+	}, nil
+}
+
+// Decrypt unwraps an encrypted blob into a config.
+func Decrypt(blob metadata.KeySyncBlob, password []byte) (*Config, error) {
+	if blob.KDF != "argon2id" {
+		return nil, fmt.Errorf("unsupported KDF: %s", blob.KDF)
+	}
+
+	key := deriveKey(password, blob.Salt)
+	plaintext, err := crypto.DecryptDEM(key, blob.Ciphertext)
+	if err != nil {
+		return nil, fmt.Errorf("decryption failed (wrong password?): %w", err)
+	}
+
+	var c Config
+	if err := json.Unmarshal(plaintext, &c); err != nil {
+		return nil, err
+	}
+	return &c, nil
 }
 
 // DefaultDir returns the default directory for DistFS configuration.
@@ -58,35 +97,17 @@ func DefaultPath() string {
 
 // Save encrypts and saves the configuration to the specified path.
 func Save(c Config, path string) error {
-	password, err := getPassword("Enter passphrase to encrypt config: ", true)
+	password, err := GetPassword("Enter passphrase to encrypt config: ", true)
 	if err != nil {
 		return err
 	}
 
-	salt := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, salt); err != nil {
-		return err
-	}
-
-	key := deriveKey(password, salt)
-
-	plaintext, err := json.Marshal(c)
+	blob, err := Encrypt(c, password)
 	if err != nil {
 		return err
 	}
 
-	ciphertext, err := crypto.EncryptDEM(key, plaintext)
-	if err != nil {
-		return err
-	}
-
-	ec := EncryptedConfig{
-		KDF:        "argon2id",
-		Salt:       salt,
-		Ciphertext: ciphertext,
-	}
-
-	b, err := json.MarshalIndent(ec, "", "  ")
+	b, err := json.MarshalIndent(blob, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -106,26 +127,16 @@ func Load(path string) (*Config, error) {
 		return nil, err
 	}
 
-	// Try to unmarshal as EncryptedConfig
-	var ec EncryptedConfig
-	if err := json.Unmarshal(b, &ec); err == nil && ec.KDF == "argon2id" {
+	// Try to unmarshal as KeySyncBlob
+	var blob metadata.KeySyncBlob
+	if err := json.Unmarshal(b, &blob); err == nil && blob.KDF == "argon2id" {
 		// It is encrypted
-		password, err := getPassword("Enter passphrase to decrypt config: ", false)
+		password, err := GetPassword("Enter passphrase to decrypt config: ", false)
 		if err != nil {
 			return nil, err
 		}
 
-		key := deriveKey(password, ec.Salt)
-		plaintext, err := crypto.DecryptDEM(key, ec.Ciphertext)
-		if err != nil {
-			return nil, fmt.Errorf("decryption failed (wrong password?): %w", err)
-		}
-
-		var c Config
-		if err := json.Unmarshal(plaintext, &c); err != nil {
-			return nil, err
-		}
-		return &c, nil
+		return Decrypt(blob, password)
 	}
 
 	// Fallback: Try plaintext (migration)
@@ -142,22 +153,23 @@ func deriveKey(password []byte, salt []byte) []byte {
 	return argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
 }
 
-func getPassword(prompt string, confirm bool) ([]byte, error) {
+// GetPassword prompts the user for a passphrase.
+func GetPassword(prompt string, confirm bool) ([]byte, error) {
 	if envPass := os.Getenv("DISTFS_PASSWORD"); envPass != "" {
 		return []byte(envPass), nil
 	}
 
-	fmt.Print(prompt)
+	fmt.Fprint(os.Stderr, prompt)
 	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Println()
+	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return nil, err
 	}
 
 	if confirm {
-		fmt.Print("Confirm passphrase: ")
+		fmt.Fprint(os.Stderr, "Confirm passphrase: ")
 		byteConfirm, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Println()
+		fmt.Fprintln(os.Stderr)
 		if err != nil {
 			return nil, err
 		}

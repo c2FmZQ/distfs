@@ -17,6 +17,7 @@ sleep 2
 /bin/test-public.sh
 /bin/test-writable.sh
 /bin/test-group.sh
+/bin/test-keysync-e2e.sh
 /bin/test-ha.sh
 
 echo "ALL E2E TESTS PASSED"

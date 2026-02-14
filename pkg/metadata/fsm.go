@@ -58,7 +58,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -156,6 +156,7 @@ const (
 	CmdSetUserQuota    CommandType = 17
 	CmdRotateKey       CommandType = 18
 	CmdInitWorld       CommandType = 19
+	CmdStoreKeySync    CommandType = 20
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -261,6 +262,8 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyRotateKey(cmd.Data)
 	case CmdInitWorld:
 		return fsm.applyInitWorld(cmd.Data)
+	case CmdStoreKeySync:
+		return fsm.applyStoreKeySync(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -1396,4 +1399,37 @@ func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
 		return nil, err
 	}
 	return &group, nil
+}
+
+func (fsm *MetadataFSM) applyStoreKeySync(data []byte) interface{} {
+	var req KeySyncRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("keysync"))
+		encoded, err := json.Marshal(req.Blob)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(req.UserID), encoded)
+	})
+}
+
+// GetKeySyncBlob retrieves the encrypted configuration blob for a user.
+func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
+	var blob KeySyncBlob
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("keysync"))
+		v := b.Get([]byte(userID))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &blob)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &blob, nil
 }

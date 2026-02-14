@@ -197,3 +197,16 @@ type SealedRequest struct {
 type SealedResponse struct {
 	Sealed []byte `json:"sealed"`
 }
+
+// KeySyncBlob stores a passphrase-encrypted client configuration for synchronization.
+type KeySyncBlob struct {
+	KDF        string `json:"kdf"`
+	Salt       []byte `json:"salt"`
+	Ciphertext []byte `json:"ciphertext"`
+}
+
+// KeySyncRequest is the Raft command payload for storing a sync blob.
+type KeySyncRequest struct {
+	UserID string      `json:"uid"`
+	Blob   KeySyncBlob `json:"blob"`
+}

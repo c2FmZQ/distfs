@@ -72,6 +72,14 @@ While TLS (Layer 4) protects the connection, DistFS implements **Layer 7 End-to-
 3.  **Unsealed at Edges:** Encryption/Decryption happens exclusively at the Client and the Raft Leader. Intermediate nodes or proxies see only opaque blobs.
 4.  **Replay Protection:** Each sealed envelope includes a high-resolution timestamp and is subject to sliding-window nonce verification.
 
+### 3.5 Multi-Device Key Synchronization (Zero-Knowledge Sync)
+To support seamless multi-device usage without compromising the "Trust No One" model, DistFS allows users to store a recovery blob on the server.
+1.  **Client-Side Preparation:** The client encrypts its `config.json` (containing the PQC Identity and Encryption keys) using a user-provided passphrase and **Argon2id** KDF.
+2.  **Passphrase-Encrypted Blob:** The server only ever sees the opaque ciphertext (`KeySyncBlob`).
+3.  **Synchronization Protocol:**
+    *   **Retrieval (New Device):** The user authenticates via OIDC (JWT). The server returns the blob. The user enters their passphrase locally to decrypt and install their keys.
+    *   **Storage/Update (Existing Device):** To prevent unauthorized overwrites, the client must provide a valid `Session-Token` and use **Layer 7 E2EE (Sealing)**. This proves the user already knows the current key before they can change the sync blob.
+
 ---
 
 ## 4. Metadata Layer (MetaNodes)

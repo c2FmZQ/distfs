@@ -240,6 +240,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterUser(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/user/keysync" {
+		if r.Method == http.MethodGet {
+			s.handleGetKeySync(w, r)
+			return
+		}
+		if r.Method == http.MethodPost {
+			s.handleStoreKeySync(w, r)
+			return
+		}
+	}
 	if r.URL.Path == "/v1/login" && r.Method == http.MethodPost {
 		s.handleLogin(w, r)
 		return
@@ -741,6 +751,39 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string, error) {
+	s.jwks.Ready(ctx)
+	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
+		kid, _ := token.Header["kid"].(string)
+		return s.jwks.GetKey(kid)
+	})
+
+	if err != nil || !token.Valid {
+		log.Printf("JWT Verification FAILED: %v", err)
+		return "", "", fmt.Errorf("invalid jwt: %w", err)
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return "", "", fmt.Errorf("invalid claims")
+	}
+	email, _ := claims["email"].(string)
+	if email == "" {
+		return "", "", fmt.Errorf("jwt missing email")
+	}
+
+	secret, err := s.fsm.GetClusterSecret()
+	if err != nil {
+		return "", "", fmt.Errorf("cluster secret not available: %w", err)
+	}
+
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(email))
+	userID := hex.EncodeToString(mac.Sum(nil))
+
+	return userID, email, nil
+}
+
 func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
@@ -753,38 +796,11 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var email string
-	s.jwks.Ready(r.Context())
-	token, err := jwt.Parse(req.JWT, func(token *jwt.Token) (interface{}, error) {
-		kid, _ := token.Header["kid"].(string)
-		return s.jwks.GetKey(kid)
-	})
-
-	if err != nil || !token.Valid {
-		http.Error(w, "invalid jwt: "+err.Error(), http.StatusUnauthorized)
-		return
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		http.Error(w, "invalid claims", http.StatusUnauthorized)
-		return
-	}
-	email, _ = claims["email"].(string)
-	if email == "" {
-		http.Error(w, "jwt missing email", http.StatusUnauthorized)
-		return
-	}
-
-	secret, err := s.fsm.GetClusterSecret()
+	userID, _, err := s.verifyJWT(r.Context(), req.JWT)
 	if err != nil {
-		http.Error(w, "cluster secret not available", http.StatusInternalServerError)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
-
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(email))
-	userID := hex.EncodeToString(mac.Sum(nil))
 
 	// Check if exists
 	var existing User
@@ -811,6 +827,70 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	body, _ := json.Marshal(user)
 
 	s.applyCommandRaw(w, r, CmdCreateUser, body, http.StatusCreated)
+}
+
+func (s *Server) handleGetKeySync(w http.ResponseWriter, r *http.Request) {
+	auth := r.Header.Get("Authorization")
+	if !strings.HasPrefix(auth, "Bearer ") {
+		log.Printf("handleGetKeySync: missing bearer token")
+		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		return
+	}
+	jwtStr := strings.TrimPrefix(auth, "Bearer ")
+
+	userID, _, err := s.verifyJWT(r.Context(), jwtStr)
+	if err != nil {
+		log.Printf("handleGetKeySync: verifyJWT failed: %v", err)
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	blob, err := s.fsm.GetKeySyncBlob(userID)
+	if err != nil {
+		if err == ErrNotFound {
+			http.Error(w, "not found", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(blob)
+}
+
+func (s *Server) handleStoreKeySync(w http.ResponseWriter, r *http.Request) {
+	user, err := s.authenticate(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+
+	// Session Token is present. Now check for sealing (Mandatory).
+	if r.Header.Get("X-DistFS-Sealed") != "true" {
+		http.Error(w, "E2EE mandatory for keysync storage", http.StatusForbidden)
+		return
+	}
+
+	payload, err := s.unsealRequest(r, user)
+	if err != nil {
+		http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var blob KeySyncBlob
+	if err := json.Unmarshal(payload, &blob); err != nil {
+		http.Error(w, "invalid blob format", http.StatusBadRequest)
+		return
+	}
+
+	req := KeySyncRequest{
+		UserID: user.ID,
+		Blob:   blob,
+	}
+	data, _ := json.Marshal(req)
+
+	s.applyCommandRaw(w, r, CmdStoreKeySync, data, http.StatusCreated)
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {

@@ -16,17 +16,26 @@ package metadata
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/mlkem"
 	"crypto/rand"
+	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/c2FmZQ/tlsproxy/jwks"
+	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
@@ -440,6 +449,106 @@ func TestRegisterUserEndpoint(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusUnauthorized {
 		t.Errorf("Expected 401 for invalid JWT, got %d", resp.StatusCode)
+	}
+}
+
+func TestKeySync(t *testing.T) {
+	node, ts, _, serverEK, srv := setupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Mock JWKS
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	kid := "test-key"
+	jwk := map[string]interface{}{
+		"kty": "RSA",
+		"kid": kid,
+		"n":   base64.RawURLEncoding.EncodeToString(priv.N.Bytes()),
+		"e":   base64.RawURLEncoding.EncodeToString(big.NewInt(int64(priv.E)).Bytes()),
+	}
+	jwksRes := map[string]interface{}{"keys": []interface{}{jwk}}
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(jwksRes)
+	}))
+	defer jwksServer.Close()
+
+	// Update srv to use mock JWKS
+	srv.jwks.SetIssuers([]jwks.Issuer{{JWKSURI: jwksServer.URL + "/jwks.json"}})
+
+	// Initialize Cluster Secret
+	var secret []byte
+	secret, _ = node.FSM.GetClusterSecret()
+	if secret == nil {
+		secret = make([]byte, 32)
+		rand.Read(secret)
+		f := node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
+		if err := f.Error(); err != nil {
+			t.Fatalf("Failed to init secret: %v", err)
+		}
+	}
+
+	// 2. Setup User
+	email := "sync@example.com"
+	secret, _ = node.FSM.GetClusterSecret()
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(email))
+	userID := hex.EncodeToString(mac.Sum(nil))
+
+	u1Dec, _ := crypto.GenerateEncryptionKey()
+	u1Sign, _ := crypto.GenerateIdentityKey()
+	u1 := User{ID: userID, SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
+	u1Bytes, _ := json.Marshal(u1)
+	node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second)
+
+	// Mint JWT
+	jwtToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+		"email": email,
+		"exp":   time.Now().Add(time.Hour).Unix(),
+	})
+	jwtToken.Header["kid"] = kid
+	jwtStr, _ := jwtToken.SignedString(priv)
+
+	// 3. GET should be 404 (not found)
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/user/keysync", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtStr)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("Expected 404 for empty keysync, got %d", resp.StatusCode)
+	}
+
+	// 4. POST (Store) with Session + Sealing
+	blob := KeySyncBlob{KDF: "argon2id", Salt: []byte("salt"), Ciphertext: []byte("data")}
+	payload, _ := json.Marshal(blob)
+	body := sealTestRequest(t, userID, u1Sign, serverEK, payload)
+	sessionToken := loginSession(t, ts, userID, u1Sign)
+
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/user/keysync", bytes.NewReader(body))
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Session-Token", sessionToken)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Expected 201 for keysync storage, got %d", resp.StatusCode)
+	}
+
+	// 5. GET should now return the blob
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/keysync", nil)
+	req.Header.Set("Authorization", "Bearer "+jwtStr)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected 200 for keysync retrieval, got %d", resp.StatusCode)
+	}
+	var got KeySyncBlob
+	json.NewDecoder(resp.Body).Decode(&got)
+	if string(got.Ciphertext) != "data" {
+		t.Errorf("Retrieved blob data mismatch")
+	}
+
+	// 6. POST without sealing should fail (403)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/user/keysync", bytes.NewReader(payload))
+	req.Header.Set("Session-Token", sessionToken)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 for unsealed keysync storage, got %d", resp.StatusCode)
 	}
 }
 

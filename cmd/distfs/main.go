@@ -86,6 +86,18 @@ func main() {
 		cmdGroupCreate(args)
 	case "group-add":
 		cmdGroupAdd(args)
+	case "keysync":
+		if len(args) < 1 {
+			log.Fatal("keysync requires a subcommand (push or pull)")
+		}
+		switch args[0] {
+		case "push":
+			cmdKeySyncPush(args[1:])
+		case "pull":
+			cmdKeySyncPull(args[1:])
+		default:
+			log.Fatalf("unknown keysync subcommand: %s", args[0])
+		}
 	default:
 		usage()
 	}
@@ -96,6 +108,8 @@ func usage() {
 	fmt.Println("Commands:")
 	fmt.Println("  init -meta <url> -id <user_id>  Initialize client config")
 	fmt.Println("  register -jwt <jwt>             Register user with server")
+	fmt.Println("  keysync push                    Encrypt and upload local keys to server")
+	fmt.Println("  keysync pull -meta <url>        Retrieve and decrypt keys from server")
 	fmt.Println("  ls <path>                       List directory")
 	fmt.Println("  mkdir <path>                    Create directory")
 	fmt.Println("  rm <path>                       Delete file or directory")
@@ -106,6 +120,93 @@ func usage() {
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	os.Exit(1)
+}
+
+func cmdKeySyncPush(args []string) {
+	conf, err := config.Load(*configPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	password, err := config.GetPassword("Enter passphrase to encrypt keys for sync: ", true)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	blob, err := config.Encrypt(*conf, password)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	c := loadClient()
+	if err := c.PushKeySync(blob); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Keys pushed to server successfully.")
+}
+
+func cmdKeySyncPull(args []string) {
+	fs := flag.NewFlagSet("keysync pull", flag.ExitOnError)
+	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
+	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
+	clientID := fs.String("client-id", "", "The client ID")
+	scopes := fs.String("scopes", "", "The scopes to request (comma separated)")
+	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
+	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
+	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
+	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
+	fs.Parse(args)
+
+	if *jwt == "" {
+		if *clientID == "" || *authEndpoint == "" || *tokenEndpoint == "" {
+			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required")
+		}
+
+		var scopeList []string
+		if *scopes != "" {
+			for _, s := range strings.Split(*scopes, ",") {
+				s = strings.TrimSpace(s)
+				if s != "" {
+					scopeList = append(scopeList, s)
+				}
+			}
+		}
+
+		ctx := context.Background()
+		token, err := auth.GetToken(ctx, auth.Config{
+			ClientID:      *clientID,
+			AuthEndpoint:  *authEndpoint,
+			TokenEndpoint: *tokenEndpoint,
+			Scopes:        scopeList,
+			ShowQR:        *qrCode,
+			Browser:       *browser,
+		})
+		if err != nil {
+			log.Fatalf("device auth failed: %v", err)
+		}
+		*jwt = token.AccessToken
+	}
+
+	c := client.NewClient(*metaURL, "") // dataURL not needed for pull
+	blob, err := c.PullKeySync(*jwt)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	password, err := config.GetPassword("Enter passphrase to decrypt sync blob: ", false)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	conf, err := config.Decrypt(*blob, password)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if err := config.Save(*conf, *configPath); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Keys pulled and configuration restored successfully.")
 }
 
 func cmdInit(args []string) {

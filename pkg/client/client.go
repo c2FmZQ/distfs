@@ -1492,3 +1492,60 @@ func (c *Client) Remove(path string) error {
 	}
 	return nil
 }
+
+// PushKeySync uploads an encrypted configuration blob to the server.
+// Requires a valid session and mandatory Layer 7 E2EE (Sealing).
+func (c *Client) PushKeySync(blob *metadata.KeySyncBlob) error {
+	data, _ := json.Marshal(blob)
+	req, err := http.NewRequest("POST", c.metaURL+"/v1/user/keysync", nil)
+	if err != nil {
+		return err
+	}
+
+	if err := c.authenticateRequest(req); err != nil {
+		return err
+	}
+
+	if err := c.sealBody(req, data); err != nil {
+		return err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("push keysync failed: %d %s", resp.StatusCode, string(b))
+	}
+	return nil
+}
+
+// PullKeySync retrieves the encrypted configuration blob from the server.
+// Authenticates using an OIDC JWT.
+func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
+	req, err := http.NewRequest("GET", c.metaURL+"/v1/user/keysync", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+jwt)
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("pull keysync failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	var blob metadata.KeySyncBlob
+	if err := json.NewDecoder(resp.Body).Decode(&blob); err != nil {
+		return nil, fmt.Errorf("failed to decode keysync blob: %w", err)
+	}
+	return &blob, nil
+}

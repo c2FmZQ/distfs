@@ -249,3 +249,21 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** [Done] Use the registered `User.EncKey` for encryption.
 *   **Step 15.3: Client Transparent Unsealing**
     *   **Action:** [Done] Update Client HTTP helpers to automatically unseal responses when the sealed header is present.
+
+---
+
+## Phase 17: Multi-Device Key Synchronization [COMPLETED]
+**Goal:** Allow users to sync their cryptographic keys across devices securely.
+
+*   **Step 17.1: Metadata FSM Support**
+    *   **Action:** [Done] Add `keysync` bucket to BoltDB.
+    *   **Action:** [Done] Implement `CmdStoreKeySync` command.
+*   **Step 17.2: Server Endpoints**
+    *   **Action:** [Done] `GET /v1/user/keysync`: Authenticate via OIDC JWT, return blob.
+    *   **Action:** [Done] `POST /v1/user/keysync`: Authenticate via `Session-Token` + Mandatory Sealing, store blob.
+*   **Step 17.3: Client Integration**
+    *   **Action:** [Done] Implement `PushKeySync` and `PullKeySync` in `pkg/client`.
+    *   **Action:** [Done] Use existing `pkg/config` encryption logic (Argon2id).
+*   **Step 17.4: CLI Commands**
+    *   **Action:** [Done] Add `distfs keysync push`.
+    *   **Action:** [Done] Add `distfs keysync pull` (or integrate into `init`).
