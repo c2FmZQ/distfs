@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.25.5'
+
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y fuse3 libfuse3-dev
+
+    - name: Unit Tests
+      run: go test -v ./...
+
+    - name: Unit Tests (no-pinentry)
+      run: go test -v -tags nopinentry ./...
+
+    - name: Run E2E and FUSE Tests
+      run: ./scripts/run-tests.sh
