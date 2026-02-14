@@ -139,8 +139,25 @@ func loginSession(t *testing.T, ts *httptest.Server, userID string, userSignKey 
 	return sessionRes.Token
 }
 
+func sealTestRequest(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverPKBytes []byte, payload []byte) []byte {
+	serverPK, err := crypto.UnmarshalEncapsulationKey(serverPKBytes)
+	if err != nil {
+		t.Fatalf("failed to unmarshal server PK: %v", err)
+	}
+	sealed, err := crypto.SealRequest(serverPK, userSignKey, payload)
+	if err != nil {
+		t.Fatalf("SealRequest failed: %v", err)
+	}
+	sr := SealedRequest{
+		UserID: userID,
+		Sealed: sealed,
+	}
+	b, _ := json.Marshal(sr)
+	return b
+}
+
 func TestMetadataCluster(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -163,10 +180,12 @@ func TestMetadataCluster(t *testing.T) {
 		OwnerID: "u1",
 		Type:    FileType,
 	}
-	body, _ := json.Marshal(inode)
+	payload, _ := json.Marshal(inode)
+	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -244,7 +263,7 @@ func TestFSM_EdgeCases(t *testing.T) {
 }
 
 func TestIdentityRegistry(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -274,9 +293,11 @@ func TestIdentityRegistry(t *testing.T) {
 
 	// Create Group
 	group := Group{ID: "g1", OwnerID: "u1"}
-	body, _ := json.Marshal(group)
+	payload, _ := json.Marshal(group)
+	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -412,7 +433,7 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -438,11 +459,13 @@ func TestChunkPagination(t *testing.T) {
 		OwnerID:       "u1",
 		ChunkManifest: manifest,
 	}
-	body, _ := json.Marshal(inode)
+	payload, _ := json.Marshal(inode)
+	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
 	// POST /v1/meta/inode
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

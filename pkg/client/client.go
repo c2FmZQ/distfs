@@ -218,6 +218,34 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 	return nil
 }
 
+func (c *Client) sealBody(req *http.Request, payload []byte) error {
+	if payload == nil {
+		return nil
+	}
+
+	sk, err := c.GetServerKey()
+	if err != nil {
+		return err
+	}
+
+	sealed, err := crypto.SealRequest(sk, c.signKey, payload)
+	if err != nil {
+		return err
+	}
+
+	sr := metadata.SealedRequest{
+		UserID: c.userID,
+		Sealed: sealed,
+	}
+
+	data, _ := json.Marshal(sr)
+	req.Body = io.NopCloser(bytes.NewReader(data))
+	req.ContentLength = int64(len(data))
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Content-Type", "application/json")
+	return nil
+}
+
 func (c *Client) allocateNodes() ([]metadata.Node, error) {
 	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/allocate", nil)
 	if err != nil {
@@ -248,13 +276,16 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 		"chunks":   chunks,
 		"mode":     mode,
 	}
-	body, _ := json.Marshal(reqData)
+	data, _ := json.Marshal(reqData)
 
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/token", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/token", nil)
 	if err != nil {
 		return "", err
 	}
 	if err := c.authenticateRequest(req); err != nil {
+		return "", err
+	}
+	if err := c.sealBody(req, data); err != nil {
 		return "", err
 	}
 
@@ -343,14 +374,16 @@ func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inode", bytes.NewReader(data))
+	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inode", nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := c.authenticateRequest(req); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if err := c.sealBody(req, data); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -374,14 +407,16 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("PUT", c.metaURL+"/v1/meta/inode/"+inode.ID, bytes.NewReader(data))
+	req, err := http.NewRequest("PUT", c.metaURL+"/v1/meta/inode/"+inode.ID, nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := c.authenticateRequest(req); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if err := c.sealBody(req, data); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -426,18 +461,20 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 }
 
 func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
-	body, err := json.Marshal(ids)
+	data, err := json.Marshal(ids)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inodes", bytes.NewReader(body))
+	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inodes", nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := c.authenticateRequest(req); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if err := c.sealBody(req, data); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1070,14 +1107,16 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 
 	data, _ := json.Marshal(reqData)
 	url := c.metaURL + "/v1/group/"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		return nil, err
 	}
 	if err := c.authenticateRequest(req); err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if err := c.sealBody(req, data); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1128,14 +1167,16 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	group.Members[userID] = true
 
 	data, _ := json.Marshal(group)
-	req, err := http.NewRequest("PUT", c.metaURL+"/v1/group/"+groupID, bytes.NewReader(data))
+	req, err := http.NewRequest("PUT", c.metaURL+"/v1/group/"+groupID, nil)
 	if err != nil {
 		return err
 	}
 	if err := c.authenticateRequest(req); err != nil {
 		return err
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if err := c.sealBody(req, data); err != nil {
+		return err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -1268,14 +1309,16 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	}
 
 	var hReq *http.Request
-	hReq, err = http.NewRequest("POST", c.metaURL+"/v1/meta/setattr", bytes.NewReader(data))
+	hReq, err = http.NewRequest("POST", c.metaURL+"/v1/meta/setattr", nil)
 	if err != nil {
 		return err
 	}
 	if err = c.authenticateRequest(hReq); err != nil {
 		return err
 	}
-	hReq.Header.Set("Content-Type", "application/json")
+	if err = c.sealBody(hReq, data); err != nil {
+		return err
+	}
 
 	var resp *http.Response
 	resp, err = c.httpClient.Do(hReq)

@@ -233,3 +233,39 @@ func TestKeyRing(t *testing.T) {
 		t.Error("UnmarshalKeyRing should fail for short data")
 	}
 }
+
+func TestSealedRequest(t *testing.T) {
+	// 1. Setup Keys
+	serverDK, _ := GenerateEncryptionKey()
+	serverPK := serverDK.EncapsulationKey()
+
+	clientID, _ := GenerateIdentityKey()
+
+	// 2. Seal
+	payload := []byte(`{"cmd":"test","data":"secret"}`)
+	sealed, err := SealRequest(serverPK, clientID, payload)
+	if err != nil {
+		t.Fatalf("SealRequest failed: %v", err)
+	}
+
+	// 3. Open
+	ts, opened, err := OpenRequest(serverDK, clientID.Public(), sealed)
+	if err != nil {
+		t.Fatalf("OpenRequest failed: %v", err)
+	}
+
+	if string(opened) != string(payload) {
+		t.Errorf("Payload mismatch: %s vs %s", string(opened), string(payload))
+	}
+
+	if ts == 0 {
+		t.Error("Timestamp should not be zero")
+	}
+
+	// 4. Test Tamper
+	sealed[len(sealed)-1] ^= 0xFF
+	_, _, err = OpenRequest(serverDK, clientID.Public(), sealed)
+	if err == nil {
+		t.Error("OpenRequest should fail for tampered ciphertext")
+	}
+}

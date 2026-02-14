@@ -64,6 +64,15 @@ To minimize PII exposure, the metadata layer operates on opaque identifiers.
     *   **Implication:** Logs, snapshots, and disk storage contain no emails or names.
 *   **No Names:** The FSM does **not** store user names (e.g., "Alice"). Users who wish to share their display name must store it in an encrypted file (e.g., `/.profile`) within the file system itself.
 
+### 3.4 Transport Privacy (Layer 7 E2EE)
+While TLS (Layer 4) protects the connection, DistFS implements **Layer 7 End-to-End Encryption** for all metadata operations to ensure that infrastructure components (load balancers, WAFs, or malicious proxies) cannot observe or tamper with the file system structure.
+
+1.  **Sealed Requests:** All requests from the Client to the Metadata Server are wrapped in a `SealedRequest` envelope:
+    *   **Encapsulation:** The request payload is encrypted using the active **Cluster Public Key** (ML-KEM-768).
+    *   **Signature:** The inner payload is signed by the **Client's Private Signing Key**.
+2.  **Unsealed on Leader:** Only the Raft Cluster Leader (possessing the corresponding private key) can decrypt and verify the request. Decryption happens in memory immediately before processing.
+3.  **Replay Protection:** Each sealed request includes a high-resolution timestamp. The server maintains a sliding-window nonce cache and rejects requests older than 2 minutes or those with duplicate timestamps.
+
 ---
 
 ## 4. Metadata Layer (MetaNodes)

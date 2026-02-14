@@ -161,3 +161,8 @@ type WorldIdentity struct {
 	Public  []byte `json:"public"`
 	Private []byte `json:"private"`
 }
+
+type SealedRequest struct {
+	UserID string `json:"uid"`
+	Sealed []byte `json:"sealed"`
+}

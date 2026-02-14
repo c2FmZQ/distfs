@@ -221,3 +221,18 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement memory caching for Group Private Keys.
 *   **Step 13.4: Group Management CLI**
     *   **Action:** Implement `chgrp` and `group-create`/`group-add` commands.
+
+---
+
+## Phase 14: Layer 7 End-to-End Encryption (Metadata Privacy)
+**Goal:** Encrypt all client-to-server request payloads using the server's public key.
+
+*   **Step 14.1: Sealed Request Primitives**
+    *   **Action:** Implement `SealRequest` and `OpenRequest` in `pkg/crypto`.
+    *   **Action:** Inner payload: `[Timestamp][Signature][JSON]`.
+*   **Step 14.2: Server Unsealing Middleware**
+    *   **Action:** Implement a request interceptor in `MetadataServer` that transparently unseals bodies.
+    *   **Action:** Enforce timestamp-based replay protection.
+*   **Step 14.3: Client Sealing Integration**
+    *   **Action:** Update `Client.sendRequest` (or equivalent) to wrap all outgoing payloads.
+    *   **Action:** Transition all handlers to strictly expect sealed requests.

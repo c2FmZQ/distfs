@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	"bytes"
 	"context"
 	"crypto/hmac"
 	"crypto/rand"
@@ -61,6 +62,9 @@ type Server struct {
 	challengeCache map[string]challengeEntry // Base64(Challenge) -> Entry
 	challengeMu    sync.Mutex
 
+	requestNonceCache map[string]time.Time
+	requestNonceMu    sync.Mutex
+
 	replMonitor *ReplicationMonitor
 	gcWorker    *GCWorker
 	keyWorker   *KeyRotationWorker
@@ -91,6 +95,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 		signKey:             signKey,
 		raftSecret:          raftSecret,
 		challengeCache:      make(map[string]challengeEntry),
+		requestNonceCache:   make(map[string]time.Time),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 	}
@@ -262,6 +267,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user != nil {
+		// Handle Sealed Request (Layer 7 E2EE)
+		if r.Header.Get("X-DistFS-Sealed") == "true" {
+			payload, err := s.unsealRequest(r, user)
+			if err != nil {
+				http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(payload))
+			r.ContentLength = int64(len(payload))
+		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
+			// Enforce E2EE for mutations
+			http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
+			return
+		}
+
 		ctx := context.WithValue(r.Context(), userContextKey, user)
 		r = r.WithContext(ctx)
 	}
@@ -1327,6 +1347,56 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
+}
+
+func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
+	var sealed SealedRequest
+	if err := json.NewDecoder(r.Body).Decode(&sealed); err != nil {
+		return nil, fmt.Errorf("invalid sealed request: %w", err)
+	}
+
+	if sealed.UserID != user.ID {
+		return nil, fmt.Errorf("user mismatch in sealed request")
+	}
+
+	// 1. Get Active Cluster Key
+	active, err := s.fsm.GetActiveKey()
+	if err != nil {
+		return nil, fmt.Errorf("active cluster key not found")
+	}
+	dk, err := crypto.UnmarshalDecapsulationKey(active.DecKey)
+	if err != nil {
+		return nil, fmt.Errorf("invalid cluster key")
+	}
+
+	// 2. Open
+	ts, payload, err := crypto.OpenRequest(dk, user.SignKey, sealed.Sealed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open request: %w", err)
+	}
+
+	// 3. Replay Protection
+	now := time.Now().UnixNano()
+	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
+		return nil, fmt.Errorf("request timestamp out of range")
+	}
+
+	nonce := user.ID + ":" + fmt.Sprintf("%d", ts)
+	s.requestNonceMu.Lock()
+	// Lazy GC
+	for k, v := range s.requestNonceCache {
+		if time.Since(v) > 5*time.Minute {
+			delete(s.requestNonceCache, k)
+		}
+	}
+	if _, exists := s.requestNonceCache[nonce]; exists {
+		s.requestNonceMu.Unlock()
+		return nil, fmt.Errorf("replay detected")
+	}
+	s.requestNonceCache[nonce] = time.Now()
+	s.requestNonceMu.Unlock()
+
+	return payload, nil
 }
 
 func (s *Server) checkAndInitWorld() {
