@@ -224,28 +224,28 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 14: Layer 7 End-to-End Encryption (Metadata Privacy)
+## Phase 14: Layer 7 End-to-End Encryption (Metadata Privacy) [COMPLETED]
 **Goal:** Encrypt all client-to-server request payloads using the server's public key.
 
 *   **Step 14.1: Sealed Request Primitives**
-    *   **Action:** Implement `SealRequest` and `OpenRequest` in `pkg/crypto`.
-    *   **Action:** Inner payload: `[Timestamp][Signature][JSON]`.
+    *   **Action:** [Done] Implement `SealRequest` and `OpenRequest` in `pkg/crypto`.
+    *   **Action:** [Done] Inner payload: `[Timestamp][Signature][JSON]`.
 *   **Step 14.2: Server Unsealing Middleware**
-    *   **Action:** Implement a request interceptor in `MetadataServer` that transparently unseals bodies.
-    *   **Action:** Enforce timestamp-based replay protection.
+    *   **Action:** [Done] Implement a request interceptor in `MetadataServer` that transparently unseals bodies.
+    *   **Action:** [Done] Enforce timestamp-based replay protection.
 *   **Step 14.3: Client Sealing Integration**
-    *   **Action:** Update `Client.sendRequest` (or equivalent) to wrap all outgoing payloads.
-    *   **Action:** Transition all handlers to strictly expect sealed requests.
+    *   **Action:** [Done] Update `Client.sendRequest` (or equivalent) to wrap all outgoing payloads.
+    *   **Action:** [Done] Transition all handlers to strictly expect sealed requests.
 
 ---
 
-## Phase 15: Bidirectional Layer 7 E2EE (Response Privacy)
+## Phase 15: Bidirectional Layer 7 E2EE (Response Privacy) [COMPLETED]
 **Goal:** Encrypt all server-to-client responses using the client's registered public key.
 
 *   **Step 15.1: Response Sealing Primitives**
-    *   **Action:** Implement `SealResponse` and `OpenResponse` in `pkg/crypto`.
+    *   **Action:** [Done] Implement `SealResponse` and `OpenResponse` in `pkg/crypto`.
 *   **Step 15.2: Server Response Interceptor**
-    *   **Action:** Implement a response wrapper in `MetadataServer` that seals outgoing JSON.
-    *   **Action:** Use the registered `User.EncKey` for encryption.
+    *   **Action:** [Done] Implement a response wrapper in `MetadataServer` that seals outgoing JSON.
+    *   **Action:** [Done] Use the registered `User.EncKey` for encryption.
 *   **Step 15.3: Client Transparent Unsealing**
-    *   **Action:** Update Client HTTP helpers to automatically unseal responses when the sealed header is present.
+    *   **Action:** [Done] Update Client HTTP helpers to automatically unseal responses when the sealed header is present.

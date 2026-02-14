@@ -94,7 +94,7 @@ type Client struct {
 	serverKey  *mlkem.EncapsulationKey768
 	serverSignPK []byte
 	keyCache   map[string][]byte
-	keyMu      sync.RWMutex
+	keyMu      *sync.RWMutex
 
 	worldPublic  *mlkem.EncapsulationKey768
 	worldPrivate *mlkem.DecapsulationKey768
@@ -116,6 +116,7 @@ func NewClient(metaAddr, dataAddr string) *Client {
 		dataURL:    dataAddr,
 		httpClient: &http.Client{Transport: t},
 		keyCache:   make(map[string][]byte),
+		keyMu:      &sync.RWMutex{},
 		groupKeys:  make(map[string]*mlkem.DecapsulationKey768),
 		sessionMu:  &sync.RWMutex{},
 		loginMu:    &sync.Mutex{},
@@ -310,17 +311,28 @@ func (c *Client) allocateNodes() ([]metadata.Node, error) {
 	if err := c.authenticateRequest(req); err != nil {
 		return nil, err
 	}
+	// Even though body is nil, we want to seal it if possible or at least set the header
+	// Actually, if we want to seal it, we need a payload.
+	// Let's just send an empty JSON object.
+	if err := c.sealBody(req, []byte("{}")); err != nil {
+		return nil, err
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	body, err := c.unsealResponse(resp)
+	if err != nil {
+		return nil, err
+	}
+	defer body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("allocate failed: %d", resp.StatusCode)
 	}
 	var nodes []metadata.Node
-	if err := json.NewDecoder(resp.Body).Decode(&nodes); err != nil {
+	if err := json.NewDecoder(body).Decode(&nodes); err != nil {
 		return nil, err
 	}
 	return nodes, nil

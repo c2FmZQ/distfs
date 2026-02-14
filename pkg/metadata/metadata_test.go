@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"bytes"
+	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
@@ -139,6 +140,20 @@ func loginSession(t *testing.T, ts *httptest.Server, userID string, userSignKey 
 	return sessionRes.Token
 }
 
+func unsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, serverSignPK []byte, resp *http.Response) []byte {
+	if resp.Header.Get("X-DistFS-Sealed") != "true" {
+		b, _ := io.ReadAll(resp.Body)
+		return b
+	}
+	var sealed SealedResponse
+	json.NewDecoder(resp.Body).Decode(&sealed)
+	_, payload, err := crypto.OpenResponse(userDecKey, serverSignPK, sealed.Sealed)
+	if err != nil {
+		t.Fatalf("OpenResponse failed: %v", err)
+	}
+	return payload
+}
+
 func sealTestRequest(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverPKBytes []byte, payload []byte) []byte {
 	serverPK, err := crypto.UnmarshalEncapsulationKey(serverPKBytes)
 	if err != nil {
@@ -157,14 +172,16 @@ func sealTestRequest(t *testing.T, userID string, userSignKey *crypto.IdentityKe
 }
 
 func TestMetadataCluster(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
+	userDecKey, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
 	user := User{
 		ID:      "u1",
 		SignKey: userSignKey.Public(),
+		EncKey:  userDecKey.EncapsulationKey().Bytes(),
 	}
 	userBytes, _ := json.Marshal(user)
 	f := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: userBytes}.Marshal(), 5*time.Second)
@@ -196,9 +213,13 @@ func TestMetadataCluster(t *testing.T) {
 		t.Errorf("POST status %d: %s", resp.StatusCode, body)
 	}
 
+	// Unseal response if needed (Create Inode returns the created Inode)
+	_ = unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+
 	// Test Get Inode
 	token = loginSession(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -208,10 +229,11 @@ func TestMetadataCluster(t *testing.T) {
 		t.Errorf("GET status %d", resp.StatusCode)
 	}
 
+	opened := unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 	var got Inode
-	json.NewDecoder(resp.Body).Decode(&got)
+	json.Unmarshal(opened, &got)
 	if got.ID != "inode-1" {
-		t.Errorf("GET ID mismatch")
+		t.Errorf("GET ID mismatch: %s", got.ID)
 	}
 
 	// Test Delete Inode
@@ -263,7 +285,7 @@ func TestFSM_EdgeCases(t *testing.T) {
 }
 
 func TestIdentityRegistry(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -276,8 +298,13 @@ func TestIdentityRegistry(t *testing.T) {
 	}
 
 	// Create User (via Raft directly, since /v1/user is removed)
+	userDecKey, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
-	user := User{ID: "u1", SignKey: userSignKey.Public()}
+	user := User{
+		ID:      "u1",
+		SignKey: userSignKey.Public(),
+		EncKey:  userDecKey.EncapsulationKey().Bytes(),
+	}
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
@@ -306,6 +333,8 @@ func TestIdentityRegistry(t *testing.T) {
 	if resp.StatusCode != http.StatusCreated {
 		t.Errorf("Group Create failed: %d", resp.StatusCode)
 	}
+
+	_ = unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 
 	// Register Node
 	n := Node{ID: "node-data-1", Status: NodeStatusActive}
@@ -433,12 +462,17 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := setupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
+	userDecKey, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
-	user := User{ID: "u1", SignKey: userSignKey.Public()}
+	user := User{
+		ID:      "u1",
+		SignKey: userSignKey.Public(),
+		EncKey:  userDecKey.EncapsulationKey().Bytes(),
+	}
 	userBytes, _ := json.Marshal(user)
 	f := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: userBytes}.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -475,9 +509,12 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("POST status %d", resp.StatusCode)
 	}
 
+	_ = unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+
 	// Verify via API (Transparent Reconstruction)
 	token = loginSession(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/paginated-file", nil)
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -487,8 +524,9 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("GET status %d", resp.StatusCode)
 	}
 
+	opened := unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 	var got Inode
-	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+	if err := json.Unmarshal(opened, &got); err != nil {
 		t.Fatalf("Decode failed: %v", err)
 	}
 

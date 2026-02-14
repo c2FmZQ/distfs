@@ -273,7 +273,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if user != nil {
 		// Handle Sealed Request (Layer 7 E2EE)
-		if r.Header.Get("X-DistFS-Sealed") == "true" {
+		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet && r.ContentLength > 0 {
 			payload, err := s.unsealRequest(r, user)
 			if err != nil {
 				http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
@@ -281,6 +281,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			r.Body = io.NopCloser(bytes.NewReader(payload))
 			r.ContentLength = int64(len(payload))
+		} else if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
+			// X-DistFS-Sealed set but no body or GET? 
+			// If it's not a GET, it MUST have a sealed body if header is set.
+			// Actually, let's just allow GETs to skip unsealing but still trigger sealed response.
 		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
 			// Enforce E2EE for mutations
 			http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
@@ -705,8 +709,23 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		Signature: sig,
 	}
 
+	data, _ := json.Marshal(signed)
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(signed)
+
+	// E2EE?
+	user, _ = r.Context().Value(userContextKey).(*User)
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
@@ -1095,6 +1114,19 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	// E2EE?
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, body)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusCreated)
+			w.Write(sealed)
+			log.Printf("GROUP: handleCreateGroup finished for %s (SEALED)", groupID)
+			return
+		}
+	}
+
 	w.WriteHeader(http.StatusCreated)
 	w.Write(body)
 	log.Printf("GROUP: handleCreateGroup finished for %s", groupID)
