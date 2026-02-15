@@ -33,7 +33,6 @@ import (
 // Config represents the client-side configuration.
 type Config struct {
 	ServerURL string `json:"server_url"`
-	DataURL   string `json:"data_url"`
 	UserID    string `json:"user_id"`
 	EncKey    string `json:"enc_key"`
 	SignKey   string `json:"sign_key"`

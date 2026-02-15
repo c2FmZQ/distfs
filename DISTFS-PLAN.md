@@ -296,4 +296,31 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update `distfs-fuse` to utilize the unified onboarding logic if configuration is missing.
 *   **Step 19.3: Documentation & E2E**
     *   **Action:** Update `README.md` and project scripts to use the streamlined flow.
+
+---
+
+## Phase 20: Automated OIDC Discovery
+**Goal:** Eliminate manual OIDC endpoint configuration for clients.
+
+*   **Step 20.1: OIDC Discovery (Server)**
+    *   **Action:** Update `storage-node` to fetch OIDC configuration from a discovery URL.
+    *   **Action:** Implement `GET /v1/auth/config` to expose OIDC endpoints to clients.
+*   **Step 20.2: Dynamic Configuration (Client)**
+    *   **Action:** Update `pkg/client` to automatically fetch OIDC endpoints from the metadata server.
+*   **Step 20.3: Mock & E2E Updates**
+    *   **Action:** Update `test-auth` mock server to serve an OIDC discovery document.
+    *   **Action:** Simplify E2E scripts by removing manual endpoint flags.
+
+---
+
+## Phase 21: Hedged Data Access
+**Goal:** Optimize data latency and reliability using direct metadata URLs and parallel staggered fetches.
+
+*   **Step 21.1: Authoritative URL Injection (Server)**
+    *   **Action:** Update `ChunkEntry` to include `URLs []string`.
+    *   **Action:** Update Metadata Server to resolve Node IDs to authoritative Public URLs during Inode retrieval.
+*   **Step 21.2: Hedged Request Implementation (Client)**
+    *   **Action:** Refactor `downloadChunk` to implement staggered parallel fetches (1s delay).
+    *   **Action:** Implement immediate cancellation of pending replicas upon first success.
+    *   **Action:** Remove client-side node cache and registry refresh logic.
     

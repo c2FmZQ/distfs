@@ -48,10 +48,11 @@ func main() {
 		clusterAdvertise = flag.String("cluster-advertise", "", "Public Cluster API address (host:port)")
 		dataDir          = flag.String("data-dir", "data", "Directory for storage")
 		bootstrap        = flag.Bool("bootstrap", false, "Bootstrap a new cluster")
-		jwksURL          = flag.String("jwks-url", "", "JWKS URL for auth")
+		oidcURL          = flag.String("oidc-discovery-url", "", "OIDC Discovery URL")
 		raftSecret       = flag.String("raft-secret", "", "Shared secret for cluster operations")
-		tlsCert          = flag.String("tls-cert", "", "TLS certificate for public API")
-		tlsKey           = flag.String("tls-key", "", "TLS key for public API")
+
+		tlsCert = flag.String("tls-cert", "", "TLS certificate for public API")
+		tlsKey  = flag.String("tls-key", "", "TLS key for public API")
 	)
 	flag.Parse()
 
@@ -178,8 +179,7 @@ func main() {
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *jwksURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour)
-
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour)
 	// DiskStore uses separate storage instance rooted at chunks/
 	chunkDir := filepath.Join(baseDir, "chunks")
 	if err := os.MkdirAll(chunkDir, 0700); err != nil {
@@ -198,6 +198,8 @@ func main() {
 	publicMux := http.NewServeMux()
 	publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 	publicMux.Handle("/v1/meta/key", metaServer)
+	publicMux.Handle("/v1/node", metaServer)
+
 	publicMux.Handle("/v1/user/", metaServer)
 	publicMux.Handle("/v1/group/", metaServer)
 	publicMux.Handle("/v1/cluster/", metaServer)

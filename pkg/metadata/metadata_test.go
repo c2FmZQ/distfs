@@ -473,7 +473,7 @@ func TestKeySync(t *testing.T) {
 	defer jwksServer.Close()
 
 	// Update srv to use mock JWKS
-	srv.jwks.SetIssuers([]jwks.Issuer{{JWKSURI: jwksServer.URL + "/jwks.json"}})
+	srv.jwks.SetIssuers([]jwks.Issuer{{Issuer: "test-auth-server", JWKSURI: jwksServer.URL + "/jwks.json"}})
 
 	// Initialize Cluster Secret
 	var secret []byte
@@ -498,12 +498,15 @@ func TestKeySync(t *testing.T) {
 	u1Sign, _ := crypto.GenerateIdentityKey()
 	u1 := User{ID: userID, SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
 	u1Bytes, _ := json.Marshal(u1)
-	node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second)
+	fUser := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second)
+	if err := fUser.Error(); err != nil {
+		t.Fatalf("Failed to apply user create: %v", err)
+	}
 
 	// Mint JWT
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"email": email,
-		"exp":   time.Now().Add(time.Hour).Unix(),
+		"iss": "test-auth-server", "email": email,
+		"exp": time.Now().Add(time.Hour).Unix(),
 	})
 	jwtToken.Header["kid"] = kid
 	jwtStr, _ := jwtToken.SignedString(priv)

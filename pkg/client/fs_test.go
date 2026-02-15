@@ -95,8 +95,16 @@ func TestDistFS_ReadDir(t *testing.T) {
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
+	// Register Data Node
+	node := metadata.Node{
+		ID:      "data1",
+		Address: tsData.URL,
+		Status:  metadata.NodeStatusActive,
+	}
+	registerNode(t, tsMeta.URL, "testsecret", node)
+
 	// 2. Client
-	c := NewClient(tsMeta.URL, tsData.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)

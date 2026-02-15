@@ -15,15 +15,12 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -73,22 +70,6 @@ func main() {
 		cmdGroupCreate(args)
 	case "group-add":
 		cmdGroupAdd(args)
-	case "register":
-		fmt.Println("Warning: 'register' is deprecated. Use 'init --new' instead.")
-		cmdRegister(args)
-	case "keysync":
-		fmt.Println("Warning: 'keysync' is deprecated. Use 'init' instead.")
-		if len(args) < 1 {
-			log.Fatal("keysync requires a subcommand (push or pull)")
-		}
-		switch args[0] {
-		case "push":
-			cmdKeySyncPush(args[1:])
-		case "pull":
-			cmdKeySyncPull(args[1:])
-		default:
-			log.Fatalf("unknown keysync subcommand: %s", args[0])
-		}
 	default:
 		usage()
 	}
@@ -144,156 +125,13 @@ func cmdInit(args []string) {
 	}
 }
 
-func cmdKeySyncPush(args []string) {
-	conf, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	password, err := config.GetPassword("Enter passphrase to encrypt keys for sync: ", true)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	blob, err := config.Encrypt(*conf, password)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	c := loadClient()
-	if err := c.PushKeySync(blob); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Keys pushed to server successfully.")
-}
-
-func cmdKeySyncPull(args []string) {
-	fs := flag.NewFlagSet("keysync pull", flag.ExitOnError)
-	serverURL := fs.String("server", "http://localhost:8080", "Metadata Server URL")
-	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
-	clientID := fs.String("client-id", "distfs", "The client ID")
-	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
-	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
-	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
-	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
-	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
-	fs.Parse(args)
-
-	opts := client.OnboardingOptions{
-		ServerURL:     *serverURL,
-		JWT:           *jwt,
-		ClientID:      *clientID,
-		Scopes:        strings.Split(*scopes, ","),
-		AuthEndpoint:  *authEndpoint,
-		TokenEndpoint: *tokenEndpoint,
-		ShowQR:        *qrCode,
-		Browser:       *browser,
-	}
-
-	token, err := client.GetOIDCToken(context.Background(), opts)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	c := client.NewClient(*serverURL, "") // dataURL not needed for pull
-	blob, err := c.PullKeySync(token)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	password, err := config.GetPassword("Enter passphrase to decrypt sync blob: ", false)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	conf, err := config.Decrypt(*blob, password)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	if err := config.SaveWithPassword(*conf, *configPath, password); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Keys pulled and configuration restored successfully.")
-}
-
-func cmdRegister(args []string) {
-	fs := flag.NewFlagSet("register", flag.ExitOnError)
-	jwt := fs.String("jwt", "", "OIDC JWT for registration")
-	clientID := fs.String("client-id", "distfs", "The client ID")
-	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
-	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
-	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
-	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
-	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
-	fs.Parse(args)
-
-	conf, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	opts := client.OnboardingOptions{
-		JWT:           *jwt,
-		ClientID:      *clientID,
-		Scopes:        strings.Split(*scopes, ","),
-		AuthEndpoint:  *authEndpoint,
-		TokenEndpoint: *tokenEndpoint,
-		ShowQR:        *qrCode,
-		Browser:       *browser,
-	}
-
-	token, err := client.GetOIDCToken(context.Background(), opts)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	skBytes, _ := hex.DecodeString(conf.SignKey)
-	sk := crypto.UnmarshalIdentityKey(skBytes)
-
-	dkBytes, _ := hex.DecodeString(conf.EncKey)
-	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
-
-	req := map[string]interface{}{
-		"jwt":      token,
-		"sign_key": sk.Public(),
-		"enc_key":  dk.EncapsulationKey().Bytes(),
-	}
-	body, _ := json.Marshal(req)
-
-	resp, err := http.Post(conf.ServerURL+"/v1/user/register", "application/json", bytes.NewBuffer(body))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
-	}
-
-	var user struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		log.Fatalf("failed to decode response: %v", err)
-	}
-
-	conf.UserID = user.ID
-	if err := config.Save(*conf, *configPath); err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("User registered successfully. ID: %s\n", user.ID)
-}
-
 func loadClient() *client.Client {
 	conf, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	c := client.NewClient(conf.ServerURL, conf.DataURL)
+	c := client.NewClient(conf.ServerURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)

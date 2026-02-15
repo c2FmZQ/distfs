@@ -143,7 +143,6 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 
 		conf := config.Config{
 			ServerURL: opts.ServerURL,
-			DataURL:   opts.ServerURL,
 			UserID:    user.ID,
 			EncKey:    hex.EncodeToString(crypto.MarshalDecapsulationKey(dk)),
 			SignKey:   hex.EncodeToString(sk.MarshalPrivate()),
@@ -167,7 +166,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 			return err
 		}
 
-		c := NewClient(opts.ServerURL, opts.ServerURL)
+		c := NewClient(opts.ServerURL)
 		svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal server key: %w", err)
@@ -183,7 +182,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		fmt.Printf("New account initialized successfully. User ID: %s\n", user.ID)
 	} else {
 		// Existing account flow (Pull)
-		c := NewClient(opts.ServerURL, "")
+		c := NewClient(opts.ServerURL)
 		blob, err := c.PullKeySync(token)
 		if err != nil {
 			return fmt.Errorf("failed to pull keys: %w (did you mean --new?)", err)
@@ -201,7 +200,6 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 
 		// Update URLs and Server Key from current run
 		conf.ServerURL = opts.ServerURL
-		conf.DataURL = opts.ServerURL
 		conf.ServerKey = hex.EncodeToString(sKey)
 
 		if err := config.SaveWithPassword(*conf, opts.ConfigPath, password); err != nil {

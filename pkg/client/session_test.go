@@ -45,7 +45,7 @@ func TestClientSessionManagement(t *testing.T) {
 	createUser(t, metaNode, user)
 
 	// 3. Client
-	c := NewClient(tsMeta.URL, "") // dataAddr not needed for meta test
+	c := NewClient(tsMeta.URL) // dataAddr not needed for meta test
 	c = c.WithIdentity(user.ID, dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)

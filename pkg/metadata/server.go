@@ -119,9 +119,10 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 func (s *Server) discoverOIDC(discoveryURL string) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
+	client := &http.Client{Timeout: 10 * time.Second}
 
 	for {
-		resp, err := http.Get(discoveryURL)
+		resp, err := client.Get(discoveryURL)
 		if err != nil {
 			log.Printf("OIDC discovery failed: %v", err)
 		} else {
@@ -297,13 +298,19 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthChallenge(w, r)
 		return
 	}
-	if r.URL.Path == "/v1/node" && r.Method == http.MethodPost {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+	if r.URL.Path == "/v1/node" {
+		if r.Method == http.MethodPost {
+			if !s.checkRaftSecret(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			s.handleRegisterNode(w, r)
 			return
 		}
-		s.handleRegisterNode(w, r)
-		return
+		if r.Method == http.MethodGet {
+			s.handleGetNodes(w, r)
+			return
+		}
 	}
 	if r.URL.Path == "/v1/cluster/join" && r.Method == http.MethodPost {
 		if !s.checkRaftSecret(r) {
@@ -1064,6 +1071,8 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 			return err
 		}
 
+		s.resolveURLs(inode.ChunkManifest)
+
 		var err error
 		data, err = json.Marshal(inode)
 		return err
@@ -1133,6 +1142,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 				var inode Inode
 				if err := json.Unmarshal(v, &inode); err == nil {
 					if err := loadInodeWithPages(tx, &inode); err == nil {
+						s.resolveURLs(inode.ChunkManifest)
 						result = append(result, &inode)
 					}
 				}
@@ -1862,4 +1872,35 @@ func (s *Server) handleGetAuthConfig(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(conf)
+}
+
+func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
+	nodes, err := s.fsm.GetNodes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(nodes)
+}
+
+func (s *Server) resolveURLs(manifest []ChunkEntry) {
+	nodes, err := s.fsm.GetNodes()
+	if err != nil {
+		log.Printf("Failed to resolve URLs: %v", err)
+		return
+	}
+	nodeMap := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		nodeMap[n.ID] = n.Address
+	}
+
+	for i := range manifest {
+		manifest[i].URLs = make([]string, 0, len(manifest[i].Nodes))
+		for _, nodeID := range manifest[i].Nodes {
+			if addr, ok := nodeMap[nodeID]; ok {
+				manifest[i].URLs = append(manifest[i].URLs, addr)
+			}
+		}
+	}
 }

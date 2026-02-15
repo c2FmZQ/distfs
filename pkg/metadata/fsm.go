@@ -1433,3 +1433,19 @@ func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
 	}
 	return &blob, nil
 }
+
+func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
+	var nodes []Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				nodes = append(nodes, n)
+			}
+		}
+		return nil
+	})
+	return nodes, err
+}

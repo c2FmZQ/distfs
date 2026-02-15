@@ -92,9 +92,9 @@ func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) *mlkem.Encapsul
 	return dk.EncapsulationKey()
 }
 
-func registerNode(t *testing.T, metaURL, secret string, node metadata.Node) {
+func registerNode(t *testing.T, serverURL, secret string, node metadata.Node) {
 	body, _ := json.Marshal(node)
-	req, _ := http.NewRequest("POST", metaURL+"/v1/node", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", serverURL+"/v1/node", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Raft-Secret", secret)
 	resp, err := http.DefaultClient.Do(req)
@@ -154,8 +154,16 @@ func TestClientIntegration(t *testing.T) {
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
+	// Register Data Node
+	node := metadata.Node{
+		ID:      "data1",
+		Address: tsData.URL,
+		Status:  metadata.NodeStatusActive,
+	}
+	registerNode(t, tsMeta.URL, "testsecret", node)
+
 	// 3. Client
-	c := NewClient(tsMeta.URL, tsData.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
@@ -284,7 +292,7 @@ func TestReplication(t *testing.T) {
 	}
 
 	// 3. Client
-	c := NewClient(tsMeta.URL, nodes[0].URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
@@ -366,7 +374,7 @@ func TestDirectories(t *testing.T) {
 	}
 	registerNode(t, tsMeta.URL, "testsecret", node)
 
-	c := NewClient(tsMeta.URL, tsData.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
@@ -460,7 +468,7 @@ func TestReplicationRepair(t *testing.T) {
 	registerNode(t, tsMeta.URL, "testsecret", node1)
 
 	// 3. Write File (Will have 1 replica)
-	c := NewClient(tsMeta.URL, ts1.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
@@ -582,7 +590,7 @@ func TestReadAhead(t *testing.T) {
 	}
 	registerNode(t, tsMeta.URL, "testsecret", node)
 
-	c := NewClient(tsMeta.URL, tsData.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
@@ -690,7 +698,7 @@ func TestGarbageCollection(t *testing.T) {
 	}
 	registerNode(t, tsMeta.URL, "testsecret", node)
 
-	c := NewClient(tsMeta.URL, tsData.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
@@ -778,7 +786,7 @@ func TestResolvePathComplex(t *testing.T) {
 		ID: "d1", Address: tsData.URL, Status: metadata.NodeStatusActive,
 	})
 
-	c := NewClient(tsMeta.URL, tsData.URL)
+	c := NewClient(tsMeta.URL)
 	c = c.WithIdentity("user-1", dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)

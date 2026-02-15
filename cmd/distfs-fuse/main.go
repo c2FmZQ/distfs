@@ -100,7 +100,7 @@ func main() {
 }
 
 func loadClient(conf *config.Config) *client.Client {
-	c := client.NewClient(conf.ServerURL, conf.DataURL)
+	c := client.NewClient(conf.ServerURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)

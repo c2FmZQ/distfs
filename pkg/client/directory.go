@@ -188,7 +188,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
 	data, _ := json.Marshal(update)
-	req, _ := http.NewRequest("PUT", c.metaURL+"/v1/meta/directory/"+parentID+"/entry", nil)
+	req, _ := http.NewRequest("PUT", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
 	if err := c.authenticateRequest(req); err != nil {
 		return nil, nil, fmt.Errorf("auth failed: %w", err)
 	}
@@ -243,7 +243,7 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 	}
 	data, _ := json.Marshal(req)
 
-	hReq, err := http.NewRequest("POST", c.metaURL+"/v1/meta/rename", nil)
+	hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/rename", nil)
 	if err != nil {
 		return err
 	}
@@ -290,7 +290,7 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	update := metadata.ChildUpdate{ParentID: parentID, Name: encName}
 	data, _ := json.Marshal(update)
 
-	req, err := http.NewRequest("DELETE", c.metaURL+"/v1/meta/directory/"+parentID+"/entry", nil)
+	req, err := http.NewRequest("DELETE", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
 	if err != nil {
 		return err
 	}
@@ -347,7 +347,7 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 	}
 	data, _ := json.Marshal(req)
 
-	hReq, err := http.NewRequest("POST", c.metaURL+"/v1/meta/link", nil)
+	hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/link", nil)
 	if err != nil {
 		return err
 	}

@@ -16,6 +16,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
@@ -40,7 +41,7 @@ func (c *Client) GetServerSignKey() ([]byte, error) {
 		return sk, nil
 	}
 
-	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/key/sign")
+	resp, err := c.httpClient.Get(c.serverURL + "/v1/meta/key/sign")
 	if err != nil {
 		return nil, err
 	}
@@ -64,7 +65,7 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 		return sk, nil
 	}
 
-	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/key")
+	resp, err := c.httpClient.Get(c.serverURL + "/v1/meta/key")
 	if err != nil {
 		return nil, err
 	}
@@ -87,8 +88,7 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
-	metaURL      string
-	dataURL      string
+	serverURL    string
 	httpClient   *http.Client
 	userID       string
 	decKey       *mlkem.DecapsulationKey768
@@ -109,20 +109,22 @@ type Client struct {
 }
 
 // NewClient creates a new DistFS client.
-func NewClient(metaAddr, dataAddr string) *Client {
+func NewClient(serverAddr string) *Client {
 	t := &http.Transport{
 		MaxIdleConns:        100,
 		MaxIdleConnsPerHost: 100,
 	}
 	return &Client{
-		metaURL:    metaAddr,
-		dataURL:    dataAddr,
-		httpClient: &http.Client{Transport: t},
-		keyCache:   make(map[string][]byte),
-		keyMu:      &sync.RWMutex{},
-		groupKeys:  make(map[string]*mlkem.DecapsulationKey768),
-		sessionMu:  &sync.RWMutex{},
-		loginMu:    &sync.Mutex{},
+		serverURL: serverAddr,
+		httpClient: &http.Client{
+			Transport: t,
+			Timeout:   30 * time.Second,
+		},
+		keyCache:  make(map[string][]byte),
+		keyMu:     &sync.RWMutex{},
+		groupKeys: make(map[string]*mlkem.DecapsulationKey768),
+		sessionMu: &sync.RWMutex{},
+		loginMu:   &sync.Mutex{},
 	}
 }
 
@@ -154,7 +156,7 @@ func (c *Client) Login() error {
 	// 1. Get Challenge
 	reqData := metadata.AuthChallengeRequest{UserID: c.userID}
 	b, _ := json.Marshal(reqData)
-	resp, err := c.httpClient.Post(c.metaURL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
+	resp, err := c.httpClient.Post(c.serverURL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
@@ -188,7 +190,7 @@ func (c *Client) Login() error {
 	}
 	b, _ = json.Marshal(solve)
 
-	resp, err = c.httpClient.Post(c.metaURL+"/v1/login", "application/json", bytes.NewReader(b))
+	resp, err = c.httpClient.Post(c.serverURL+"/v1/login", "application/json", bytes.NewReader(b))
 	if err != nil {
 		return err
 	}
@@ -317,7 +319,7 @@ func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 }
 
 func (c *Client) allocateNodes() ([]metadata.Node, error) {
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/allocate", nil)
+	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/allocate", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -359,7 +361,7 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 	}
 	data, _ := json.Marshal(reqData)
 
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/token", nil)
+	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/token", nil)
 	if err != nil {
 		return "", err
 	}
@@ -426,24 +428,81 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 	return nil
 }
 
-func (c *Client) downloadChunk(id string, token string) ([]byte, error) {
-	req, err := http.NewRequest("GET", c.dataURL+"/v1/data/"+id, nil)
-	if err != nil {
-		return nil, err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, token string) ([]byte, error) {
+	if len(urls) == 0 {
+		return nil, fmt.Errorf("no URLs provided for chunk %s", id)
 	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
+	type result struct {
+		data []byte
+		err  error
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("download chunk failed: %d", resp.StatusCode)
+
+	resCh := make(chan result, len(urls))
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var started, consumed int
+	for i, url := range urls {
+		started++
+		if i > 0 {
+			// Staggered start
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(1 * time.Second):
+			}
+		}
+
+		go func(targetURL string) {
+			req, err := http.NewRequestWithContext(ctx, "GET", targetURL+"/v1/data/"+id, nil)
+			if err != nil {
+				resCh <- result{err: err}
+				return
+			}
+			if token != "" {
+				req.Header.Set("Authorization", "Bearer "+token)
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				resCh <- result{err: err}
+				return
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				resCh <- result{err: fmt.Errorf("node %s returned %d", targetURL, resp.StatusCode)}
+				return
+			}
+
+			data, err := io.ReadAll(resp.Body)
+			resCh <- result{data: data, err: err}
+		}(url)
+
+		// Check if anyone finished before starting next stagger
+		select {
+		case res := <-resCh:
+			consumed++
+			if res.err == nil {
+				return res.data, nil
+			}
+			// If error, continue loop to start next replica immediately
+		default:
+		}
 	}
-	return io.ReadAll(resp.Body)
+
+	// Wait for remaining
+	var lastErr error
+	for i := consumed; i < started; i++ {
+		res := <-resCh
+		if res.err == nil {
+			return res.data, nil
+		}
+		lastErr = res.err
+	}
+
+	return nil, fmt.Errorf("failed to download chunk %s from any node: %v", id, lastErr)
 }
 
 type APIError struct {
@@ -460,7 +519,7 @@ func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inode", nil)
+	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/inode", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -498,7 +557,7 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("PUT", c.metaURL+"/v1/meta/inode/"+inode.ID, nil)
+	req, err := http.NewRequest("PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -532,7 +591,7 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 }
 
 func (c *Client) getInode(id string) (*metadata.Inode, error) {
-	req, err := http.NewRequest("GET", c.metaURL+"/v1/meta/inode/"+id, nil)
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/meta/inode/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -566,7 +625,7 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/meta/inodes", nil)
+	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/inodes", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -675,11 +734,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 
 			nodes, err := c.allocateNodes()
 			if err != nil {
-				if c.dataURL != "" {
-					nodes = []metadata.Node{{Address: c.dataURL}}
-				} else {
-					return fmt.Errorf("allocation failed: %v", err)
-				}
+				return fmt.Errorf("allocation failed: %v", err)
 			}
 
 			if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
@@ -816,7 +871,7 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 
 	go func() {
 		chunkEntry := r.inode.ChunkManifest[idx]
-		ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
+		ct, err := r.client.downloadChunk(context.Background(), chunkEntry.ID, chunkEntry.URLs, r.token)
 		var pt []byte
 		if err == nil {
 			pt, err = crypto.DecryptChunk(r.fileKey, ct)
@@ -901,7 +956,7 @@ func (r *FileReader) read(p []byte) (int, error) {
 
 				// Unlock during network I/O
 				r.mu.Unlock()
-				ct, err := r.client.downloadChunk(chunkEntry.ID, r.token)
+				ct, err := r.client.downloadChunk(context.Background(), chunkEntry.ID, chunkEntry.URLs, r.token)
 				r.mu.Lock()
 
 				if err != nil {
@@ -1034,7 +1089,7 @@ func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768,
 		return gk, nil
 	}
 
-	req, err := http.NewRequest("GET", c.metaURL+"/v1/group/"+groupID+"/private", nil)
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/group/"+groupID+"/private", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1086,7 +1141,7 @@ func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
 		return wp, nil
 	}
 
-	resp, err := c.httpClient.Get(c.metaURL + "/v1/meta/key/world")
+	resp, err := c.httpClient.Get(c.serverURL + "/v1/meta/key/world")
 	if err != nil {
 		return nil, err
 	}
@@ -1115,7 +1170,7 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 		return wp, nil
 	}
 
-	req, err := http.NewRequest("GET", c.metaURL+"/v1/meta/key/world/private", nil)
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/meta/key/world/private", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1166,7 +1221,7 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 
 // GetGroup fetches the group metadata.
 func (c *Client) GetGroup(id string) (*metadata.Group, error) {
-	req, err := http.NewRequest("GET", c.metaURL+"/v1/group/"+id, nil)
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/group/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1219,7 +1274,7 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	}
 
 	data, _ := json.Marshal(reqData)
-	url := c.metaURL + "/v1/group/"
+	url := c.serverURL + "/v1/group/"
 	req, err := http.NewRequest("POST", url, nil)
 	if err != nil {
 		return nil, err
@@ -1286,7 +1341,7 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	group.Members[userID] = true
 
 	data, _ := json.Marshal(group)
-	req, err := http.NewRequest("PUT", c.metaURL+"/v1/group/"+groupID, nil)
+	req, err := http.NewRequest("PUT", c.serverURL+"/v1/group/"+groupID, nil)
 	if err != nil {
 		return err
 	}
@@ -1317,7 +1372,7 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 
 // GetUser fetches the user metadata (including public keys).
 func (c *Client) GetUser(id string) (*metadata.User, error) {
-	req, err := http.NewRequest("GET", c.metaURL+"/v1/user/"+id, nil)
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/user/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1436,7 +1491,7 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	}
 
 	var hReq *http.Request
-	hReq, err = http.NewRequest("POST", c.metaURL+"/v1/meta/setattr", nil)
+	hReq, err = http.NewRequest("POST", c.serverURL+"/v1/meta/setattr", nil)
 	if err != nil {
 		return err
 	}
@@ -1473,7 +1528,7 @@ func (c *Client) Remove(path string) error {
 		return err
 	}
 
-	req, err := http.NewRequest("DELETE", c.metaURL+"/v1/meta/inode/"+inode.ID, nil)
+	req, err := http.NewRequest("DELETE", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
 	if err != nil {
 		return err
 	}
@@ -1497,7 +1552,7 @@ func (c *Client) Remove(path string) error {
 // Requires a valid session and mandatory Layer 7 E2EE (Sealing).
 func (c *Client) PushKeySync(blob *metadata.KeySyncBlob) error {
 	data, _ := json.Marshal(blob)
-	req, err := http.NewRequest("POST", c.metaURL+"/v1/user/keysync", nil)
+	req, err := http.NewRequest("POST", c.serverURL+"/v1/user/keysync", nil)
 	if err != nil {
 		return err
 	}
@@ -1526,7 +1581,7 @@ func (c *Client) PushKeySync(blob *metadata.KeySyncBlob) error {
 // PullKeySync retrieves the encrypted configuration blob from the server.
 // Authenticates using an OIDC JWT.
 func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
-	req, err := http.NewRequest("GET", c.metaURL+"/v1/user/keysync", nil)
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/user/keysync", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1549,3 +1604,5 @@ func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
 	}
 	return &blob, nil
 }
+
+// RefreshNodeRegistry fetches the current node registry from the server.

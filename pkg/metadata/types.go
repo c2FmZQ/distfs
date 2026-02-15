@@ -46,7 +46,8 @@ const (
 // ChunkEntry represents a single chunk of a file and its location.
 type ChunkEntry struct {
 	ID    string   `json:"id"`
-	Nodes []string `json:"nodes"`
+	Nodes []string `json:"nodes"`          // Storage Node IDs
+	URLs  []string `json:"urls,omitempty"` // Public URLs (Resolved by Metadata Server)
 }
 
 // ChunkPage is a pagination structure for storing large file manifests.

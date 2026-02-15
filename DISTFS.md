@@ -187,9 +187,13 @@ The client library implements `io.fs.FS` and `io.fs.File`.
     5.  Return a `File` handle.
 *   `Read(b []byte)`:
     1.  Calculate which Chunk(s) correspond to the requested byte range.
-    2.  Fetch chunk(s) from nearest DataNode (HTTP GET).
-    3.  Decrypt chunk in memory.
-    4.  Copy to `b`.
+    2.  Lookup Chunk IDs and their associated Public URLs in the Inode's `ChunkManifest`.
+    3.  Execute **Staggered Parallel Fetches** (Hedged Requests):
+        *   Initiate a download from the primary node.
+        *   If the download hasn't finished within a 1-second threshold, initiate a parallel fetch from the next replica.
+        *   Repeat until all replicas are exhausted or a download succeeds.
+    4.  Upon the first successful download, cancel all remaining parallel requests for that chunk.
+    5.  Decrypt chunk in memory and copy to `b`.
 
 ### 6.2 REST API
 Communication uses JSON over HTTP/2 (or gRPC).
@@ -209,6 +213,7 @@ Communication uses JSON over HTTP/2 (or gRPC).
     *   **Groups:** `UUID -> Public Keys`.
 *   **User Registration:**
     *   **Federated Identity:** Users must register via `POST /v1/user/register` providing a valid OIDC ID Token (JWT). The server calculates `HMAC(email)` using the internal Cluster Secret and registers the keys against this hash. The email is discarded immediately.
+    *   **Automated Configuration:** The cluster leader is configured with an OIDC Discovery URL. It exposes the necessary authorization and token endpoints to clients via the `/v1/auth/config` endpoint, enabling zero-config onboarding.
 *   **Authentication:**
     *   **Client Auth:** Client authenticates with Metadata Server via Sealed Tokens (signed/encrypted) proving identity.
     *   **Chunk Access:** Client authenticates with Data Nodes via Signed Capability Tokens issued by Metadata Server.
