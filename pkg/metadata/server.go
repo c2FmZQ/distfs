@@ -66,6 +66,13 @@ type Server struct {
 	requestNonceCache map[string]time.Time
 	requestNonceMu    sync.Mutex
 
+	// Request Batching
+	batchMu      sync.Mutex
+	batchQueue   []*LogCommand
+	batchResps   []chan interface{} // Corresponding channels for batchQueue
+	batchTimer   *time.Timer
+	batchApplyCh chan batchRequest
+
 	replMonitor *ReplicationMonitor
 	gcWorker    *GCWorker
 	keyWorker   *KeyRotationWorker
@@ -78,10 +85,16 @@ type Server struct {
 	stopCh     chan struct{}
 }
 
+type batchRequest struct {
+	cmds  []*LogCommand
+	resps []chan interface{}
+}
+
 type challengeEntry struct {
 	UserID    string
 	CreatedAt time.Time
 }
+
 
 // NewServer creates a new Metadata Server.
 func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
@@ -101,11 +114,16 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 		stopCh:              make(chan struct{}),
+		batchQueue:          make([]*LogCommand, 0),
+		batchResps:          make([]chan interface{}, 0),
+		batchApplyCh:        make(chan batchRequest),
 	}
 
 	if oidcDiscoveryURL != "" {
 		go s.discoverOIDC(oidcDiscoveryURL)
 	}
+
+	go s.batchProcessor()
 
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
@@ -143,6 +161,54 @@ func (s *Server) discoverOIDC(discoveryURL string) {
 		case <-s.stopCh:
 			return
 		}
+	}
+}
+
+func (s *Server) batchProcessor() {
+	for {
+		select {
+		case req := <-s.batchApplyCh:
+			s.applyBatch(req)
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *Server) applyBatch(req batchRequest) {
+	// 1. Marshal the batch
+	data, err := json.Marshal(req.cmds)
+	if err != nil {
+		log.Printf("Failed to marshal batch: %v", err)
+		for _, ch := range req.resps {
+			ch <- err
+		}
+		return
+	}
+
+	// 2. Apply single Raft log
+	cmd := LogCommand{Type: CmdBatch, Data: data}
+	f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		for _, ch := range req.resps {
+			ch <- err
+		}
+		return
+	}
+
+	// 3. Distribute results
+	results, ok := f.Response().([]interface{})
+	if !ok || len(results) != len(req.resps) {
+		log.Printf("Batch result mismatch: got %d results for %d requests", len(results), len(req.resps))
+		err := fmt.Errorf("internal batch error")
+		for _, ch := range req.resps {
+			ch <- err
+		}
+		return
+	}
+
+	for i, res := range results {
+		req.resps[i] <- res
 	}
 }
 
@@ -1694,15 +1760,36 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 		return nil, fmt.Errorf("not leader")
 	}
 
-	cmd := LogCommand{Type: cmdType, Data: data}
-	b, _ := json.Marshal(cmd)
+	cmd := &LogCommand{Type: cmdType, Data: data}
+	respCh := make(chan interface{}, 1)
 
-	f := s.raft.Apply(b, 5*time.Second)
-	if err := f.Error(); err != nil {
-		return nil, err
+	s.batchMu.Lock()
+	s.batchQueue = append(s.batchQueue, cmd)
+	s.batchResps = append(s.batchResps, respCh)
+
+	if s.batchTimer == nil {
+		s.batchTimer = time.AfterFunc(2*time.Millisecond, func() {
+			s.batchMu.Lock()
+			if len(s.batchQueue) > 0 {
+				req := batchRequest{
+					cmds:  s.batchQueue,
+					resps: s.batchResps,
+				}
+				s.batchQueue = make([]*LogCommand, 0)
+				s.batchResps = make([]chan interface{}, 0)
+				s.batchTimer = nil
+				s.batchMu.Unlock()
+				s.batchApplyCh <- req
+			} else {
+				s.batchTimer = nil
+				s.batchMu.Unlock()
+			}
+		})
 	}
+	s.batchMu.Unlock()
 
-	resp := f.Response()
+	// Wait for result
+	resp := <-respCh
 	if err, ok := resp.(error); ok && err != nil {
 		return nil, err
 	}

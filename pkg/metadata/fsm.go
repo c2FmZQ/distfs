@@ -157,6 +157,7 @@ const (
 	CmdRotateKey       CommandType = 18
 	CmdInitWorld       CommandType = 19
 	CmdStoreKeySync    CommandType = 20
+	CmdBatch           CommandType = 21
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -264,8 +265,64 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return fsm.applyInitWorld(cmd.Data)
 	case CmdStoreKeySync:
 		return fsm.applyStoreKeySync(cmd.Data)
+	case CmdBatch:
+		return fsm.applyBatch(cmd.Data)
 	}
 	return fmt.Errorf("unknown command")
+}
+
+func (fsm *MetadataFSM) applyBatch(data []byte) interface{} {
+	var cmds []LogCommand
+	if err := json.Unmarshal(data, &cmds); err != nil {
+		return err
+	}
+
+	results := make([]interface{}, len(cmds))
+	for i, cmd := range cmds {
+		switch cmd.Type {
+		case CmdCreateInode:
+			results[i] = fsm.applyCreateInode(cmd.Data)
+		case CmdUpdateInode:
+			results[i] = fsm.applyUpdateInode(cmd.Data)
+		case CmdDeleteInode:
+			results[i] = fsm.applyDeleteInode(cmd.Data)
+		case CmdRegisterNode:
+			results[i] = fsm.applyRegisterNode(cmd.Data)
+		case CmdCreateUser:
+			results[i] = fsm.applyCreateUser(cmd.Data)
+		case CmdCreateGroup:
+			results[i] = fsm.applyCreateGroup(cmd.Data)
+		case CmdUpdateGroup:
+			results[i] = fsm.applyUpdateGroup(cmd.Data)
+		case CmdAddChild:
+			results[i] = fsm.applyAddChild(cmd.Data)
+		case CmdRemoveChild:
+			results[i] = fsm.applyRemoveChild(cmd.Data)
+		case CmdAddChunkReplica:
+			results[i] = fsm.applyAddChunkReplica(cmd.Data)
+		case CmdRename:
+			results[i] = fsm.applyRename(cmd.Data)
+		case CmdSetAttr:
+			results[i] = fsm.applySetAttr(cmd.Data)
+		case CmdLink:
+			results[i] = fsm.applyLink(cmd.Data)
+		case CmdGCRemove:
+			results[i] = fsm.applyGCRemove(cmd.Data)
+		case CmdInitSecret:
+			results[i] = fsm.applyInitSecret(cmd.Data)
+		case CmdSetUserQuota:
+			results[i] = fsm.applySetUserQuota(cmd.Data)
+		case CmdRotateKey:
+			results[i] = fsm.applyRotateKey(cmd.Data)
+		case CmdInitWorld:
+			results[i] = fsm.applyInitWorld(cmd.Data)
+		case CmdStoreKeySync:
+			results[i] = fsm.applyStoreKeySync(cmd.Data)
+		default:
+			results[i] = fmt.Errorf("unknown batch command")
+		}
+	}
+	return results
 }
 
 func (fsm *MetadataFSM) applyCreateInode(data []byte) interface{} {
