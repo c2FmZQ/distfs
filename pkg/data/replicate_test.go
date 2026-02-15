@@ -102,3 +102,83 @@ func TestReplicateEndpoint(t *testing.T) {
 		t.Error("Node 1 missing replicated chunk")
 	}
 }
+
+func TestParallelReplication(t *testing.T) {
+	servers := make([]*httptest.Server, 4)
+	stores := make([]*DiskStore, 4)
+
+	for i := 0; i < 4; i++ {
+		tmpDir := t.TempDir()
+		st, _ := createTestStorage(t, tmpDir)
+		store, _ := NewDiskStore(st)
+		stores[i] = store
+		server := NewServer(store, nil, nil)
+		ts := httptest.NewServer(server)
+		servers[i] = ts
+		defer ts.Close()
+	}
+
+	content := []byte("parallel fan-out content")
+	h := sha256.Sum256(content)
+	chunkID := hex.EncodeToString(h[:])
+
+	replicas := fmt.Sprintf("%s,%s,%s", servers[1].URL, servers[2].URL, servers[3].URL)
+	url := fmt.Sprintf("%s/v1/data/%s?replicas=%s", servers[0].URL, chunkID, replicas)
+
+	req, _ := http.NewRequest("PUT", url, bytes.NewReader(content))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Expected 201, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	for i := 0; i < 4; i++ {
+		has, _ := stores[i].HasChunk(chunkID)
+		if !has {
+			t.Errorf("Node %d missing chunk", i)
+		}
+	}
+}
+
+func TestParallelReplicationFailure(t *testing.T) {
+	servers := make([]*httptest.Server, 3)
+	stores := make([]*DiskStore, 3)
+
+	for i := 0; i < 3; i++ {
+		tmpDir := t.TempDir()
+		st, _ := createTestStorage(t, tmpDir)
+		store, _ := NewDiskStore(st)
+		stores[i] = store
+		server := NewServer(store, nil, nil)
+		ts := httptest.NewServer(server)
+		servers[i] = ts
+		defer ts.Close()
+	}
+
+	servers[2].Close()
+
+	content := []byte("failure test content")
+	h := sha256.Sum256(content)
+	chunkID := hex.EncodeToString(h[:])
+
+	replicas := fmt.Sprintf("%s,%s", servers[1].URL, servers[2].URL)
+	url := fmt.Sprintf("%s/v1/data/%s?replicas=%s", servers[0].URL, chunkID, replicas)
+
+	req, _ := http.NewRequest("PUT", url, bytes.NewReader(content))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT request itself failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("Expected 502, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	has0, _ := stores[0].HasChunk(chunkID)
+	if !has0 {
+		t.Error("Node 0 should have the chunk even if replication failed")
+	}
+}

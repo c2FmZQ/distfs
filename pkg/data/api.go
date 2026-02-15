@@ -192,16 +192,24 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id stri
 		return
 	}
 
-	target := req.Targets[0]
-	remaining := ""
-	if len(req.Targets) > 1 {
-		remaining = strings.Join(req.Targets[1:], ",")
+	// Parallel Fan-out
+	token := r.Header.Get("Authorization")
+	errCh := make(chan error, len(req.Targets))
+	for _, target := range req.Targets {
+		go func(t string) {
+			errCh <- s.replicate(id, t, "", token)
+		}(target)
 	}
 
-	// Propagate auth
-	token := r.Header.Get("Authorization")
-	if err := s.replicate(id, target, remaining, token); err != nil {
-		http.Error(w, fmt.Sprintf("replication failed: %v", err), http.StatusBadGateway)
+	var errs []string
+	for i := 0; i < len(req.Targets); i++ {
+		if err := <-errCh; err != nil {
+			errs = append(errs, err.Error())
+		}
+	}
+
+	if len(errs) > 0 {
+		http.Error(w, fmt.Sprintf("replication failed: %s", strings.Join(errs, "; ")), http.StatusBadGateway)
 		return
 	}
 
@@ -224,12 +232,24 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 	replicas := r.URL.Query().Get("replicas")
 	if replicas != "" {
 		targets := strings.Split(replicas, ",")
-		nextTarget := targets[0]
-		remaining := strings.Join(targets[1:], ",")
-
 		token := r.Header.Get("Authorization")
-		if err := s.replicate(id, nextTarget, remaining, token); err != nil {
-			http.Error(w, fmt.Sprintf("replication failed: %v", err), http.StatusBadGateway)
+
+		errCh := make(chan error, len(targets))
+		for _, target := range targets {
+			go func(t string) {
+				errCh <- s.replicate(id, t, "", token)
+			}(target)
+		}
+
+		var errs []string
+		for i := 0; i < len(targets); i++ {
+			if err := <-errCh; err != nil {
+				errs = append(errs, err.Error())
+			}
+		}
+
+		if len(errs) > 0 {
+			http.Error(w, fmt.Sprintf("replication failed: %s", strings.Join(errs, "; ")), http.StatusBadGateway)
 			return
 		}
 	}
