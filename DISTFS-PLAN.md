@@ -323,4 +323,23 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Refactor `downloadChunk` to implement staggered parallel fetches (1s delay).
     *   **Action:** Implement immediate cancellation of pending replicas upon first success.
     *   **Action:** Remove client-side node cache and registry refresh logic.
+
+---
+
+## Phase 22: Performance Benchmarking
+**Goal:** Measure and optimize system throughput, latency, and resiliency under load.
+
+*   **Step 22.1: Benchmarking Tool (`distfs-bench`)**
+    *   **Action:** Implement a dedicated benchmarking binary in `cmd/distfs-bench`.
+    *   **Action:** Support metadata-only modes (mkdir/ls/rm) to stress the Raft consensus layer.
+    *   **Action:** Support data modes (put/get) with configurable file sizes (1KB to 1GB).
+    *   **Action:** Implement concurrent workers with latency histogram reporting (P50, P95, P99).
+*   **Step 22.2: Large Scale Cluster Simulation**
+    *   **Action:** Create `docker-compose.bench.yml` for a 3-node cluster with resource limits.
+    *   **Action:** Use a dedicated benchmark runner container to isolate client-side crypto CPU usage.
+*   **Step 22.3: "Grey Failure" Latency Analysis**
+    *   **Action:** Benchmark read performance while injecting network latency (e.g., 2s) into a single node.
+    *   **Action:** Quantify the efficiency of Phase 21 hedged requests in masking tail latency.
+*   **Step 22.4: FUSE Performance Profiling**
+    *   **Action:** Run `fio` against a `distfs-fuse` mount point to measure POSIX overhead.
     

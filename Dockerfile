@@ -8,6 +8,7 @@ COPY bin/storage-node /bin/storage-node
 COPY bin/distfs /bin/distfs
 COPY bin/distfs-fuse /bin/distfs-fuse
 COPY bin/test-auth /bin/test-auth
+COPY bin/distfs-bench /bin/distfs-bench
 COPY scripts/test-e2e.sh /bin/test-e2e.sh
 COPY scripts/test-fuse.sh /bin/test-fuse.sh
 COPY scripts/test-ha.sh /bin/test-ha.sh
@@ -19,7 +20,8 @@ COPY scripts/test-writable.sh /bin/test-writable.sh
 COPY scripts/test-group.sh /bin/test-group.sh
 COPY scripts/test-keysync-e2e.sh /bin/test-keysync-e2e.sh
 COPY scripts/test-hedged-reads.sh /bin/test-hedged-reads.sh
+COPY scripts/benchmark.sh /bin/benchmark.sh
 COPY scripts/test-all-e2e.sh /bin/test-all-e2e.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-writable.sh /bin/test-group.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-all-e2e.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-writable.sh /bin/test-group.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/benchmark.sh /bin/test-all-e2e.sh
 
 ENTRYPOINT ["/bin/storage-node"]

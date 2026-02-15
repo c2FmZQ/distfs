@@ -118,7 +118,7 @@ func NewClient(serverAddr string) *Client {
 		serverURL: serverAddr,
 		httpClient: &http.Client{
 			Transport: t,
-			Timeout:   30 * time.Second,
+			Timeout:   5 * time.Minute,
 		},
 		keyCache:  make(map[string][]byte),
 		keyMu:     &sync.RWMutex{},
