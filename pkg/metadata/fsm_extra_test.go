@@ -170,17 +170,11 @@ func TestFSM_Rename(t *testing.T) {
 		}
 
 		// Inode links should be updated
-
 		var f1 Inode
-
 		json.Unmarshal(inodes.Get([]byte("f1")), &f1)
-
 		if f1.Links == nil || !f1.Links["root:file1-moved"] {
-
 			return fmt.Errorf("f1 links not updated correctly: %+v", f1.Links)
-
 		}
-
 		return nil
 
 	})

@@ -1796,6 +1796,7 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 	if s.batchTimer == nil {
 		s.batchTimer = time.AfterFunc(2*time.Millisecond, func() {
 			s.batchMu.Lock()
+			defer s.batchMu.Unlock()
 			if len(s.batchQueue) > 0 {
 				req := batchRequest{
 					cmds:  s.batchQueue,
@@ -1804,11 +1805,9 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 				s.batchQueue = make([]*LogCommand, 0)
 				s.batchResps = make([]chan interface{}, 0)
 				s.batchTimer = nil
-				s.batchMu.Unlock()
 				s.batchApplyCh <- req
 			} else {
 				s.batchTimer = nil
-				s.batchMu.Unlock()
 			}
 		})
 	}
@@ -1986,14 +1985,23 @@ func (s *Server) sessionCleanupWorker() {
 	for {
 		select {
 		case <-ticker.C:
-			s.sessionKeyMu.Lock()
+			s.sessionKeyMu.RLock()
+			var expired []string
 			now := time.Now().Unix()
 			for token, entry := range s.sessionKeyCache {
 				if entry.expiry < now {
-					delete(s.sessionKeyCache, token)
+					expired = append(expired, token)
 				}
 			}
-			s.sessionKeyMu.Unlock()
+			s.sessionKeyMu.RUnlock()
+
+			if len(expired) > 0 {
+				s.sessionKeyMu.Lock()
+				for _, token := range expired {
+					delete(s.sessionKeyCache, token)
+				}
+				s.sessionKeyMu.Unlock()
+			}
 		case <-s.stopCh:
 			return
 		}

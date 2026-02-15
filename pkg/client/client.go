@@ -937,6 +937,9 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 						break
 					}
 				}
+				if parentID == "" {
+					return nil, fmt.Errorf("inode %s has no valid parent links", id)
+				}
 			}
 		}
 	}
