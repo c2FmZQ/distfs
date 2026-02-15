@@ -2,12 +2,9 @@
 package main
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"flag"
 	"fmt"
-	"io"
-	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -31,7 +28,7 @@ type fileInfo struct {
 
 type metrics struct {
 	ops      uint64
-	bytes    uint64
+	bytes    int64
 	failures uint64
 	files    sync.Map // path -> fileInfo
 }
@@ -65,9 +62,8 @@ func main() {
 			case <-ticker.C:
 				elapsed := time.Since(start)
 				ops := atomic.LoadUint64(&m.ops)
-				throughput := float64(atomic.LoadUint64(&m.bytes)) / 1024 / 1024 / elapsed.Seconds()
-				fmt.Printf("[%v] Ops: %d, Failures: %d, Speed: %.2f MB/s
-", elapsed.Truncate(time.Second), ops, atomic.LoadUint64(&m.failures), throughput)
+				throughput := float64(atomic.LoadInt64(&m.bytes)) / 1024 / 1024 / elapsed.Seconds()
+				fmt.Printf("[%v] Ops: %d, Failures: %d, Speed: %.2f MB/s\n", elapsed.Truncate(time.Second), ops, atomic.LoadUint64(&m.failures), throughput)
 			case <-ctx_done:
 				return
 			}
@@ -75,17 +71,11 @@ func main() {
 	}()
 
 	wg.Wait()
-	fmt.Printf("
---- Final Report ---
-")
-	fmt.Printf("Total Time: %v
-", time.Since(start))
-	fmt.Printf("Total Ops:  %d
-", atomic.LoadUint64(&m.ops))
-	fmt.Printf("Failures:   %d
-", atomic.LoadUint64(&m.failures))
-	fmt.Printf("Avg Speed:  %.2f MB/s
-", float64(atomic.LoadUint64(&m.bytes))/1024/1024/time.Since(start).Seconds())
+	fmt.Printf("\n--- Final Report ---\n")
+	fmt.Printf("Total Time: %v\n", time.Since(start))
+	fmt.Printf("Total Ops:  %d\n", atomic.LoadUint64(&m.ops))
+	fmt.Printf("Failures:   %d\n", atomic.LoadUint64(&m.failures))
+	fmt.Printf("Avg Speed:  %.2f MB/s\n", float64(atomic.LoadInt64(&m.bytes))/1024/1024/time.Since(start).Seconds())
 }
 
 func worker(id int, base string, done chan struct{}, m *metrics) {
@@ -99,27 +89,35 @@ func worker(id int, base string, done chan struct{}, m *metrics) {
 			return
 		default:
 			op := rng.Intn(100)
+			performed := false
 			switch {
 			case op < 40: // Write (40%)
-				doWrite(rng, workerDir, m)
+				// Check total size
+				if atomic.LoadInt64(&m.bytes) < *maxSize {
+					doWrite(rng, workerDir, m)
+					performed = true
+				} else {
+					// Size limit reached, use randomized sleep to prevent synchronized wake-ups
+					time.Sleep(time.Duration(rng.Intn(500)) * time.Millisecond)
+				}
 			case op < 70: // Read & Verify (30%)
 				doRead(rng, m)
+				performed = true
 			case op < 85: // Rename/Link (15%)
 				doMetadata(rng, workerDir, m)
+				performed = true
 			default: // Delete (15%)
 				doDelete(rng, m)
+				performed = true
 			}
-			atomic.AddUint64(&m.ops, 1)
+			if performed {
+				atomic.AddUint64(&m.ops, 1)
+			}
 		}
 	}
 }
 
 func doWrite(rng *rand.Rand, base string, m *metrics) {
-	// Check total size
-	if atomic.LoadUint64(&m.bytes) >= uint64(*maxSize) {
-		return
-	}
-
 	name := fmt.Sprintf("file-%d", rng.Int63())
 	path := filepath.Join(base, name)
 	size := rng.Int63n(10 * 1024 * 1024) // Up to 10MB
@@ -127,13 +125,14 @@ func doWrite(rng *rand.Rand, base string, m *metrics) {
 	rng.Read(data)
 
 	if err := os.WriteFile(path, data, 0644); err != nil {
+		fmt.Printf("WRITE FAILURE: %v\n", err)
 		atomic.AddUint64(&m.failures, 1)
 		return
 	}
 
 	hash := sha256.Sum256(data)
 	m.files.Store(path, fileInfo{path: path, hash: hash, size: size})
-	atomic.AddUint64(&m.bytes, uint64(size))
+	atomic.AddInt64(&m.bytes, size)
 }
 
 func doRead(rng *rand.Rand, m *metrics) {
@@ -151,13 +150,13 @@ func doRead(rng *rand.Rand, m *metrics) {
 
 	data, err := os.ReadFile(target.path)
 	if err != nil {
+		fmt.Printf("READ FAILURE: %s: %v\n", target.path, err)
 		atomic.AddUint64(&m.failures, 1)
 		return
 	}
 
 	if sha256.Sum256(data) != target.hash {
-		fmt.Printf("INTEGRITY FAILURE: %s
-", target.path)
+		fmt.Printf("INTEGRITY FAILURE: %s\n", target.path)
 		atomic.AddUint64(&m.failures, 1)
 	}
 }
@@ -185,12 +184,14 @@ func doMetadata(rng *rand.Rand, base string, m *metrics) {
 			target.path = newPath
 			m.files.Store(newPath, target)
 		} else {
+			fmt.Printf("RENAME FAILURE: %v\n", err)
 			atomic.AddUint64(&m.failures, 1)
 		}
 	} else { // Link
 		if err := os.Link(target.path, newPath); err == nil {
 			m.files.Store(newPath, fileInfo{path: newPath, hash: target.hash, size: target.size})
 		} else {
+			fmt.Printf("LINK FAILURE: %v\n", err)
 			atomic.AddUint64(&m.failures, 1)
 		}
 	}
@@ -209,10 +210,15 @@ func doDelete(rng *rand.Rand, m *metrics) {
 		return
 	}
 
+	var sz int64
+	fi, err := os.Stat(path)
+	if err == nil {
+		sz = fi.Size()
+	}
 	if err := os.Remove(path); err == nil {
 		m.files.Delete(path)
+		atomic.AddInt64(&m.bytes, -sz)
 	} else {
-		// Might be a directory if mkdir was used, or already deleted
 		if !os.IsNotExist(err) {
 			atomic.AddUint64(&m.failures, 1)
 		}

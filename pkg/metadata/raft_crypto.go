@@ -19,7 +19,7 @@ import (
 	"fmt"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/hashicorp/raft"
-	"github.com/hashicorp/raft-boltdb"
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
 
 // EncryptedLogStore wraps a LogStore with encryption.

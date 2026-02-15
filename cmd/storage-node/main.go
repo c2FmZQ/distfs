@@ -248,7 +248,8 @@ func main() {
 				if rn.ClientTLSConfig != nil {
 					protocol = "https"
 				}
-				target := protocol + "://localhost:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
+				// Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
+				target := protocol + "://127.0.0.1:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
 
 				req, _ := http.NewRequest("POST", target, bytes.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")
@@ -263,14 +264,14 @@ func main() {
 						Transport: &http.Transport{
 							TLSClientConfig: rn.ClientTLSConfig,
 						},
-						Timeout: 10 * time.Second,
+						Timeout: 60 * time.Second,
 					}
 				}
 
 				resp, err := client.Do(req)
 				if err != nil {
-					log.Printf("Heartbeat failed: %v", err)
-				} else {
+					log.Printf("Heartbeat failed to %s: %v", target, err)
+				} else if resp != nil {
 					resp.Body.Close()
 				}
 			}

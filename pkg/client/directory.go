@@ -15,6 +15,7 @@
 package client
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -227,22 +228,31 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
 	data, _ := json.Marshal(update)
-	req, _ := http.NewRequest("PUT", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, nil, fmt.Errorf("auth failed: %w", err)
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return nil, nil, err
-	}
+	err = c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
 
-	resp, err := c.httpClient.Do(req)
+		req, _ := http.NewRequest("PUT", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
+		if err := c.authenticateRequest(req); err != nil {
+			return fmt.Errorf("auth failed: %w", err)
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, nil, fmt.Errorf("add child failed: %d %s", resp.StatusCode, string(b))
 	}
 	return newInode, newKey, nil
 }
@@ -285,33 +295,37 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 		NewName:     encNewName,
 	}
 	data, _ := json.Marshal(req)
+	return c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
 
-	hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/rename", nil)
-	if err != nil {
-		return err
-	}
-	if err := c.authenticateRequest(hReq); err != nil {
-		return err
-	}
-	if err := c.sealBody(hReq, data); err != nil {
-		return err
-	}
+		hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/rename", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(hReq, data); err != nil {
+			return err
+		}
 
-	resp, err := c.httpClient.Do(hReq)
-	if err != nil {
-		return err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
+		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return fmt.Errorf("rename failed: %d %s", resp.StatusCode, string(b))
-	}
-	return nil
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
 }
 
 // RemoveEntry deletes a directory entry.
@@ -337,32 +351,37 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	update := metadata.ChildUpdate{ParentID: parentID, Name: encName}
 	data, _ := json.Marshal(update)
 
-	req, err := http.NewRequest("DELETE", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
-	if err != nil {
-		return err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return err
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return err
-	}
+	return c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
+		req, err := http.NewRequest("DELETE", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return fmt.Errorf("remove entry failed: %d %s", resp.StatusCode, string(b))
-	}
-	return nil
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
 }
 
 // Link creates a hard link.
@@ -409,34 +428,38 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 	}
 	data, _ := json.Marshal(req)
 
-	hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/link", nil)
-	if err != nil {
-		return err
-	}
-	if err := c.authenticateRequest(hReq); err != nil {
-		return err
-	}
-	if err := c.sealBody(hReq, data); err != nil {
-		return err
-	}
+	return c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
 
-	resp, err := c.httpClient.Do(hReq)
-	if err != nil {
-		return err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
+		hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/link", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(hReq, data); err != nil {
+			return err
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return fmt.Errorf("link failed: %d %s", resp.StatusCode, string(b))
-	}
-	return nil
+		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
 }
-
 func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
 	path = strings.Trim(path, "/")
 	if path == "" {

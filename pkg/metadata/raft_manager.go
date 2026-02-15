@@ -29,7 +29,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
 	"github.com/hashicorp/raft"
-	raftboltdb "github.com/hashicorp/raft-boltdb"
+	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
 
 // RaftNode wraps the Hashicorp Raft instance and its dependencies.
@@ -161,6 +161,9 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	fsm.OnSnapshot = func() {
 		kr.Rotate()
 		st.SaveDataFile(keyRingName, KeyRingData{Bytes: kr.Marshal()})
+		// Note: Trust state is persisted only during snapshots to optimize I/O performance.
+		// Newly registered nodes are trusted in-memory until then.
+		fsm.saveTrustState()
 	}
 
 	r, err = raft.NewRaft(config, fsm, logStore, stableStore, snapStore, transport)

@@ -18,10 +18,24 @@ echo "--- Starting 15-Minute FUSE POSIX Load Test ---"
 rm -f /tmp/fuse-load-config.json
 AUTH_URL="http://test-auth:8080"
 SERVER_URL="http://storage-node-1:8080"
+
+# Wait for auth server
+echo "Waiting for test-auth..."
+until wget -qO- "$AUTH_URL/mint?email=fuse-load@example.com" > /dev/null 2>&1; do
+    sleep 1
+done
 JWT=$(wget -qO- "$AUTH_URL/mint?email=fuse-load@example.com")
 
 export DISTFS_PASSWORD="loadpass"
-/bin/distfs init --server "$SERVER_URL" --jwt "$JWT" --config /tmp/fuse-load-config.json
+
+# Wait for storage node
+echo "Waiting for storage-node-1..."
+until wget -qO- "$SERVER_URL/v1/meta/key" > /dev/null 2>&1; do
+    sleep 1
+done
+echo "Server ready."
+
+/bin/distfs -config /tmp/fuse-load-config.json init --new -server "$SERVER_URL" -jwt "$JWT"
 
 # 2. Mount
 echo "Mounting DistFS to $MOUNT_POINT..."

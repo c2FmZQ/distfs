@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -53,10 +52,11 @@ func (f *FS) Root() (fs.Node, error) {
 
 // Dir implements both fs.Node and fs.Handle for directories.
 type Dir struct {
-	fs    *FS
-	inode *metadata.Inode
-	key   []byte
-	mu    sync.Mutex
+	fs         *FS
+	inode      *metadata.Inode
+	key        []byte
+	mu         sync.Mutex
+	lastUpdate time.Time
 }
 
 var _ fs.Node = (*Dir)(nil)
@@ -86,9 +86,12 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	log.Printf("FUSE Lookup: %s", name)
 	d.mu.Lock()
-	// Refetch inode to see new children
-	if updated, err := d.fs.client.GetInode(d.inode.ID); err == nil {
-		d.inode = updated
+	// Freshness check: only refetch if older than 1s
+	if time.Since(d.lastUpdate) > 1*time.Second {
+		if updated, err := d.fs.client.GetInode(d.inode.ID); err == nil {
+			d.inode = updated
+			d.lastUpdate = time.Now()
+		}
 	}
 
 	mac := hmac.New(sha256.New, d.key)
@@ -104,12 +107,12 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 	inode, err := d.fs.client.GetInode(childID)
 	if err != nil {
-		return nil, syscall.EIO
+		return nil, mapError(err)
 	}
 
 	key, err := d.fs.client.UnlockInode(inode)
 	if err != nil {
-		return nil, syscall.EACCES
+		return nil, mapError(err)
 	}
 
 	if inode.Type == metadata.DirType {
@@ -141,7 +144,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	inodes, err := d.fs.client.GetInodes(ids)
 	if err != nil {
 		log.Printf("FUSE ReadDirAll: batch fetch failed: %v", err)
-		return nil, syscall.EIO
+		return nil, mapError(err)
 	}
 
 	var dirents []fuse.Dirent
@@ -173,7 +176,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), d.inode.GroupID)
 	if err != nil {
 		log.Printf("FUSE Create failed: %v", err)
-		return nil, nil, syscall.EIO
+		return nil, nil, mapError(err)
 	}
 	f := &File{fs: d.fs, inode: inode, key: key}
 	h, err := f.Open(ctx, nil, nil)
@@ -191,7 +194,7 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), d.inode.GroupID)
 	if err != nil {
 		log.Printf("FUSE Mkdir failed: %v", err)
-		return nil, syscall.EIO
+		return nil, mapError(err)
 	}
 	return &Dir{fs: d.fs, inode: inode, key: key}, nil
 }
@@ -202,7 +205,7 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	err := d.fs.client.RenameRaw(d.inode.ID, d.key, req.OldName, targetDir.inode.ID, targetDir.key, req.NewName)
 	if err != nil {
 		log.Printf("FUSE Rename failed: %v", err)
-		return syscall.EIO
+		return mapError(err)
 	}
 	return nil
 }
@@ -212,10 +215,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	err := d.fs.client.RemoveEntryRaw(d.inode.ID, d.key, req.Name)
 	if err != nil {
 		log.Printf("FUSE Remove failed: %v", err)
-		if strings.Contains(err.Error(), "directory not empty") {
-			return syscall.ENOTEMPTY
-		}
-		return syscall.EIO
+		return mapError(err)
 	}
 	return nil
 }
@@ -225,7 +225,7 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, d.inode.GroupID)
 	if err != nil {
 		log.Printf("FUSE Symlink failed: %v", err)
-		return nil, syscall.EIO
+		return nil, mapError(err)
 	}
 	return &File{fs: d.fs, inode: inode, key: key}, nil
 }
@@ -241,7 +241,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	err := d.fs.client.LinkRaw(d.inode.ID, d.key, req.NewName, oldFile.inode.ID)
 	if err != nil {
 		log.Printf("FUSE Link failed: %v", err)
-		return nil, syscall.EIO
+		return nil, mapError(err)
 	}
 	// Update target node's metadata to reflect new nlink
 	if updated, err := d.fs.client.GetInode(oldFile.inode.ID); err == nil {
@@ -302,7 +302,7 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 	}
 	reader, err := f.fs.client.NewReader(f.inode.ID, f.key)
 	if err != nil {
-		return nil, syscall.EIO
+		return nil, mapError(err)
 	}
 	return &FileHandle{file: f, reader: reader}, nil
 }
@@ -329,7 +329,7 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 		data := make([]byte, req.Size)
 		n, err := h.tmp.ReadAt(data, req.Offset)
 		if err != nil && err != io.EOF {
-			return syscall.EIO
+			return mapError(err)
 		}
 		resp.Data = data[:n]
 		return nil
@@ -338,7 +338,7 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 	data := make([]byte, req.Size)
 	n, err := h.reader.ReadAt(data, req.Offset)
 	if err != nil && err != io.EOF {
-		return syscall.EIO
+		return mapError(err)
 	}
 	resp.Data = data[:n]
 	return nil
@@ -352,26 +352,26 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 	if !h.dirty {
 		f, err := os.CreateTemp("", "distfs-write-*")
 		if err != nil {
-			return syscall.EIO
+			return mapError(err)
 		}
 		rc, err := h.file.fs.client.ReadFile(h.file.inode.ID, h.file.key)
 		if err != nil {
 			f.Close()
 			os.Remove(f.Name())
-			return syscall.EIO
+			return mapError(err)
 		}
 		defer rc.Close()
 		if _, err := io.Copy(f, rc); err != nil {
 			f.Close()
 			os.Remove(f.Name())
-			return syscall.EIO
+			return mapError(err)
 		}
 		h.tmp = f
 		h.dirty = true
 	}
 
 	if _, err := h.tmp.WriteAt(req.Data, req.Offset); err != nil {
-		return syscall.EIO
+		return mapError(err)
 	}
 	resp.Size = len(req.Data)
 	return nil
@@ -385,17 +385,17 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		log.Printf("FUSE Flush: committing %s", h.file.inode.ID)
 		info, err := h.tmp.Stat()
 		if err != nil {
-			return syscall.EIO
+			return mapError(err)
 		}
 
 		if _, err := h.tmp.Seek(0, io.SeekStart); err != nil {
-			return syscall.EIO
+			return mapError(err)
 		}
 
 		_, err = h.file.fs.client.WriteFile(h.file.inode.ID, h.tmp, info.Size(), uint32(h.file.inode.Mode))
 		if err != nil {
 			log.Printf("FUSE Flush commit failed: %v", err)
-			return syscall.EIO
+			return mapError(err)
 		}
 		h.dirty = false
 		h.file.inode.Size = uint64(info.Size())
@@ -448,7 +448,7 @@ func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse
 	})
 	if err != nil {
 		log.Printf("FUSE Setattr failed: %v", err)
-		return syscall.EIO
+		return mapError(err)
 	}
 
 	// Update local cache

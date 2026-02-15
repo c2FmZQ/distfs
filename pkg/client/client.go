@@ -25,9 +25,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	mrand "math/rand"
 	"net/http"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -124,6 +126,8 @@ type Client struct {
 	sessionKey    []byte // Cached shared secret for memoization
 	sessionMu     *sync.RWMutex
 	loginMu       *sync.Mutex
+
+	concurrencySem chan struct{}
 }
 
 // NewClient creates a new DistFS client.
@@ -138,13 +142,14 @@ func NewClient(serverAddr string) *Client {
 			Transport: t,
 			Timeout:   5 * time.Minute,
 		},
-		keyCache:  make(map[string]fileMetadata),
-		keyMu:     &sync.RWMutex{},
-		pathCache: make(map[string]pathCacheEntry),
-		pathMu:    &sync.RWMutex{},
-		groupKeys: make(map[string]*mlkem.DecapsulationKey768),
-		sessionMu: &sync.RWMutex{},
-		loginMu:   &sync.Mutex{},
+		keyCache:       make(map[string]fileMetadata),
+		keyMu:          &sync.RWMutex{},
+		pathCache:      make(map[string]pathCacheEntry),
+		pathMu:         &sync.RWMutex{},
+		groupKeys:      make(map[string]*mlkem.DecapsulationKey768),
+		sessionMu:      &sync.RWMutex{},
+		loginMu:        &sync.Mutex{},
+		concurrencySem: make(chan struct{}, 64), // Increased to 64 for higher throughput
 	}
 }
 
@@ -428,39 +433,74 @@ func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 	return io.NopCloser(bytes.NewReader(payload)), nil
 }
 
-func (c *Client) allocateNodes() ([]metadata.Node, error) {
-	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/allocate", nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, err
-	}
-	// Even though body is nil, we want to seal it if possible or at least set the header
-	// Actually, if we want to seal it, we need a payload.
-	// Let's just send an empty JSON object.
-	if err := c.sealBody(req, []byte("{}")); err != nil {
-		return nil, err
-	}
+func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
+	var lastErr error
+	backoff := 100 * time.Millisecond
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
+	for i := 0; i < 5; i++ {
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/allocate", nil)
+		if err != nil {
+			return nil, err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return nil, err
+		}
+		// Even though body is nil, we want to seal it if possible or at least set the header
+		// Actually, if we want to seal it, we need a payload.
+		// Let's just send an empty JSON object.
+		if err := c.sealBody(req, []byte("{}")); err != nil {
+			return nil, err
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("allocate failed: %d", resp.StatusCode)
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			lastErr = err
+			// Check context before sleeping
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff + time.Duration(rng.Int63n(int64(backoff/2)))):
+			}
+			backoff *= 2
+			continue
+		}
+
+		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
+			resp.Body.Close()
+			lastErr = fmt.Errorf("metadata server busy (%d)", resp.StatusCode)
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff + time.Duration(rng.Int63n(int64(backoff/2)))):
+			}
+			backoff *= 2
+			continue
+		}
+
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			lastErr = err
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(backoff + time.Duration(rng.Int63n(int64(backoff/2)))):
+			}
+			backoff *= 2
+			continue
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return nil, &APIError{StatusCode: resp.StatusCode}
+		}
+		var nodes []metadata.Node
+		if err := json.NewDecoder(body).Decode(&nodes); err != nil {
+			return nil, err
+		}
+		return nodes, nil
 	}
-	var nodes []metadata.Node
-	if err := json.NewDecoder(body).Decode(&nodes); err != nil {
-		return nil, err
-	}
-	return nodes, nil
+	return nil, fmt.Errorf("node allocation failed after retries: %w", lastErr)
 }
 
 func (c *Client) issueToken(inodeID string, chunks []string, mode string) (string, error) {
@@ -471,37 +511,46 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 	}
 	data, _ := json.Marshal(reqData)
 
-	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/token", nil)
-	if err != nil {
-		return "", err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return "", err
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return "", err
-	}
+	var token string
+	err := c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return "", err
-	}
-	defer body.Close()
+		req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/token", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return "", fmt.Errorf("issueToken failed: %d %s", resp.StatusCode, string(b))
-	}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
 
-	respBytes, err := io.ReadAll(body)
-	if err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(respBytes), nil
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		respBytes, err := io.ReadAll(body)
+		if err != nil {
+			return err
+		}
+		token = base64.StdEncoding.EncodeToString(respBytes)
+		return nil
+	})
+
+	return token, err
 }
 
 func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, token string) error {
@@ -519,23 +568,29 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 		url += "?replicas=" + strings.Join(replicas, ",")
 	}
 
-	req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
-	}
+	return c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusCreated {
-		return fmt.Errorf("upload failed: %d", resp.StatusCode)
-	}
-	return nil
+		req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusCreated {
+			b, _ := io.ReadAll(resp.Body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
 }
 
 func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, token string) ([]byte, error) {
@@ -543,76 +598,86 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 		return nil, fmt.Errorf("no URLs provided for chunk %s", id)
 	}
 
-	type result struct {
-		data []byte
-		err  error
-	}
+	var data []byte
+	err := c.withRetry(ctx, func() error {
+		type result struct {
+			data []byte
+			err  error
+		}
 
-	resCh := make(chan result, len(urls))
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
+		resCh := make(chan result, len(urls))
+		lctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 
-	var started, consumed int
-	for i, url := range urls {
-		started++
-		if i > 0 {
-			// Staggered start
+		var started, consumed int
+		for i, url := range urls {
+			started++
+			if i > 0 {
+				// Staggered start
+				select {
+				case <-lctx.Done():
+					return lctx.Err()
+				case <-time.After(1 * time.Second):
+				}
+			}
+			go func(targetURL string) {
+				c.acquire()
+				defer c.release()
+
+				req, err := http.NewRequestWithContext(lctx, "GET", targetURL+"/v1/data/"+id, nil)
+				if err != nil {
+					resCh <- result{err: err}
+					return
+				}
+				if token != "" {
+					req.Header.Set("Authorization", "Bearer "+token)
+				}
+
+				resp, err := c.httpClient.Do(req)
+				if err != nil {
+					resCh <- result{err: err}
+					return
+				}
+				defer resp.Body.Close()
+
+				if resp.StatusCode != http.StatusOK {
+					resCh <- result{err: &APIError{StatusCode: resp.StatusCode, Message: "node error"}}
+					return
+				}
+
+				d, err := io.ReadAll(resp.Body)
+				resCh <- result{data: d, err: err}
+			}(url)
+
+			// Check if anyone finished before starting next stagger
 			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(1 * time.Second):
+			case res := <-resCh:
+				consumed++
+				if res.err == nil {
+					data = res.data
+					return nil
+				}
+			default:
 			}
 		}
 
-		go func(targetURL string) {
-			req, err := http.NewRequestWithContext(ctx, "GET", targetURL+"/v1/data/"+id, nil)
-			if err != nil {
-				resCh <- result{err: err}
-				return
-			}
-			if token != "" {
-				req.Header.Set("Authorization", "Bearer "+token)
-			}
-
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				resCh <- result{err: err}
-				return
-			}
-			defer resp.Body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				resCh <- result{err: fmt.Errorf("node %s returned %d", targetURL, resp.StatusCode)}
-				return
-			}
-
-			data, err := io.ReadAll(resp.Body)
-			resCh <- result{data: data, err: err}
-		}(url)
-
-		// Check if anyone finished before starting next stagger
-		select {
-		case res := <-resCh:
-			consumed++
+		// Wait for remaining
+		var lastErr error
+		for i := consumed; i < started; i++ {
+			res := <-resCh
 			if res.err == nil {
-				return res.data, nil
+				data = res.data
+				return nil
 			}
-			// If error, continue loop to start next replica immediately
-		default:
+			lastErr = res.err
 		}
-	}
+		return lastErr
+	})
 
-	// Wait for remaining
-	var lastErr error
-	for i := consumed; i < started; i++ {
-		res := <-resCh
-		if res.err == nil {
-			return res.data, nil
-		}
-		lastErr = res.err
+	if err != nil {
+		return nil, fmt.Errorf("failed to download chunk %s from any node: %w", id, err)
 	}
-
-	return nil, fmt.Errorf("failed to download chunk %s from any node: %v", id, lastErr)
+	return data, nil
 }
 
 type APIError struct {
@@ -624,107 +689,143 @@ func (e *APIError) Error() string {
 	return fmt.Sprintf("api error: %d %s", e.StatusCode, e.Message)
 }
 
+func (e *APIError) ToPOSIX() error {
+	switch e.StatusCode {
+	case http.StatusNotFound:
+		return syscall.ENOENT
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return syscall.EACCES
+	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
+		return syscall.EAGAIN
+	case http.StatusConflict:
+		return syscall.EEXIST
+	default:
+		return syscall.EIO
+	}
+}
+
 func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	data, err := json.Marshal(inode)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/inode", nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, err
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-	}
 
 	var created metadata.Inode
-	if err := json.NewDecoder(body).Decode(&created); err != nil {
+	err = c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/inode", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&created)
+	})
+
+	if err != nil {
 		return nil, err
 	}
 	return &created, nil
 }
-
 func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	data, err := json.Marshal(inode)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, err
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-	}
 
 	var updated metadata.Inode
-	if err := json.NewDecoder(body).Decode(&updated); err != nil {
+	err = c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequest("PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&updated)
+	})
+
+	if err != nil {
 		return nil, err
 	}
 	return &updated, nil
 }
-
 func (c *Client) getInode(id string) (*metadata.Inode, error) {
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/meta/inode/"+id, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-	}
 	var inode metadata.Inode
-	if err := json.NewDecoder(body).Decode(&inode); err != nil {
+	err := c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequest("GET", c.serverURL+"/v1/meta/inode/"+id, nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return json.NewDecoder(body).Decode(&inode)
+	})
+
+	if err != nil {
 		return nil, err
 	}
 	return &inode, nil
@@ -860,14 +961,12 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 
 				token, err := c.issueToken(id, []string{cid}, "W")
 				if err != nil {
-					return fmt.Errorf("token issue failed: %v", err)
+					return fmt.Errorf("token issue failed: %w", err)
 				}
-
-				nodes, err := c.allocateNodes()
+				nodes, err := c.allocateNodes(context.Background())
 				if err != nil {
-					return fmt.Errorf("allocation failed: %v", err)
+					return fmt.Errorf("allocation failed: %w", err)
 				}
-
 				if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
 					return err
 				}
@@ -973,7 +1072,7 @@ type FileReader struct {
 	token           string
 	mu              sync.Mutex
 
-	readAhead   map[int64]readAheadResult
+	readAhead   map[int64]*readAheadResult
 	readAheadMu sync.Mutex
 }
 
@@ -1027,10 +1126,9 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		offset:          0,
 		currentChunkIdx: -1,
 		token:           token,
-		readAhead:       make(map[int64]readAheadResult),
+		readAhead:       make(map[int64]*readAheadResult),
 	}, nil
 }
-
 func (r *FileReader) triggerPrefetch(idx int64) {
 	if idx < 0 || idx >= int64(len(r.inode.ChunkManifest)) {
 		return
@@ -1041,7 +1139,7 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 		r.readAheadMu.Unlock()
 		return
 	}
-	res := readAheadResult{ready: make(chan struct{})}
+	res := &readAheadResult{ready: make(chan struct{})}
 	r.readAhead[idx] = res
 	r.readAheadMu.Unlock()
 
@@ -1053,16 +1151,11 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 			pt, err = crypto.DecryptChunk(r.fileKey, ct)
 		}
 
-		r.readAheadMu.Lock()
-		res := r.readAhead[idx]
 		res.data = pt
 		res.err = err
 		close(res.ready)
-		r.readAhead[idx] = res
-		r.readAheadMu.Unlock()
 	}()
 }
-
 func (r *FileReader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1120,20 +1213,25 @@ func (r *FileReader) read(p []byte) (int, error) {
 			r.readAheadMu.Unlock()
 
 			if exists {
+
 				// Wait for it
+
 				r.mu.Unlock()
+
 				<-res.ready
+
 				r.mu.Lock()
 
-				r.readAheadMu.Lock()
-				res = r.readAhead[chunkIdx]
-				r.readAheadMu.Unlock()
-
 				if res.err != nil {
+
 					return totalRead, res.err
+
 				}
+
 				pt = res.data
+
 			} else {
+
 				if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
 					break
 				}
@@ -1803,6 +1901,70 @@ func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
 		return nil, fmt.Errorf("failed to decode keysync blob: %w", err)
 	}
 	return &blob, nil
+}
+
+func (c *Client) acquire() {
+	c.concurrencySem <- struct{}{}
+}
+
+func (c *Client) release() {
+	<-c.concurrencySem
+}
+
+func (c *Client) withRetry(ctx context.Context, op func() error) error {
+	var lastErr error
+	backoff := 100 * time.Millisecond
+	maxBackoff := 10 * time.Second
+	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+
+	for i := 0; i < 5; i++ {
+		err := op()
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+
+		if !c.isRetryable(err) {
+			return err
+		}
+
+		// Exponential backoff with jitter (optimized PRNG)
+		jitter := time.Duration(rng.Int63n(int64(backoff / 2)))
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(backoff + jitter):
+		}
+
+		backoff *= 2
+		if backoff > maxBackoff {
+			backoff = maxBackoff
+		}
+	}
+	return fmt.Errorf("operation failed after retries: %w", lastErr)
+}
+
+func (c *Client) isRetryable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	// Network errors
+	if strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "eof") {
+		return true
+	}
+	// API errors
+	if apiErr, ok := err.(*APIError); ok {
+		if apiErr.StatusCode == http.StatusServiceUnavailable ||
+			apiErr.StatusCode == http.StatusTooManyRequests ||
+			apiErr.StatusCode == http.StatusInternalServerError {
+			return true
+		}
+	}
+	return false
 }
 
 // RefreshNodeRegistry fetches the current node registry from the server.

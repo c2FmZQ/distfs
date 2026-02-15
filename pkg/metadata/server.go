@@ -1793,25 +1793,42 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 	s.batchQueue = append(s.batchQueue, cmd)
 	s.batchResps = append(s.batchResps, respCh)
 
-	if s.batchTimer == nil {
-		s.batchTimer = time.AfterFunc(2*time.Millisecond, func() {
-			s.batchMu.Lock()
-			defer s.batchMu.Unlock()
-			if len(s.batchQueue) > 0 {
-				req := batchRequest{
-					cmds:  s.batchQueue,
-					resps: s.batchResps,
+	// Trigger immediately if threshold reached
+	const batchThreshold = 50
+	if len(s.batchQueue) >= batchThreshold {
+		if s.batchTimer != nil {
+			s.batchTimer.Stop()
+			s.batchTimer = nil
+		}
+		req := batchRequest{
+			cmds:  s.batchQueue,
+			resps: s.batchResps,
+		}
+		s.batchQueue = make([]*LogCommand, 0)
+		s.batchResps = make([]chan interface{}, 0)
+		s.batchMu.Unlock()
+		s.batchApplyCh <- req
+	} else {
+		if s.batchTimer == nil {
+			s.batchTimer = time.AfterFunc(10*time.Millisecond, func() {
+				s.batchMu.Lock()
+				defer s.batchMu.Unlock()
+				if len(s.batchQueue) > 0 {
+					req := batchRequest{
+						cmds:  s.batchQueue,
+						resps: s.batchResps,
+					}
+					s.batchQueue = make([]*LogCommand, 0)
+					s.batchResps = make([]chan interface{}, 0)
+					s.batchTimer = nil
+					s.batchApplyCh <- req
+				} else {
+					s.batchTimer = nil
 				}
-				s.batchQueue = make([]*LogCommand, 0)
-				s.batchResps = make([]chan interface{}, 0)
-				s.batchTimer = nil
-				s.batchApplyCh <- req
-			} else {
-				s.batchTimer = nil
-			}
-		})
+			})
+		}
+		s.batchMu.Unlock()
 	}
-	s.batchMu.Unlock()
 
 	// Wait for result
 	resp := <-respCh

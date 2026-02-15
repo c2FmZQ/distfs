@@ -558,11 +558,16 @@ func TestFSMRestore(t *testing.T) {
 
 	inode := Inode{ID: "restore-test"}
 	data, _ := json.Marshal(inode)
-	resp := fsm.applyCreateInode(data)
-	if err, ok := resp.(error); ok {
-		t.Fatalf("applyCreateInode failed: %v", err)
+	err = fsm.db.Update(func(tx *bolt.Tx) error {
+		resp := fsm.executeCreateInode(tx, data)
+		if err, ok := resp.(error); ok {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("executeCreateInode failed: %v", err)
 	}
-
 	// Snapshot
 	snap, _ := fsm.Snapshot()
 	var buf bytes.Buffer

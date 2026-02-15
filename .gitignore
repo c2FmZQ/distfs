@@ -4,6 +4,7 @@
 /storage-node
 /test-auth
 *.key
+/*.log
 /data/
 /node*/
 /DISTFS-REPORT.md
