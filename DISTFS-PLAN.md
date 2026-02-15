@@ -343,3 +343,66 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 22.4: FUSE Performance Profiling**
     *   **Action:** Run `fio` against a `distfs-fuse` mount point to measure POSIX overhead.
     
+---
+
+## Phase 23: Client-Side Path Caching
+**Goal:** Reduce path resolution latency from O(Depth) to O(1) for repeated access.
+
+*   **Step 23.1: Path Hint Store**
+    *   **Action:** Implement a thread-safe `PathCache` in `pkg/client` mapping absolute paths to `(InodeID, SymmetricKey)`.
+*   **Step 23.2: Resolution Shortcut**
+    *   **Action:** Update `ResolvePath` to check the cache before initiating directory traversal.
+*   **Step 23.3: Cache Validation (Integrity)**
+    *   **Action:** Store parent ID and name HMAC in the `Inode` struct.
+    *   **Action:** Implement mandatory validation when using a cache hint: verify the target Inode still has the expected parent and name.
+    *   **Action:** Automatically invalidate cache entries on validation failure.
+
+---
+
+## Phase 24: Small File Inlining
+**Goal:** Eliminate storage node round-trips for small files by embedding data in the metadata layer.
+
+*   **Step 24.1: Inode Schema Expansion**
+    *   **Action:** Add `InlineData []byte` field to the `Inode` struct.
+*   **Step 24.2: Inline Write Path**
+    *   **Action:** Update `Client.WriteFile` to store encrypted content directly in `Inode.InlineData` if size is below threshold (e.g., 4KB).
+*   **Step 24.3: Inline Read Path**
+    *   **Action:** Update `Client.ReadFile` to return a buffer from `InlineData` if present, skipping chunk allocation.
+*   **Step 24.4: Eviction Logic**
+    *   **Action:** Implement atomic transition in `MetadataFSM`: when a file grows beyond the inline limit, move data to Data Nodes and clear `InlineData` in a single Raft transaction.
+
+---
+
+## Phase 25: Node-Driven Parallel Replication
+**Goal:** Reduce write latency by parallelizing chunk replication at the primary storage node.
+
+*   **Step 25.1: Parallel Replication Worker**
+    *   **Action:** Update `DataNode` chunk upload handler to initiate replication to all peers in parallel via goroutines.
+*   **Step 25.2: Strict Success Coupling**
+    *   **Action:** Ensure the primary node waits for confirmation from ALL required replicas before returning `201 Created` to the client.
+*   **Step 25.3: Error Propagation**
+    *   **Action:** Return a composite error to the client if any parallel replication leg fails, triggering a standard client retry.
+
+---
+
+## Phase 26: Session Key Memoization
+**Goal:** Reduce cryptographic overhead by reusing established ML-KEM shared secrets.
+
+*   **Step 26.1: Security Context Cache**
+    *   **Action:** Implement a server-side session cache mapping `SessionToken` to the derived symmetric `RequestKey`.
+*   **Step 26.2: Optimized Unsealing**
+    *   **Action:** Update `unsealRequest` middleware to skip ML-KEM decapsulation if a valid session context exists, using cached AES-GCM keys directly.
+*   **Step 26.3: Client-Side Session State**
+    *   **Action:** Update `pkg/client` to cache derived secrets and only perform KEM encapsulation when the session expires or is rejected.
+
+---
+
+## Phase 27: Metadata Request Batching
+**Goal:** Increase metadata throughput by amortizing Raft fsync costs.
+
+*   **Step 27.1: Request Aggregator**
+    *   **Action:** Implement a buffering queue in the `MetadataServer` for incoming Raft mutation requests.
+*   **Step 27.2: Group Commit Logic**
+    *   **Action:** Implement a timed trigger (e.g., 2ms) to collect all pending requests into a single `CmdBatch` Raft log entry.
+*   **Step 27.3: Batch FSM Processing**
+    *   **Action:** Update `MetadataFSM` to iterate through batches and return an array of individual execution results.

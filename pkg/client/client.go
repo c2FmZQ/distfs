@@ -85,6 +85,13 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 	return pk, nil
 }
 
+type pathCacheEntry struct {
+	inodeID  string
+	key      []byte
+	parentID string
+	nameHMAC string
+}
+
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
@@ -97,6 +104,9 @@ type Client struct {
 	serverSignPK []byte
 	keyCache     map[string][]byte
 	keyMu        *sync.RWMutex
+
+	pathCache map[string]pathCacheEntry
+	pathMu    *sync.RWMutex
 
 	worldPublic  *mlkem.EncapsulationKey768
 	worldPrivate *mlkem.DecapsulationKey768
@@ -122,6 +132,8 @@ func NewClient(serverAddr string) *Client {
 		},
 		keyCache:  make(map[string][]byte),
 		keyMu:     &sync.RWMutex{},
+		pathCache: make(map[string]pathCacheEntry),
+		pathMu:    &sync.RWMutex{},
 		groupKeys: make(map[string]*mlkem.DecapsulationKey768),
 		sessionMu: &sync.RWMutex{},
 		loginMu:   &sync.Mutex{},
@@ -211,6 +223,25 @@ func (c *Client) Login() error {
 	c.sessionExpiry = time.Now().Add(55 * time.Minute) // Buffer
 	c.sessionMu.Unlock()
 	return nil
+}
+
+func (c *Client) getPathCache(path string) (pathCacheEntry, bool) {
+	c.pathMu.RLock()
+	defer c.pathMu.RUnlock()
+	entry, ok := c.pathCache[path]
+	return entry, ok
+}
+
+func (c *Client) putPathCache(path string, entry pathCacheEntry) {
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	c.pathCache[path] = entry
+}
+
+func (c *Client) invalidatePathCache(path string) {
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	delete(c.pathCache, path)
 }
 
 func (c *Client) authenticateRequest(req *http.Request) error {
@@ -656,7 +687,7 @@ func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
 	return inodes, nil
 }
 
-func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32, groupID string) error {
+func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
@@ -697,6 +728,8 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		// Assume not found, create new
 		inode = metadata.Inode{
 			ID:            id,
+			ParentID:      parentID,
+			NameHMAC:      nameHMAC,
 			Type:          iType,
 			Mode:          mode,
 			Size:          uint64(size),
@@ -774,12 +807,23 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 	c.keyMu.RUnlock()
 
 	var groupID string
+	var parentID string
+	var nameHMAC string
 	if !ok {
 		if inode, err := c.GetInode(id); err == nil {
 			if key, err := c.UnlockInode(inode); err == nil {
 				fileKey = key
 				groupID = inode.GroupID
+				parentID = inode.ParentID
+				nameHMAC = inode.NameHMAC
 			}
+		}
+	} else {
+		// Even if we have the key, we need metadata if we want to preserve parentID/nameHMAC
+		if inode, err := c.GetInode(id); err == nil {
+			groupID = inode.GroupID
+			parentID = inode.ParentID
+			nameHMAC = inode.NameHMAC
 		}
 	}
 
@@ -790,7 +834,7 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 		}
 	}
 
-	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil, mode, groupID); err != nil {
+	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil, mode, groupID, parentID, nameHMAC); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -1545,6 +1589,7 @@ func (c *Client) Remove(path string) error {
 		b, _ := io.ReadAll(resp.Body)
 		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
+	c.invalidatePathCache(path)
 	return nil
 }
 

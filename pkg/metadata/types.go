@@ -135,6 +135,7 @@ type Inode struct {
 	NLink         uint32            `json:"nlink"`
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 	EncryptedName []byte            `json:"enc_name"`
+	NameHMAC      string            `json:"name_hmac,omitempty"` // HMAC(parentKey, name)
 	Children      map[string]string `json:"children,omitempty"`
 	ChunkManifest []ChunkEntry      `json:"manifest,omitempty"`
 	ChunkPages    []string          `json:"chunk_pages,omitempty"`

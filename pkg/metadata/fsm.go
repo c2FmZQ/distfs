@@ -593,6 +593,8 @@ func (fsm *MetadataFSM) applyLink(data []byte) interface{} {
 
 		// 4. Update Target
 		target.NLink++
+		target.ParentID = req.ParentID
+		target.NameHMAC = req.Name
 		target.Version++
 
 		// 5. Save
@@ -748,6 +750,7 @@ func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
 			var child Inode
 			if err := json.Unmarshal(vChild, &child); err == nil {
 				child.ParentID = req.NewParentID
+				child.NameHMAC = req.NewName
 				child.Version++
 				if err := saveInodeWithPages(tx, &child); err != nil {
 					return err
