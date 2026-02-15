@@ -9,11 +9,11 @@ done
 
 echo "Initializing Owner (user1)..."
 JWT1=$(wget -qO- "http://test-auth:8080/mint?email=user1-public@example.com")
-distfs -use-pinentry=false -config /tmp/u1-public.json init --new -meta http://storage-node-1:8080 -jwt "$JWT1"
+distfs -use-pinentry=false -config /tmp/u1-public.json init --new -server http://storage-node-1:8080 -jwt "$JWT1"
 
 echo "Initializing Reader (user2)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-public@example.com")
-distfs -use-pinentry=false -config /tmp/u2-public.json init --new -meta http://storage-node-1:8080 -jwt "$JWT2"
+distfs -use-pinentry=false -config /tmp/u2-public.json init --new -server http://storage-node-1:8080 -jwt "$JWT2"
 
 echo "User 1: Creating public test dir..."
 until distfs -use-pinentry=false -config /tmp/u1-public.json mkdir /public; do

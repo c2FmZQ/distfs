@@ -18,6 +18,15 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
+// OIDCConfig represents the subset of OpenID Connect configuration needed by clients.
+type OIDCConfig struct {
+	Issuer                      string `json:"issuer"`
+	JWKSURI                     string `json:"jwks_uri"`
+	AuthorizationEndpoint       string `json:"authorization_endpoint,omitempty"`
+	DeviceAuthorizationEndpoint string `json:"device_authorization_endpoint,omitempty"`
+	TokenEndpoint               string `json:"token_endpoint"`
+}
+
 // InodeType represents the file type (File, Directory, Symlink).
 type InodeType uint8
 

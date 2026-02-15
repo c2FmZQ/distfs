@@ -51,11 +51,10 @@ var uiAssets embed.FS
 // Server is the HTTP server for the Metadata Node.
 // It handles client requests and coordinates with the Raft cluster.
 type Server struct {
-	nodeID  string
-	raft    *raft.Raft
-	fsm     *MetadataFSM
-	jwks    *jwks.Remote
-	jwksURL string
+	nodeID string
+	raft   *raft.Raft
+	fsm    *MetadataFSM
+	jwks   *jwks.Remote
 	// nodeKey removed - used for mTLS but not passed to Server for auth anymore
 	signKey *crypto.IdentityKey
 
@@ -73,6 +72,10 @@ type Server struct {
 
 	clientTLSConfig     *tls.Config
 	keyRotationInterval time.Duration
+
+	oidcMu     sync.RWMutex
+	oidcConfig *OIDCConfig
+	stopCh     chan struct{}
 }
 
 type challengeEntry struct {
@@ -81,27 +84,29 @@ type challengeEntry struct {
 }
 
 // NewServer creates a new Metadata Server.
-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
-	if jwksURL != "" {
-		remote.SetIssuers([]jwks.Issuer{{JWKSURI: jwksURL}})
-	}
 
 	s := &Server{
 		nodeID:              nodeID,
 		raft:                r,
 		fsm:                 fsm,
 		jwks:                remote,
-		jwksURL:             jwksURL,
 		signKey:             signKey,
 		raftSecret:          raftSecret,
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
+		stopCh:              make(chan struct{}),
 	}
+
+	if oidcDiscoveryURL != "" {
+		go s.discoverOIDC(oidcDiscoveryURL)
+	}
+
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
 	s.gcWorker = NewGCWorker(s)
@@ -111,8 +116,38 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, jwksURL string, si
 	return s
 }
 
+func (s *Server) discoverOIDC(discoveryURL string) {
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+
+	for {
+		resp, err := http.Get(discoveryURL)
+		if err != nil {
+			log.Printf("OIDC discovery failed: %v", err)
+		} else {
+			var conf OIDCConfig
+			if err := json.NewDecoder(resp.Body).Decode(&conf); err != nil {
+				log.Printf("failed to decode OIDC discovery: %v", err)
+			} else {
+				s.oidcMu.Lock()
+				s.oidcConfig = &conf
+				s.jwks.SetIssuers([]jwks.Issuer{{JWKSURI: conf.JWKSURI}})
+				s.oidcMu.Unlock()
+				log.Printf("OIDC discovery successful for %s", conf.Issuer)
+			}
+			resp.Body.Close()
+		}
+		select {
+		case <-ticker.C:
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
 // Shutdown stops the server and its background workers.
 func (s *Server) Shutdown() {
+	close(s.stopCh)
 	if s.replMonitor != nil {
 		s.replMonitor.Stop()
 	}
@@ -252,6 +287,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.URL.Path == "/v1/login" && r.Method == http.MethodPost {
 		s.handleLogin(w, r)
+		return
+	}
+	if r.URL.Path == "/v1/auth/config" && r.Method == http.MethodGet {
+		s.handleGetAuthConfig(w, r)
 		return
 	}
 	if r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost {
@@ -1809,4 +1848,18 @@ func (s *Server) checkAndInitWorld() {
 	if err := future.Error(); err != nil {
 		log.Printf("Failed to init world identity: %v", err)
 	}
+}
+
+func (s *Server) handleGetAuthConfig(w http.ResponseWriter, r *http.Request) {
+	s.oidcMu.RLock()
+	conf := s.oidcConfig
+	s.oidcMu.RUnlock()
+
+	if conf == nil {
+		http.Error(w, "OIDC configuration not available", http.StatusServiceUnavailable)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(conf)
 }

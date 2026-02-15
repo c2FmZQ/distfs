@@ -9,11 +9,11 @@ done
 
 echo "Initializing user1 (Owner)..."
 JWT1=$(wget -qO- "http://test-auth:8080/mint?email=user1-writable@example.com")
-distfs -use-pinentry=false -config /tmp/u1-writable.json init --new -meta http://storage-node-1:8080 -jwt "$JWT1"
+distfs -use-pinentry=false -config /tmp/u1-writable.json init --new -server http://storage-node-1:8080 -jwt "$JWT1"
 
 echo "Initializing user2 (Collaborator)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-writable@example.com")
-distfs -use-pinentry=false -config /tmp/u2-writable.json init --new -meta http://storage-node-1:8080 -jwt "$JWT2"
+distfs -use-pinentry=false -config /tmp/u2-writable.json init --new -server http://storage-node-1:8080 -jwt "$JWT2"
 
 echo "User 1: Creating world-writable directory..."
 distfs -use-pinentry=false -config /tmp/u1-writable.json mkdir /shared

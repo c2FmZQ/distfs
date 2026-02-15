@@ -39,25 +39,84 @@ func main() {
 	})
 
 	// Mint Token Endpoint
+
 	http.HandleFunc("/mint", func(w http.ResponseWriter, r *http.Request) {
+
 		email := r.URL.Query().Get("email")
+
 		if email == "" {
+
 			email = "test@example.com"
+
 		}
+
 		token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
+
 			"email": email,
-			"iss":   "test-auth-server",
-			"exp":   time.Now().Add(1 * time.Hour).Unix(),
+
+			"iss": "test-auth-server",
+
+			"exp": time.Now().Add(1 * time.Hour).Unix(),
 		})
+
 		token.Header["kid"] = kid
+
 		s, err := token.SignedString(key)
+
 		if err != nil {
+
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+
 			return
+
 		}
+
 		w.Write([]byte(s))
+
+	})
+
+	// Discovery Handler
+
+	http.HandleFunc("/.well-known/openid-configuration", func(w http.ResponseWriter, r *http.Request) {
+
+		host := r.Host
+
+		if host == "" {
+
+			host = "localhost:8080"
+
+		}
+
+		scheme := "http"
+
+		if r.TLS != nil {
+
+			scheme = "https"
+
+		}
+
+		baseURL := scheme + "://" + host
+
+		resp := map[string]string{
+
+			"issuer": "test-auth-server",
+
+			"jwks_uri": baseURL + "/jwks.json",
+
+			"authorization_endpoint": baseURL + "/auth",
+
+			"device_authorization_endpoint": baseURL + "/device_auth",
+
+			"token_endpoint": baseURL + "/token",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		json.NewEncoder(w).Encode(resp)
+
 	})
 
 	log.Printf("Auth Server listening on %s", *addr)
+
 	log.Fatal(http.ListenAndServe(*addr, nil))
 }

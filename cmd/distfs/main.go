@@ -97,7 +97,7 @@ func main() {
 func usage() {
 	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] <command> [args]")
 	fmt.Println("Commands:")
-	fmt.Println("  init [--new] -meta <url>        Initialize client config (pulls existing keys by default)")
+	fmt.Println("  init [--new] -server <url>      Initialize client config (pulls existing keys by default)")
 	fmt.Println("  ls <path>                       List directory")
 	fmt.Println("  mkdir <path>                    Create directory")
 	fmt.Println("  rm <path>                       Delete file or directory")
@@ -112,12 +112,12 @@ func usage() {
 
 func cmdInit(args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
+	serverURL := fs.String("server", "http://localhost:8080", "Metadata Server URL")
 	isNew := fs.Bool("new", false, "Initialize a new account")
 
 	// Auth flags
 	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
-	clientID := fs.String("client-id", "", "The client ID")
+	clientID := fs.String("client-id", "distfs", "The client ID")
 	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
@@ -128,7 +128,7 @@ func cmdInit(args []string) {
 
 	opts := client.OnboardingOptions{
 		ConfigPath:    *configPath,
-		MetaURL:       *metaURL,
+		ServerURL:     *serverURL,
 		IsNew:         *isNew,
 		JWT:           *jwt,
 		ClientID:      *clientID,
@@ -169,9 +169,9 @@ func cmdKeySyncPush(args []string) {
 
 func cmdKeySyncPull(args []string) {
 	fs := flag.NewFlagSet("keysync pull", flag.ExitOnError)
-	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
+	serverURL := fs.String("server", "http://localhost:8080", "Metadata Server URL")
 	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
-	clientID := fs.String("client-id", "", "The client ID")
+	clientID := fs.String("client-id", "distfs", "The client ID")
 	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
@@ -180,7 +180,7 @@ func cmdKeySyncPull(args []string) {
 	fs.Parse(args)
 
 	opts := client.OnboardingOptions{
-		MetaURL:       *metaURL,
+		ServerURL:     *serverURL,
 		JWT:           *jwt,
 		ClientID:      *clientID,
 		Scopes:        strings.Split(*scopes, ","),
@@ -195,7 +195,7 @@ func cmdKeySyncPull(args []string) {
 		log.Fatal(err)
 	}
 
-	c := client.NewClient(*metaURL, "") // dataURL not needed for pull
+	c := client.NewClient(*serverURL, "") // dataURL not needed for pull
 	blob, err := c.PullKeySync(token)
 	if err != nil {
 		log.Fatal(err)
@@ -220,7 +220,7 @@ func cmdKeySyncPull(args []string) {
 func cmdRegister(args []string) {
 	fs := flag.NewFlagSet("register", flag.ExitOnError)
 	jwt := fs.String("jwt", "", "OIDC JWT for registration")
-	clientID := fs.String("client-id", "", "The client ID")
+	clientID := fs.String("client-id", "distfs", "The client ID")
 	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
@@ -261,7 +261,7 @@ func cmdRegister(args []string) {
 	}
 	body, _ := json.Marshal(req)
 
-	resp, err := http.Post(conf.MetaURL+"/v1/user/register", "application/json", bytes.NewBuffer(body))
+	resp, err := http.Post(conf.ServerURL+"/v1/user/register", "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -293,7 +293,7 @@ func loadClient() *client.Client {
 		log.Fatal(err)
 	}
 
-	c := client.NewClient(conf.MetaURL, conf.DataURL)
+	c := client.NewClient(conf.ServerURL, conf.DataURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)

@@ -10,7 +10,7 @@ echo "--- Starting KeySync E2E Test ---"
 # Wait for services
 sleep 2
 
-META_URL="http://storage-node-1:8080"
+SERVER_URL="http://storage-node-1:8080"
 AUTH_URL="http://test-auth:8080"
 CONFIG1="/tmp/config1.json"
 CONFIG2="/tmp/config2.json"
@@ -25,11 +25,11 @@ fi
 
 # 2. Initialize New Account (Flow 1: Init + Register + Cloud Backup)
 echo "Initializing New Account..."
-/bin/distfs -use-pinentry=false -config "$CONFIG1" init --new -meta "$META_URL" -jwt "$JWT"
+/bin/distfs -use-pinentry=false -config "$CONFIG1" init --new -server "$SERVER_URL" -jwt "$JWT"
 
 # 3. Pull Keys to Config 2 (Flow 2: Auth + Pull + Decrypt)
 echo "Pulling Keys to Config 2 (New Device simulation)..."
-/bin/distfs -use-pinentry=false -config "$CONFIG2" init -meta "$META_URL" -jwt "$JWT"
+/bin/distfs -use-pinentry=false -config "$CONFIG2" init -server "$SERVER_URL" -jwt "$JWT"
 
 # 4. Verify Config 2 works
 echo "Verifying Config 2 works..."

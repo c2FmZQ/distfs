@@ -118,33 +118,34 @@ go build ./cmd/...
 
 2.  **Start the First Node (Bootstrap):**
     ```bash
-    ./storage-node --data-dir ./data/n1 --api-addr :8080 --bootstrap
+    ./storage-node --data-dir ./data/n1 --api-addr :8080 --bootstrap --oidc-discovery-url https://example.com/.well-known/openid-configuration
     ```
 
 3.  **Join Additional Nodes:**
     ```bash
-    ./storage-node --data-dir ./data/n2 --api-addr :8081 --raft-bind :8082 --cluster-addr :9091
+    ./storage-node --data-dir ./data/n2 --api-addr :8081 --raft-bind :8082 --cluster-addr :9091 --oidc-discovery-url https://example.com/.well-known/openid-configuration
     # Use the admin API or dashboard to join the node to the cluster.
     ```
 
 ## Usage
 
 ### 1. Unified Onboarding
-DistFS simplifies setup by combining identity generation, OIDC registration, and cloud-backed recovery into a single command.
+DistFS simplifies setup by combining identity generation, OIDC registration, and cloud-backed recovery into a single command. Endpoints for authentication are discovered automatically from the metadata server.
 
 #### New Account
 Generate your local PQC identity and register with the cluster in one step.
 ```bash
 # Uses OAuth2 Device Flow by default
-./distfs init --new -meta http://localhost:8080 -client-id <id> -auth-endpoint <url> -token-endpoint <url>
+./distfs init --new -server http://localhost:8080
 ```
-The client will prompt for a passphrase to encrypt your local configuration and automatically store a recovery blob on the server.
+The client will prompt for a passphrase to encrypt your local configuration and automatically store a recovery blob on the server. (Optional: `-client-id <id>` if your cluster uses a custom OIDC client ID).
 
 #### Existing Account (New Device)
 Restore your identity on a new device using your OIDC credentials and passphrase.
 ```bash
-./distfs init -meta http://localhost:8080 -client-id <id> -auth-endpoint <url> -token-endpoint <url>
+./distfs init -server http://localhost:8080
 ```
+(Optional: `-client-id <id>` if your cluster uses a custom OIDC client ID).
 
 ### 2. File Operations
 Once initialized, you can use standard file operations.

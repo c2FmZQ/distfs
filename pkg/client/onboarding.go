@@ -26,12 +26,13 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/auth"
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 // OnboardingOptions holds parameters for the unified onboarding flow.
 type OnboardingOptions struct {
 	ConfigPath    string
-	MetaURL       string
+	ServerURL     string
 	IsNew         bool
 	JWT           string
 	ClientID      string
@@ -49,14 +50,35 @@ func GetOIDCToken(ctx context.Context, opts OnboardingOptions) (string, error) {
 		return opts.JWT, nil
 	}
 
-	if opts.ClientID == "" || opts.AuthEndpoint == "" || opts.TokenEndpoint == "" {
+	authEndpoint := opts.AuthEndpoint
+	tokenEndpoint := opts.TokenEndpoint
+
+	if authEndpoint == "" || tokenEndpoint == "" {
+		// Discovery from server
+		resp, err := http.Get(opts.ServerURL + "/v1/auth/config")
+		if err != nil {
+			return "", fmt.Errorf("failed to fetch auth config: %w", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return "", fmt.Errorf("auth config unavailable: %d", resp.StatusCode)
+		}
+		var conf metadata.OIDCConfig
+		if err := json.NewDecoder(resp.Body).Decode(&conf); err != nil {
+			return "", fmt.Errorf("failed to decode auth config: %w", err)
+		}
+		authEndpoint = conf.DeviceAuthorizationEndpoint
+		tokenEndpoint = conf.TokenEndpoint
+	}
+
+	if opts.ClientID == "" || authEndpoint == "" || tokenEndpoint == "" {
 		return "", fmt.Errorf("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required")
 	}
 
 	token, err := auth.GetToken(ctx, auth.Config{
 		ClientID:      opts.ClientID,
-		AuthEndpoint:  opts.AuthEndpoint,
-		TokenEndpoint: opts.TokenEndpoint,
+		AuthEndpoint:  authEndpoint,
+		TokenEndpoint: tokenEndpoint,
 		Scopes:        opts.Scopes,
 		ShowQR:        opts.ShowQR,
 		Browser:       opts.Browser,
@@ -79,7 +101,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 	}
 
 	// Fetch Server Key
-	resp, err := http.Get(opts.MetaURL + "/v1/meta/key")
+	resp, err := http.Get(opts.ServerURL + "/v1/meta/key")
 	if err != nil {
 		return fmt.Errorf("failed to fetch server key: %w", err)
 	}
@@ -101,7 +123,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		}
 		body, _ := json.Marshal(req)
 
-		resp, err := http.Post(opts.MetaURL+"/v1/user/register", "application/json", bytes.NewReader(body))
+		resp, err := http.Post(opts.ServerURL+"/v1/user/register", "application/json", bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("registration failed: %w", err)
 		}
@@ -120,8 +142,8 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		}
 
 		conf := config.Config{
-			MetaURL:   opts.MetaURL,
-			DataURL:   opts.MetaURL,
+			ServerURL: opts.ServerURL,
+			DataURL:   opts.ServerURL,
 			UserID:    user.ID,
 			EncKey:    hex.EncodeToString(crypto.MarshalDecapsulationKey(dk)),
 			SignKey:   hex.EncodeToString(sk.MarshalPrivate()),
@@ -145,7 +167,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 			return err
 		}
 
-		c := NewClient(opts.MetaURL, opts.MetaURL)
+		c := NewClient(opts.ServerURL, opts.ServerURL)
 		svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
 		if err != nil {
 			return fmt.Errorf("failed to unmarshal server key: %w", err)
@@ -161,7 +183,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		fmt.Printf("New account initialized successfully. User ID: %s\n", user.ID)
 	} else {
 		// Existing account flow (Pull)
-		c := NewClient(opts.MetaURL, "")
+		c := NewClient(opts.ServerURL, "")
 		blob, err := c.PullKeySync(token)
 		if err != nil {
 			return fmt.Errorf("failed to pull keys: %w (did you mean --new?)", err)
@@ -178,8 +200,8 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		}
 
 		// Update URLs and Server Key from current run
-		conf.MetaURL = opts.MetaURL
-		conf.DataURL = opts.MetaURL
+		conf.ServerURL = opts.ServerURL
+		conf.DataURL = opts.ServerURL
 		conf.ServerKey = hex.EncodeToString(sKey)
 
 		if err := config.SaveWithPassword(*conf, opts.ConfigPath, password); err != nil {

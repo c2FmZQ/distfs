@@ -26,12 +26,12 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
 
-	metaURL := flag.String("meta", "http://localhost:8080", "Metadata Server URL (only used if config is missing)")
+	serverURL := flag.String("server", "http://localhost:8080", "Metadata Server URL (only used if config is missing)")
 	isNew := flag.Bool("new", false, "Initialize a new account if config is missing")
 
 	// Auth flags
 	jwt := flag.String("jwt", "", "OIDC JWT for registration")
-	clientID := flag.String("client-id", "", "The client ID")
+	clientID := flag.String("client-id", "distfs", "The client ID")
 	scopes := flag.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := flag.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := flag.String("token-endpoint", "", "The token endpoint")
@@ -45,7 +45,7 @@ func main() {
 		fmt.Println("Configuration missing. Starting unified onboarding...")
 		opts := client.OnboardingOptions{
 			ConfigPath:    *configPath,
-			MetaURL:       *metaURL,
+			ServerURL:     *serverURL,
 			IsNew:         *isNew,
 			JWT:           *jwt,
 			ClientID:      *clientID,
@@ -100,7 +100,7 @@ func main() {
 }
 
 func loadClient(conf *config.Config) *client.Client {
-	c := client.NewClient(conf.MetaURL, conf.DataURL)
+	c := client.NewClient(conf.ServerURL, conf.DataURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)

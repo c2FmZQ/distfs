@@ -100,7 +100,7 @@ sleep 5
 if [ ! -f /root/.distfs/config.json ]; then
   echo "Initializing and Registering User (Unified)..."
   JWT=$(wget -qO- "http://test-auth:8080/mint?email=test@example.com")
-  distfs -use-pinentry=false init --new -meta $LEADER_URL -jwt "$JWT"
+  distfs -use-pinentry=false init --new -server $LEADER_URL -jwt "$JWT"
   echo "Making root world-writable for concurrent tests..."
   distfs -use-pinentry=false chmod 0777 /
 fi

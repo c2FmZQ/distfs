@@ -9,21 +9,21 @@ done
 
 echo "Initializing user1 (Group Owner)..."
 JWT1=$(wget -qO- "http://test-auth:8080/mint?email=user1-group@example.com")
-U1_OUT=$(distfs -use-pinentry=false -config /tmp/u1-group.json init --new -meta http://storage-node-1:8080 -jwt "$JWT1")
+U1_OUT=$(distfs -use-pinentry=false -config /tmp/u1-group.json init --new -server http://storage-node-1:8080 -jwt "$JWT1")
 echo "$U1_OUT"
 U1_ID=$(echo "$U1_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 echo "User 1 ID: $U1_ID"
 
 echo "Initializing user2 (Group Member)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-group@example.com")
-U2_OUT=$(distfs -use-pinentry=false -config /tmp/u2-group.json init --new -meta http://storage-node-1:8080 -jwt "$JWT2")
+U2_OUT=$(distfs -use-pinentry=false -config /tmp/u2-group.json init --new -server http://storage-node-1:8080 -jwt "$JWT2")
 echo "$U2_OUT"
 U2_ID=$(echo "$U2_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 echo "User 2 ID: $U2_ID"
 
 echo "Initializing user3 (Non-Member)..."
 JWT3=$(wget -qO- "http://test-auth:8080/mint?email=user3-group@example.com")
-U3_OUT=$(distfs -use-pinentry=false -config /tmp/u3-group.json init --new -meta http://storage-node-1:8080 -jwt "$JWT3")
+U3_OUT=$(distfs -use-pinentry=false -config /tmp/u3-group.json init --new -server http://storage-node-1:8080 -jwt "$JWT3")
 echo "$U3_OUT"
 U3_ID=$(echo "$U3_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 echo "User 3 ID: $U3_ID"
