@@ -12,36 +12,27 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-package metadata
+package metadata_test
 
 import (
 	"encoding/json"
 	"fmt"
+	"net/http/httptest"
 	"sync"
 	"testing"
-	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
-	"github.com/hashicorp/raft"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 	bolt "go.etcd.io/bbolt"
 )
 
 func TestRequestBatching(t *testing.T) {
-	node, _, _, _, server := setupCluster(t)
+	node, _, _, _, server := metadata.SetupCluster(t)
 	defer node.Shutdown()
 
 	// Wait for leader
-	leader := false
-	for i := 0; i < 50; i++ {
-		if node.Raft.State() == raft.Leader {
-			leader = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !leader {
-		t.Fatal("Node did not become leader")
-	}
+	metadata.WaitLeader(t, node.Raft)
 
 	// Launch concurrent requests
 	const numReqs = 50
@@ -54,20 +45,14 @@ func TestRequestBatching(t *testing.T) {
 			defer wg.Done()
 			dk, _ := crypto.GenerateEncryptionKey()
 			sk, _ := crypto.GenerateIdentityKey()
-			user := User{
+			user := metadata.User{
 				ID:      fmt.Sprintf("user-%d", id),
 				SignKey: sk.Public(),
 				EncKey:  dk.EncapsulationKey().Bytes(),
 			}
 			body, _ := json.Marshal(user)
 
-			// This should trigger the batching logic in applyRaftCommand
-			// Instead of calling applyCommandRaw, we call applyRaftCommand directly to check internal batching
-			// But applyCommandRaw is the one calling applyRaftCommand.
-			// Let's call a public method that uses it, e.g. handleRegisterUser logic.
-			// But we don't have a request object here.
-			// Ideally we test applyRaftCommand directly.
-			_, err := server.applyRaftCommand(CmdCreateUser, body)
+			_, err := server.ApplyRaftCommand(metadata.CmdCreateUser, body)
 			if err != nil {
 				errCh <- err
 			}
@@ -84,7 +69,7 @@ func TestRequestBatching(t *testing.T) {
 	// Verify all users created
 	for i := 0; i < numReqs; i++ {
 		// Read FSM directly
-		server.fsm.db.View(func(tx *bolt.Tx) error {
+		server.FSM().DB().View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("users"))
 			v := b.Get([]byte(fmt.Sprintf("user-%d", i)))
 			if v == nil {
@@ -92,5 +77,44 @@ func TestRequestBatching(t *testing.T) {
 			}
 			return nil
 		})
+	}
+}
+
+func TestSessionKeyMemoization(t *testing.T) {
+	node, _, _, _, server := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	metadata.WaitLeader(t, node.Raft)
+
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+	userID := "user-mem"
+	user := metadata.User{
+		ID:      userID,
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+	}
+	metadata.CreateUser(t, node, user)
+
+	tsMeta := httptest.NewServer(server)
+	defer tsMeta.Close()
+
+	c := client.NewClient(tsMeta.URL)
+	c = c.WithIdentity(userID, dk)
+	c = c.WithSignKey(userSignKey)
+
+	if err := c.Login(); err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	if err := c.Mkdir("/m1"); err != nil {
+		t.Fatalf("First Mkdir failed: %v", err)
+	}
+
+	if server.SessionKeyCacheSize() != 1 {
+		t.Errorf("Expected 1 session key in cache, got %d", server.SessionKeyCacheSize())
+	}
+
+	if err := c.Mkdir("/m2"); err != nil {
+		t.Fatalf("Second Mkdir failed: %v", err)
 	}
 }

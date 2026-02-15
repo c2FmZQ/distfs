@@ -249,9 +249,13 @@ func TestSealedRequest(t *testing.T) {
 	}
 
 	// 3. Open
-	ts, opened, err := OpenRequest(serverDK, clientID.Public(), sealed)
+	ts, opened, sharedSecret, err := OpenRequest(serverDK, clientID.Public(), sealed)
 	if err != nil {
 		t.Fatalf("OpenRequest failed: %v", err)
+	}
+
+	if len(sharedSecret) != 32 {
+		t.Error("Invalid shared secret length")
 	}
 
 	if string(opened) != string(payload) {
@@ -264,7 +268,7 @@ func TestSealedRequest(t *testing.T) {
 
 	// 4. Test Tamper
 	sealed[len(sealed)-1] ^= 0xFF
-	_, _, err = OpenRequest(serverDK, clientID.Public(), sealed)
+	_, _, _, err = OpenRequest(serverDK, clientID.Public(), sealed)
 	if err == nil {
 		t.Error("OpenRequest should fail for tampered ciphertext")
 	}

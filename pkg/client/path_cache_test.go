@@ -112,7 +112,7 @@ func TestPathCache(t *testing.T) {
 	count1 := atomic.LoadUint64(&getInodeCount)
 	t.Logf("First resolution took %d Inode fetches", count1)
 
-	// Expect root + a + b + c + f.txt = 5 fetches? 
+	// Expect root + a + b + c + f.txt = 5 fetches?
 	// ResolvePath("/") caches root.
 	// a caches /a, etc.
 	if count1 < 4 {

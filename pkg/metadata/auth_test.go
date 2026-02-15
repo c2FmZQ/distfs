@@ -6,13 +6,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 func TestChallengeResponseAuth(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -24,7 +23,7 @@ func TestChallengeResponseAuth(t *testing.T) {
 		SignKey: userSK.Public(),
 		EncKey:  userDK.EncapsulationKey().Bytes(),
 	}
-	createUser(t, node, user)
+	CreateUser(t, node, user)
 
 	// 2. Request Challenge
 	creq := AuthChallengeRequest{UserID: user.ID}
@@ -87,14 +86,4 @@ func TestChallengeResponseAuth(t *testing.T) {
 		t.Fatalf("authenticated request failed: %d", resp.StatusCode)
 	}
 	resp.Body.Close()
-}
-
-func createUser(t *testing.T, raftNode *RaftNode, user User) {
-	userBytes, _ := json.Marshal(user)
-	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Create user raft apply failed: %v", err)
-	}
 }

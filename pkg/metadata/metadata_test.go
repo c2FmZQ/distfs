@@ -44,7 +44,7 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKey, []byte, *Server) {
+func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKey, []byte, *Server) {
 	tmpDir := t.TempDir()
 
 	mk, err := storage_crypto.CreateAESMasterKeyForTest()
@@ -75,18 +75,7 @@ func setupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		t.Fatalf("Bootstrap failed: %v", err)
 	}
 
-	leader := false
-	for i := 0; i < 50; i++ {
-		if node.Raft.State() == raft.Leader {
-			leader = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !leader {
-		node.Shutdown()
-		t.Fatalf("Node did not become leader")
-	}
+	WaitLeader(t, node.Raft)
 
 	// Bootstrap cluster key
 	dk, _ := crypto.GenerateEncryptionKey()
@@ -181,7 +170,7 @@ func sealTestRequest(t *testing.T, userID string, userSignKey *crypto.IdentityKe
 }
 
 func TestMetadataCluster(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := setupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -271,7 +260,7 @@ func TestMetadataCluster(t *testing.T) {
 }
 
 func TestSecurity_AccessControl(t *testing.T) {
-	node, ts, _, serverEK, _ := setupCluster(t)
+	node, ts, _, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -343,7 +332,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 }
 
 func TestFSM_EdgeCases(t *testing.T) {
-	node, _, _, _, _ := setupCluster(t)
+	node, _, _, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 
 	// Unknown Command (using string for type instead of number to avoid unmarshal error if it's strict, or just use a known unused number)
@@ -366,7 +355,7 @@ func TestFSM_EdgeCases(t *testing.T) {
 }
 
 func TestIdentityRegistry(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := setupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -433,7 +422,7 @@ func TestIdentityRegistry(t *testing.T) {
 }
 
 func TestRegisterUserEndpoint(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	_ = node
 	defer ts.Close()
 
@@ -453,7 +442,7 @@ func TestRegisterUserEndpoint(t *testing.T) {
 }
 
 func TestKeySync(t *testing.T) {
-	node, ts, _, serverEK, srv := setupCluster(t)
+	node, ts, _, serverEK, srv := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -646,7 +635,7 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := setupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -751,7 +740,7 @@ func TestChunkPagination(t *testing.T) {
 }
 
 func TestAccounting(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
@@ -841,7 +830,7 @@ func TestAccounting(t *testing.T) {
 }
 
 func TestDashboardAPI(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
@@ -923,7 +912,7 @@ func TestDashboardAPI(t *testing.T) {
 }
 
 func TestQuotaEnforcement(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	_ = node
 	defer node.Shutdown()
 	defer ts.Close()

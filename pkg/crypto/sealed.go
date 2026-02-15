@@ -58,10 +58,10 @@ func SealRequest(serverPK *mlkem.EncapsulationKey768, clientSK *IdentityKey, pay
 }
 
 // OpenRequest decrypts and verifies a sealed request.
-func OpenRequest(serverSK *mlkem.DecapsulationKey768, clientPK []byte, sealed []byte) (int64, []byte, error) {
+func OpenRequest(serverSK *mlkem.DecapsulationKey768, clientPK []byte, sealed []byte) (int64, []byte, []byte, error) {
 	kemSize := mlkem.CiphertextSize768
 	if len(sealed) < kemSize {
-		return 0, nil, fmt.Errorf("sealed request too short")
+		return 0, nil, nil, fmt.Errorf("sealed request too short")
 	}
 
 	kemCT := sealed[:kemSize]
@@ -70,17 +70,17 @@ func OpenRequest(serverSK *mlkem.DecapsulationKey768, clientPK []byte, sealed []
 	// 1. Decapsulate
 	sharedSecret, err := serverSK.Decapsulate(kemCT)
 	if err != nil {
-		return 0, nil, fmt.Errorf("decapsulate failed: %w", err)
+		return 0, nil, nil, fmt.Errorf("decapsulate failed: %w", err)
 	}
 
 	// 2. Decrypt DEM
 	inner, err := DecryptDEM(sharedSecret, demCT)
 	if err != nil {
-		return 0, nil, fmt.Errorf("dem decrypt failed: %w", err)
+		return 0, nil, nil, fmt.Errorf("dem decrypt failed: %w", err)
 	}
 
 	if len(inner) < 8+64 { // ts(8) + ed25519 sig(64)
-		return 0, nil, fmt.Errorf("decrypted payload too short")
+		return 0, nil, nil, fmt.Errorf("decrypted payload too short")
 	}
 
 	// 3. Parse Inner
@@ -89,6 +89,43 @@ func OpenRequest(serverSK *mlkem.DecapsulationKey768, clientPK []byte, sealed []
 	payload := inner[8+64:]
 
 	// 4. Verify Signature
+	toVerify := make([]byte, 8+len(payload))
+	copy(toVerify[0:8], inner[0:8])
+	copy(toVerify[8:], payload)
+	if !VerifySignature(clientPK, toVerify, sig) {
+		return 0, nil, nil, fmt.Errorf("invalid signature")
+	}
+
+	return ts, payload, sharedSecret, nil
+}
+
+// OpenRequestSymmetric decrypts a sealed request using a pre-shared key (Session Memoization).
+func OpenRequestSymmetric(sharedSecret []byte, clientPK []byte, sealed []byte) (int64, []byte, error) {
+	kemSize := mlkem.CiphertextSize768
+	if len(sealed) < kemSize {
+		return 0, nil, fmt.Errorf("sealed request too short")
+	}
+
+	// In memoized mode, the KEM CT is present (sent by client) but ignored by server
+	// because we already have the shared secret.
+	demCT := sealed[kemSize:]
+
+	// 1. Decrypt DEM
+	inner, err := DecryptDEM(sharedSecret, demCT)
+	if err != nil {
+		return 0, nil, fmt.Errorf("dem decrypt failed: %w", err)
+	}
+
+	if len(inner) < 8+64 {
+		return 0, nil, fmt.Errorf("decrypted payload too short")
+	}
+
+	// 2. Parse Inner
+	ts := int64(binary.BigEndian.Uint64(inner[0:8]))
+	sig := inner[8 : 8+64]
+	payload := inner[8+64:]
+
+	// 3. Verify Signature
 	toVerify := make([]byte, 8+len(payload))
 	copy(toVerify[0:8], inner[0:8])
 	copy(toVerify[8:], payload)

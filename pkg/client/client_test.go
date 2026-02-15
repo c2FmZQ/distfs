@@ -473,7 +473,7 @@ func TestReplicationRepair(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	content := bytes.Repeat([]byte("repair me "), 1000) // ~10KB
+	content := bytes.Repeat([]byte("repair me "), 1000)                                      // ~10KB
 	_, err = c.WriteFile("repair-file", bytes.NewReader(content), int64(len(content)), 0644) // Raw write
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)

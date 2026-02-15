@@ -10,7 +10,7 @@ import (
 )
 
 func TestDashboard_UsersNodes(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -64,7 +64,7 @@ func TestDashboard_UsersNodes(t *testing.T) {
 }
 
 func TestDashboard_Lookup(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -90,7 +90,7 @@ func TestDashboard_Lookup(t *testing.T) {
 }
 
 func TestClusterStatus(t *testing.T) {
-	node, ts, _, _, _ := setupCluster(t)
+	node, ts, _, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -109,7 +109,7 @@ func TestClusterStatus(t *testing.T) {
 }
 
 func TestDashboard_Auth(t *testing.T) {
-	_, ts, _, _, _ := setupCluster(t)
+	_, ts, _, _, _ := SetupCluster(t)
 	defer ts.Close()
 
 	// No secret

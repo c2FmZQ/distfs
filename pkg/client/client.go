@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -114,6 +115,7 @@ type Client struct {
 
 	sessionToken  string
 	sessionExpiry time.Time
+	sessionKey    []byte // Cached shared secret for memoization
 	sessionMu     *sync.RWMutex
 	loginMu       *sync.Mutex
 }
@@ -295,14 +297,86 @@ func (c *Client) sealBody(req *http.Request, payload []byte) error {
 		return nil
 	}
 
-	sk, err := c.GetServerKey()
-	if err != nil {
-		return err
-	}
+	c.sessionMu.RLock()
+	sessionKey := c.sessionKey
+	sessionToken := c.sessionToken
+	c.sessionMu.RUnlock()
 
-	sealed, err := crypto.SealRequest(sk, c.signKey, payload)
-	if err != nil {
-		return err
+	var sealed []byte
+
+	if sessionKey != nil && sessionToken != "" {
+		// 1. Optimized Path: Symmetric Encryption (Memoization)
+		// We still send a dummy KEM CT to match the wire format expected by the server.
+		// The server sees the Session-Token, looks up the key, and ignores the KEM CT.
+		kemSize := mlkem.CiphertextSize768
+		dummyKEM := make([]byte, kemSize)
+		rand.Read(dummyKEM)
+
+		// Encrypt Inner using cached key
+		ts := time.Now().UnixNano()
+		tsBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(tsBytes, uint64(ts))
+
+		toSign := make([]byte, 8+len(payload))
+		copy(toSign[0:8], tsBytes)
+		copy(toSign[8:], payload)
+		sig := c.signKey.Sign(toSign)
+
+		inner := make([]byte, 8+len(sig)+len(payload))
+		copy(inner[0:8], tsBytes)
+		copy(inner[8:8+len(sig)], sig)
+		copy(inner[8+len(sig):], payload)
+
+		demCT, err := crypto.EncryptDEM(sessionKey, inner)
+		if err != nil {
+			return err
+		}
+
+		sealed = make([]byte, len(dummyKEM)+len(demCT))
+		copy(sealed[0:len(dummyKEM)], dummyKEM)
+		copy(sealed[len(dummyKEM):], demCT)
+
+	} else {
+		// 2. Standard Path: Full KEM
+		sk, err := c.GetServerKey()
+		if err != nil {
+			return err
+		}
+
+		// 2a. Encapsulate
+		sharedSecret, kemCT := crypto.Encapsulate(sk)
+
+		// 2b. Prepare Inner
+		ts := time.Now().UnixNano()
+		tsBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(tsBytes, uint64(ts))
+
+		toSign := make([]byte, 8+len(payload))
+		copy(toSign[0:8], tsBytes)
+		copy(toSign[8:], payload)
+		sig := c.signKey.Sign(toSign)
+
+		inner := make([]byte, 8+len(sig)+len(payload))
+		copy(inner[0:8], tsBytes)
+		copy(inner[8:8+len(sig)], sig)
+		copy(inner[8+len(sig):], payload)
+
+		// 2c. Encrypt DEM
+		demCT, err := crypto.EncryptDEM(sharedSecret, inner)
+		if err != nil {
+			return err
+		}
+
+		sealed = make([]byte, len(kemCT)+len(demCT))
+		copy(sealed[0:len(kemCT)], kemCT)
+		copy(sealed[len(kemCT):], demCT)
+
+		// Cache for next time if we have a session
+		c.sessionMu.Lock()
+		if c.sessionToken != "" {
+			c.sessionKey = sharedSecret
+		}
+		c.sessionMu.Unlock()
 	}
 
 	sr := metadata.SealedRequest{
@@ -317,7 +391,6 @@ func (c *Client) sealBody(req *http.Request, payload []byte) error {
 	req.Header.Set("Content-Type", "application/json")
 	return nil
 }
-
 func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
 		return resp.Body, nil

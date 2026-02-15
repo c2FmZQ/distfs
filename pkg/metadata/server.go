@@ -66,6 +66,9 @@ type Server struct {
 	requestNonceCache map[string]time.Time
 	requestNonceMu    sync.Mutex
 
+	sessionKeyCache map[string][]byte // SessionToken -> SharedSecret
+	sessionKeyMu    sync.RWMutex
+
 	// Request Batching
 	batchMu      sync.Mutex
 	batchQueue   []*LogCommand
@@ -95,7 +98,6 @@ type challengeEntry struct {
 	CreatedAt time.Time
 }
 
-
 // NewServer creates a new Metadata Server.
 func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
 	retryClient := retryablehttp.NewClient()
@@ -111,6 +113,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		raftSecret:          raftSecret,
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),
+		sessionKeyCache:     make(map[string][]byte),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 		stopCh:              make(chan struct{}),
@@ -1755,6 +1758,24 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 	w.Write(data)
 }
 
+func (s *Server) ApplyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
+	return s.applyRaftCommand(cmdType, data)
+}
+
+func (s *Server) FSM() *MetadataFSM {
+	return s.fsm
+}
+
+func (s *Server) SessionKeyCacheSize() int {
+	s.sessionKeyMu.RLock()
+	defer s.sessionKeyMu.RUnlock()
+	return len(s.sessionKeyCache)
+}
+
+func (fsm *MetadataFSM) DB() *bolt.DB {
+	return fsm.db
+}
+
 func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
 	if s.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("not leader")
@@ -1879,6 +1900,26 @@ func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
 		return nil, fmt.Errorf("user mismatch in sealed request")
 	}
 
+	// 0. Check Session Cache (Memoization)
+	sessionToken := r.Header.Get("Session-Token")
+	if sessionToken != "" {
+		s.sessionKeyMu.RLock()
+		key, ok := s.sessionKeyCache[sessionToken]
+		s.sessionKeyMu.RUnlock()
+
+		if ok {
+			ts, payload, err := crypto.OpenRequestSymmetric(key, user.SignKey, sealed.Sealed)
+			if err == nil {
+				// Success with cached key
+				if err := s.checkReplay(user.ID, ts); err != nil {
+					return nil, err
+				}
+				return payload, nil
+			}
+			// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
+		}
+	}
+
 	// 1. Get Active Cluster Key
 	active, err := s.fsm.GetActiveKey()
 	if err != nil {
@@ -1889,19 +1930,34 @@ func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
 		return nil, fmt.Errorf("invalid cluster key")
 	}
 
-	// 2. Open
-	ts, payload, err := crypto.OpenRequest(dk, user.SignKey, sealed.Sealed)
+	// 2. Open (Full KEM)
+	ts, payload, sharedSecret, err := crypto.OpenRequest(dk, user.SignKey, sealed.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open request: %w", err)
 	}
 
 	// 3. Replay Protection
-	now := time.Now().UnixNano()
-	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
-		return nil, fmt.Errorf("request timestamp out of range")
+	if err := s.checkReplay(user.ID, ts); err != nil {
+		return nil, err
 	}
 
-	nonce := user.ID + ":" + fmt.Sprintf("%d", ts)
+	// 4. Memoize Shared Secret
+	if sessionToken != "" {
+		s.sessionKeyMu.Lock()
+		s.sessionKeyCache[sessionToken] = sharedSecret
+		s.sessionKeyMu.Unlock()
+	}
+
+	return payload, nil
+}
+
+func (s *Server) checkReplay(userID string, ts int64) error {
+	now := time.Now().UnixNano()
+	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
+		return fmt.Errorf("request timestamp out of range")
+	}
+
+	nonce := userID + ":" + fmt.Sprintf("%d", ts)
 	s.requestNonceMu.Lock()
 	// Lazy GC
 	for k, v := range s.requestNonceCache {
@@ -1911,12 +1967,11 @@ func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
 	}
 	if _, exists := s.requestNonceCache[nonce]; exists {
 		s.requestNonceMu.Unlock()
-		return nil, fmt.Errorf("replay detected")
+		return fmt.Errorf("replay detected")
 	}
 	s.requestNonceCache[nonce] = time.Now()
 	s.requestNonceMu.Unlock()
-
-	return payload, nil
+	return nil
 }
 
 func (s *Server) checkAndInitWorld() {
