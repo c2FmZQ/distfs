@@ -41,6 +41,8 @@ const (
 	RootID = "root-directory-inode-id-0000000000"
 	// WorldID is the reserved ID for the 'world' recipient in lockboxes.
 	WorldID = "world"
+	// InlineLimit is the maximum size of a file that can be inlined in metadata.
+	InlineLimit = 4096
 )
 
 // ChunkEntry represents a single chunk of a file and its location.
@@ -136,6 +138,7 @@ type Inode struct {
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 	EncryptedName []byte            `json:"enc_name"`
 	NameHMAC      string            `json:"name_hmac,omitempty"` // HMAC(parentKey, name)
+	InlineData    []byte            `json:"inline_data,omitempty"`
 	Children      map[string]string `json:"children,omitempty"`
 	ChunkManifest []ChunkEntry      `json:"manifest,omitempty"`
 	ChunkPages    []string          `json:"chunk_pages,omitempty"`

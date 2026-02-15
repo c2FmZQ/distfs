@@ -298,7 +298,7 @@ func TestReplication(t *testing.T) {
 	c = c.WithServerKey(serverEK)
 
 	// 4. Write
-	content := []byte("replicated data")
+	content := bytes.Repeat([]byte("replicated data "), 500) // ~8KB
 	_, err = c.WriteFile("repl-file", bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
@@ -473,7 +473,7 @@ func TestReplicationRepair(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	content := []byte("repair me")
+	content := bytes.Repeat([]byte("repair me "), 1000) // ~10KB
 	_, err = c.WriteFile("repair-file", bytes.NewReader(content), int64(len(content)), 0644) // Raw write
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
@@ -707,7 +707,7 @@ func TestGarbageCollection(t *testing.T) {
 	if err := c.EnsureRoot(); err != nil {
 		t.Fatal(err)
 	}
-	content := []byte("garbage")
+	content := bytes.Repeat([]byte("garbage "), 1000) // ~8KB
 	if err := c.CreateFile("/gc-test", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}

@@ -748,49 +748,68 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 		return err
 	}
 
-	var chunkEntries []metadata.ChunkEntry
-	buf := make([]byte, crypto.ChunkSize)
-
-	for {
-		n, err := io.ReadFull(r, buf)
-		if n > 0 {
-			chunkData := buf[:n]
-			cid, ct, err := crypto.EncryptChunk(fileKey, chunkData)
-			if err != nil {
-				return err
-			}
-
-			token, err := c.issueToken(id, []string{cid}, "W")
-			if err != nil {
-				return fmt.Errorf("token issue failed: %v", err)
-			}
-
-			nodes, err := c.allocateNodes()
-			if err != nil {
-				return fmt.Errorf("allocation failed: %v", err)
-			}
-
-			if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
-				return err
-			}
-
-			var nodeIDs []string
-			for _, node := range nodes {
-				nodeIDs = append(nodeIDs, node.ID)
-			}
-			chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
-		}
+	// 1. Inline Path
+	if iType == metadata.FileType && size <= metadata.InlineLimit {
+		data, err := io.ReadAll(r)
 		if err != nil {
 			return err
 		}
+		// Encrypt as single blob using DEM
+		ciphertext, err := crypto.EncryptDEM(fileKey, data)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt inline data: %w", err)
+		}
+		inode.InlineData = ciphertext
+		inode.ChunkManifest = nil
+		inode.ChunkPages = nil
+		inode.Size = uint64(len(data))
+	} else {
+		// 2. Chunk Path
+		inode.InlineData = nil
+		var chunkEntries []metadata.ChunkEntry
+		buf := make([]byte, crypto.ChunkSize)
+
+		for {
+			n, err := io.ReadFull(r, buf)
+			if n > 0 {
+				chunkData := buf[:n]
+				cid, ct, err := crypto.EncryptChunk(fileKey, chunkData)
+				if err != nil {
+					return err
+				}
+
+				token, err := c.issueToken(id, []string{cid}, "W")
+				if err != nil {
+					return fmt.Errorf("token issue failed: %v", err)
+				}
+
+				nodes, err := c.allocateNodes()
+				if err != nil {
+					return fmt.Errorf("allocation failed: %v", err)
+				}
+
+				if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
+					return err
+				}
+
+				var nodeIDs []string
+				for _, node := range nodes {
+					nodeIDs = append(nodeIDs, node.ID)
+				}
+				chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
+			}
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			if err != nil {
+				return err
+			}
+		}
+		inode.ChunkManifest = chunkEntries
+		inode.Size = uint64(size)
 	}
 
 	// Final update using updateInode (uses version check)
-	inode.ChunkManifest = chunkEntries
-	inode.Size = uint64(size)
 	_, err = c.updateInode(inode)
 	if err == nil {
 		c.keyMu.Lock()
@@ -965,8 +984,17 @@ func (r *FileReader) read(p []byte) (int, error) {
 		}
 
 		var pt []byte
+		var err error
 		if chunkIdx == r.currentChunkIdx && r.currentChunk != nil {
 			pt = r.currentChunk
+		} else if r.inode.InlineData != nil {
+			// Handle Inlined File
+			pt, err = crypto.DecryptDEM(r.fileKey, r.inode.InlineData)
+			if err != nil {
+				return totalRead, fmt.Errorf("failed to decrypt inline data: %w", err)
+			}
+			r.currentChunk = pt
+			r.currentChunkIdx = 0
 		} else {
 			// Trigger prefetch for next few chunks
 			for i := int64(1); i <= 3; i++ {
