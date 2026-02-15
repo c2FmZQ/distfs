@@ -73,12 +73,14 @@ While TLS (Layer 4) protects the connection, DistFS implements **Layer 7 End-to-
 4.  **Replay Protection:** Each sealed envelope includes a high-resolution timestamp and is subject to sliding-window nonce verification.
 
 ### 3.5 Multi-Device Key Synchronization (Zero-Knowledge Sync)
-To support seamless multi-device usage without compromising the "Trust No One" model, DistFS allows users to store a recovery blob on the server.
-1.  **Client-Side Preparation:** The client encrypts its `config.json` (containing the PQC Identity and Encryption keys) using a user-provided passphrase and **Argon2id** KDF.
-2.  **Passphrase-Encrypted Blob:** The server only ever sees the opaque ciphertext (`KeySyncBlob`).
-3.  **Synchronization Protocol:**
-    *   **Retrieval (New Device):** The user authenticates via OIDC (JWT). The server returns the blob. The user enters their passphrase locally to decrypt and install their keys.
-    *   **Storage/Update (Existing Device):** To prevent unauthorized overwrites, the client must provide a valid `Session-Token` and use **Layer 7 E2EE (Sealing)**. This proves the user already knows the current key before they can change the sync blob.
+To support seamless multi-device usage without compromising the "Trust No One" model, DistFS provides a unified onboarding flow that combines identity initialization, registration, and cloud-backed recovery.
+
+1.  **Unified Onboarding (`init` command):**
+    *   **New Account (`--new`):** The client generates PQC identity keys, executes the OAuth2 Device Flow to authenticate via OIDC, registers the keys with the server, encrypts the local configuration, and automatically pushes a synchronization blob to the server.
+    *   **Existing Account:** On a new device, the user runs `init` without the `--new` flag. The client authenticates via OIDC, retrieves the encrypted synchronization blob from the server, and restores the local configuration after prompting for the passphrase.
+2.  **Client-Side Preparation:** The client encrypts its `config.json` (containing the PQC Identity and Encryption keys) using a user-provided passphrase and **Argon2id** KDF.
+3.  **Passphrase-Encrypted Blob:** The server only ever sees the opaque ciphertext (`KeySyncBlob`).
+4.  **Security Enforcement:** To prevent unauthorized overwrites, storing or updating a sync blob requires a valid `Session-Token` and mandatory **Layer 7 E2EE (Sealing)**.
 
 ### 3.6 Secure Passphrase Entry (Pinentry)
 To enhance security during passphrase entry, DistFS supports the **Assuan protocol** via the `pinentry` suite of tools.

@@ -23,22 +23,15 @@ if [ -z "$JWT" ]; then
     exit 1
 fi
 
-# 2. Initialize and Register User
-echo "Initializing and Registering User..."
-/bin/distfs -use-pinentry=false -config "$CONFIG1" init -meta "$META_URL"
-/bin/distfs -use-pinentry=false -config "$CONFIG1" register -jwt "$JWT"
+# 2. Initialize New Account (Flow 1: Init + Register + Cloud Backup)
+echo "Initializing New Account..."
+/bin/distfs -use-pinentry=false -config "$CONFIG1" init --new -meta "$META_URL" -jwt "$JWT"
 
-# 3. Push Keys from Config 1
-echo "Pushing Keys from Config 1..."
-# Use DISTFS_PASSWORD from environment (set in docker-compose.yml)
-/bin/distfs -use-pinentry=false -config "$CONFIG1" keysync push
+# 3. Pull Keys to Config 2 (Flow 2: Auth + Pull + Decrypt)
+echo "Pulling Keys to Config 2 (New Device simulation)..."
+/bin/distfs -use-pinentry=false -config "$CONFIG2" init -meta "$META_URL" -jwt "$JWT"
 
-# 4. Pull Keys to Config 2
-echo "Pulling Keys to Config 2..."
-# We simulate a new device by only knowing the MetaURL and having a JWT.
-/bin/distfs -use-pinentry=false -config "$CONFIG2" keysync pull -meta "$META_URL" -jwt "$JWT"
-
-# 5. Verify Config 2 works
+# 4. Verify Config 2 works
 echo "Verifying Config 2 works..."
 # Ensure we can list root.
 /bin/distfs -use-pinentry=false -config "$CONFIG2" ls / > /dev/null

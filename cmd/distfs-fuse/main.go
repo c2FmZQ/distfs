@@ -2,14 +2,11 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
-	"encoding/json"
 	"flag"
-	"io"
+	"fmt"
 	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -18,12 +15,10 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/c2FmZQ/distfs/pkg/auth"
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	distfuse "github.com/c2FmZQ/distfs/pkg/fuse"
-	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 func main() {
@@ -31,11 +26,13 @@ func main() {
 	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
 
-	// Registration flags
-	doRegister := flag.Bool("register", false, "Register user with server")
+	metaURL := flag.String("meta", "http://localhost:8080", "Metadata Server URL (only used if config is missing)")
+	isNew := flag.Bool("new", false, "Initialize a new account if config is missing")
+
+	// Auth flags
 	jwt := flag.String("jwt", "", "OIDC JWT for registration")
 	clientID := flag.String("client-id", "", "The client ID")
-	scopes := flag.String("scopes", "", "The scopes to request (comma separated)")
+	scopes := flag.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := flag.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := flag.String("token-endpoint", "", "The token endpoint")
 	qrCode := flag.Bool("qr", false, "Show a QR code of the verification URL")
@@ -44,13 +41,25 @@ func main() {
 	flag.Parse()
 	config.UsePinentry = *usePinentry
 
-	if *doRegister {
-		performRegistration(*configPath, *jwt, *clientID, *scopes, *authEndpoint, *tokenEndpoint, *qrCode, *browser)
+	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
+		fmt.Println("Configuration missing. Starting unified onboarding...")
+		opts := client.OnboardingOptions{
+			ConfigPath:    *configPath,
+			MetaURL:       *metaURL,
+			IsNew:         *isNew,
+			JWT:           *jwt,
+			ClientID:      *clientID,
+			Scopes:        strings.Split(*scopes, ","),
+			AuthEndpoint:  *authEndpoint,
+			TokenEndpoint: *tokenEndpoint,
+			ShowQR:        *qrCode,
+			Browser:       *browser,
+		}
+		if err := client.PerformUnifiedOnboarding(context.Background(), opts); err != nil {
+			log.Fatal(err)
+		}
 		// Small delay for Raft propagation
 		time.Sleep(2 * time.Second)
-		if *mountpoint == "" {
-			return
-		}
 	}
 
 	if *mountpoint == "" {
@@ -100,84 +109,10 @@ func loadClient(conf *config.Config) *client.Client {
 	sk := crypto.UnmarshalIdentityKey(skBytes)
 
 	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
-	svKey, _ := crypto.UnmarshalEncapsulationKey(svKeyBytes)
+	svKey, err := crypto.UnmarshalEncapsulationKey(svKeyBytes)
+	if err != nil {
+		log.Fatalf("failed to unmarshal server key: %v", err)
+	}
 
 	return c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
-}
-
-func performRegistration(configPath, jwt, clientID, scopes, authEndpoint, tokenEndpoint string, qrCode bool, browser string) {
-	if jwt == "" {
-		if clientID == "" || authEndpoint == "" || tokenEndpoint == "" {
-			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required for registration")
-		}
-
-		var scopeList []string
-		if scopes != "" {
-			for _, s := range strings.Split(scopes, ",") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					scopeList = append(scopeList, s)
-				}
-			}
-		}
-
-		ctx := context.Background()
-		token, err := auth.GetToken(ctx, auth.Config{
-			ClientID:      clientID,
-			AuthEndpoint:  authEndpoint,
-			TokenEndpoint: tokenEndpoint,
-			Scopes:        scopeList,
-			ShowQR:        qrCode,
-			Browser:       browser,
-		})
-		if err != nil {
-			log.Fatalf("device auth failed: %v", err)
-		}
-		jwt = token.AccessToken
-	}
-
-	conf, err := config.Load(configPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	skBytes, _ := hex.DecodeString(conf.SignKey)
-	sk := crypto.UnmarshalIdentityKey(skBytes)
-
-	dkBytes, _ := hex.DecodeString(conf.EncKey)
-	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
-
-	req := map[string]interface{}{
-		"jwt":      jwt,
-		"sign_key": sk.Public(),
-		"enc_key":  dk.EncapsulationKey().Bytes(),
-	}
-	body, _ := json.Marshal(req)
-
-	resp, err := http.Post(conf.MetaURL+"/v1/user/register", "application/json", bytes.NewReader(body))
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		log.Fatalf("registration failed: %d %s", resp.StatusCode, string(b))
-	}
-
-	var user metadata.User
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		log.Fatalf("failed to decode user response: %v", err)
-	}
-
-	conf.UserID = user.ID
-	if err := config.Save(*conf, configPath); err != nil {
-		log.Fatalf("failed to save config: %v", err)
-	}
-
-	if resp.StatusCode == http.StatusOK {
-		log.Println("User already registered. ID:", user.ID)
-	} else {
-		log.Println("User registered successfully. ID:", user.ID)
-	}
 }

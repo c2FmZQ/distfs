@@ -282,4 +282,18 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Step 18.3: CLI & FUSE Integration**
         *   **Action:** Add `--use-pinentry` flag to `distfs` and `distfs-fuse`.
         *   **Action:** Update `config.GetPassword` to use the secure wrapper if enabled.
+
+---
+
+## Phase 19: Unified Onboarding Flow
+**Goal:** Simplify client setup by combining init, register, and keysync into a single command.
+
+*   **Step 19.1: Unified Init Logic (CLI)**
+    *   **Action:** Refactor `distfs init` to support `--new` and existing account flows.
+    *   **Action:** Integrate OIDC Device Flow, Registration, and KeySync (Push/Pull) into `init`.
+    *   **Action:** Deprecate or internalize standalone `register` and `keysync` commands.
+*   **Step 19.2: Unified Onboarding (FUSE)**
+    *   **Action:** Update `distfs-fuse` to utilize the unified onboarding logic if configuration is missing.
+*   **Step 19.3: Documentation & E2E**
+    *   **Action:** Update `README.md` and project scripts to use the streamlined flow.
     

@@ -101,7 +101,11 @@ func Save(c Config, path string) error {
 	if err != nil {
 		return err
 	}
+	return SaveWithPassword(c, path, password)
+}
 
+// SaveWithPassword saves the configuration using the provided password.
+func SaveWithPassword(c Config, path string, password []byte) error {
 	blob, err := Encrypt(c, password)
 	if err != nil {
 		return err
@@ -139,14 +143,7 @@ func Load(path string) (*Config, error) {
 		return Decrypt(blob, password)
 	}
 
-	// Fallback: Try plaintext (migration)
-	var c Config
-	if err := json.Unmarshal(b, &c); err == nil && c.UserID != "" {
-		fmt.Println("Warning: Config is unencrypted. It will be encrypted on next save.")
-		return &c, nil
-	}
-
-	return nil, fmt.Errorf("invalid config format")
+	return nil, fmt.Errorf("invalid config format: encryption mandatory")
 }
 
 func deriveKey(password []byte, salt []byte) []byte {

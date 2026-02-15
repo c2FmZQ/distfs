@@ -129,21 +129,25 @@ go build ./cmd/...
 
 ## Usage
 
-### 1. Initialize the Client
-Generate your local identity and link to a metadata server.
-```bash
-./distfs init -meta http://localhost:8080
-```
+### 1. Unified Onboarding
+DistFS simplifies setup by combining identity generation, OIDC registration, and cloud-backed recovery into a single command.
 
-### 2. Register via OIDC
-Authenticate with an OIDC provider to register your public keys with the cluster.
+#### New Account
+Generate your local PQC identity and register with the cluster in one step.
 ```bash
 # Uses OAuth2 Device Flow by default
-./distfs register -client-id <id> -auth-endpoint <url> -token-endpoint <url>
+./distfs init --new -meta http://localhost:8080 -client-id <id> -auth-endpoint <url> -token-endpoint <url>
 ```
-The client will automatically extract your email address from the OIDC token to derive your User ID.
+The client will prompt for a passphrase to encrypt your local configuration and automatically store a recovery blob on the server.
 
-### 3. File Operations
+#### Existing Account (New Device)
+Restore your identity on a new device using your OIDC credentials and passphrase.
+```bash
+./distfs init -meta http://localhost:8080 -client-id <id> -auth-endpoint <url> -token-endpoint <url>
+```
+
+### 2. File Operations
+Once initialized, you can use standard file operations.
 ```bash
 # Create a directory
 ./distfs mkdir /documents
@@ -158,20 +162,11 @@ The client will automatically extract your email address from the OIDC token to 
 ./distfs get /documents/remote-file.txt restored.txt
 ```
 
-### 4. FUSE Mounting
-Standard OS integration is provided via FUSE.
+### 3. FUSE Mounting
+Standard OS integration is provided via FUSE. If no configuration is found, `distfs-fuse` will automatically trigger the onboarding flow.
 ```bash
 mkdir ~/distfs-mount
 ./distfs-fuse -mount ~/distfs-mount
-```
-
-### 5. Multi-Device Key Sync
-```bash
-# On device 1: Push keys to the server
-./distfs keysync push
-
-# On device 2: Pull keys using OIDC identity
-./distfs keysync pull -meta http://cluster-url:8080 -jwt <oidc-token>
 ```
 
 ## Development and Acknowledgments

@@ -28,7 +28,6 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/c2FmZQ/distfs/pkg/auth"
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -56,8 +55,6 @@ func main() {
 	switch command {
 	case "init":
 		cmdInit(args)
-	case "register":
-		cmdRegister(args)
 	case "ls":
 		cmdLs(args)
 	case "mkdir":
@@ -76,7 +73,11 @@ func main() {
 		cmdGroupCreate(args)
 	case "group-add":
 		cmdGroupAdd(args)
+	case "register":
+		fmt.Println("Warning: 'register' is deprecated. Use 'init --new' instead.")
+		cmdRegister(args)
 	case "keysync":
+		fmt.Println("Warning: 'keysync' is deprecated. Use 'init' instead.")
 		if len(args) < 1 {
 			log.Fatal("keysync requires a subcommand (push or pull)")
 		}
@@ -96,10 +97,7 @@ func main() {
 func usage() {
 	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] <command> [args]")
 	fmt.Println("Commands:")
-	fmt.Println("  init -meta <url>                Initialize client config")
-	fmt.Println("  register [flags]                Register user with server")
-	fmt.Println("  keysync push                    Encrypt and upload local keys to server")
-	fmt.Println("  keysync pull -meta <url>        Retrieve and decrypt keys from server")
+	fmt.Println("  init [--new] -meta <url>        Initialize client config (pulls existing keys by default)")
 	fmt.Println("  ls <path>                       List directory")
 	fmt.Println("  mkdir <path>                    Create directory")
 	fmt.Println("  rm <path>                       Delete file or directory")
@@ -110,6 +108,40 @@ func usage() {
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	os.Exit(1)
+}
+
+func cmdInit(args []string) {
+	fs := flag.NewFlagSet("init", flag.ExitOnError)
+	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
+	isNew := fs.Bool("new", false, "Initialize a new account")
+
+	// Auth flags
+	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
+	clientID := fs.String("client-id", "", "The client ID")
+	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
+	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
+	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
+	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
+	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
+
+	fs.Parse(args)
+
+	opts := client.OnboardingOptions{
+		ConfigPath:    *configPath,
+		MetaURL:       *metaURL,
+		IsNew:         *isNew,
+		JWT:           *jwt,
+		ClientID:      *clientID,
+		Scopes:        strings.Split(*scopes, ","),
+		AuthEndpoint:  *authEndpoint,
+		TokenEndpoint: *tokenEndpoint,
+		ShowQR:        *qrCode,
+		Browser:       *browser,
+	}
+
+	if err := client.PerformUnifiedOnboarding(context.Background(), opts); err != nil {
+		log.Fatal(err)
+	}
 }
 
 func cmdKeySyncPush(args []string) {
@@ -140,45 +172,31 @@ func cmdKeySyncPull(args []string) {
 	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
 	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
 	clientID := fs.String("client-id", "", "The client ID")
-	scopes := fs.String("scopes", "", "The scopes to request (comma separated)")
+	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
 	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
 	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
 	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
 	fs.Parse(args)
 
-	if *jwt == "" {
-		if *clientID == "" || *authEndpoint == "" || *tokenEndpoint == "" {
-			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required")
-		}
+	opts := client.OnboardingOptions{
+		MetaURL:       *metaURL,
+		JWT:           *jwt,
+		ClientID:      *clientID,
+		Scopes:        strings.Split(*scopes, ","),
+		AuthEndpoint:  *authEndpoint,
+		TokenEndpoint: *tokenEndpoint,
+		ShowQR:        *qrCode,
+		Browser:       *browser,
+	}
 
-		var scopeList []string
-		if *scopes != "" {
-			for _, s := range strings.Split(*scopes, ",") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					scopeList = append(scopeList, s)
-				}
-			}
-		}
-
-		ctx := context.Background()
-		token, err := auth.GetToken(ctx, auth.Config{
-			ClientID:      *clientID,
-			AuthEndpoint:  *authEndpoint,
-			TokenEndpoint: *tokenEndpoint,
-			Scopes:        scopeList,
-			ShowQR:        *qrCode,
-			Browser:       *browser,
-		})
-		if err != nil {
-			log.Fatalf("device auth failed: %v", err)
-		}
-		*jwt = token.AccessToken
+	token, err := client.GetOIDCToken(context.Background(), opts)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	c := client.NewClient(*metaURL, "") // dataURL not needed for pull
-	blob, err := c.PullKeySync(*jwt)
+	blob, err := c.PullKeySync(token)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -193,41 +211,10 @@ func cmdKeySyncPull(args []string) {
 		log.Fatal(err)
 	}
 
-	if err := config.Save(*conf, *configPath); err != nil {
+	if err := config.SaveWithPassword(*conf, *configPath, password); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Keys pulled and configuration restored successfully.")
-}
-
-func cmdInit(args []string) {
-	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	metaURL := fs.String("meta", "http://localhost:8080", "Metadata Server URL")
-	fs.Parse(args)
-
-	// Fetch Server Key
-	resp, err := http.Get(*metaURL + "/v1/meta/key")
-	if err != nil {
-		log.Fatalf("failed to fetch server key: %v", err)
-	}
-	defer resp.Body.Close()
-	sKey, _ := io.ReadAll(resp.Body)
-
-	// Generate local keys
-	dk, _ := crypto.GenerateEncryptionKey()
-	sk, _ := crypto.GenerateIdentityKey()
-
-	conf := config.Config{
-		MetaURL:   *metaURL,
-		DataURL:   *metaURL, // Assume unified by default
-		EncKey:    hex.EncodeToString(crypto.MarshalDecapsulationKey(dk)),
-		SignKey:   hex.EncodeToString(sk.MarshalPrivate()),
-		ServerKey: hex.EncodeToString(sKey),
-	}
-
-	if err := config.Save(conf, *configPath); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Config initialized. Server key: %s\n", hex.EncodeToString(sKey[:8]))
 }
 
 func cmdRegister(args []string) {
@@ -246,34 +233,19 @@ func cmdRegister(args []string) {
 		log.Fatal(err)
 	}
 
-	if *jwt == "" {
-		if *clientID == "" || *authEndpoint == "" || *tokenEndpoint == "" {
-			log.Fatal("-jwt or (-client-id, -auth-endpoint, -token-endpoint) is required")
-		}
+	opts := client.OnboardingOptions{
+		JWT:           *jwt,
+		ClientID:      *clientID,
+		Scopes:        strings.Split(*scopes, ","),
+		AuthEndpoint:  *authEndpoint,
+		TokenEndpoint: *tokenEndpoint,
+		ShowQR:        *qrCode,
+		Browser:       *browser,
+	}
 
-		var scopeList []string
-		if *scopes != "" {
-			for _, s := range strings.Split(*scopes, ",") {
-				s = strings.TrimSpace(s)
-				if s != "" {
-					scopeList = append(scopeList, s)
-				}
-			}
-		}
-
-		ctx := context.Background()
-		token, err := auth.GetToken(ctx, auth.Config{
-			ClientID:      *clientID,
-			AuthEndpoint:  *authEndpoint,
-			TokenEndpoint: *tokenEndpoint,
-			Scopes:        scopeList,
-			ShowQR:        *qrCode,
-			Browser:       *browser,
-		})
-		if err != nil {
-			log.Fatalf("device auth failed: %v", err)
-		}
-		*jwt = token.AccessToken
+	token, err := client.GetOIDCToken(context.Background(), opts)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	skBytes, _ := hex.DecodeString(conf.SignKey)
@@ -283,13 +255,13 @@ func cmdRegister(args []string) {
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
 
 	req := map[string]interface{}{
-		"jwt":      *jwt,
+		"jwt":      token,
 		"sign_key": sk.Public(),
 		"enc_key":  dk.EncapsulationKey().Bytes(),
 	}
 	body, _ := json.Marshal(req)
 
-	resp, err := http.Post(conf.MetaURL+"/v1/user/register", "application/json", bytes.NewReader(body))
+	resp, err := http.Post(conf.MetaURL+"/v1/user/register", "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -330,7 +302,10 @@ func loadClient() *client.Client {
 	sk := crypto.UnmarshalIdentityKey(skBytes)
 
 	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
-	svKey, _ := crypto.UnmarshalEncapsulationKey(svKeyBytes)
+	svKey, err := crypto.UnmarshalEncapsulationKey(svKeyBytes)
+	if err != nil {
+		log.Fatalf("failed to unmarshal server key: %v", err)
+	}
 
 	return c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 }
@@ -465,19 +440,20 @@ func cmdGet(args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
+
 	rc, err := c.ReadFile(inode.ID, key)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer rc.Close()
 
-	out, err := os.Create(local)
+	f, err := os.Create(local)
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer out.Close()
+	defer f.Close()
 
-	if _, err := io.Copy(out, rc); err != nil {
+	if _, err := io.Copy(f, rc); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s downloaded to %s.\n", remote, local)
