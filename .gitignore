@@ -1,7 +1,8 @@
-bin/
-distfs
-storage-node
-test-auth
+/bin/
+/distfs
+/distfs-fuse
+/storage-node
+/test-auth
 *.key
-data/
-node*/
+/data/
+/node*/
