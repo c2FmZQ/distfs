@@ -169,13 +169,20 @@ func TestFSM_Rename(t *testing.T) {
 			return fmt.Errorf("file1-moved not in root or wrong ID")
 		}
 
-		// Inode parent_id should be updated
+		// Inode links should be updated
+
 		var f1 Inode
+
 		json.Unmarshal(inodes.Get([]byte("f1")), &f1)
-		if f1.ParentID != "root" {
-			return fmt.Errorf("f1 parent_id not updated: %s", f1.ParentID)
+
+		if f1.Links == nil || !f1.Links["root:file1-moved"] {
+
+			return fmt.Errorf("f1 links not updated correctly: %+v", f1.Links)
+
 		}
+
 		return nil
+
 	})
 	if err != nil {
 		t.Error(err)

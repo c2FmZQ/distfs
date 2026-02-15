@@ -87,10 +87,16 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 }
 
 type pathCacheEntry struct {
-	inodeID  string
-	key      []byte
-	parentID string
-	nameHMAC string
+	inodeID string
+	key     []byte
+	linkTag string // "ParentID:NameHMAC"
+}
+
+type fileMetadata struct {
+	key     []byte
+	groupID string
+	linkTag string // "ParentID:NameHMAC"
+	inlined bool
 }
 
 // Client is the primary entry point for interacting with a DistFS cluster.
@@ -103,7 +109,7 @@ type Client struct {
 	signKey      *crypto.IdentityKey
 	serverKey    *mlkem.EncapsulationKey768
 	serverSignPK []byte
-	keyCache     map[string][]byte
+	keyCache     map[string]fileMetadata
 	keyMu        *sync.RWMutex
 
 	pathCache map[string]pathCacheEntry
@@ -132,7 +138,7 @@ func NewClient(serverAddr string) *Client {
 			Transport: t,
 			Timeout:   5 * time.Minute,
 		},
-		keyCache:  make(map[string][]byte),
+		keyCache:  make(map[string]fileMetadata),
 		keyMu:     &sync.RWMutex{},
 		pathCache: make(map[string]pathCacheEntry),
 		pathMu:    &sync.RWMutex{},
@@ -147,7 +153,7 @@ func (c *Client) WithIdentity(userID string, key *mlkem.DecapsulationKey768) *Cl
 	c2 := *c
 	c2.userID = userID
 	c2.decKey = key
-	c2.keyCache = make(map[string][]byte) // New cache for new identity
+	c2.keyCache = make(map[string]fileMetadata) // New cache for new identity
 	return &c2
 }
 
@@ -800,10 +806,11 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 
 		// Assume not found, create new
 		inode = metadata.Inode{
-			ID:            id,
-			ParentID:      parentID,
-			NameHMAC:      nameHMAC,
-			Type:          iType,
+			ID:   id,
+			Type: iType,
+			Links: map[string]bool{
+				parentID + ":" + nameHMAC: true,
+			},
 			Mode:          mode,
 			Size:          uint64(size),
 			ChunkManifest: nil,
@@ -886,7 +893,12 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	_, err = c.updateInode(inode)
 	if err == nil {
 		c.keyMu.Lock()
-		c.keyCache[id] = fileKey
+		c.keyCache[id] = fileMetadata{
+			key:     fileKey,
+			groupID: groupID,
+			linkTag: parentID + ":" + nameHMAC,
+			inlined: inode.InlineData != nil,
+		}
 		c.keyMu.Unlock()
 	}
 	return err
@@ -895,27 +907,37 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 // WriteFile writes a file. Returns the FileKey used.
 func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]byte, error) {
 	c.keyMu.RLock()
-	fileKey, ok := c.keyCache[id]
+	meta, ok := c.keyCache[id]
 	c.keyMu.RUnlock()
 
+	var fileKey []byte
 	var groupID string
 	var parentID string
 	var nameHMAC string
-	if !ok {
+
+	if ok {
+		fileKey = meta.key
+		groupID = meta.groupID
+		parts := strings.SplitN(meta.linkTag, ":", 2)
+		if len(parts) == 2 {
+			parentID = parts[0]
+			nameHMAC = parts[1]
+		}
+	} else {
 		if inode, err := c.GetInode(id); err == nil {
 			if key, err := c.UnlockInode(inode); err == nil {
 				fileKey = key
 				groupID = inode.GroupID
-				parentID = inode.ParentID
-				nameHMAC = inode.NameHMAC
+				// Try to pick a link tag for the cache
+				for tag := range inode.Links {
+					parts := strings.SplitN(tag, ":", 2)
+					if len(parts) == 2 {
+						parentID = parts[0]
+						nameHMAC = parts[1]
+						break
+					}
+				}
 			}
-		}
-	} else {
-		// Even if we have the key, we need metadata if we want to preserve parentID/nameHMAC
-		if inode, err := c.GetInode(id); err == nil {
-			groupID = inode.GroupID
-			parentID = inode.ParentID
-			nameHMAC = inode.NameHMAC
 		}
 	}
 
@@ -960,8 +982,11 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 
 	if fileKey == nil {
 		c.keyMu.RLock()
-		fileKey = c.keyCache[id]
+		meta, ok := c.keyCache[id]
 		c.keyMu.RUnlock()
+		if ok {
+			fileKey = meta.key
+		}
 	}
 
 	if fileKey == nil {
@@ -973,8 +998,20 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 			return nil, err
 		}
 		fileKey = key
+
+		// Optimization: Update cache from what we just fetched
+		var linkTag string
+		for tag := range inode.Links {
+			linkTag = tag
+			break
+		}
 		c.keyMu.Lock()
-		c.keyCache[id] = fileKey
+		c.keyCache[id] = fileMetadata{
+			key:     fileKey,
+			groupID: inode.GroupID,
+			linkTag: linkTag,
+			inlined: inode.InlineData != nil,
+		}
 		c.keyMu.Unlock()
 	}
 
@@ -1185,6 +1222,20 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 	// 1. Try personal access
 	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 	if err == nil {
+		// Update Cache
+		var linkTag string
+		for tag := range inode.Links {
+			linkTag = tag
+			break
+		}
+		c.keyMu.Lock()
+		c.keyCache[inode.ID] = fileMetadata{
+			key:     key,
+			groupID: inode.GroupID,
+			linkTag: linkTag,
+			inlined: inode.InlineData != nil,
+		}
+		c.keyMu.Unlock()
 		return key, nil
 	}
 	lastErr = err

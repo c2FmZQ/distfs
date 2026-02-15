@@ -66,7 +66,7 @@ type Server struct {
 	requestNonceCache map[string]time.Time
 	requestNonceMu    sync.Mutex
 
-	sessionKeyCache map[string][]byte // SessionToken -> SharedSecret
+	sessionKeyCache map[string]sessionKeyEntry // SessionToken -> Entry
 	sessionKeyMu    sync.RWMutex
 
 	// Request Batching
@@ -93,6 +93,11 @@ type batchRequest struct {
 	resps []chan interface{}
 }
 
+type sessionKeyEntry struct {
+	key    []byte
+	expiry int64
+}
+
 type challengeEntry struct {
 	UserID    string
 	CreatedAt time.Time
@@ -113,20 +118,20 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		raftSecret:          raftSecret,
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),
-		sessionKeyCache:     make(map[string][]byte),
+		sessionKeyCache:     make(map[string]sessionKeyEntry),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 		stopCh:              make(chan struct{}),
 		batchQueue:          make([]*LogCommand, 0),
 		batchResps:          make([]chan interface{}, 0),
-		batchApplyCh:        make(chan batchRequest),
+		batchApplyCh:        make(chan batchRequest, 100),
 	}
-
 	if oidcDiscoveryURL != "" {
 		go s.discoverOIDC(oidcDiscoveryURL)
 	}
 
 	go s.batchProcessor()
+	go s.sessionCleanupWorker()
 
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
@@ -1904,11 +1909,11 @@ func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
 	sessionToken := r.Header.Get("Session-Token")
 	if sessionToken != "" {
 		s.sessionKeyMu.RLock()
-		key, ok := s.sessionKeyCache[sessionToken]
+		entry, ok := s.sessionKeyCache[sessionToken]
 		s.sessionKeyMu.RUnlock()
 
 		if ok {
-			ts, payload, err := crypto.OpenRequestSymmetric(key, user.SignKey, sealed.Sealed)
+			ts, payload, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
 			if err == nil {
 				// Success with cached key
 				if err := s.checkReplay(user.ID, ts); err != nil {
@@ -1919,7 +1924,6 @@ func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
 			// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
 		}
 	}
-
 	// 1. Get Active Cluster Key
 	active, err := s.fsm.GetActiveKey()
 	if err != nil {
@@ -1944,13 +1948,15 @@ func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
 	// 4. Memoize Shared Secret
 	if sessionToken != "" {
 		s.sessionKeyMu.Lock()
-		s.sessionKeyCache[sessionToken] = sharedSecret
+		s.sessionKeyCache[sessionToken] = sessionKeyEntry{
+			key:    sharedSecret,
+			expiry: time.Now().Add(2 * time.Hour).Unix(),
+		}
 		s.sessionKeyMu.Unlock()
 	}
 
 	return payload, nil
 }
-
 func (s *Server) checkReplay(userID string, ts int64) error {
 	now := time.Now().UnixNano()
 	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
@@ -1974,6 +1980,25 @@ func (s *Server) checkReplay(userID string, ts int64) error {
 	return nil
 }
 
+func (s *Server) sessionCleanupWorker() {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			s.sessionKeyMu.Lock()
+			now := time.Now().Unix()
+			for token, entry := range s.sessionKeyCache {
+				if entry.expiry < now {
+					delete(s.sessionKeyCache, token)
+				}
+			}
+			s.sessionKeyMu.Unlock()
+		case <-s.stopCh:
+			return
+		}
+	}
+}
 func (s *Server) checkAndInitWorld() {
 	_, err := s.fsm.GetWorldIdentity()
 	if err == nil {

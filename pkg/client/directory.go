@@ -72,7 +72,15 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 		inode, err := c.getInode(entry.inodeID)
 		if err == nil {
 			// Validate hint integrity
-			if inode.ParentID == entry.parentID && inode.NameHMAC == entry.nameHMAC {
+			// Root has no linkTag
+			valid := false
+			if path == "/" {
+				valid = inode.ID == metadata.RootID
+			} else if inode.Links != nil {
+				valid = inode.Links[entry.linkTag]
+			}
+
+			if valid {
 				return inode, entry.key, nil
 			}
 			// Stale cache
@@ -81,7 +89,6 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 			c.invalidatePathCache(path)
 		}
 	}
-
 	// 2. Sequential Resolution
 	relPath := strings.TrimPrefix(path, "/")
 	rootInode, err := c.getInode(metadata.RootID)
@@ -143,12 +150,10 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 		currentPath += "/" + part
 		c.putPathCache(currentPath, pathCacheEntry{
-			inodeID:  inode.ID,
-			key:      key,
-			parentID: parentID,
-			nameHMAC: encName,
+			inodeID: inode.ID,
+			key:     key,
+			linkTag: parentID + ":" + encName,
 		})
-
 		currentKey = key
 	}
 
@@ -199,9 +204,10 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	} else {
 		lb := c.createLockbox(newKey, mode, groupID)
 		inode := metadata.Inode{
-			ID:            newID,
-			ParentID:      parentID,
-			NameHMAC:      encName,
+			ID: newID,
+			Links: map[string]bool{
+				parentID + ":" + encName: true,
+			},
 			Type:          iType,
 			Mode:          mode,
 			UID:           0, // TODO: set from client info
@@ -383,10 +389,9 @@ func (c *Client) Link(targetPath, linkPath string) error {
 	targetKey, _ := c.UnlockInode(target)
 
 	c.putPathCache("/"+strings.Trim(linkPath, "/"), pathCacheEntry{
-		inodeID:  target.ID,
-		key:      targetKey,
-		parentID: parent.ID,
-		nameHMAC: encName,
+		inodeID: target.ID,
+		key:     targetKey,
+		linkTag: parent.ID + ":" + encName,
 	})
 	return nil
 }
@@ -465,7 +470,17 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 			if err != nil {
 				return err
 			}
-			return c.writeInodeContent(existingID, metadata.FileType, key, r, size, nil, inode.Mode, inode.GroupID, inode.ParentID, inode.NameHMAC)
+			var linkTag string
+			for tag := range inode.Links {
+				linkTag = tag
+				break
+			}
+			parts := strings.SplitN(linkTag, ":", 2)
+			pID, nHMAC := "", ""
+			if len(parts) == 2 {
+				pID, nHMAC = parts[0], parts[1]
+			}
+			return c.writeInodeContent(existingID, metadata.FileType, key, r, size, nil, inode.Mode, inode.GroupID, pID, nHMAC)
 		}
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}
@@ -473,10 +488,9 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 	inode, key, err := c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID)
 	if err == nil {
 		c.putPathCache("/"+path, pathCacheEntry{
-			inodeID:  inode.ID,
-			key:      key,
-			parentID: parentInode.ID,
-			nameHMAC: encName,
+			inodeID: inode.ID,
+			key:     key,
+			linkTag: parentInode.ID + ":" + encName,
 		})
 	}
 	return err

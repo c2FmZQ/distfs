@@ -650,8 +650,10 @@ func (fsm *MetadataFSM) applyLink(data []byte) interface{} {
 
 		// 4. Update Target
 		target.NLink++
-		target.ParentID = req.ParentID
-		target.NameHMAC = req.Name
+		if target.Links == nil {
+			target.Links = make(map[string]bool)
+		}
+		target.Links[req.ParentID+":"+req.Name] = true
 		target.Version++
 
 		// 5. Save
@@ -774,6 +776,9 @@ func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
 					if target.NLink > 0 {
 						target.NLink--
 					}
+					if target.Links != nil {
+						delete(target.Links, req.NewParentID+":"+req.NewName)
+					}
 					if target.NLink == 0 {
 						b.Delete([]byte(target.ID))
 						enqueueGC(tx, &target)
@@ -801,13 +806,16 @@ func (fsm *MetadataFSM) applyRename(data []byte) interface{} {
 		newParent.Children[req.NewName] = childID
 		newParent.Version++
 
-		// 5. Update Child Metadata
+		// 6. Update Child Metadata (Links)
 		vChild := b.Get([]byte(childID))
 		if vChild != nil {
 			var child Inode
 			if err := json.Unmarshal(vChild, &child); err == nil {
-				child.ParentID = req.NewParentID
-				child.NameHMAC = req.NewName
+				if child.Links == nil {
+					child.Links = make(map[string]bool)
+				}
+				delete(child.Links, req.OldParentID+":"+req.OldName)
+				child.Links[req.NewParentID+":"+req.NewName] = true
 				child.Version++
 				if err := saveInodeWithPages(tx, &child); err != nil {
 					return err
@@ -861,6 +869,22 @@ func (fsm *MetadataFSM) applyAddChild(data []byte) interface{} {
 
 		inode.Children[update.Name] = update.ChildID
 		inode.Version++
+
+		// Update Child Links
+		vChild := b.Get([]byte(update.ChildID))
+		if vChild != nil {
+			var child Inode
+			if err := json.Unmarshal(vChild, &child); err == nil {
+				if child.Links == nil {
+					child.Links = make(map[string]bool)
+				}
+				child.Links[update.ParentID+":"+update.Name] = true
+				child.Version++
+				if err := saveInodeWithPages(tx, &child); err != nil {
+					return err
+				}
+			}
+		}
 
 		return saveInodeWithPages(tx, &inode)
 	})
@@ -920,6 +944,9 @@ func (fsm *MetadataFSM) applyRemoveChild(data []byte) interface{} {
 		// 6. Update Child
 		if child.NLink > 0 {
 			child.NLink--
+		}
+		if child.Links != nil {
+			delete(child.Links, update.ParentID+":"+update.Name)
 		}
 		child.Version++
 

@@ -124,7 +124,7 @@ type Node struct {
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID            string            `json:"id"`
-	ParentID      string            `json:"parent_id"`
+	Links         map[string]bool   `json:"links,omitempty"` // Set of "ParentID:NameHMAC"
 	Type          InodeType         `json:"type"`
 	OwnerID       string            `json:"owner_id"` // DistFS User ID
 	GroupID       string            `json:"group_id"` // DistFS Group ID
@@ -137,7 +137,6 @@ type Inode struct {
 	NLink         uint32            `json:"nlink"`
 	SymlinkTarget string            `json:"symlink_target,omitempty"`
 	EncryptedName []byte            `json:"enc_name"`
-	NameHMAC      string            `json:"name_hmac,omitempty"` // HMAC(parentKey, name)
 	InlineData    []byte            `json:"inline_data,omitempty"`
 	Children      map[string]string `json:"children,omitempty"`
 	ChunkManifest []ChunkEntry      `json:"manifest,omitempty"`

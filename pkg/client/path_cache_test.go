@@ -166,10 +166,9 @@ func TestPathCache(t *testing.T) {
 	// 7. Validation Logic Test
 	// Manually inject a stale entry pointing to a non-existent ID
 	c.putPathCache("/stale", pathCacheEntry{
-		inodeID:  "missing-id",
-		key:      make([]byte, 32),
-		parentID: "wrong-parent",
-		nameHMAC: "wrong-hmac",
+		inodeID: "missing-id",
+		key:     make([]byte, 32),
+		linkTag: "wrong-parent:wrong-hmac",
 	})
 
 	// Resolving /stale should fall back to sequential (which fails with 404)
