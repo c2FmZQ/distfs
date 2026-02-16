@@ -177,84 +177,149 @@ func (c *Client) Symlink(target, path string) error {
 }
 
 // AddEntry adds a new directory entry to the given parent.
-func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string) (*metadata.Inode, []byte, error) {
+
+func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string, uid, gid uint32) (*metadata.Inode, []byte, error) {
+
 	mac := hmac.New(sha256.New, parentKey)
+
 	mac.Write([]byte(name))
+
 	encName := hex.EncodeToString(mac.Sum(nil))
 
 	newID := generateID()
+
 	newKey := make([]byte, 32)
+
 	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
+
 		return nil, nil, err
+
 	}
 
 	encNameBlob, err := crypto.EncryptDEM(newKey, []byte(name))
+
 	if err != nil {
+
 		return nil, nil, fmt.Errorf("failed to encrypt name: %w", err)
+
 	}
 
 	var newInode *metadata.Inode
+
 	if iType == metadata.FileType {
+
 		if err := c.writeInodeContent(context.Background(), newID, iType, newKey, r, size, encNameBlob, mode, groupID, parentID, encName); err != nil {
+
 			return nil, nil, err
+
 		}
+
 		newInode, err = c.GetInode(context.Background(), newID)
+
 		if err != nil {
+
 			return nil, nil, err
+
 		}
+
 	} else {
+
 		lb := c.createLockbox(newKey, mode, groupID)
+
 		inode := metadata.Inode{
+
 			ID: newID,
+
 			Links: map[string]bool{
+
 				parentID + ":" + encName: true,
 			},
-			Type:          iType,
-			Mode:          mode,
-			UID:           0, // TODO: set from client info
-			GID:           0,
-			Children:      make(map[string]string),
-			Lockbox:       lb,
+
+			Type: iType,
+
+			Mode: mode,
+
+			UID: uid,
+
+			GID: gid,
+
+			Children: make(map[string]string),
+
+			Lockbox: lb,
+
 			EncryptedName: encNameBlob,
-			OwnerID:       c.userID,
-			GroupID:       groupID,
+
+			OwnerID: c.userID,
+
+			GroupID: groupID,
+
 			SymlinkTarget: symlinkTarget,
 		}
+
 		newInode, err = c.createInode(context.Background(), inode)
+
 		if err != nil {
+
 			return nil, nil, err
+
 		}
+
 	}
 
 	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
+
 	data, _ := json.Marshal(update)
+
 	err = c.withRetry(context.Background(), func() error {
+
 		c.acquire()
+
 		defer c.release()
 
 		req, _ := http.NewRequest("PUT", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
+
 		if err := c.authenticateRequest(req); err != nil {
+
 			return fmt.Errorf("auth failed: %w", err)
+
 		}
+
 		if err := c.sealBody(req, data); err != nil {
+
 			return err
+
 		}
 
 		resp, err := c.httpClient.Do(req)
+
 		if err != nil {
+
 			return err
+
 		}
+
 		defer resp.Body.Close()
+
 		if resp.StatusCode != http.StatusOK {
+
 			b, _ := io.ReadAll(resp.Body)
+
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+
 		}
+
 		return nil
+
 	})
+
 	if err != nil {
+
 		return nil, nil, err
+
 	}
+
 	return newInode, newKey, nil
+
 }
 
 // Rename moves or renames a directory entry.
@@ -508,7 +573,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}
 
-	inode, key, err := c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID)
+	inode, key, err := c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID, 0, 0)
 	if err == nil {
 		c.putPathCache("/"+path, pathCacheEntry{
 			inodeID: inode.ID,

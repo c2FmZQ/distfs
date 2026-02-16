@@ -53,12 +53,23 @@ async function fetchUsers() {
         }
         data.forEach(u => {
             const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td>${u.id}</td>
-                <td>${u.usage ? u.usage.inodes : 0}</td>
-                <td>${formatBytes(u.usage ? u.usage.bytes : 0)}</td>
-                <td>${u.quota && u.quota.max_bytes ? formatBytes(u.quota.max_bytes) : 'Unlim'}</td>
-            `;
+            
+            const tdId = document.createElement('td');
+            tdId.innerText = u.id;
+            tr.appendChild(tdId);
+
+            const tdInodes = document.createElement('td');
+            tdInodes.innerText = u.usage ? u.usage.inodes : 0;
+            tr.appendChild(tdInodes);
+
+            const tdBytes = document.createElement('td');
+            tdBytes.innerText = formatBytes(u.usage ? u.usage.bytes : 0);
+            tr.appendChild(tdBytes);
+
+            const tdQuota = document.createElement('td');
+            tdQuota.innerText = u.quota && u.quota.max_bytes ? formatBytes(u.quota.max_bytes) : 'Unlim';
+            tr.appendChild(tdQuota);
+
             tbody.appendChild(tr);
         });
     } catch (e) { console.error(e); }
@@ -76,12 +87,23 @@ async function fetchNodes() {
         }
         data.forEach(n => {
             const tr = document.createElement('tr');
-            tr.innerHTML = `
-                <td>${n.id}</td>
-                <td>${n.address}</td>
-                <td>${n.status}</td>
-                <td>${new Date(n.last_heartbeat * 1000).toLocaleString()}</td>
-            `;
+            
+            const tdId = document.createElement('td');
+            tdId.innerText = n.id;
+            tr.appendChild(tdId);
+
+            const tdAddress = document.createElement('td');
+            tdAddress.innerText = n.address;
+            tr.appendChild(tdAddress);
+
+            const tdStatus = document.createElement('td');
+            tdStatus.innerText = n.status;
+            tr.appendChild(tdStatus);
+
+            const tdHeartbeat = document.createElement('td');
+            tdHeartbeat.innerText = new Date(n.last_heartbeat * 1000).toLocaleString();
+            tr.appendChild(tdHeartbeat);
+
             tbody.appendChild(tr);
         });
     } catch (e) { console.error(e); }

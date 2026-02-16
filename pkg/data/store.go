@@ -43,4 +43,7 @@ type Store interface {
 
 	// Stats returns total capacity and used space in bytes.
 	Stats() (capacity int64, used int64, err error)
+
+	// QuarantineChunk moves the chunk to a quarantine area or renames it.
+	QuarantineChunk(id string) error
 }

@@ -10,7 +10,7 @@ echo "" >> $REPORT
 # 1. Build static binaries for Alpine compatibility
 echo "Building binaries (static linking)..."
 mkdir -p bin
-CGO_ENABLED=0 go build -o bin/storage-node ./cmd/storage-node
+CGO_ENABLED=0 go build -tags debug -o bin/storage-node ./cmd/storage-node
 CGO_ENABLED=0 go build -o bin/distfs ./cmd/distfs
 CGO_ENABLED=0 go build -o bin/distfs-fuse ./cmd/distfs-fuse
 CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth

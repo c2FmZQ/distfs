@@ -75,8 +75,10 @@ func (s *IntegrityScrubber) scrub() {
 		}
 
 		if err := s.verifyChunk(id); err != nil {
-			log.Printf("CORRUPTION DETECTED: Chunk %s: %v", id, err)
-			// TODO: Quarantine or report to leader
+			log.Printf("CORRUPTION DETECTED: Chunk %s: %v. Quarantining...", id, err)
+			if qErr := s.store.QuarantineChunk(id); qErr != nil {
+				log.Printf("Failed to quarantine chunk %s: %v", id, qErr)
+			}
 		}
 	}
 }

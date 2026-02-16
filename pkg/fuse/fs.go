@@ -49,11 +49,39 @@ func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.Sta
 		freeBytes = 0
 	}
 	resp.Bfree = uint64(freeBytes) / uint64(bsize)
-	resp.Bavail = resp.Bfree // TODO: consider quota here if available in stats
+
+	// Default to cluster free space
+	resp.Bavail = resp.Bfree
+
+	// Check User Quota
+	user, err := f.client.GetUser(f.client.UserID())
+	if err == nil && user.Quota.MaxBytes > 0 {
+		quotaFree := user.Quota.MaxBytes - user.Usage.TotalBytes
+		if quotaFree < 0 {
+			quotaFree = 0
+		}
+		quotaBlocks := uint64(quotaFree) / uint64(bsize)
+		if quotaBlocks < resp.Bavail {
+			resp.Bavail = quotaBlocks
+		}
+	}
 
 	// Inodes
 	resp.Files = 1000000 // Soft limit from DISTFS.md
-	resp.Ffree = 1000000 // Just a placeholder for now
+	if err == nil && user.Quota.MaxInodes > 0 {
+		resp.Files = uint64(user.Quota.MaxInodes)
+	}
+
+	usedFiles := uint64(0)
+	if err == nil {
+		usedFiles = uint64(user.Usage.InodeCount)
+	}
+
+	if usedFiles > resp.Files {
+		resp.Ffree = 0
+	} else {
+		resp.Ffree = resp.Files - usedFiles
+	}
 
 	return nil
 }
@@ -195,7 +223,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
 	log.Printf("FUSE Create: %s", req.Name)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), d.inode.GroupID)
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), d.inode.GroupID, req.Uid, req.Gid)
 	if err != nil {
 		log.Printf("FUSE Create failed: %v", err)
 		return nil, nil, mapError(err)
@@ -213,7 +241,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	log.Printf("FUSE Mkdir: %s", req.Name)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), d.inode.GroupID)
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), d.inode.GroupID, req.Uid, req.Gid)
 	if err != nil {
 		log.Printf("FUSE Mkdir failed: %v", err)
 		return nil, mapError(err)
@@ -244,7 +272,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 
 func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
 	log.Printf("FUSE Symlink: %s -> %s", req.NewName, req.Target)
-	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, d.inode.GroupID)
+	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, d.inode.GroupID, req.Uid, req.Gid)
 	if err != nil {
 		log.Printf("FUSE Symlink failed: %v", err)
 		return nil, mapError(err)

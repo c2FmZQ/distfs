@@ -20,6 +20,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"embed"
 	"encoding/base64"
@@ -330,22 +331,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/api/debug/suicide" && r.Method == http.MethodPost {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.handleSuicide(w, r)
-		return
-	}
-
-	if r.URL.Path == "/api/debug/scrub" && r.Method == http.MethodPost {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.ForceReplicationScan()
-		w.WriteHeader(http.StatusOK)
+	if s.handleDebugRoutes(w, r) {
 		return
 	}
 
@@ -1873,17 +1859,9 @@ func (s *Server) checkRaftSecret(r *http.Request) bool {
 	if s.raftSecret == "" {
 		return false // Fail closed
 	}
-	return r.Header.Get("X-Raft-Secret") == s.raftSecret
-}
-
-func (s *Server) handleSuicide(w http.ResponseWriter, r *http.Request) {
-	log.Printf("CRITICAL: Suicide requested via debug API")
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("Goodbye cruel world\n"))
-	go func() {
-		time.Sleep(500 * time.Millisecond)
-		os.Exit(1)
-	}()
+	provided := sha256.Sum256([]byte(r.Header.Get("X-Raft-Secret")))
+	expected := sha256.Sum256([]byte(s.raftSecret))
+	return subtle.ConstantTimeCompare(provided[:], expected[:]) == 1
 }
 
 func (s *Server) handleGetServerSignKey(w http.ResponseWriter, r *http.Request) {

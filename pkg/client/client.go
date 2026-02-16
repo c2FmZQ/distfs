@@ -181,6 +181,11 @@ func (c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client {
 	return &c2
 }
 
+// UserID returns the current user ID.
+func (c *Client) UserID() string {
+	return c.userID
+}
+
 // Login performs the challenge-response handshake to obtain a session token.
 func (c *Client) Login() error {
 	// 1. Get Challenge
@@ -682,6 +687,46 @@ func (e *APIError) ToPOSIX() error {
 	default:
 		return syscall.EIO
 	}
+}
+
+func (c *Client) GetUser(id string) (*metadata.User, error) {
+	var user metadata.User
+	err := c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/"+id, nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			resp.Body.Close()
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&user)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return &user, nil
 }
 
 func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
@@ -2173,32 +2218,6 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	return nil
 }
 
-// GetUser fetches the user metadata (including public keys).
-func (c *Client) GetUser(id string) (*metadata.User, error) {
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/user/"+id, nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get user failed: %d", resp.StatusCode)
-	}
-
-	var user metadata.User
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, err
-	}
-	return &user, nil
-}
-
 // SetAttr updates the attributes of an inode at the given path.
 func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 	inode, key, err := c.ResolvePath(path)
@@ -2586,5 +2605,3 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 		return nil
 	})
 }
-
-// RefreshNodeRegistry fetches the current node registry from the server.

@@ -170,3 +170,34 @@ func (s *DiskStore) Stats() (int64, int64, error) {
 	free := int64(stat.Bfree) * int64(stat.Bsize)
 	return capacity, capacity - free, nil
 }
+
+func (s *DiskStore) QuarantineChunk(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	found := false
+	var path string
+
+	err := filepath.WalkDir(s.st.Dir(), func(p string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if d.Name() == id {
+			found = true
+			path = p
+			return fmt.Errorf("stop")
+		}
+		return nil
+	})
+
+	if found && path != "" {
+		return os.Rename(path, path+".corrupted")
+	}
+	if err != nil && err.Error() != "stop" {
+		return err
+	}
+	return os.ErrNotExist
+}
