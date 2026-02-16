@@ -49,8 +49,8 @@ echo '```' >> $REPORT
 if grep -F -- "--- DISTFS E2E REPORT ---" /tmp/e2e-runner.log > /dev/null; then
     sed -n '/--- DISTFS E2E REPORT ---/,$p' /tmp/e2e-runner.log >> $REPORT
 else
-    echo "Warning: Report marker not found. Appending last 50 lines of runner log." >> $REPORT
-    tail -n 50 /tmp/e2e-runner.log >> $REPORT
+    echo "Warning: Report marker not found. Appending last 100 lines of the log." >> $REPORT
+    tail -n 100 /tmp/all-logs.log >> $REPORT
 fi
 echo '```' >> $REPORT
 
