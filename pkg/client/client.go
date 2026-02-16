@@ -710,7 +710,6 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 
 		body, err := c.unsealResponse(resp)
 		if err != nil {
-			resp.Body.Close()
 			return err
 		}
 		defer body.Close()
@@ -837,6 +836,7 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 		if err != nil {
 			return err
 		}
+
 		body, err := c.unsealResponse(resp)
 		if err != nil {
 			return err
@@ -847,6 +847,7 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 			b, _ := io.ReadAll(body)
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
+
 		return json.NewDecoder(body).Decode(&inode)
 	})
 
@@ -1680,36 +1681,35 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 	return crypto.DecryptChunk(key, ct)
 }
 
-func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) error {
+func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) (*metadata.Inode, error) {
 	ctx := context.Background()
 
 	// 1. Get current inode state
 	inode, err := c.GetInode(ctx, id)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	key, err := c.UnlockInode(inode)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// 2. Handle Small File Inlining (Optimized Path)
 	if size <= metadata.InlineLimit {
 		buf := make([]byte, size)
 		if _, err := r.ReadAt(buf, 0); err != nil && err != io.EOF {
-			return err
+			return nil, err
 		}
 		ciphertext, err := crypto.EncryptDEM(key, buf)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		inode.InlineData = ciphertext
 		inode.ChunkManifest = nil
 		inode.ChunkPages = nil
 		inode.Size = uint64(size)
-		_, err = c.updateInode(ctx, *inode)
-		return err
+		return c.updateInode(ctx, *inode)
 	}
 
 	// 3. Handle Chunked File (Differential Update)
@@ -1746,27 +1746,27 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 
 			n, err := r.ReadAt(buf[:chunkSize], offset)
 			if err != nil && err != io.EOF {
-				return err
+				return nil, err
 			}
 			chunkData := buf[:n]
 
 			// Encrypt
 			cid, ct, err := crypto.EncryptChunk(key, chunkData)
 			if err != nil {
-				return err
+				return nil, err
 			}
 
 			// Upload
 			token, err := c.issueToken(id, []string{cid}, "W")
 			if err != nil {
-				return err
+				return nil, err
 			}
 			nodes, err := c.allocateNodes(ctx)
 			if err != nil {
-				return err
+				return nil, err
 			}
 			if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
-				return err
+				return nil, err
 			}
 
 			var nodeIDs []string
@@ -1779,8 +1779,7 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 
 	inode.ChunkManifest = newManifest
 	inode.Size = uint64(size)
-	_, err = c.updateInode(ctx, *inode)
-	return err
+	return c.updateInode(ctx, *inode)
 }
 
 func (c *Client) ReadDataFile(name string, data any) error {

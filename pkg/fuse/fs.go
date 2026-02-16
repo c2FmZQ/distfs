@@ -33,6 +33,10 @@ func NewFS(c *client.Client) *FS {
 	return &FS{client: c}
 }
 
+func (f *FS) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return syscall.ENOSYS
+}
+
 func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
 	stats, err := f.client.GetClusterStats()
 	if err != nil {
@@ -126,6 +130,11 @@ var _ fs.NodeSymlinker = (*Dir)(nil)
 var _ fs.NodeSetattrer = (*Dir)(nil)
 var _ fs.NodeLinker = (*Dir)(nil)
 var _ fs.NodeForgetter = (*Dir)(nil)
+var _ fs.NodePoller = (*Dir)(nil)
+
+func (h *Dir) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return syscall.ENOSYS
+}
 
 func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	d.mu.Lock()
@@ -141,7 +150,6 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
-	log.Printf("FUSE Lookup: %s", name)
 	d.mu.Lock()
 	// Freshness check: only refetch if older than 1s
 	if time.Since(d.lastUpdate) > 1*time.Second {
@@ -179,7 +187,6 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 }
 
 func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
-	log.Printf("FUSE ReadDirAll for %s", d.inode.ID)
 	d.mu.Lock()
 	// Refetch inode to see new children
 	if updated, err := d.fs.client.GetInode(ctx, d.inode.ID); err == nil {
@@ -222,10 +229,8 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 }
 
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
-	log.Printf("FUSE Create: %s", req.Name)
 	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), d.inode.GroupID, req.Uid, req.Gid)
 	if err != nil {
-		log.Printf("FUSE Create failed: %v", err)
 		return nil, nil, mapError(err)
 	}
 	f := &File{fs: d.fs, inode: inode, key: key}
@@ -240,57 +245,46 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 }
 
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
-	log.Printf("FUSE Mkdir: %s", req.Name)
 	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), d.inode.GroupID, req.Uid, req.Gid)
 	if err != nil {
-		log.Printf("FUSE Mkdir failed: %v", err)
 		return nil, mapError(err)
 	}
 	return &Dir{fs: d.fs, inode: inode, key: key}, nil
 }
 
 func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
-	log.Printf("FUSE Rename: %s -> %s", req.OldName, req.NewName)
 	targetDir := newDir.(*Dir)
 	err := d.fs.client.RenameRaw(d.inode.ID, d.key, req.OldName, targetDir.inode.ID, targetDir.key, req.NewName)
 	if err != nil {
-		log.Printf("FUSE Rename failed: %v", err)
 		return mapError(err)
 	}
 	return nil
 }
 
 func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
-	log.Printf("FUSE Remove: %s", req.Name)
 	err := d.fs.client.RemoveEntryRaw(d.inode.ID, d.key, req.Name)
 	if err != nil {
-		log.Printf("FUSE Remove failed: %v", err)
 		return mapError(err)
 	}
 	return nil
 }
 
 func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
-	log.Printf("FUSE Symlink: %s -> %s", req.NewName, req.Target)
 	inode, key, err := d.fs.client.AddEntry(d.inode.ID, d.key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, d.inode.GroupID, req.Uid, req.Gid)
 	if err != nil {
-		log.Printf("FUSE Symlink failed: %v", err)
 		return nil, mapError(err)
 	}
 	return &File{fs: d.fs, inode: inode, key: key}, nil
 }
 
 func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	log.Printf("FUSE Setattr Dir: %s", d.inode.ID)
 	return setAttr(d.fs.client, d.inode, d.key, req, &resp.Attr)
 }
 
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
-	log.Printf("FUSE Link: %s -> %s", req.NewName, old.(*File).inode.ID)
 	oldFile := old.(*File)
 	err := d.fs.client.LinkRaw(d.inode.ID, d.key, req.NewName, oldFile.inode.ID)
 	if err != nil {
-		log.Printf("FUSE Link failed: %v", err)
 		return nil, mapError(err)
 	}
 	// Update target node's metadata to reflect new nlink
@@ -303,9 +297,6 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 }
 
 func (d *Dir) Forget() {
-	if d.inode != nil {
-		log.Printf("FUSE Forget Dir: %s", d.inode.ID)
-	}
 }
 
 // File implements both fs.Node and fs.Handle for files.
@@ -323,6 +314,11 @@ var _ fs.NodeReadlinker = (*File)(nil)
 var _ fs.NodeSetattrer = (*File)(nil)
 var _ fs.NodeForgetter = (*File)(nil)
 var _ fs.NodeFsyncer = (*File)(nil)
+var _ fs.NodePoller = (*File)(nil)
+
+func (f *File) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return syscall.ENOSYS
+}
 
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 	f.mu.Lock()
@@ -351,7 +347,6 @@ func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	log.Printf("FUSE Setattr File: %s", f.inode.ID)
 	return setAttr(f.fs.client, f.inode, f.key, req, &resp.Attr)
 }
 
@@ -371,13 +366,9 @@ func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenR
 }
 
 func (f *File) Forget() {
-	if f.inode != nil {
-		log.Printf("FUSE Forget File: %s", f.inode.ID)
-	}
 }
 
 func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	log.Printf("FUSE Fsync File: %s", f.inode.ID)
 	f.mu.Lock()
 	handles := make([]*FileHandle, len(f.handles))
 	copy(handles, f.handles)
@@ -404,34 +395,73 @@ var _ fs.HandleReader = (*FileHandle)(nil)
 var _ fs.HandleWriter = (*FileHandle)(nil)
 var _ fs.HandleFlusher = (*FileHandle)(nil)
 var _ fs.HandleReleaser = (*FileHandle)(nil)
+var _ fs.HandlePoller = (*FileHandle)(nil)
+
+func (h *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
+	return syscall.ENOSYS
+}
 
 func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Check if we can serve from memory (dirty pages)
 	const chunkSize = 1024 * 1024
-	pageIdx := req.Offset / chunkSize
-	pageOffset := int(req.Offset % chunkSize)
+	totalSize := int64(h.size)
+	if h.pages == nil {
+		totalSize = int64(h.file.inode.Size)
+	}
 
-	// Simple case: Read entirely within one dirty page
-	if page, ok := h.pages[pageIdx]; ok {
-		end := pageOffset + req.Size
-		if end > len(page) {
-			end = len(page)
-		}
-		resp.Data = make([]byte, end-pageOffset)
-		copy(resp.Data, page[pageOffset:end])
+	readOffset := req.Offset
+	readSize := req.Size
+	if readOffset >= totalSize {
 		return nil
 	}
-
-	// Fallback to reader for clean pages
-	data := make([]byte, req.Size)
-	n, err := h.reader.ReadAt(data, req.Offset)
-	if err != nil && err != io.EOF {
-		return mapError(err)
+	if readOffset+int64(readSize) > totalSize {
+		readSize = int(totalSize - readOffset)
 	}
-	resp.Data = data[:n]
+
+	data := make([]byte, readSize)
+	bytesRead := 0
+
+	for bytesRead < readSize {
+		currentOff := readOffset + int64(bytesRead)
+		pageIdx := currentOff / chunkSize
+		pageOff := int(currentOff % chunkSize)
+
+		toRead := readSize - bytesRead
+		remainingInPage := int(chunkSize - pageOff)
+		if toRead > remainingInPage {
+			toRead = remainingInPage
+		}
+
+		if h.pages != nil {
+			if page, ok := h.pages[pageIdx]; ok {
+				if pageOff < len(page) {
+					avail := copy(data[bytesRead:], page[pageOff:])
+					if avail > toRead {
+						avail = toRead
+					}
+				}
+				bytesRead += toRead
+				continue
+			}
+		}
+
+		// Fetch from reader
+		n, err := h.reader.ReadAt(data[bytesRead:bytesRead+toRead], currentOff)
+		if err != nil && err != io.EOF {
+			return mapError(err)
+		}
+		if n == 0 && err == io.EOF {
+			break
+		}
+		bytesRead += n
+		if n < toRead && err == io.EOF {
+			break
+		}
+	}
+
+	resp.Data = data[:bytesRead]
 	return nil
 }
 
@@ -512,8 +542,6 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	defer h.mu.Unlock()
 
 	if len(h.pages) > 0 {
-		log.Printf("FUSE Flush: syncing %s (%d pages)", h.file.inode.ID, len(h.pages))
-
 		dirtyMap := make(map[int64]bool)
 		for idx := range h.pages {
 			dirtyMap[idx] = true
@@ -521,15 +549,20 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 		// Use FileHandle as ReaderAt
 		// SyncFile uses this to read the modified chunks
-		err := h.file.fs.client.SyncFile(h.file.inode.ID, h, int64(h.size), dirtyMap)
+		updated, err := h.file.fs.client.SyncFile(h.file.inode.ID, h, int64(h.size), dirtyMap)
 		if err != nil {
 			log.Printf("FUSE Flush sync failed: %v", err)
 			return mapError(err)
 		}
 
+		// Update file metadata
+		h.file.mu.Lock()
+		h.file.inode = updated
+		h.file.mu.Unlock()
+
 		// Clear dirty pages after successful sync
 		h.pages = make(map[int64][]byte)
-		h.file.inode.Size = h.size
+		h.size = updated.Size
 	}
 	return nil
 }
@@ -574,7 +607,9 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	h.pages = nil
 	h.mu.Unlock()
 
-	h.reader.Close()
+	if h.reader != nil {
+		h.reader.Close()
+	}
 
 	h.file.mu.Lock()
 	for i, fh := range h.file.handles {
