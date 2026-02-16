@@ -17,11 +17,13 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 	"log"
 	mrand "math/rand"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
@@ -1295,33 +1298,211 @@ func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
 }
 
 func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
-	return c.ReadFile(id, nil)
+	rc, err := c.ReadFile(id, nil)
+	if err != nil {
+		if errors.Is(err, crypto.ErrRecipientNotFound) {
+			inode, getErr := c.getInode(context.Background(), id)
+			if getErr == nil {
+				c.sessionMu.RLock()
+				token := c.sessionToken
+				c.sessionMu.RUnlock()
+				if inode.LeaseOwner != "" && inode.LeaseOwner == token {
+					return io.NopCloser(bytes.NewReader(nil)), nil
+				}
+			}
+		}
+		return nil, err
+	}
+	return rc, nil
 }
 
 func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
+	ctx := context.Background()
+	// Acquire lease first to prevent concurrent writers
+	if err := c.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil); err != nil {
+		return nil, err
+	}
+
+	c.keyMu.RLock()
+	meta, ok := c.keyCache[id]
+	c.keyMu.RUnlock()
+
+	var fileKey []byte
+	var groupID string
+	var parentID string
+	var nameHMAC string
+	var inode *metadata.Inode
+
+	if ok {
+		fileKey = meta.key
+		groupID = meta.groupID
+		parts := strings.SplitN(meta.linkTag, ":", 2)
+		if len(parts) == 2 {
+			parentID = parts[0]
+			nameHMAC = parts[1]
+		}
+		inode, _ = c.getInode(ctx, id)
+	} else {
+		// Try getInode directly first (in case id is an Inode ID)
+		inode, _ = c.getInode(ctx, id)
+		if inode != nil {
+			fileKey, _ = c.UnlockInode(inode)
+			if fileKey != nil {
+				// Success, found by raw ID
+			}
+		}
+
+		if fileKey == nil {
+			// Try to resolve path
+			dir, name := filepath.Split(id)
+			pInode, pKey, err := c.ResolvePath(dir)
+			if err == nil {
+				mac := hmac.New(sha256.New, pKey)
+				mac.Write([]byte(name))
+				nameHMAC = hex.EncodeToString(mac.Sum(nil))
+				parentID = pInode.ID
+				groupID = pInode.GroupID
+
+				if childID, exists := pInode.Children[nameHMAC]; exists {
+					inode, _ = c.getInode(ctx, childID)
+					if inode != nil {
+						fileKey, _ = c.UnlockInode(inode)
+					}
+				}
+			}
+		}
+	}
+
+	if fileKey == nil {
+		fileKey = make([]byte, 32)
+		rand.Read(fileKey)
+	}
+
+	if inode == nil {
+		// New file
+		inode = &metadata.Inode{
+			ID:      id,
+			Type:    metadata.FileType,
+			Mode:    0600,
+			OwnerID: c.userID,
+			GroupID: groupID,
+			Links:   map[string]bool{parentID + ":" + nameHMAC: true},
+		}
+	}
+
 	return &FileWriter{
-		client: c,
-		id:     id,
-		buf:    &bytes.Buffer{},
+		client:   c,
+		ctx:      ctx,
+		inode:    *inode,
+		fileKey:  fileKey,
+		parentID: parentID,
+		nameHMAC: nameHMAC,
+		buf:      make([]byte, 0, crypto.ChunkSize),
 	}, nil
 }
 
+
 type FileWriter struct {
-	client *Client
-	id     string
-	buf    *bytes.Buffer
+	client   *Client
+	ctx      context.Context
+	inode    metadata.Inode
+	fileKey  []byte
+	parentID string
+	nameHMAC string
+	buf      []byte
+	manifest []metadata.ChunkEntry
+	written  int64
+	closed   bool
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
-	return w.buf.Write(p)
+	if w.closed {
+		return 0, io.ErrClosedPipe
+	}
+	n := len(p)
+	for len(p) > 0 {
+		space := crypto.ChunkSize - len(w.buf)
+		if space > len(p) {
+			w.buf = append(w.buf, p...)
+			break
+		}
+		w.buf = append(w.buf, p[:space]...)
+		if err := w.flushChunk(); err != nil {
+			return 0, err
+		}
+		p = p[space:]
+	}
+	w.written += int64(n)
+	return n, nil
+}
+
+func (w *FileWriter) flushChunk() error {
+	if len(w.buf) == 0 {
+		return nil
+	}
+	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf)
+	if err != nil {
+		return err
+	}
+	token, err := w.client.issueToken(w.inode.ID, []string{cid}, "W")
+	if err != nil {
+		return err
+	}
+	nodes, err := w.client.allocateNodes(w.ctx)
+	if err != nil {
+		return err
+	}
+	if err := w.client.uploadChunk(cid, ct, nodes, token); err != nil {
+		return err
+	}
+	var nodeIDs []string
+	for _, node := range nodes {
+		nodeIDs = append(nodeIDs, node.ID)
+	}
+	w.manifest = append(w.manifest, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
+	w.buf = w.buf[:0]
+	return nil
 }
 
 func (w *FileWriter) Close() error {
-	// For now, we perform a simple buffered write.
-	// Future optimization: implement streaming chunked uploads in real-time.
-	_, err := w.client.WriteFile(w.id, w.buf, int64(w.buf.Len()), 0600)
+	if w.closed {
+		return nil
+	}
+	w.closed = true
+
+	// Handle Inlining for small files
+	if len(w.manifest) == 0 && len(w.buf) <= metadata.InlineLimit {
+		ciphertext, err := crypto.EncryptDEM(w.fileKey, w.buf)
+		if err != nil {
+			return err
+		}
+		w.inode.InlineData = ciphertext
+		w.inode.ChunkManifest = nil
+		w.inode.Size = uint64(len(w.buf))
+	} else {
+		if err := w.flushChunk(); err != nil {
+			return err
+		}
+		w.inode.InlineData = nil
+		w.inode.ChunkManifest = w.manifest
+		w.inode.Size = uint64(w.written)
+	}
+
+	// Final Metadata Update
+	_, err := w.client.updateInode(w.ctx, w.inode)
+	if err == nil {
+		w.client.keyMu.Lock()
+		w.client.keyCache[w.inode.ID] = fileMetadata{
+			key:     w.fileKey,
+			groupID: w.inode.GroupID,
+			linkTag: w.parentID + ":" + w.nameHMAC,
+			inlined: w.inode.InlineData != nil,
+		}
+		w.client.keyMu.Unlock()
+	}
 	return err
 }
+
 
 func (c *Client) ReadDataFile(name string, data any) error {
 	// Map name to a full path if necessary, here we assume names are IDs or paths
@@ -1330,7 +1511,11 @@ func (c *Client) ReadDataFile(name string, data any) error {
 		return err
 	}
 	defer rc.Close()
-	return json.NewDecoder(rc).Decode(data)
+	err = json.NewDecoder(rc).Decode(data)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	return err
 }
 
 func (c *Client) SaveDataFile(name string, data any) error {
@@ -1357,8 +1542,14 @@ func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), erro
 	}
 
 	ctx := context.Background()
+
+	// Pre-create lockbox for potential new files
+	fileKey := make([]byte, 32)
+	rand.Read(fileKey)
+	lb := c.createLockbox(fileKey, 0600, "")
+
 	// 1. Acquire leases for all files
-	if err := c.AcquireLeases(ctx, names, 2*time.Minute); err != nil {
+	if err := c.AcquireLeases(ctx, names, 2*time.Minute, lb); err != nil {
 		return nil, err
 	}
 
@@ -2082,10 +2273,11 @@ func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {
 	return &stats, nil
 }
 
-func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration) error {
+func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration, lb crypto.Lockbox) error {
 	req := metadata.LeaseRequest{
 		InodeIDs: ids,
 		Duration: int64(duration),
+		Lockbox:  lb,
 	}
 	data, _ := json.Marshal(req)
 

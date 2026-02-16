@@ -27,6 +27,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -174,9 +175,11 @@ func (c LogCommand) Marshal() []byte {
 }
 
 type LeaseRequest struct {
-	InodeIDs []string `json:"inode_ids"`
-	OwnerID  string   `json:"owner_id"` // Session ID
-	Duration int64    `json:"duration"` // Nanoseconds
+	InodeIDs []string       `json:"inode_ids"`
+	OwnerID  string         `json:"owner_id"` // Session ID
+	UserID   string         `json:"user_id"`  // Actual User ID for placeholders
+	Lockbox  crypto.Lockbox `json:"lockbox,omitempty"`
+	Duration int64          `json:"duration"` // Nanoseconds
 }
 
 type ChildUpdate struct {
@@ -1461,28 +1464,40 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	expiry := now + req.Duration
 
 	// 1. Validation Phase: Check if all are available
-	inodes := make([]Inode, len(req.InodeIDs))
+	inodes := make([]*Inode, len(req.InodeIDs))
 	for i, id := range req.InodeIDs {
 		v := b.Get([]byte(id))
 		if v == nil {
-			return ErrNotFound
+			continue // Non-existent inodes can be leased for creation
 		}
-		if err := json.Unmarshal(v, &inodes[i]); err != nil {
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
 			return err
 		}
+		inodes[i] = &inode
 
 		// Conflict if already owned by someone else AND not expired
-		if inodes[i].LeaseOwner != "" && inodes[i].LeaseOwner != req.OwnerID && inodes[i].LeaseExpiry > now {
+		if inode.LeaseOwner != "" && inode.LeaseOwner != req.OwnerID && inode.LeaseExpiry > now {
 			return ErrConflict
 		}
 	}
 
 	// 2. Grant Phase: Apply leases
-	for i := range inodes {
-		inodes[i].LeaseOwner = req.OwnerID
-		inodes[i].LeaseExpiry = expiry
-		inodes[i].Version++
-		if err := saveInodeWithPages(tx, &inodes[i]); err != nil {
+	for i, id := range req.InodeIDs {
+		inode := inodes[i]
+		if inode == nil {
+			// Create a minimal inode if it doesn't exist.
+			inode = &Inode{
+				ID:      id,
+				OwnerID: req.UserID,
+				Lockbox: req.Lockbox,
+				Version: 1,
+			}
+		}
+		inode.LeaseOwner = req.OwnerID
+		inode.LeaseExpiry = expiry
+		inode.Version++
+		if err := saveInodeWithPages(tx, inode); err != nil {
 			return err
 		}
 	}

@@ -86,7 +86,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 
 	// 3. Test Atomic Acquire
 	ids := []string{f1, f2}
-	if err := c.AcquireLeases(ctx, ids, 10*time.Second); err != nil {
+	if err := c.AcquireLeases(ctx, ids, 10*time.Second, nil); err != nil {
 		t.Fatalf("AcquireLeases failed: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := c2.AcquireLeases(ctx, []string{f1}, 5*time.Second)
+	err := c2.AcquireLeases(ctx, []string{f1}, 5*time.Second, nil)
 	if err == nil {
 		t.Error("Expected conflict error for leased file, got nil")
 	}
@@ -112,7 +112,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 		t.Fatalf("ReleaseLeases failed: %v", err)
 	}
 
-	if err := c2.AcquireLeases(ctx, []string{f1}, 5*time.Second); err != nil {
+	if err := c2.AcquireLeases(ctx, []string{f1}, 5*time.Second, nil); err != nil {
 		t.Fatalf("c2 failed to acquire released lease: %v", err)
 	}
 }

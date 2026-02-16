@@ -2235,6 +2235,12 @@ func (s *Server) handleGetClusterStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	sessionToken := r.Header.Get("Session-Token")
 	if sessionToken == "" {
 		http.Error(w, "missing session token", http.StatusUnauthorized)
@@ -2249,6 +2255,7 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 
 	// Use Session Token as the unique owner ID for the lease
 	req.OwnerID = sessionToken
+	req.UserID = user.ID
 	if req.Duration == 0 {
 		req.Duration = int64(2 * time.Minute) // Default duration
 	}
@@ -2258,6 +2265,12 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	sessionToken := r.Header.Get("Session-Token")
 	if sessionToken == "" {
 		http.Error(w, "missing session token", http.StatusUnauthorized)
@@ -2271,6 +2284,7 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	req.OwnerID = sessionToken
+	req.UserID = user.ID
 	body, _ := json.Marshal(req)
 	s.applyCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
 }
