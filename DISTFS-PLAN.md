@@ -423,3 +423,34 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 28.4: Node Eviction (Forget)**
     *   **Action:** Implement `fs.NodeForgetter` to properly release internal client-side tracking data when the kernel evicts an inode from its cache.
 
+---
+
+## Phase 29: Storage API & Distributed Locking
+**Goal:** Implement a subset of the `storage.Storage` interface to support transactional multi-file updates and high-level E2EE data management.
+
+*   **Step 29.1: Metadata Schema & FSM Expansion**
+    *   **Action:** Add `LeaseOwner string` and `LeaseExpiry int64` to the `Inode` struct in `pkg/metadata/types.go`.
+    *   **Action:** Implement `CmdAcquireLeases` and `CmdReleaseLeases` in `pkg/metadata/fsm.go`.
+    *   **Action:** Add FSM logic to atomically validate and grant leases for multiple Inodes in a single Raft transaction (Deadlock Prevention).
+*   **Step 29.2: Client Locking Primitives**
+    *   **Action:** Implement `AcquireLeases(ctx, ids)` and `ReleaseLeases(ctx, ids)` in `pkg/client/client.go`.
+    *   **Action:** Ensure leases are associated with the `Session-Token`.
+*   **Step 29.3: High-Level Blob API (`OpenBlobRead` / `OpenBlobWrite`)**
+    *   **Action:** Implement `OpenBlobRead(id)` as a wrapper around `NewReader`.
+    *   **Action:** Implement `OpenBlobWrite(id)` by creating a new `FileWriter` that handles streaming chunked encryption and pipelined uploads.
+*   **Step 29.4: Data File API (`ReadDataFile` / `SaveDataFile`)**
+    *   **Action:** Implement E2EE serialization (JSON/Gob) wrappers.
+    *   **Action:** Integrate with Step 24.2 (Small File Inlining) to store these files directly in the Metadata Layer for low latency.
+*   **Step 29.5: Transactional Updates (`OpenForUpdate` / `OpenManyForUpdate`)**
+    *   **Action:** Implement the transactional lifecycle:
+        1.  Acquire exclusive leases for all requested Inodes.
+        2.  Read current data and decrypt.
+        3.  Provide data to user callback.
+        4.  Re-encrypt and perform atomic `UpdateInode` + `ReleaseLease` Raft command.
+    *   **Action:** Implement automatic lease renewal based on client heartbeat to handle long-running transactions.
+*   **Step 29.6: Lease Reaper**
+    *   **Action:** Add a background worker to the `MetadataServer` that monitors session heartbeats.
+    *   **Action:** Automatically release all leases owned by a session if its heartbeat times out or the session is revoked.
+    *   **Action:** Add a "Lease" view to the operator dashboard.
+
+

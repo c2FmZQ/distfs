@@ -131,8 +131,8 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		leaderURLCache: make(map[raft.ServerAddress]string),
 		stopCh:         make(chan struct{}),
 		batchQueue:     make([]*LogCommand, 0),
-		batchResps:          make([]chan interface{}, 0),
-		batchApplyCh:        make(chan batchRequest, 100),
+		batchResps:     make([]chan interface{}, 0),
+		batchApplyCh:   make(chan batchRequest, 100),
 	}
 	if oidcDiscoveryURL != "" {
 		go s.discoverOIDC(oidcDiscoveryURL)
@@ -497,6 +497,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if r.URL.Path == "/v1/meta/link" && r.Method == http.MethodPost {
 		s.handleLink(w, r)
+		return
+	} else if r.URL.Path == "/v1/meta/lease/acquire" && r.Method == http.MethodPost {
+		s.handleAcquireLeases(w, r)
+		return
+	} else if r.URL.Path == "/v1/meta/lease/release" && r.Method == http.MethodPost {
+		s.handleReleaseLeases(w, r)
 		return
 	} else if strings.HasPrefix(r.URL.Path, "/v1/meta/directory/") && strings.HasSuffix(r.URL.Path, "/entry") {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/directory/")
@@ -2019,59 +2025,147 @@ func (s *Server) checkReplay(userID string, ts int64) error {
 }
 
 func (s *Server) sessionCleanupWorker() {
+
 	ticker := time.NewTicker(5 * time.Minute)
+
 	defer ticker.Stop()
+
 	for {
+
 		select {
+
 		case <-ticker.C:
+
 			s.sessionKeyMu.RLock()
+
 			var expired []string
+
 			now := time.Now().Unix()
+
 			for token, entry := range s.sessionKeyCache {
+
 				if entry.expiry < now {
+
 					expired = append(expired, token)
+
 				}
+
 			}
+
 			s.sessionKeyMu.RUnlock()
 
 			if len(expired) > 0 {
+
 				s.sessionKeyMu.Lock()
+
 				for _, token := range expired {
+
+					// Proactively release leases for these sessions
+
+					go func(t string) {
+
+						// Find inodes owned by this session
+
+						var ids []string
+
+						s.fsm.db.View(func(tx *bolt.Tx) error {
+
+							b := tx.Bucket([]byte("inodes"))
+
+							c := b.Cursor()
+
+							for k, v := c.First(); k != nil; k, v = c.Next() {
+
+								var inode Inode
+
+								if err := json.Unmarshal(v, &inode); err == nil {
+
+									if inode.LeaseOwner == t {
+
+										ids = append(ids, inode.ID)
+
+									}
+
+								}
+
+							}
+
+							return nil
+
+						})
+
+						if len(ids) > 0 {
+
+							req := LeaseRequest{InodeIDs: ids, OwnerID: t}
+
+							body, _ := json.Marshal(req)
+
+							s.applyRaftCommand(CmdReleaseLeases, body)
+
+						}
+
+					}(token)
+
 					delete(s.sessionKeyCache, token)
+
 				}
+
 				s.sessionKeyMu.Unlock()
+
 			}
+
 		case <-s.stopCh:
+
 			return
+
 		}
+
 	}
+
 }
+
 func (s *Server) checkAndInitWorld() {
+
 	_, err := s.fsm.GetWorldIdentity()
+
 	if err == nil {
+
 		return
+
 	}
 
 	log.Printf("Initializing World Identity...")
+
 	dk, _ := crypto.GenerateEncryptionKey()
+
 	pk := dk.EncapsulationKey().Bytes()
+
 	priv := crypto.MarshalDecapsulationKey(dk)
 
 	world := WorldIdentity{
-		Public:  pk,
+
+		Public: pk,
+
 		Private: priv,
 	}
 
 	data, _ := json.Marshal(world)
+
 	cmd := LogCommand{
+
 		Type: CmdInitWorld,
+
 		Data: data,
 	}
 
 	future := s.raft.Apply(cmd.Marshal(), 10*time.Second)
+
 	if err := future.Error(); err != nil {
+
 		log.Printf("Failed to init world identity: %v", err)
+
 	}
+
 }
 
 func (s *Server) handleGetAuthConfig(w http.ResponseWriter, r *http.Request) {
@@ -2138,4 +2232,45 @@ func (s *Server) handleGetClusterStats(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
+	sessionToken := r.Header.Get("Session-Token")
+	if sessionToken == "" {
+		http.Error(w, "missing session token", http.StatusUnauthorized)
+		return
+	}
+
+	var req LeaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Use Session Token as the unique owner ID for the lease
+	req.OwnerID = sessionToken
+	if req.Duration == 0 {
+		req.Duration = int64(2 * time.Minute) // Default duration
+	}
+
+	body, _ := json.Marshal(req)
+	s.applyCommandRaw(w, r, CmdAcquireLeases, body, http.StatusOK)
+}
+
+func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
+	sessionToken := r.Header.Get("Session-Token")
+	if sessionToken == "" {
+		http.Error(w, "missing session token", http.StatusUnauthorized)
+		return
+	}
+
+	var req LeaseRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	req.OwnerID = sessionToken
+	body, _ := json.Marshal(req)
+	s.applyCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
 }

@@ -158,6 +158,8 @@ const (
 	CmdInitWorld       CommandType = 19
 	CmdStoreKeySync    CommandType = 20
 	CmdBatch           CommandType = 21
+	CmdAcquireLeases   CommandType = 22
+	CmdReleaseLeases   CommandType = 23
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -169,6 +171,12 @@ type LogCommand struct {
 func (c LogCommand) Marshal() []byte {
 	b, _ := json.Marshal(c)
 	return b
+}
+
+type LeaseRequest struct {
+	InodeIDs []string `json:"inode_ids"`
+	OwnerID  string   `json:"owner_id"` // Session ID
+	Duration int64    `json:"duration"` // Nanoseconds
 }
 
 type ChildUpdate struct {
@@ -306,6 +314,10 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeInitWorld(tx, data)
 	case CmdStoreKeySync:
 		return fsm.executeStoreKeySync(tx, data)
+	case CmdAcquireLeases:
+		return fsm.executeAcquireLeases(tx, data)
+	case CmdReleaseLeases:
+		return fsm.executeReleaseLeases(tx, data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -1436,6 +1448,77 @@ func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
 		return nil, err
 	}
 	return &blob, nil
+}
+
+func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface{} {
+	var req LeaseRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	b := tx.Bucket([]byte("inodes"))
+	now := time.Now().UnixNano()
+	expiry := now + req.Duration
+
+	// 1. Validation Phase: Check if all are available
+	inodes := make([]Inode, len(req.InodeIDs))
+	for i, id := range req.InodeIDs {
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(v, &inodes[i]); err != nil {
+			return err
+		}
+
+		// Conflict if already owned by someone else AND not expired
+		if inodes[i].LeaseOwner != "" && inodes[i].LeaseOwner != req.OwnerID && inodes[i].LeaseExpiry > now {
+			return ErrConflict
+		}
+	}
+
+	// 2. Grant Phase: Apply leases
+	for i := range inodes {
+		inodes[i].LeaseOwner = req.OwnerID
+		inodes[i].LeaseExpiry = expiry
+		inodes[i].Version++
+		if err := saveInodeWithPages(tx, &inodes[i]); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface{} {
+	var req LeaseRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	b := tx.Bucket([]byte("inodes"))
+	for _, id := range req.InodeIDs {
+		v := b.Get([]byte(id))
+		if v == nil {
+			continue // Already gone?
+		}
+		var inode Inode
+		if err := json.Unmarshal(v, &inode); err != nil {
+			return err
+		}
+
+		// Only release if we are the owner
+		if inode.LeaseOwner == req.OwnerID {
+			inode.LeaseOwner = ""
+			inode.LeaseExpiry = 0
+			inode.Version++
+			if err := saveInodeWithPages(tx, &inode); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func (fsm *MetadataFSM) GetNodes() ([]Node, error) {

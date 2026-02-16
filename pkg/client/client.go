@@ -26,6 +26,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	mrand "math/rand"
 	"net/http"
 	"strings"
@@ -1293,6 +1294,95 @@ func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
 	return io.NopCloser(r), nil
 }
 
+func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
+	return c.ReadFile(id, nil)
+}
+
+func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
+	return &FileWriter{
+		client: c,
+		id:     id,
+		buf:    &bytes.Buffer{},
+	}, nil
+}
+
+type FileWriter struct {
+	client *Client
+	id     string
+	buf    *bytes.Buffer
+}
+
+func (w *FileWriter) Write(p []byte) (int, error) {
+	return w.buf.Write(p)
+}
+
+func (w *FileWriter) Close() error {
+	// For now, we perform a simple buffered write.
+	// Future optimization: implement streaming chunked uploads in real-time.
+	_, err := w.client.WriteFile(w.id, w.buf, int64(w.buf.Len()), 0600)
+	return err
+}
+
+func (c *Client) ReadDataFile(name string, data any) error {
+	// Map name to a full path if necessary, here we assume names are IDs or paths
+	rc, err := c.OpenBlobRead(name)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	return json.NewDecoder(rc).Decode(data)
+}
+
+func (c *Client) SaveDataFile(name string, data any) error {
+	b, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	wc, err := c.OpenBlobWrite(name)
+	if err != nil {
+		return err
+	}
+	defer wc.Close()
+	_, err = wc.Write(b)
+	return err
+}
+
+func (c *Client) OpenForUpdate(name string, data any) (func(bool), error) {
+	return c.OpenManyForUpdate([]string{name}, []any{data})
+}
+
+func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), error) {
+	if len(names) != len(data) {
+		return nil, fmt.Errorf("names and data length mismatch")
+	}
+
+	ctx := context.Background()
+	// 1. Acquire leases for all files
+	if err := c.AcquireLeases(ctx, names, 2*time.Minute); err != nil {
+		return nil, err
+	}
+
+	// 2. Read all files
+	for i, name := range names {
+		if err := c.ReadDataFile(name, data[i]); err != nil {
+			c.ReleaseLeases(ctx, names)
+			return nil, err
+		}
+	}
+
+	// 3. Return commit callback
+	return func(commit bool) {
+		if commit {
+			for i, name := range names {
+				if err := c.SaveDataFile(name, data[i]); err != nil {
+					log.Printf("Failed to save %s during transactional update: %v", name, err)
+				}
+			}
+		}
+		c.ReleaseLeases(ctx, names)
+	}, nil
+}
+
 // GetInode fetches the inode metadata.
 func (c *Client) GetInode(ctx context.Context, id string) (*metadata.Inode, error) {
 	return c.getInode(ctx, id)
@@ -1990,6 +2080,85 @@ func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {
 		return nil, err
 	}
 	return &stats, nil
+}
+
+func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration) error {
+	req := metadata.LeaseRequest{
+		InodeIDs: ids,
+		Duration: int64(duration),
+	}
+	data, _ := json.Marshal(req)
+
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/lease/acquire", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(hReq, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
+func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
+	req := metadata.LeaseRequest{
+		InodeIDs: ids,
+	}
+	data, _ := json.Marshal(req)
+
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/lease/release", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(hReq, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
 }
 
 // RefreshNodeRegistry fetches the current node registry from the server.

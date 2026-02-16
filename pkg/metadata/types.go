@@ -150,6 +150,8 @@ type Inode struct {
 	ChunkPages    []string          `json:"chunk_pages,omitempty"`
 	Lockbox       crypto.Lockbox    `json:"lockbox"`
 	Version       uint64            `json:"version"`
+	LeaseOwner    string            `json:"lease_owner,omitempty"`
+	LeaseExpiry   int64             `json:"lease_expiry,omitempty"`
 }
 
 // AuthChallengeRequest initiates the login flow.
