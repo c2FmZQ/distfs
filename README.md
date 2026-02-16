@@ -1,181 +1,160 @@
-# DistFS
+# DistFS: User Manual and Documentation
 
-DistFS is a distributed, end-to-end encrypted file system designed with a "trust-no-one" security model. It provides a strongly consistent namespace via Raft consensus and a scalable data layer for sharded chunk storage. 
+DistFS is a distributed, end-to-end encrypted (E2EE) file system designed for zero-knowledge privacy. It provides a strongly consistent namespace via Raft consensus and a horizontally scalable data layer for sharded chunk storage. 
 
-The primary goal of the project is to ensure that storage providers have zero knowledge of the user's data or the file system structure.
+This manual provides comprehensive documentation for deploying, using, and managing a DistFS cluster.
 
-## Core Principles
+---
 
-*   **Privacy by Default:** All file content and metadata (including filenames and directory structures) are encrypted on the client side before being sent to the cluster.
-*   **Zero-Knowledge:** The server never sees plaintext data or encryption keys. Access control is enforced cryptographically.
-*   **Strong Consistency:** Metadata operations are managed by a Raft consensus group to ensure a global, consistent view of the file system.
-*   **Availability:** Data is sharded into fixed-size chunks and replicated across multiple nodes to protect against hardware failures.
-*   **Quantum Readiness:** Identity and key encapsulation rely on Post-Quantum Cryptography (PQC) algorithms.
+## 1. Core Pillars
 
-## Architecture
+DistFS is built upon three foundational technical principles:
+*   **Zero-Knowledge Privacy:** File content, filenames, and directory structures are encrypted at the client. The storage infrastructure never possesses plaintext data or encryption keys.
+*   **Strong Consistency:** Global namespace operations (creation, deletion, moves) are managed by a Raft consensus group, ensuring a unified view across all nodes and clients.
+*   **Post-Quantum Readiness:** Identity management and key encapsulation utilize Post-Quantum Cryptography (PQC) algorithms (ML-KEM-768) to safeguard against future quantum threats.
 
-DistFS utilizes a unified node architecture where each node can perform two roles:
-1.  **Metadata Role:** Participates in the Raft group to manage inodes and directories.
-2.  **Data Role:** Stores encrypted binary blobs (chunks). Chunks are content-addressed by the hash of their encrypted content.
+---
 
-```mermaid
-graph TD
-    subgraph "DistFS Cluster"
-        Node1["Unified Node 1 (Leader)"]
-        Node2["Unified Node 2 (Voter)"]
-        Node3["Unified Node 3 (Voter)"]
-        Node4["Unified Node 4 (Data)"]
-        Node5["Unified Node 5 (Data)"]
-    end
+## 2. Getting Started
 
-    Client["DistFS Client"] -- "Metadata API (Raft)" --> Node1
-    Client -- "Data API (HTTP/2)" --> Node4
-    Client -- "Data API (HTTP/2)" --> Node5
+### 2.1 Prerequisites
+*   **Operating System:** Linux (kernel support for FUSE 3 required).
+*   **Software:** `fuse3` and `libfuse3-dev` installed locally.
+*   **Environment:** Go 1.25 or higher for building from source.
 
-    Node1 -- "Log Replication" --> Node2
-    Node1 -- "Log Replication" --> Node3
-    Node4 -- "Replication" --> Node5
-```
-
-### Data Flow (Write)
-
-When a user writes a file, the client handles the heavy lifting to maintain zero-knowledge privacy.
-
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant M as MetaNode (Raft)
-    participant D1 as Primary DataNode
-    participant D2 as Secondary DataNode
-
-    Note over C: Encrypt Chunks (AES-GCM)
-    C->>M: POST /v1/meta/allocate (ChunkID)
-    M-->>C: Target Nodes (D1, D2)
-    C->>D1: PUT /v1/data/{ID} (replicas=D2)
-    D1->>D2: Forward Chunk
-    D2-->>D1: ACK
-    D1-->>C: ACK
-    C->>M: PUT /v1/meta/inode (Commit Manifest)
-    M-->>C: Success
-```
-
-## Security Model
-
-DistFS employs a defense-in-depth strategy to protect user privacy.
-
-```mermaid
-graph LR
-    subgraph "Client Boundary (Trusted)"
-        Keys["PQC Identity & Session Keys"]
-        Plaintext["Plaintext Data"]
-    end
-
-    subgraph "Metadata Layer (Stateless Privacy)"
-        Sealing["Layer 7 Request Sealing"]
-        Anonymization["HMAC Anonymized UserIDs"]
-    end
-
-    subgraph "Storage Layer (Zero-Knowledge)"
-        AES["AES-256-GCM Chunks"]
-        RestEnc["At-Rest Disk Encryption"]
-    end
-
-    Plaintext -- "Encryption" --> AES
-    Keys -- "Signing" --> Sealing
-    Sealing -- "mTLS" --> Anonymization
-    AES -- "Upload" --> RestEnc
-```
-
-*   **Layer 7 E2EE (Sealing):** All metadata requests and responses are wrapped in encrypted envelopes, protecting against inspection by intermediate proxies or load balancers.
-*   **Identity:** User identities are based on PQC sign/encrypt key pairs. User IDs are anonymized using a cluster-wide HMAC secret.
-*   **At-Rest Encryption:** Nodes leverage `github.com/c2FmZQ/storage` to encrypt all local data (logs, snapshots, and chunks) using a node-local master key.
-*   **Multi-Device Sync:** Users can securely synchronize their configuration across devices using a passphrase-encrypted recovery blob stored on the server.
-
-## Getting Started
-
-### Prerequisites
-
-*   Linux environment
-*   Go 1.25+
-*   `fuse3` and `libfuse3-dev` (for FUSE support)
-*   Docker and Docker Compose (for testing)
-
-### Installation
-
+### 2.2 Installation
+Clone the repository and build the core binaries:
 ```bash
 git clone https://github.com/c2FmZQ/distfs.git
 cd distfs
-go build ./cmd/...
+go build ./cmd/distfs
+go build ./cmd/distfs-fuse
+go build ./cmd/storage-node
 ```
 
-### Running a Cluster
+---
 
-1.  **Configure the Master Key:**
-    Every node requires a master passphrase to manage its local encryption.
-    ```bash
-    export DISTFS_MASTER_KEY="your-node-secret"
-    ```
+## 3. The Unified Onboarding Flow
 
-2.  **Start the First Node (Bootstrap):**
-    ```bash
-    ./storage-node --data-dir ./data/n1 --api-addr :8080 --bootstrap --oidc-discovery-url https://example.com/.well-known/openid-configuration
-    ```
+DistFS streamlines client initialization by integrating identity generation, OIDC authentication, and secure configuration backup.
 
-3.  **Join Additional Nodes:**
-    ```bash
-    ./storage-node --data-dir ./data/n2 --api-addr :8081 --raft-bind :8082 --cluster-addr :9091 --oidc-discovery-url https://example.com/.well-known/openid-configuration
-    # Use the admin API or dashboard to join the node to the cluster.
-    ```
-
-## Usage
-
-### 1. Unified Onboarding
-DistFS simplifies setup by combining identity generation, OIDC registration, and cloud-backed recovery into a single command. Endpoints for authentication are discovered automatically from the metadata server.
-
-#### New Account
-Generate your local PQC identity and register with the cluster in one step.
+### 3.1 Initializing a New Account
+To create a new identity and register with a cluster:
 ```bash
-# Uses OAuth2 Device Flow by default
-./distfs init --new -server http://localhost:8080
+./distfs init --new -server http://cluster-leader:8080
 ```
-The client will prompt for a passphrase to encrypt your local configuration and automatically store a recovery blob on the server. (Optional: `-client-id <id>` if your cluster uses a custom OIDC client ID).
+This command performs the following:
+1.  Generates PQC identity keys locally.
+2.  Executes an OAuth2 Device Flow for federated authentication (OIDC).
+3.  Registers your public keys with the Metadata Server.
+4.  Encrypts your local configuration with a passphrase using Argon2id.
+5.  Pushes an encrypted recovery blob to the server for multi-device sync.
 
-#### Existing Account (New Device)
-Restore your identity on a new device using your OIDC credentials and passphrase.
+### 3.2 Restoring an Account (New Device)
+To restore your identity on a secondary device:
 ```bash
-./distfs init -server http://localhost:8080
+./distfs init -server http://cluster-leader:8080
 ```
-(Optional: `-client-id <id>` if your cluster uses a custom OIDC client ID).
+Provide your OIDC credentials and the original passphrase when prompted to retrieve and decrypt your keys.
 
-### 2. File Operations
-Once initialized, you can use standard file operations.
+---
+
+## 4. CLI Command Reference
+
+The `distfs` binary provides a set of tools for manual interaction with the file system.
+
+### 4.1 Namespace Operations
+*   `ls <path>`: List directory contents. Encrypted names are decrypted locally.
+*   `mkdir <path>`: Create a new directory.
+*   `rm <path>`: Remove a file or empty directory.
+*   `mv <old_path> <new_path>`: Move or rename an entry (atomic metadata operation).
+
+### 4.2 Data Operations
+*   `put <local_file> <remote_path>`: Encrypt and upload a file. Files under 4KB are automatically inlined in the metadata layer for performance.
+*   `get <remote_path> <local_file>`: Download and decrypt a file. Uses hedged reads to mitigate tail latency.
+
+### 4.3 Sharing and Permissions
+*   `chmod <mode> <path>`: Update permission bits.
+    *   Adding world-read bit (`0004`) automatically adds the "world" recipient to the file's cryptographic lockbox.
+*   `chgrp <group_id> <path>`: Assign a file to a group. Group members can unlock the file key using the Group Private Key.
+
+---
+
+## 5. FUSE Integration
+
+Standard OS integration is provided via `distfs-fuse`.
+
+### 5.1 Mounting
 ```bash
-# Create a directory
-./distfs mkdir /documents
-
-# Upload a file
-./distfs put local-file.txt /documents/remote-file.txt
-
-# List files
-./distfs ls /documents
-
-# Download a file
-./distfs get /documents/remote-file.txt restored.txt
+mkdir ~/my-files
+./distfs-fuse -mount ~/my-files
 ```
+If no configuration is found in the default location (`~/.distfs/config.json`), the FUSE tool will automatically initiate the onboarding flow.
 
-### 3. FUSE Mounting
-Standard OS integration is provided via FUSE. If no configuration is found, `distfs-fuse` will automatically trigger the onboarding flow.
+### 5.2 POSIX Fidelity
+DistFS supports a subset of POSIX operations optimized for distributed environments:
+*   **Differential Synchronization (Fsync):** `fsync` only re-uploads modified 1MB pages rather than the entire file.
+*   **Quota Reporting:** `df -h` on the mount point reflects the user's specific storage and inode quotas.
+*   **Incremental ReadDir:** Supports large directories by streaming metadata in batches.
+
+---
+
+## 6. Server Administration
+
+### 6.1 Configuring a Storage Node
+Every node requires a master passphrase for its at-rest encryption layer:
 ```bash
-mkdir ~/distfs-mount
-./distfs-fuse -mount ~/distfs-mount
+export DISTFS_MASTER_KEY="your-node-passphrase"
 ```
 
-## Development and Acknowledgments
+### 6.2 Bootstrapping a Cluster
+Start the primary node with the `--bootstrap` flag:
+```bash
+./storage-node --id node-1 --bootstrap \
+  --api-addr :8080 \
+  --raft-bind :8081 \
+  --oidc-discovery-url https://auth.example.com/.well-known/openid-configuration
+```
 
-DistFS is actively maintained and tested. The implementation relies on a robust CI suite covering unit tests and complex E2E failure simulations.
+### 6.3 Joining Nodes
+New nodes must be registered using their public identity key and the cluster secret.
+```bash
+./storage-node --id node-2 \
+  --api-addr :8082 \
+  --raft-bind :8083 \
+  --raft-advertise node-2-ip:8083 \
+  --raft-secret <cluster-secret>
+```
 
-This project was built and is maintained with extensive use of the **Gemini CLI**, an AI-powered engineering tool. The AI assisted in architectural design, implementation of cryptographic logic, and the development of the comprehensive test suite.
+### 6.4 Management Dashboard
+The cluster provides a lightweight, dependency-free dashboard at `/api/cluster` (requires `X-Raft-Secret` header or session auth). It provides visibility into:
+*   Raft replication state and leadership.
+*   Cluster-wide storage utilization.
+*   Anonymized user accounting and active leases.
+
+---
+
+## 7. Security Model Summary
+
+DistFS employs a defense-in-depth architecture:
+*   **Data at Rest:** All local storage (logs, snapshots, chunks) is encrypted using node-local master keys.
+*   **Metadata Sealing:** All client-server communication is end-to-end encrypted at Layer 7 using rotating Cluster Epoch Keys.
+*   **Anonymization:** Persistent User IDs are HMAC hashes of emails; the server never stores plaintext emails or names in its database.
+*   **Secure Entry:** Support for `pinentry` ensures that passphrases never touch the terminal history or process environment.
+
+---
+
+## 8. Technical Specifications
+
+*   **Chunk Size:** 1 MB (Fixed).
+*   **Encryption:** AES-256-GCM (Data), ML-KEM-768 (Metadata).
+*   **Max File Size:** 100 GB (Soft limit).
+*   **Replication Factor:** Default 3 (Configurable).
+*   **Consistency:** Strong (Metadata), Eventual/Pipelined (Data).
+
+---
 
 ## License
 
 Copyright 2026 TTBT Enterprises LLC. Licensed under the Apache License, Version 2.0.
+For full architectural details, see [DESIGN.md](DESIGN.md).
