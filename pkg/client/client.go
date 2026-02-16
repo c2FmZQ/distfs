@@ -1071,6 +1071,8 @@ type FileReader struct {
 	cancel context.CancelFunc
 }
 
+// NewReader creates a new FileReader for the given inode.
+// The caller MUST call Close() on the returned reader to release resources and cancel background prefetching.
 func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 	inode, err := c.getInode(context.Background(), id)
 	if err != nil {
@@ -1298,27 +1300,54 @@ func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
 }
 
 func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
+	// 1. Try treating id as a direct Inode ID (fast path)
 	rc, err := c.ReadFile(id, nil)
-	if err != nil {
-		if errors.Is(err, crypto.ErrRecipientNotFound) {
-			inode, getErr := c.getInode(context.Background(), id)
-			if getErr == nil {
-				c.sessionMu.RLock()
-				token := c.sessionToken
-				c.sessionMu.RUnlock()
-				if inode.LeaseOwner != "" && inode.LeaseOwner == token {
-					return io.NopCloser(bytes.NewReader(nil)), nil
-				}
+	if err == nil {
+		return rc, nil
+	}
+
+	// 2. Try resolving as a path if direct read failed
+	// Only try if it looks like a path or the previous error wasn't "not found"
+	var inode *metadata.Inode
+	var key []byte
+	resolveErr := errors.New("resolution skipped")
+
+	if strings.Contains(id, "/") {
+		inode, key, resolveErr = c.ResolvePath(id)
+		if resolveErr == nil {
+			rc, err = c.ReadFile(inode.ID, key)
+			if err == nil {
+				return rc, nil
 			}
 		}
-		return nil, err
 	}
-	return rc, nil
+
+	// 3. Handle Placeholder (Leased) Files
+	// If we hold the lease, and the file is empty/new, return empty reader.
+	if errors.Is(err, crypto.ErrRecipientNotFound) {
+		// Use the inode we resolved, or fetch if we didn't resolve yet
+		if inode == nil {
+			inode, _ = c.getInode(context.Background(), id)
+		}
+
+		if inode != nil {
+			c.sessionMu.RLock()
+			token := c.sessionToken
+			c.sessionMu.RUnlock()
+			// Strictly check if it's a new placeholder: Owned by us, Version 1, and Empty.
+			if inode.LeaseOwner == token && inode.Version == 1 && inode.Size == 0 {
+				return io.NopCloser(bytes.NewReader(nil)), nil
+			}
+		}
+	}
+
+	return nil, err
 }
 
 func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 	ctx := context.Background()
-	// Acquire lease first to prevent concurrent writers
+	// Acquire lease first to prevent concurrent writers.
+	// Note: We lease the input `id` (which might be a path) to lock the name.
 	if err := c.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil); err != nil {
 		return nil, err
 	}
@@ -1330,6 +1359,8 @@ func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 	var fileKey []byte
 	var groupID string
 	var parentID string
+	var parentKey []byte
+	var name string
 	var nameHMAC string
 	var inode *metadata.Inode
 
@@ -1343,31 +1374,32 @@ func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 		}
 		inode, _ = c.getInode(ctx, id)
 	} else {
-		// Try getInode directly first (in case id is an Inode ID)
+		// 1. Try getInode directly (Treating id as InodeID)
 		inode, _ = c.getInode(ctx, id)
 		if inode != nil {
 			fileKey, _ = c.UnlockInode(inode)
-			if fileKey != nil {
-				// Success, found by raw ID
-			}
 		}
 
 		if fileKey == nil {
-			// Try to resolve path
-			dir, name := filepath.Split(id)
+			// 2. Try to resolve as Path
+			dir, fileName := filepath.Split(id)
+			name = fileName
 			pInode, pKey, err := c.ResolvePath(dir)
-			if err == nil {
-				mac := hmac.New(sha256.New, pKey)
-				mac.Write([]byte(name))
-				nameHMAC = hex.EncodeToString(mac.Sum(nil))
-				parentID = pInode.ID
-				groupID = pInode.GroupID
+			if err != nil {
+				return nil, err
+			}
 
-				if childID, exists := pInode.Children[nameHMAC]; exists {
-					inode, _ = c.getInode(ctx, childID)
-					if inode != nil {
-						fileKey, _ = c.UnlockInode(inode)
-					}
+			mac := hmac.New(sha256.New, pKey)
+			mac.Write([]byte(name))
+			nameHMAC = hex.EncodeToString(mac.Sum(nil))
+			parentID = pInode.ID
+			parentKey = pKey
+			groupID = pInode.GroupID
+
+			if childID, exists := pInode.Children[nameHMAC]; exists {
+				inode, _ = c.getInode(ctx, childID)
+				if inode != nil {
+					fileKey, _ = c.UnlockInode(inode)
 				}
 			}
 		}
@@ -1378,41 +1410,57 @@ func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 		rand.Read(fileKey)
 	}
 
+	isNew := false
 	if inode == nil {
-		// New file
+		if parentID == "" {
+			return nil, fmt.Errorf("cannot create file: parent directory not found or path invalid")
+		}
+		// Generate new UUID for the file
+		uidBytes := make([]byte, 16)
+		rand.Read(uidBytes)
+		newID := hex.EncodeToString(uidBytes)
+
 		inode = &metadata.Inode{
-			ID:      id,
+			ID:      newID,
 			Type:    metadata.FileType,
 			Mode:    0600,
 			OwnerID: c.userID,
 			GroupID: groupID,
+			// We set links here, but we MUST also update the parent later.
 			Links:   map[string]bool{parentID + ":" + nameHMAC: true},
+			Lockbox: c.createLockbox(fileKey, 0600, groupID),
 		}
+		isNew = true
 	}
 
 	return &FileWriter{
-		client:   c,
-		ctx:      ctx,
-		inode:    *inode,
-		fileKey:  fileKey,
-		parentID: parentID,
-		nameHMAC: nameHMAC,
-		buf:      make([]byte, 0, crypto.ChunkSize),
+		client:    c,
+		ctx:       ctx,
+		inode:     *inode,
+		fileKey:   fileKey,
+		parentID:  parentID,
+		parentKey: parentKey,
+		name:      name,
+		nameHMAC:  nameHMAC,
+		buf:       make([]byte, 0, crypto.ChunkSize),
+		isNew:     isNew,
 	}, nil
 }
 
-
 type FileWriter struct {
-	client   *Client
-	ctx      context.Context
-	inode    metadata.Inode
-	fileKey  []byte
-	parentID string
-	nameHMAC string
-	buf      []byte
-	manifest []metadata.ChunkEntry
-	written  int64
-	closed   bool
+	client    *Client
+	ctx       context.Context
+	inode     metadata.Inode
+	fileKey   []byte
+	parentID  string
+	parentKey []byte
+	name      string
+	nameHMAC  string
+	buf       []byte
+	manifest  []metadata.ChunkEntry
+	written   int64
+	closed    bool
+	isNew     bool
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
@@ -1489,7 +1537,56 @@ func (w *FileWriter) Close() error {
 	}
 
 	// Final Metadata Update
-	_, err := w.client.updateInode(w.ctx, w.inode)
+	var err error
+	if w.isNew {
+		if w.parentID == "" {
+			return fmt.Errorf("cannot link new file: parentID missing")
+		}
+		// 1. Create Inode
+		_, err = w.client.createInode(w.ctx, w.inode)
+		if err != nil {
+			return err
+		}
+		// 2. Link to Parent
+		update := metadata.ChildUpdate{
+			ParentID: w.parentID,
+			Name:     w.nameHMAC,
+			ChildID:  w.inode.ID,
+		}
+		data, _ := json.Marshal(update)
+		err = w.client.withRetry(w.ctx, func() error {
+			w.client.acquire()
+			defer w.client.release()
+
+			req, _ := http.NewRequestWithContext(w.ctx, "PUT", w.client.serverURL+"/v1/meta/directory/"+w.parentID+"/entry", nil)
+			if err := w.client.authenticateRequest(req); err != nil {
+				return err
+			}
+			if err := w.client.sealBody(req, data); err != nil {
+				return err
+			}
+
+			resp, err := w.client.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(resp.Body)
+				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+			}
+			return nil
+		})
+	} else {
+		_, err = w.client.updateInode(w.ctx, w.inode)
+	}
+
+	if releaseErr := w.client.ReleaseLeases(w.ctx, []string{w.inode.ID}); releaseErr != nil {
+		if err == nil {
+			err = fmt.Errorf("failed to release lease: %w", releaseErr)
+		}
+	}
+
 	if err == nil {
 		w.client.keyMu.Lock()
 		w.client.keyCache[w.inode.ID] = fileMetadata{
@@ -1499,10 +1596,147 @@ func (w *FileWriter) Close() error {
 			inlined: w.inode.InlineData != nil,
 		}
 		w.client.keyMu.Unlock()
+
+		// Cache the path if we know it
+		if w.name != "" && w.parentID != "" {
+			// We don't have the full path here easily unless we passed it or reconstructing it.
+			// But we updated keyCache, which is good enough for ID-based access.
+			// Path cache population is tricky without full path.
+		}
 	}
 	return err
 }
 
+func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx int64) ([]byte, error) {
+	inode, err := c.GetInode(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	// Handle inline data
+	if inode.InlineData != nil {
+		if chunkIdx == 0 {
+			return crypto.DecryptDEM(key, inode.InlineData)
+		}
+		return nil, io.EOF
+	}
+
+	if chunkIdx < 0 || chunkIdx >= int64(len(inode.ChunkManifest)) {
+		return nil, io.EOF
+	}
+	entry := inode.ChunkManifest[chunkIdx]
+	token, err := c.issueToken(id, nil, "R")
+	if err != nil {
+		return nil, err
+	}
+	ct, err := c.downloadChunk(ctx, entry.ID, entry.URLs, token)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.DecryptChunk(key, ct)
+}
+
+func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) error {
+	ctx := context.Background()
+
+	// 1. Get current inode state
+	inode, err := c.GetInode(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	key, err := c.UnlockInode(inode)
+	if err != nil {
+		return err
+	}
+
+	// 2. Handle Small File Inlining (Optimized Path)
+	if size <= metadata.InlineLimit {
+		buf := make([]byte, size)
+		if _, err := r.ReadAt(buf, 0); err != nil && err != io.EOF {
+			return err
+		}
+		ciphertext, err := crypto.EncryptDEM(key, buf)
+		if err != nil {
+			return err
+		}
+		inode.InlineData = ciphertext
+		inode.ChunkManifest = nil
+		inode.ChunkPages = nil
+		inode.Size = uint64(size)
+		_, err = c.updateInode(ctx, *inode)
+		return err
+	}
+
+	// 3. Handle Chunked File (Differential Update)
+	inode.InlineData = nil
+	numChunks := (size + crypto.ChunkSize - 1) / crypto.ChunkSize
+	newManifest := make([]metadata.ChunkEntry, numChunks)
+	buf := make([]byte, crypto.ChunkSize)
+
+	for i := int64(0); i < numChunks; i++ {
+		// Determine if we need to upload this chunk
+		needUpload := false
+		if dirtyChunks[i] {
+			needUpload = true
+		} else if i >= int64(len(inode.ChunkManifest)) {
+			// New chunk (file grew)
+			needUpload = true
+		} else {
+			// Check if we can reuse existing
+			newManifest[i] = inode.ChunkManifest[i]
+		}
+
+		if needUpload {
+			// Read from source
+			offset := i * int64(crypto.ChunkSize)
+			chunkSize := int64(crypto.ChunkSize)
+			if offset+chunkSize > size {
+				chunkSize = size - offset
+			}
+
+			// Clear buffer for safety (avoid leaking previous chunk data in partial reads)
+			for k := range buf {
+				buf[k] = 0
+			}
+
+			n, err := r.ReadAt(buf[:chunkSize], offset)
+			if err != nil && err != io.EOF {
+				return err
+			}
+			chunkData := buf[:n]
+
+			// Encrypt
+			cid, ct, err := crypto.EncryptChunk(key, chunkData)
+			if err != nil {
+				return err
+			}
+
+			// Upload
+			token, err := c.issueToken(id, []string{cid}, "W")
+			if err != nil {
+				return err
+			}
+			nodes, err := c.allocateNodes(ctx)
+			if err != nil {
+				return err
+			}
+			if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
+				return err
+			}
+
+			var nodeIDs []string
+			for _, node := range nodes {
+				nodeIDs = append(nodeIDs, node.ID)
+			}
+			newManifest[i] = metadata.ChunkEntry{ID: cid, Nodes: nodeIDs}
+		}
+	}
+
+	inode.ChunkManifest = newManifest
+	inode.Size = uint64(size)
+	_, err = c.updateInode(ctx, *inode)
+	return err
+}
 
 func (c *Client) ReadDataFile(name string, data any) error {
 	// Map name to a full path if necessary, here we assume names are IDs or paths

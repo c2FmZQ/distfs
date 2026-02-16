@@ -575,6 +575,9 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 
 	target, err := url.Parse(targetAddr)
 	if err != nil {
+		s.leaderURLMu.Lock()
+		delete(s.leaderURLCache, leaderAddr)
+		s.leaderURLMu.Unlock()
 		http.Error(w, "invalid leader address", http.StatusInternalServerError)
 		return true
 	}
@@ -2059,55 +2062,7 @@ func (s *Server) sessionCleanupWorker() {
 				s.sessionKeyMu.Lock()
 
 				for _, token := range expired {
-
-					// Proactively release leases for these sessions
-
-					go func(t string) {
-
-						// Find inodes owned by this session
-
-						var ids []string
-
-						s.fsm.db.View(func(tx *bolt.Tx) error {
-
-							b := tx.Bucket([]byte("inodes"))
-
-							c := b.Cursor()
-
-							for k, v := c.First(); k != nil; k, v = c.Next() {
-
-								var inode Inode
-
-								if err := json.Unmarshal(v, &inode); err == nil {
-
-									if inode.LeaseOwner == t {
-
-										ids = append(ids, inode.ID)
-
-									}
-
-								}
-
-							}
-
-							return nil
-
-						})
-
-						if len(ids) > 0 {
-
-							req := LeaseRequest{InodeIDs: ids, OwnerID: t}
-
-							body, _ := json.Marshal(req)
-
-							s.applyRaftCommand(CmdReleaseLeases, body)
-
-						}
-
-					}(token)
-
 					delete(s.sessionKeyCache, token)
-
 				}
 
 				s.sessionKeyMu.Unlock()

@@ -368,8 +368,8 @@ type FileHandle struct {
 	file   *File
 	reader *client.FileReader
 	mu     sync.Mutex
-	tmp    *os.File
-	dirty  bool
+	pages  map[int64][]byte
+	size   uint64
 }
 
 var _ fs.HandleReader = (*FileHandle)(nil)
@@ -381,16 +381,23 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.dirty {
-		data := make([]byte, req.Size)
-		n, err := h.tmp.ReadAt(data, req.Offset)
-		if err != nil && err != io.EOF {
-			return mapError(err)
+	// Check if we can serve from memory (dirty pages)
+	const chunkSize = 1024 * 1024
+	pageIdx := req.Offset / chunkSize
+	pageOffset := int(req.Offset % chunkSize)
+
+	// Simple case: Read entirely within one dirty page
+	if page, ok := h.pages[pageIdx]; ok {
+		end := pageOffset + req.Size
+		if end > len(page) {
+			end = len(page)
 		}
-		resp.Data = data[:n]
+		resp.Data = make([]byte, end-pageOffset)
+		copy(resp.Data, page[pageOffset:end])
 		return nil
 	}
 
+	// Fallback to reader for clean pages
 	data := make([]byte, req.Size)
 	n, err := h.reader.ReadAt(data, req.Offset)
 	if err != nil && err != io.EOF {
@@ -401,34 +408,73 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 }
 
 func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
-	log.Printf("FUSE Write: %s offset=%d size=%d", h.file.inode.ID, req.Offset, len(req.Data))
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if !h.dirty {
-		f, err := os.CreateTemp("", "distfs-write-*")
-		if err != nil {
-			return mapError(err)
-		}
-		rc, err := h.file.fs.client.ReadFile(h.file.inode.ID, h.file.key)
-		if err != nil {
-			f.Close()
-			os.Remove(f.Name())
-			return mapError(err)
-		}
-		defer rc.Close()
-		if _, err := io.Copy(f, rc); err != nil {
-			f.Close()
-			os.Remove(f.Name())
-			return mapError(err)
-		}
-		h.tmp = f
-		h.dirty = true
+	if h.pages == nil {
+		h.pages = make(map[int64][]byte)
+		h.size = h.file.inode.Size
 	}
 
-	if _, err := h.tmp.WriteAt(req.Data, req.Offset); err != nil {
-		return mapError(err)
+	const chunkSize = 1024 * 1024
+
+	// Handle writes spanning multiple pages
+	written := 0
+	for written < len(req.Data) {
+		offset := req.Offset + int64(written)
+		pageIdx := offset / chunkSize
+		pageOffset := int(offset % chunkSize)
+
+		remainingInPage := int(chunkSize) - pageOffset
+		toWrite := len(req.Data) - written
+		if toWrite > remainingInPage {
+			toWrite = remainingInPage
+		}
+
+		// Load Page
+		page, ok := h.pages[pageIdx]
+		if !ok {
+			// Fetch from server if it exists
+			if pageIdx < int64(len(h.file.inode.ChunkManifest)) {
+				// Fetch
+				data, err := h.file.fs.client.FetchChunk(ctx, h.file.inode.ID, h.file.key, pageIdx)
+				if err != nil {
+					return mapError(err)
+				}
+				page = data
+			} else {
+				// New Page (zeroed)
+				page = make([]byte, 0, chunkSize)
+			}
+			h.pages[pageIdx] = page
+		}
+
+		// Ensure page is big enough (handling sparse/append)
+		neededLen := pageOffset + toWrite
+		if len(page) < neededLen {
+			// Extend with zeros if gap
+			if len(page) < pageOffset {
+				padding := make([]byte, pageOffset-len(page))
+				page = append(page, padding...)
+			}
+			// Extend for data
+			extension := make([]byte, neededLen-len(page))
+			page = append(page, extension...)
+		}
+
+		// Copy Data
+		copy(page[pageOffset:], req.Data[written:written+toWrite])
+		h.pages[pageIdx] = page
+
+		written += toWrite
 	}
+
+	// Update Size
+	newEnd := req.Offset + int64(len(req.Data))
+	if uint64(newEnd) > h.size {
+		h.size = uint64(newEnd)
+	}
+
 	resp.Size = len(req.Data)
 	return nil
 }
@@ -437,43 +483,67 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if h.dirty {
-		if h.tmp == nil {
-			return syscall.EIO
+	if len(h.pages) > 0 {
+		log.Printf("FUSE Flush: syncing %s (%d pages)", h.file.inode.ID, len(h.pages))
+
+		dirtyMap := make(map[int64]bool)
+		for idx := range h.pages {
+			dirtyMap[idx] = true
 		}
-		log.Printf("FUSE Flush: committing %s", h.file.inode.ID)
-		info, err := h.tmp.Stat()
+
+		// Use FileHandle as ReaderAt
+		// SyncFile uses this to read the modified chunks
+		err := h.file.fs.client.SyncFile(h.file.inode.ID, h, int64(h.size), dirtyMap)
 		if err != nil {
+			log.Printf("FUSE Flush sync failed: %v", err)
 			return mapError(err)
 		}
 
-		if _, err := h.tmp.Seek(0, io.SeekStart); err != nil {
-			return mapError(err)
-		}
-
-		_, err = h.file.fs.client.WriteFile(h.file.inode.ID, h.tmp, info.Size(), uint32(h.file.inode.Mode))
-		if err != nil {
-			log.Printf("FUSE Flush commit failed: %v", err)
-			return mapError(err)
-		}
-		h.dirty = false
-		h.file.inode.Size = uint64(info.Size())
+		// Clear dirty pages after successful sync
+		h.pages = make(map[int64][]byte)
+		h.file.inode.Size = h.size
 	}
 	return nil
 }
 
+// ReadAt implements io.ReaderAt for SyncFile usage
+func (h *FileHandle) ReadAt(p []byte, off int64) (n int, err error) {
+	// SyncFile only calls this for dirty chunks, so they MUST be in h.pages
+	const chunkSize = 1024 * 1024
+	pageIdx := off / chunkSize
+
+	page, ok := h.pages[pageIdx]
+	if !ok {
+		// Should not happen if logic is correct
+		return 0, io.EOF
+	}
+
+	// Logic for copying from page
+	// SyncFile asks for full chunk (or up to EOF)
+	// 'off' passed to ReadAt is usually aligned to chunk start (from SyncFile)
+	// But let's be generic
+
+	pageOffset := int(off % chunkSize)
+	if pageOffset >= len(page) {
+		return 0, io.EOF
+	}
+
+	n = copy(p, page[pageOffset:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
 func (h *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
-	log.Printf("FUSE Fsync Handle: %s", h.file.inode.ID)
+	// Flush handles the sync logic now efficiently
 	return h.Flush(ctx, &fuse.FlushRequest{})
 }
 
 func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
 	h.mu.Lock()
-	if h.tmp != nil {
-		h.tmp.Close()
-		os.Remove(h.tmp.Name())
-		h.tmp = nil
-	}
+	// Clear memory
+	h.pages = nil
 	h.mu.Unlock()
 
 	h.reader.Close()
