@@ -406,3 +406,20 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement a timed trigger (e.g., 2ms) to collect all pending requests into a single `CmdBatch` Raft log entry.
 *   **Step 27.3: Batch FSM Processing**
     *   **Action:** Update `MetadataFSM` to iterate through batches and return an array of individual execution results.
+
+---
+
+## Phase 28: Advanced POSIX & Efficiency
+**Goal:** Achieve high-fidelity POSIX behavior and optimize metadata streaming.
+
+*   **Step 28.1: Implementation of Statfs**
+    *   **Action:** Implement `GET /v1/cluster/stats` to aggregate disk usage across all registered nodes.
+    *   **Action:** Implement `Statfs` in FUSE to report cluster capacity and user remaining quota.
+*   **Step 28.2: Explicit Fsync Support**
+    *   **Action:** Implement `Fsync` in the FUSE client to trigger an immediate chunk commit and metadata update for active file handles.
+*   **Step 28.3: Incremental ReadDir**
+    *   **Action:** Implement `fs.HandleReadDirer` to stream directory entries.
+    *   **Action:** Optimize `GetInodes` batch calls to be used incrementally during traversal.
+*   **Step 28.4: Node Eviction (Forget)**
+    *   **Action:** Implement `fs.NodeForgetter` to properly release internal client-side tracking data when the kernel evicts an inode from its cache.
+

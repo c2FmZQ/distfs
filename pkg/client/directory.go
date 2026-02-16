@@ -33,7 +33,7 @@ import (
 
 // EnsureRoot makes sure the root directory inode exists.
 func (c *Client) EnsureRoot() error {
-	_, err := c.getInode(metadata.RootID)
+	_, err := c.getInode(context.Background(), metadata.RootID)
 	if err == nil {
 		return nil
 	}
@@ -55,7 +55,7 @@ func (c *Client) EnsureRoot() error {
 		Lockbox:  lb,
 		OwnerID:  c.userID,
 	}
-	_, err = c.createInode(inode)
+	_, err = c.createInode(context.Background(), inode)
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
 			return nil
@@ -70,7 +70,7 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 	// 1. Check Path Cache
 	if entry, ok := c.getPathCache(path); ok {
-		inode, err := c.getInode(entry.inodeID)
+		inode, err := c.getInode(context.Background(), entry.inodeID)
 		if err == nil {
 			// Validate hint integrity
 			// Root has no linkTag
@@ -92,12 +92,12 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 	}
 	// 2. Sequential Resolution
 	relPath := strings.TrimPrefix(path, "/")
-	rootInode, err := c.getInode(metadata.RootID)
+	rootInode, err := c.getInode(context.Background(), metadata.RootID)
 	if err != nil {
 		if err := c.EnsureRoot(); err != nil {
 			return nil, nil, fmt.Errorf("failed to ensure root inode: %w", err)
 		}
-		rootInode, err = c.getInode(metadata.RootID)
+		rootInode, err = c.getInode(context.Background(), metadata.RootID)
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to get root inode after creation: %w", err)
 		}
@@ -139,7 +139,7 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 		}
 
 		parentID := inode.ID
-		inode, err = c.getInode(childID)
+		inode, err = c.getInode(context.Background(), childID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -195,10 +195,10 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	var newInode *metadata.Inode
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(newID, iType, newKey, r, size, encNameBlob, mode, groupID, parentID, encName); err != nil {
+		if err := c.writeInodeContent(context.Background(), newID, iType, newKey, r, size, encNameBlob, mode, groupID, parentID, encName); err != nil {
 			return nil, nil, err
 		}
-		newInode, err = c.GetInode(newID)
+		newInode, err = c.GetInode(context.Background(), newID)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -220,7 +220,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 			GroupID:       groupID,
 			SymlinkTarget: symlinkTarget,
 		}
-		newInode, err = c.createInode(inode)
+		newInode, err = c.createInode(context.Background(), inode)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -485,7 +485,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 	if existingID, ok := parentInode.Children[encName]; ok {
 		if iType == metadata.FileType {
 			// Update existing file content
-			inode, err := c.GetInode(existingID)
+			inode, err := c.GetInode(context.Background(), existingID)
 			if err != nil {
 				return err
 			}
@@ -503,7 +503,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 			if len(parts) == 2 {
 				pID, nHMAC = parts[0], parts[1]
 			}
-			return c.writeInodeContent(existingID, metadata.FileType, key, r, size, nil, inode.Mode, inode.GroupID, pID, nHMAC)
+			return c.writeInodeContent(context.Background(), existingID, metadata.FileType, key, r, size, nil, inode.Mode, inode.GroupID, pID, nHMAC)
 		}
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}

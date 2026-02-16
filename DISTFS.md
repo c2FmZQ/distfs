@@ -218,6 +218,16 @@ Communication uses JSON over HTTP/2 (or gRPC).
     *   **Client Auth:** Client authenticates with Metadata Server via Sealed Tokens (signed/encrypted) proving identity.
     *   **Chunk Access:** Client authenticates with Data Nodes via Signed Capability Tokens issued by Metadata Server.
 
+### 6.4 FUSE Implementation Details
+To provide high-fidelity POSIX compatibility, DistFS implements the following specialized operations:
+*   **`Fsync`**: Ensures that all dirty data for a file is committed to the data nodes and the inode metadata is updated on the Raft leader before returning.
+*   **`Statfs`**: Reports cluster-wide storage capacity and user-specific remaining quota (MaxBytes/MaxInodes).
+*   **`Forget`**: Handles kernel-level node eviction to prevent memory leaks in the client during long-running mounts.
+*   **Incremental `ReadDir`**: Uses streaming directory entries to support large directories without blocking on a single massive metadata fetch.
+
+**Out of Scope: `CopyFileRange`**
+Server-side copying is currently not supported because DistFS maintains Zero-Knowledge privacy. Since every file is encrypted with a unique symmetric key, copying data between files would require the server to decrypt and re-encrypt the content (or reuse keys, which weakens the security model), violating the core security mandate. All copies must be performed client-side.
+
 ## 7. Cluster Architecture & Operations
 
 ### 7.1 Network Topology & Ports

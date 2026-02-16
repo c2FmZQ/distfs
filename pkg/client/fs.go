@@ -15,6 +15,7 @@
 package client
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"io/fs"
@@ -150,7 +151,7 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 		ids = append(ids, id)
 	}
 
-	inodes, err := d.client.getInodes(ids)
+	inodes, err := d.client.getInodes(context.Background(), ids)
 	if err != nil {
 		return nil, err
 	}

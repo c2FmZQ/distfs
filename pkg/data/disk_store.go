@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/c2FmZQ/storage"
 )
@@ -158,4 +159,14 @@ func (s *DiskStore) ListChunks() iter.Seq2[string, error] {
 			yield("", err)
 		}
 	}
+}
+
+func (s *DiskStore) Stats() (int64, int64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(s.st.Dir(), &stat); err != nil {
+		return 0, 0, err
+	}
+	capacity := int64(stat.Blocks) * int64(stat.Bsize)
+	free := int64(stat.Bfree) * int64(stat.Bsize)
+	return capacity, capacity - free, nil
 }

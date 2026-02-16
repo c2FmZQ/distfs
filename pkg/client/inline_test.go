@@ -16,6 +16,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"net/http/httptest"
 	"testing"
@@ -73,7 +74,7 @@ func TestSmallFileInlining(t *testing.T) {
 	}
 
 	// 3. Verify Inode state
-	inode, err := c.GetInode("small-1")
+	inode, err := c.GetInode(context.Background(), "small-1")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +104,7 @@ func TestSmallFileInlining(t *testing.T) {
 	}
 
 	// 6. Verify Eviction
-	inode, err = c.GetInode("small-1")
+	inode, err = c.GetInode(context.Background(), "small-1")
 	if err != nil {
 		t.Fatal(err)
 	}

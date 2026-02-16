@@ -121,6 +121,13 @@ type Node struct {
 	Used           int64      `json:"used"`
 }
 
+// ClusterStats aggregates storage information across the cluster.
+type ClusterStats struct {
+	TotalCapacity int64 `json:"total_capacity"`
+	TotalUsed     int64 `json:"total_used"`
+	NodeCount     int   `json:"node_count"`
+}
+
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID            string            `json:"id"`

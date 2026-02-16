@@ -40,4 +40,7 @@ type Store interface {
 
 	// ListChunks returns an iterator for all chunk IDs.
 	ListChunks() iter.Seq2[string, error]
+
+	// Stats returns total capacity and used space in bytes.
+	Stats() (capacity int64, used int64, err error)
 }

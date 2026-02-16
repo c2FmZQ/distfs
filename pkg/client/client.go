@@ -23,6 +23,7 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	mrand "math/rand"
@@ -434,73 +435,48 @@ func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 }
 
 func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
-	var lastErr error
-	backoff := 100 * time.Millisecond
-	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
+	var nodes []metadata.Node
+	err := c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
 
-	for i := 0; i < 5; i++ {
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/allocate", nil)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		if err := c.authenticateRequest(req); err != nil {
-			return nil, err
+			return err
 		}
-		// Even though body is nil, we want to seal it if possible or at least set the header
-		// Actually, if we want to seal it, we need a payload.
-		// Let's just send an empty JSON object.
 		if err := c.sealBody(req, []byte("{}")); err != nil {
-			return nil, err
+			return err
 		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
-			lastErr = err
-			// Check context before sleeping
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff + time.Duration(rng.Int63n(int64(backoff/2)))):
-			}
-			backoff *= 2
-			continue
+			return err
 		}
+		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
-			resp.Body.Close()
-			lastErr = fmt.Errorf("metadata server busy (%d)", resp.StatusCode)
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff + time.Duration(rng.Int63n(int64(backoff/2)))):
-			}
-			backoff *= 2
-			continue
+			return &APIError{StatusCode: resp.StatusCode, Message: "metadata server busy"}
 		}
 
 		body, err := c.unsealResponse(resp)
 		if err != nil {
-			lastErr = err
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(backoff + time.Duration(rng.Int63n(int64(backoff/2)))):
-			}
-			backoff *= 2
-			continue
+			return err
 		}
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return nil, &APIError{StatusCode: resp.StatusCode}
+			return &APIError{StatusCode: resp.StatusCode}
 		}
-		var nodes []metadata.Node
-		if err := json.NewDecoder(body).Decode(&nodes); err != nil {
-			return nil, err
-		}
-		return nodes, nil
+		return json.NewDecoder(body).Decode(&nodes)
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("node allocation failed after retries: %w", err)
 	}
-	return nil, fmt.Errorf("node allocation failed after retries: %w", lastErr)
+	return nodes, nil
 }
 
 func (c *Client) issueToken(inodeID string, chunks []string, mode string) (string, error) {
@@ -704,18 +680,18 @@ func (e *APIError) ToPOSIX() error {
 	}
 }
 
-func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
+func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
 	data, err := json.Marshal(inode)
 	if err != nil {
 		return nil, err
 	}
 
 	var created metadata.Inode
-	err = c.withRetry(context.Background(), func() error {
+	err = c.withRetry(ctx, func() error {
 		c.acquire()
 		defer c.release()
 
-		req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/inode", nil)
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inode", nil)
 		if err != nil {
 			return err
 		}
@@ -749,18 +725,18 @@ func (c *Client) createInode(inode metadata.Inode) (*metadata.Inode, error) {
 	}
 	return &created, nil
 }
-func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
+func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
 	data, err := json.Marshal(inode)
 	if err != nil {
 		return nil, err
 	}
 
 	var updated metadata.Inode
-	err = c.withRetry(context.Background(), func() error {
+	err = c.withRetry(ctx, func() error {
 		c.acquire()
 		defer c.release()
 
-		req, err := http.NewRequest("PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
+		req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
 		if err != nil {
 			return err
 		}
@@ -794,13 +770,13 @@ func (c *Client) updateInode(inode metadata.Inode) (*metadata.Inode, error) {
 	}
 	return &updated, nil
 }
-func (c *Client) getInode(id string) (*metadata.Inode, error) {
+func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, error) {
 	var inode metadata.Inode
-	err := c.withRetry(context.Background(), func() error {
+	err := c.withRetry(ctx, func() error {
 		c.acquire()
 		defer c.release()
 
-		req, err := http.NewRequest("GET", c.serverURL+"/v1/meta/inode/"+id, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/inode/"+id, nil)
 		if err != nil {
 			return err
 		}
@@ -831,50 +807,62 @@ func (c *Client) getInode(id string) (*metadata.Inode, error) {
 	return &inode, nil
 }
 
-func (c *Client) getInodes(ids []string) ([]*metadata.Inode, error) {
+func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
 	data, err := json.Marshal(ids)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/inodes", nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return nil, err
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return nil, err
-	}
 
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("get inodes failed: %d", resp.StatusCode)
-	}
 	var inodes []*metadata.Inode
-	if err := json.NewDecoder(body).Decode(&inodes); err != nil {
+	err = c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inodes", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return json.NewDecoder(body).Decode(&inodes)
+	})
+
+	if err != nil {
 		return nil, err
 	}
 	return inodes, nil
 }
 
-func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string) error {
+func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
 
 	var inode metadata.Inode
 	// Try to get existing inode
-	existing, err := c.getInode(id)
+	existing, err := c.getInode(ctx, id)
 	if err == nil {
 		inode = *existing
 		// Preserve existing Lockbox entries if possible
@@ -920,7 +908,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 			OwnerID:       c.userID,
 			GroupID:       groupID,
 		}
-		created, err := c.createInode(inode)
+		created, err := c.createInode(ctx, inode)
 		if err != nil {
 			return err
 		}
@@ -963,7 +951,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 				if err != nil {
 					return fmt.Errorf("token issue failed: %w", err)
 				}
-				nodes, err := c.allocateNodes(context.Background())
+				nodes, err := c.allocateNodes(ctx)
 				if err != nil {
 					return fmt.Errorf("allocation failed: %w", err)
 				}
@@ -989,7 +977,7 @@ func (c *Client) writeInodeContent(id string, iType metadata.InodeType, fileKey 
 	}
 
 	// Final update using updateInode (uses version check)
-	_, err = c.updateInode(inode)
+	_, err = c.updateInode(ctx, inode)
 	if err == nil {
 		c.keyMu.Lock()
 		c.keyCache[id] = fileMetadata{
@@ -1023,7 +1011,7 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 			nameHMAC = parts[1]
 		}
 	} else {
-		if inode, err := c.GetInode(id); err == nil {
+		if inode, err := c.GetInode(context.Background(), id); err == nil {
 			if key, err := c.UnlockInode(inode); err == nil {
 				fileKey = key
 				groupID = inode.GroupID
@@ -1050,7 +1038,7 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 		}
 	}
 
-	if err := c.writeInodeContent(id, metadata.FileType, fileKey, r, size, nil, mode, groupID, parentID, nameHMAC); err != nil {
+	if err := c.writeInodeContent(context.Background(), id, metadata.FileType, fileKey, r, size, nil, mode, groupID, parentID, nameHMAC); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -1074,10 +1062,13 @@ type FileReader struct {
 
 	readAhead   map[int64]*readAheadResult
 	readAheadMu sync.Mutex
+
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
-	inode, err := c.getInode(id)
+	inode, err := c.getInode(context.Background(), id)
 	if err != nil {
 		return nil, err
 	}
@@ -1119,6 +1110,7 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 
 	token, _ := c.issueToken(id, nil, "R")
 
+	ctx, cancel := context.WithCancel(context.Background())
 	return &FileReader{
 		client:          c,
 		inode:           inode,
@@ -1127,8 +1119,16 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		currentChunkIdx: -1,
 		token:           token,
 		readAhead:       make(map[int64]*readAheadResult),
+		ctx:             ctx,
+		cancel:          cancel,
 	}, nil
 }
+
+func (r *FileReader) Close() error {
+	r.cancel()
+	return nil
+}
+
 func (r *FileReader) triggerPrefetch(idx int64) {
 	if idx < 0 || idx >= int64(len(r.inode.ChunkManifest)) {
 		return
@@ -1145,7 +1145,7 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 
 	go func() {
 		chunkEntry := r.inode.ChunkManifest[idx]
-		ct, err := r.client.downloadChunk(context.Background(), chunkEntry.ID, chunkEntry.URLs, r.token)
+		ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, r.token)
 		var pt []byte
 		if err == nil {
 			pt, err = crypto.DecryptChunk(r.fileKey, ct)
@@ -1213,25 +1213,16 @@ func (r *FileReader) read(p []byte) (int, error) {
 			r.readAheadMu.Unlock()
 
 			if exists {
-
 				// Wait for it
-
 				r.mu.Unlock()
-
 				<-res.ready
-
 				r.mu.Lock()
 
 				if res.err != nil {
-
 					return totalRead, res.err
-
 				}
-
 				pt = res.data
-
 			} else {
-
 				if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
 					break
 				}
@@ -1303,13 +1294,13 @@ func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
 }
 
 // GetInode fetches the inode metadata.
-func (c *Client) GetInode(id string) (*metadata.Inode, error) {
-	return c.getInode(id)
+func (c *Client) GetInode(ctx context.Context, id string) (*metadata.Inode, error) {
+	return c.getInode(ctx, id)
 }
 
 // GetInodes fetches metadata for multiple inodes in a single batch call.
-func (c *Client) GetInodes(ids []string) ([]*metadata.Inode, error) {
-	return c.getInodes(ids)
+func (c *Client) GetInodes(ctx context.Context, ids []string) ([]*metadata.Inode, error) {
+	return c.getInodes(ctx, ids)
 }
 
 // UnlockInode attempts to decrypt the file key for the inode using the client's identity.
@@ -1772,7 +1763,7 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 			// Update the local inode state before sending to server
 			inode.Mode = newMode
 			inode.GroupID = newGroupID
-			_, err = c.updateInode(*inode)
+			_, err = c.updateInode(context.Background(), *inode)
 			if err != nil {
 				return err
 			}
@@ -1915,7 +1906,6 @@ func (c *Client) withRetry(ctx context.Context, op func() error) error {
 	var lastErr error
 	backoff := 100 * time.Millisecond
 	maxBackoff := 10 * time.Second
-	rng := mrand.New(mrand.NewSource(time.Now().UnixNano()))
 
 	for i := 0; i < 5; i++ {
 		err := op()
@@ -1928,8 +1918,8 @@ func (c *Client) withRetry(ctx context.Context, op func() error) error {
 			return err
 		}
 
-		// Exponential backoff with jitter (optimized PRNG)
-		jitter := time.Duration(rng.Int63n(int64(backoff / 2)))
+		// Exponential backoff with jitter (optimized global PRNG)
+		jitter := time.Duration(mrand.Int63n(int64(backoff / 2)))
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -1957,7 +1947,8 @@ func (c *Client) isRetryable(err error) bool {
 		return true
 	}
 	// API errors
-	if apiErr, ok := err.(*APIError); ok {
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
 		if apiErr.StatusCode == http.StatusServiceUnavailable ||
 			apiErr.StatusCode == http.StatusTooManyRequests ||
 			apiErr.StatusCode == http.StatusInternalServerError {
@@ -1965,6 +1956,40 @@ func (c *Client) isRetryable(err error) bool {
 		}
 	}
 	return false
+}
+
+func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {
+	var stats metadata.ClusterStats
+	err := c.withRetry(context.Background(), func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequest("GET", c.serverURL+"/v1/cluster/stats", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(resp.Body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(resp.Body).Decode(&stats)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return &stats, nil
 }
 
 // RefreshNodeRegistry fetches the current node registry from the server.

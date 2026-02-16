@@ -238,10 +238,30 @@ func main() {
 
 		// Wait for cluster ready
 		time.Sleep(2 * time.Second)
+
+		// Persistent heartbeat client
+		var hbClient *http.Client
+		if rn.ClientTLSConfig != nil {
+			hbClient = &http.Client{
+				Transport: &http.Transport{
+					TLSClientConfig: rn.ClientTLSConfig,
+				},
+				Timeout: 60 * time.Second,
+			}
+		} else {
+			hbClient = &http.Client{
+				Timeout: 60 * time.Second,
+			}
+		}
+
 		ticker := time.NewTicker(30 * time.Second)
 		for {
 			if rn.Raft.Leader() != "" {
 				node.LastHeartbeat = time.Now().Unix()
+				if c, u, err := store.Stats(); err == nil {
+					node.Capacity = c
+					node.Used = u
+				}
 				body, _ := json.Marshal(node)
 
 				protocol := "http"
@@ -257,18 +277,7 @@ func main() {
 					req.Header.Set("X-Raft-Secret", *raftSecret)
 				}
 
-				// If using mTLS for cluster comms, use ClientTLSConfig
-				client := http.DefaultClient
-				if rn.ClientTLSConfig != nil {
-					client = &http.Client{
-						Transport: &http.Transport{
-							TLSClientConfig: rn.ClientTLSConfig,
-						},
-						Timeout: 60 * time.Second,
-					}
-				}
-
-				resp, err := client.Do(req)
+				resp, err := hbClient.Do(req)
 				if err != nil {
 					log.Printf("Heartbeat failed to %s: %v", target, err)
 				} else if resp != nil {

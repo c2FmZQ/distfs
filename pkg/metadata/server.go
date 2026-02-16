@@ -83,6 +83,10 @@ type Server struct {
 	clientTLSConfig     *tls.Config
 	keyRotationInterval time.Duration
 
+	forwardTransport *http.Transport
+	leaderURLCache   map[raft.ServerAddress]string
+	leaderURLMu      sync.RWMutex
+
 	oidcMu     sync.RWMutex
 	oidcConfig *OIDCConfig
 	stopCh     chan struct{}
@@ -121,8 +125,12 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		sessionKeyCache:     make(map[string]sessionKeyEntry),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
-		stopCh:              make(chan struct{}),
-		batchQueue:          make([]*LogCommand, 0),
+		forwardTransport: &http.Transport{
+			TLSClientConfig: clientTLSConfig,
+		},
+		leaderURLCache: make(map[raft.ServerAddress]string),
+		stopCh:         make(chan struct{}),
+		batchQueue:     make([]*LogCommand, 0),
 		batchResps:          make([]chan interface{}, 0),
 		batchApplyCh:        make(chan batchRequest, 100),
 	}
@@ -395,6 +403,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/v1/cluster/stats" && r.Method == http.MethodGet {
+		s.handleGetClusterStats(w, r)
+		return
+	}
+
 	user, err := s.authenticate(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -511,39 +524,47 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 		return true
 	}
 
-	// Find Leader API Address in FSM
-	var leaderNode Node
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
-				if n.RaftAddress == string(leaderAddr) {
-					leaderNode = n
-					return nil
+	// 1. Check cache
+	s.leaderURLMu.RLock()
+	targetAddr, ok := s.leaderURLCache[leaderAddr]
+	s.leaderURLMu.RUnlock()
+
+	if !ok {
+		// 2. Find Leader API Address in FSM
+		var leaderNode Node
+		err := s.fsm.db.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("nodes"))
+			c := b.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var n Node
+				if err := json.Unmarshal(v, &n); err == nil {
+					if n.RaftAddress == string(leaderAddr) {
+						leaderNode = n
+						return nil
+					}
 				}
 			}
+			return fmt.Errorf("leader not registered")
+		})
+
+		if err != nil || leaderNode.Address == "" {
+			http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
+			return true
 		}
-		return fmt.Errorf("leader not registered")
-	})
 
-	if err != nil || leaderNode.Address == "" {
-		// If leader is not in FSM, we can't forward.
-		// Fallback: return 503 so client retries.
-		http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
-		return true
-	}
+		targetAddr = leaderNode.Address
+		if leaderNode.ClusterAddress != "" {
+			targetAddr = leaderNode.ClusterAddress
+		}
 
-	targetAddr := leaderNode.Address
-	if leaderNode.ClusterAddress != "" {
-		targetAddr = leaderNode.ClusterAddress
-	}
+		if s.clientTLSConfig != nil && !strings.HasPrefix(targetAddr, "https://") {
+			targetAddr = strings.Replace(targetAddr, "http://", "https://", 1)
+		}
 
-	// Ensure target scheme is https if using ClusterAddress (which implies mTLS)
-	// Or check if s.clientTLSConfig is present
-	if s.clientTLSConfig != nil && !strings.HasPrefix(targetAddr, "https://") {
-		targetAddr = strings.Replace(targetAddr, "http://", "https://", 1)
+		// Update cache
+		s.leaderURLMu.Lock()
+		s.leaderURLCache[leaderAddr] = targetAddr
+		s.leaderURLMu.Unlock()
 	}
 
 	target, err := url.Parse(targetAddr)
@@ -553,11 +574,7 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 	}
 
 	proxy := httputil.NewSingleHostReverseProxy(target)
-	if s.clientTLSConfig != nil {
-		proxy.Transport = &http.Transport{
-			TLSClientConfig: s.clientTLSConfig,
-		}
-	}
+	proxy.Transport = s.forwardTransport
 	proxy.ServeHTTP(w, r)
 	return true
 }
@@ -1812,7 +1829,12 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 		if s.batchTimer == nil {
 			s.batchTimer = time.AfterFunc(10*time.Millisecond, func() {
 				s.batchMu.Lock()
-				defer s.batchMu.Unlock()
+				if s.batchTimer == nil {
+					// Timer was stopped by threshold trigger
+					s.batchMu.Unlock()
+					return
+				}
+				s.batchTimer = nil
 				if len(s.batchQueue) > 0 {
 					req := batchRequest{
 						cmds:  s.batchQueue,
@@ -1820,10 +1842,10 @@ func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}
 					}
 					s.batchQueue = make([]*LogCommand, 0)
 					s.batchResps = make([]chan interface{}, 0)
-					s.batchTimer = nil
+					s.batchMu.Unlock()
 					s.batchApplyCh <- req
 				} else {
-					s.batchTimer = nil
+					s.batchMu.Unlock()
 				}
 			})
 		}
@@ -2095,4 +2117,25 @@ func (s *Server) resolveURLs(manifest []ChunkEntry) {
 			}
 		}
 	}
+}
+
+func (s *Server) handleGetClusterStats(w http.ResponseWriter, r *http.Request) {
+	nodes, err := s.fsm.GetNodes()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	var stats ClusterStats
+	for _, node := range nodes {
+		// Only count active nodes for capacity
+		if node.Status == NodeStatusActive {
+			stats.TotalCapacity += node.Capacity
+			stats.TotalUsed += node.Used
+			stats.NodeCount++
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(stats)
 }
