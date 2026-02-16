@@ -15,6 +15,7 @@ CGO_ENABLED=0 go build -o bin/distfs ./cmd/distfs
 CGO_ENABLED=0 go build -o bin/distfs-fuse ./cmd/distfs-fuse
 CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
 CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
+CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
 
 # 2. Run Unit Tests
 echo "## Unit Tests" >> $REPORT
