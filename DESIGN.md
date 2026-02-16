@@ -16,9 +16,9 @@ DistFS employs a unified node architecture where a single binary can perform bot
 
 ```mermaid
 graph TD
-    Client[DistFS Client / FUSE] -- Sealed JSON/HTTP2 -- MetadataGroup[Metadata Cluster Raft Group]
-    Client -- Encrypted Chunks/HTTP2 -- DataNodes[Data Nodes Pool]
-    MetadataGroup -- mTLS/Internal -- DataNodes
+    Client["DistFS Client / FUSE"] -->|Sealed JSON/HTTP2| MetadataGroup["Metadata Cluster Raft Group"]
+    Client -->|Encrypted Chunks/HTTP2| DataNodes["Data Nodes Pool"]
+    MetadataGroup -->|mTLS/Internal| DataNodes
     
     subgraph Metadata Role
         Raft[Raft Consensus]
