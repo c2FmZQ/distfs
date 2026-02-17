@@ -36,6 +36,7 @@ func TestPerformUnifiedOnboarding_NewAccount(t *testing.T) {
 	defer os.Unsetenv("DISTFS_PASSWORD")
 
 	// 1. Mock Metadata Server
+	signKey, _ := crypto.GenerateIdentityKey()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/config":
@@ -46,11 +47,35 @@ func TestPerformUnifiedOnboarding_NewAccount(t *testing.T) {
 		case "/v1/meta/key":
 			dk, _ := crypto.GenerateEncryptionKey()
 			w.Write(dk.EncapsulationKey().Bytes())
+		case "/v1/meta/key/sign":
+			w.Write(signKey.Public())
 		case "/v1/user/register":
 			json.NewEncoder(w).Encode(map[string]string{"id": "user-123"})
 		case "/v1/user/keysync":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusCreated)
+			}
+		case "/v1/auth/challenge":
+			chal := make([]byte, 32)
+			sig := signKey.Sign(chal)
+			resp := metadata.AuthChallengeResponse{
+				Challenge: chal,
+				Signature: sig,
+			}
+			json.NewEncoder(w).Encode(resp)
+		case "/v1/login":
+			json.NewEncoder(w).Encode(metadata.SessionResponse{Token: "mock-session"})
+		case "/v1/meta/inode/" + metadata.RootID:
+			inode := metadata.Inode{
+				ID:      metadata.RootID,
+				OwnerID: "user-123",
+				Version: 1,
+			}
+			json.NewEncoder(w).Encode(inode)
+		case "/v1/meta/inode":
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusCreated)
+				json.NewEncoder(w).Encode(metadata.Inode{ID: metadata.RootID, OwnerID: "user-123", Version: 1})
 			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -100,6 +125,7 @@ func TestPerformUnifiedOnboarding_Restore(t *testing.T) {
 	blob, _ := config.Encrypt(initialConf, []byte("testpass"))
 
 	// 2. Mock Metadata Server
+	signKey, _ := crypto.GenerateIdentityKey()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/v1/auth/config":
@@ -109,10 +135,29 @@ func TestPerformUnifiedOnboarding_Restore(t *testing.T) {
 		case "/v1/meta/key":
 			dk, _ := crypto.GenerateEncryptionKey()
 			w.Write(dk.EncapsulationKey().Bytes())
+		case "/v1/meta/key/sign":
+			w.Write(signKey.Public())
 		case "/v1/user/keysync":
 			if r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(blob)
 			}
+		case "/v1/auth/challenge":
+			chal := make([]byte, 32)
+			sig := signKey.Sign(chal)
+			resp := metadata.AuthChallengeResponse{
+				Challenge: chal,
+				Signature: sig,
+			}
+			json.NewEncoder(w).Encode(resp)
+		case "/v1/login":
+			json.NewEncoder(w).Encode(metadata.SessionResponse{Token: "mock-session"})
+		case "/v1/meta/inode/" + metadata.RootID:
+			inode := metadata.Inode{
+				ID:      metadata.RootID,
+				OwnerID: "user-restored",
+				Version: 1,
+			}
+			json.NewEncoder(w).Encode(inode)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}

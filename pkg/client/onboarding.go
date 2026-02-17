@@ -149,6 +149,22 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 			ServerKey: hex.EncodeToString(sKey),
 		}
 
+		c := NewClient(opts.ServerURL)
+		svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
+		if err != nil {
+			return fmt.Errorf("failed to unmarshal server key: %w", err)
+		}
+		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
+
+		// Ensure root exists and capture anchor
+		if err := c.EnsureRoot(); err != nil {
+			return fmt.Errorf("failed to ensure root: %w", err)
+		}
+		rid, rowner, rver := c.GetRootAnchor()
+		conf.RootID = rid
+		conf.RootOwner = rowner
+		conf.RootVersion = rver
+
 		// Capture passphrase once
 		password, err := config.GetPassword("Enter passphrase to protect your account: ", true)
 		if err != nil {
@@ -165,13 +181,6 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		if err != nil {
 			return err
 		}
-
-		c := NewClient(opts.ServerURL)
-		svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal server key: %w", err)
-		}
-		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 
 		if err := c.PushKeySync(blob); err != nil {
 			fmt.Printf("Warning: cloud backup failed: %v\n", err)

@@ -148,7 +148,9 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	// 2. Prepare file
 	path := "/tx-test.json"
 	data := testData{Name: "v1", Value: 1}
-	c.SaveDataFile(path, data)
+	if err := c.SaveDataFile(path, data); err != nil {
+		t.Fatalf("SaveDataFile failed: %v", err)
+	}
 
 	// 3. Perform Transactional Update
 	commit, err := c.OpenForUpdate(path, &data)

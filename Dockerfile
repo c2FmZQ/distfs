@@ -17,13 +17,13 @@ COPY scripts/test-stress.sh /bin/test-stress.sh
 COPY scripts/test-gc.sh /bin/test-gc.sh
 COPY scripts/test-integrity.sh /bin/test-integrity.sh
 COPY scripts/test-public.sh /bin/test-public.sh
-COPY scripts/test-writable.sh /bin/test-writable.sh
 COPY scripts/test-group.sh /bin/test-group.sh
 COPY scripts/test-keysync-e2e.sh /bin/test-keysync-e2e.sh
 COPY scripts/test-hedged-reads.sh /bin/test-hedged-reads.sh
+COPY scripts/test-dump-inodes.sh /bin/test-dump-inodes.sh
 COPY scripts/benchmark.sh /bin/benchmark.sh
 COPY scripts/test-fuse-load.sh /bin/test-fuse-load.sh
 COPY scripts/test-all-e2e.sh /bin/test-all-e2e.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-writable.sh /bin/test-group.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-dump-inodes.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
 
 ENTRYPOINT ["/bin/storage-node"]

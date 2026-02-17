@@ -501,7 +501,10 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update `UnlockInode` or `Open` to verify both signatures against the manifest.
     *   **Action:** Reject files with mismatched or unauthorized signatures.
 *   **Step 31.5: Prohibition of World-Writable**
-    *   **Action:** Update `MetadataServer` to explicitly reject any mutation that attempts to set the `Other-Write` bit (0002).
-    *   **Action:** Update `FSM` validation logic to ignore world-write bits during apply.
+    *   **Action:** [Done] Update `MetadataServer` to explicitly reject any mutation that attempts to set the `Other-Write` bit (0002).
+    *   **Action:** [Done] Update `FSM` validation logic to ignore world-write bits during apply.
+*   **Step 31.6: Root Anchor Persistence**
+    *   **Action:** Update client configuration to store the Root Inode ID, Owner, and last seen Version.
+    *   **Action:** Implement a safety check during initialization: warn or abort if the Root Owner changes or the Version decreases (Rollback Protection).
 
 

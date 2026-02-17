@@ -752,7 +752,8 @@ func TestAccounting(t *testing.T) {
 
 	// 1. Create User
 	userID := "acc-user"
-	user := User{ID: userID}
+	sk, _ := crypto.GenerateIdentityKey()
+	user := User{ID: userID, SignKey: sk.Public()}
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
@@ -791,6 +792,7 @@ func TestAccounting(t *testing.T) {
 
 	// 2. Create File
 	inode := Inode{ID: "f1", OwnerID: userID, Size: 100}
+	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
@@ -807,6 +809,7 @@ func TestAccounting(t *testing.T) {
 	// 3. Update File (Resize)
 	inode.Size = 250
 	inode.Version = 1 // Must match existing version
+	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
 	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
@@ -841,7 +844,8 @@ func TestQuotaEnforcement(t *testing.T) {
 	defer ts.Close()
 
 	userID := "quota-user"
-	user := User{ID: userID}
+	sk, _ := crypto.GenerateIdentityKey()
+	user := User{ID: userID, SignKey: sk.Public()}
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
@@ -866,6 +870,7 @@ func TestQuotaEnforcement(t *testing.T) {
 
 	// 2. Create File 1 (OK)
 	inode := Inode{ID: "f1", OwnerID: userID, Size: 100}
+	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
@@ -875,6 +880,7 @@ func TestQuotaEnforcement(t *testing.T) {
 
 	// 3. Create File 2 (Fail: Inode Quota)
 	inode2 := Inode{ID: "f2", OwnerID: userID, Size: 100}
+	inode2.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode2)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
@@ -889,6 +895,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	// 4. Update File 1 (Resize to 400 - OK)
 	inode.Size = 400
 	inode.Version = 1
+	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
 	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
@@ -902,6 +909,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	// 5. Update File 1 (Resize to 600 - Fail: Storage Quota)
 	inode.Size = 600
 	inode.Version = 2
+	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
 	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)

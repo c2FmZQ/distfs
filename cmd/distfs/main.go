@@ -78,9 +78,20 @@ func main() {
 		cmdAdminChown(args)
 	case "admin-chmod":
 		cmdAdminChmod(args)
+	case "admin-promote":
+		cmdAdminPromote(args)
+	case "whoami":
+		cmdWhoami(args)
+	case "dump-inodes":
+		cmdDumpInodes(args)
 	default:
 		usage()
 	}
+}
+
+func cmdWhoami(args []string) {
+	c := loadClient()
+	fmt.Println(c.UserID())
 }
 
 func usage() {
@@ -100,6 +111,7 @@ func usage() {
 	fmt.Println("  admin-join <addr>               Add a node to the cluster (discovered via address)")
 	fmt.Println("  admin-chown <email>[:<group>] <path> Override ownership (Admin only)")
 	fmt.Println("  admin-chmod <mode> <path>       Override permissions (Admin only)")
+	fmt.Println("  dump-inodes [path|id]           Recursively dump inode metadata for debugging")
 	os.Exit(1)
 }
 
@@ -157,7 +169,33 @@ func loadClient() *client.Client {
 		log.Fatalf("failed to unmarshal server key: %v", err)
 	}
 
-	return c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
+	return c.WithIdentity(conf.UserID, dk).
+		WithSignKey(sk).
+		WithServerKey(svKey).
+		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion)
+}
+
+func saveClient(c *client.Client) {
+	conf, err := config.Load(*configPath)
+	if err != nil {
+		// If we can't load it, we can't save it (need the password for encryption)
+		return
+	}
+
+	rid, rowner, rver := c.GetRootAnchor()
+	if rid == conf.RootID && rowner == conf.RootOwner && rver == conf.RootVersion {
+		return // No change
+	}
+
+	conf.RootID = rid
+	conf.RootOwner = rowner
+	conf.RootVersion = rver
+
+	// We need the password. config.Save will prompt for it.
+	// This might be annoying for every 'ls' if the version changes often.
+	// For now, let's only save if explicitly requested or on 'init'.
+	// Actually, let's just NOT save automatically in the CLI for now to avoid UX friction.
+	// In distfs-fuse it makes more sense.
 }
 
 func cmdLs(args []string) {

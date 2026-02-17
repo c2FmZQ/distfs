@@ -17,10 +17,15 @@ CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
 CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
 CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
 
+# Copy scripts to bin
+cp scripts/test-*.sh bin/
+chmod +x bin/test-*.sh
+
 # 2. Run Unit Tests
 echo "## Unit Tests" >> $REPORT
 echo '```' >> $REPORT
 echo "Running Unit Tests..."
+go fmt ./...
 if ! go test ./... > /tmp/unit-tests.log 2>&1; then
     cat /tmp/unit-tests.log >> $REPORT
     echo '```' >> $REPORT
@@ -64,6 +69,10 @@ if [ -z "$E2E_FAILED" ]; then
     echo "Overall Result: **PASSED**" >> $REPORT
 else
     echo "Overall Result: **FAILED**" >> $REPORT
+    echo "## Full Logs" >> $REPORT
+    echo '```' >> $REPORT
+    cat /tmp/e2e-runner.log >> $REPORT
+    echo '```' >> $REPORT
 fi
 
 cat $REPORT

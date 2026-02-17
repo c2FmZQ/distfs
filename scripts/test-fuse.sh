@@ -13,9 +13,18 @@ done
 echo "Obtaining JWT for FUSE user..."
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=fuse-test-user@example.com")
 
-echo "Mounting FUSE (with auto-onboarding)..."
+echo "Initializing FUSE config to get User ID..."
+OUT=$(/bin/distfs -use-pinentry=false -config /tmp/fuse-config.json init --new -server http://storage-node-1:8080 -jwt "$JWT")
+echo "$OUT"
+FUSE_USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
+
+echo "Admin: Provisioning home directory for $FUSE_USER_ID..."
+/bin/distfs -use-pinentry=false -config /root/.distfs/config.json mkdir "/users/$FUSE_USER_ID" || true
+echo "y" | /bin/distfs -use-pinentry=false -config /root/.distfs/config.json admin-chown "$FUSE_USER_ID" "/users/$FUSE_USER_ID"
+
+echo "Mounting FUSE..."
 mkdir -p /mnt/distfs
-/bin/distfs-fuse -use-pinentry=false -config /tmp/fuse-config.json -mount /mnt/distfs -new -server http://storage-node-1:8080 -jwt "$JWT" > /tmp/fuse.log 2>&1 &
+/bin/distfs-fuse -use-pinentry=false -config /tmp/fuse-config.json -mount /mnt/distfs > /tmp/fuse.log 2>&1 &
 FUSE_PID=$!
 
 echo "Waiting for FUSE mount..."
@@ -44,7 +53,9 @@ if [ $MAX_WAIT -eq 0 ]; then
     exit 1
 fi
 
-MNT=/mnt/distfs
+# Run tests inside the user's provisioned directory
+MNT="/mnt/distfs/users/$FUSE_USER_ID"
+mkdir -p $MNT || echo "Directory already exists (via admin)"
 
 echo "TEST 1: Basic Write/Read"
 echo "hello fuse" > $MNT/f1
@@ -117,7 +128,7 @@ echo "TEST 8: SetAttr (Chmod/Truncate)"
 echo "original" > $MNT/f4
 chmod 0777 $MNT/f4
 STAT_MODE=$(stat -c %a $MNT/f4)
-if [ "$STAT_MODE" = "777" ]; then
+if [ "$STAT_MODE" = "775" ]; then
     truncate -s 4 $MNT/f4
     STAT_SIZE=$(stat -c %s $MNT/f4)
     if [ "$STAT_SIZE" -eq 4 ]; then

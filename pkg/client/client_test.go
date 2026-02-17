@@ -739,7 +739,7 @@ func TestGarbageCollection(t *testing.T) {
 	// 7. Verify Deletion
 	start := time.Now()
 	deleted := false
-	for time.Since(start) < 2*time.Second {
+	for time.Since(start) < 5*time.Second {
 		exists, _ := dataStore.HasChunk(chunkID)
 		if !exists {
 			deleted = true

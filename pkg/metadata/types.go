@@ -15,6 +15,9 @@
 package metadata
 
 import (
+	"encoding/binary"
+	"sort"
+
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
@@ -90,13 +93,15 @@ type RegisterUserRequest struct {
 
 // Group represents a user group for sharing access.
 type Group struct {
-	ID            string          `json:"id"`
-	EncryptedName []byte          `json:"enc_name"`
-	GID           uint32          `json:"gid"`
-	OwnerID       string          `json:"owner_id"` // User ID (string)
-	Members       map[string]bool `json:"members"`
-	EncKey        []byte          `json:"enc_key"`
-	Lockbox       crypto.Lockbox  `json:"lockbox"`
+	ID               string          `json:"id"`
+	EncryptedName    []byte          `json:"enc_name"`
+	GID              uint32          `json:"gid"`
+	OwnerID          string          `json:"owner_id"` // User ID (string)
+	Members          map[string]bool `json:"members"`
+	EncKey           []byte          `json:"enc_key"`                // ML-KEM Public Key
+	SignKey          []byte          `json:"sign_key"`               // ML-DSA Public Key
+	EncryptedSignKey []byte          `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
+	Lockbox          crypto.Lockbox  `json:"lockbox"`
 }
 
 // NodeStatus indicates the health/lifecycle state of a storage node.
@@ -166,6 +171,93 @@ type Inode struct {
 	Version       uint64            `json:"version"`
 	LeaseOwner    string            `json:"lease_owner,omitempty"`
 	LeaseExpiry   int64             `json:"lease_expiry,omitempty"`
+
+	// Manifest Integrity (Phase 31)
+	SignerID          string   `json:"signer_id,omitempty"` // User ID of the last writer
+	UserSig           []byte   `json:"user_sig,omitempty"`  // Signature by user's ML-DSA identity key
+	GroupSig          []byte   `json:"group_sig,omitempty"` // Signature by group's ML-DSA key
+	AuthorizedSigners []string `json:"auth_signers,omitempty"`
+}
+
+// ManifestHash calculates a cryptographic hash of the inode's manifest and critical metadata.
+func (i *Inode) ManifestHash() []byte {
+	h := crypto.NewHash()
+	h.Write([]byte("id:" + i.ID + "|"))
+
+	v := make([]byte, 8)
+	binary.LittleEndian.PutUint64(v, i.Version)
+	h.Write([]byte("v:"))
+	h.Write(v)
+	h.Write([]byte("|"))
+
+	s := make([]byte, 8)
+	binary.LittleEndian.PutUint64(s, i.Size)
+	h.Write([]byte("s:"))
+	h.Write(s)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("owner:" + i.OwnerID + "|"))
+	h.Write([]byte("signer:" + i.SignerID + "|"))
+
+	// Write Children (sorted keys for canonicality)
+	h.Write([]byte("children:"))
+	keys := make([]string, 0, len(i.Children))
+	for k := range i.Children {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k + ":" + i.Children[k] + ","))
+	}
+	h.Write([]byte("|"))
+
+	// Write InlineData
+	h.Write([]byte("inline:"))
+	h.Write(i.InlineData)
+	h.Write([]byte("|"))
+
+	// Write ChunkManifest
+	h.Write([]byte("manifest:"))
+	for _, entry := range i.ChunkManifest {
+		h.Write([]byte(entry.ID + ","))
+	}
+	h.Write([]byte("|"))
+
+	// Write ChunkPages
+	h.Write([]byte("pages:"))
+	for _, page := range i.ChunkPages {
+		h.Write([]byte(page + ","))
+	}
+	h.Write([]byte("|"))
+
+	// Write AuthorizedSigners (sorted for canonicality)
+	if len(i.AuthorizedSigners) > 0 {
+		signers := make([]string, len(i.AuthorizedSigners))
+		copy(signers, i.AuthorizedSigners)
+		sort.Strings(signers)
+		h.Write([]byte("auth:"))
+		for _, signer := range signers {
+			h.Write([]byte(signer + ","))
+		}
+		h.Write([]byte("|"))
+	}
+
+	return h.Sum(nil)
+}
+
+// SignInodeForTest signs an inode using a provided identity key.
+// Only used for low-level metadata tests that bypass the client.
+func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
+	i.SignerID = userID
+	if len(i.AuthorizedSigners) == 0 && i.OwnerID != "" {
+		i.AuthorizedSigners = []string{i.OwnerID}
+	}
+	// Note: We use Version+1 because FSM increments version during apply
+	orig := i.Version
+	i.Version++
+	hash := i.ManifestHash()
+	i.UserSig = key.Sign(hash)
+	i.Version = orig
 }
 
 // AuthChallengeRequest initiates the login flow.
@@ -246,4 +338,12 @@ type KeySyncBlob struct {
 type KeySyncRequest struct {
 	UserID string      `json:"uid"`
 	Blob   KeySyncBlob `json:"blob"`
+}
+
+// SanitizeMode applies system-wide permission constraints (Phase 31).
+func SanitizeMode(mode uint32, itype InodeType) uint32 {
+	if itype == SymlinkType {
+		return mode // Symlinks are traditionally 0777
+	}
+	return mode &^ 0002 // Prohibition of World-Writable
 }

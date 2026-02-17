@@ -196,6 +196,9 @@ func TestAdminOverrides(t *testing.T) {
 	uA := metadata.User{ID: adminID, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
 	uABytes, _ := json.Marshal(uA)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uABytes}.Marshal(), 5*time.Second)
+	// Promote user to admin (the command uses ID, which is already HMAC'd in our metadata.User if using standard flows, but here we provide it directly)
+	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte(uA.ID)}.Marshal(), 5*time.Second)
+	time.Sleep(1 * time.Second)
 
 	// 2. Create User B
 	userID := "userB"
@@ -207,6 +210,7 @@ func TestAdminOverrides(t *testing.T) {
 
 	// 3. Create a File owned by Admin
 	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600}
+	inode.SignInodeForTest(adminID, skA)
 	iBytes, _ := json.Marshal(inode)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
 
@@ -251,7 +255,7 @@ func TestAdminOverrides(t *testing.T) {
 		t.Errorf("Expected User B inode count 1, got %d", uBUpdated.Usage.InodeCount)
 	}
 
-	// 7. Admin Chmod
+	// 7. Admin Chmod (World-write 0002 should be stripped to 0775)
 	if err := c.AdminChmod(context.Background(), "file1", 0777); err != nil {
 		t.Fatalf("AdminChmod failed: %v", err)
 	}
@@ -259,7 +263,7 @@ func TestAdminOverrides(t *testing.T) {
 		v := tx.Bucket([]byte("inodes")).Get([]byte("file1"))
 		return json.Unmarshal(v, &updated)
 	})
-	if updated.Mode != 0777 {
-		t.Errorf("Expected mode 0777, got %04o", updated.Mode)
+	if updated.Mode != 0775 {
+		t.Errorf("Expected mode 0775, got %04o", updated.Mode)
 	}
 }

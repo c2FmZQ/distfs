@@ -6,7 +6,7 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating stress directory..."
-distfs -use-pinentry=false mkdir /stress || echo "stress dir already exists"
+distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /stress || echo "stress dir already exists"
 
 mkdir -p /tmp/stress-in /tmp/stress-out
 

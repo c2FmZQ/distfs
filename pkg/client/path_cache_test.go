@@ -52,6 +52,11 @@ func TestPathCache(t *testing.T) {
 		if r.Method == "GET" && (len(r.URL.Path) > 14 && r.URL.Path[:15] == "/v1/meta/inode/") {
 			atomic.AddUint64(&getInodeCount, 1)
 		}
+		if r.URL.Path == "/v1/meta/key/sign" {
+			w.Write(signKey.Public())
+			return
+		}
+		// Delegate auth and metadata routes to the real metaServer
 		metaServer.ServeHTTP(w, r)
 	}))
 	defer tsMeta.Close()
@@ -59,8 +64,9 @@ func TestPathCache(t *testing.T) {
 
 	dk, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
+	userID := "user-1"
 	createUser(t, metaNode, metadata.User{
-		ID: "user-1", SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
+		ID: userID, SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
 	})
 
 	dataDir := t.TempDir()
@@ -74,10 +80,14 @@ func TestPathCache(t *testing.T) {
 	})
 
 	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
+	c = c.WithIdentity(userID, dk)
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
+	// We MUST initialize root with signer info if we want to bypass EnsureRoot's check later
+	// But EnsureRoot uses createInode which signs it.
+	// The problem is that TestPathCache might be seeing an UNSIGNED root if it was pre-created.
+	// Actually EnsureRoot is called below.
 	if err := c.EnsureRoot(); err != nil {
 		t.Fatal(err)
 	}

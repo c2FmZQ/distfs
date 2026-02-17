@@ -365,9 +365,13 @@ func cmdAdminChown(args []string) {
 	email := parts[0]
 
 	// 1. Resolve email to UserID
-	userID, err := c.AdminLookup(context.Background(), email)
-	if err != nil {
-		log.Fatalf("failed to resolve email %s: %v", email, err)
+	userID := email
+	if !isHexID(email) {
+		id, err := c.AdminLookup(context.Background(), email)
+		if err != nil {
+			log.Fatalf("failed to resolve email %s: %v", email, err)
+		}
+		userID = id
 	}
 	req.OwnerID = &userID
 
@@ -430,4 +434,39 @@ func cmdAdminChmod(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Println("Permissions updated successfully.")
+}
+
+func isHexID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+func cmdAdminPromote(args []string) {
+	if len(args) < 1 {
+		log.Fatal("usage: admin-promote <email>")
+	}
+	email := args[0]
+	c := loadClient()
+
+	// Resolve email to UserID
+	userID := email
+	if !isHexID(email) {
+		id, err := c.AdminLookup(context.Background(), email)
+		if err != nil {
+			log.Fatalf("failed to resolve email %s: %v", email, err)
+		}
+		userID = id
+	}
+
+	if err := c.AdminPromote(context.Background(), userID); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("User %s promoted to Admin successfully.\n", email)
 }

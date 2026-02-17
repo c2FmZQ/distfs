@@ -20,12 +20,12 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"syscall"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
@@ -49,19 +49,24 @@ func (c *Client) EnsureRoot() error {
 
 	lb := c.createLockbox(rootKey, 0755, "")
 	inode := metadata.Inode{
-		ID:       metadata.RootID,
-		Type:     metadata.DirType,
-		Children: make(map[string]string),
-		Lockbox:  lb,
-		OwnerID:  c.userID,
+		ID:                metadata.RootID,
+		Type:              metadata.DirType,
+		Mode:              0755,
+		Children:          make(map[string]string),
+		Lockbox:           lb,
+		OwnerID:           c.userID,
+		AuthorizedSigners: []string{c.userID},
 	}
 	_, err = c.createInode(context.Background(), inode)
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
-			return nil
+			// Already exists, but we MUST fetch it to capture the anchor (owner/version)
+			_, err = c.getInode(context.Background(), metadata.RootID)
+			return err
 		}
+		return err
 	}
-	return err
+	return nil
 }
 
 // ResolvePath traverses the directory tree to find the inode and key for a path.
@@ -266,60 +271,21 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 
 	}
 
-	update := metadata.ChildUpdate{Name: encName, ChildID: newID}
-
-	data, _ := json.Marshal(update)
-
-	err = c.withRetry(context.Background(), func() error {
-
-		c.acquire()
-
-		defer c.release()
-
-		req, _ := http.NewRequest("PUT", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
-
-		if err := c.authenticateRequest(req); err != nil {
-
-			return fmt.Errorf("auth failed: %w", err)
-
-		}
-
-		if err := c.sealBody(req, data); err != nil {
-
-			return err
-
-		}
-
-		resp, err := c.httpClient.Do(req)
-
-		if err != nil {
-
-			return err
-
-		}
-
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-
-			b, _ := io.ReadAll(resp.Body)
-
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-
-		}
-
-		return nil
-
-	})
-
+	// UPDATE PARENT (Phase 31: Manifest Signing)
+	parent, err := c.getInode(context.Background(), parentID)
 	if err != nil {
-
-		return nil, nil, err
-
+		return nil, nil, fmt.Errorf("failed to get parent for update: %w", err)
+	}
+	if parent.Children == nil {
+		parent.Children = make(map[string]string)
+	}
+	parent.Children[encName] = newID
+	_, err = c.updateInode(context.Background(), *parent)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to update parent: %w", err)
 	}
 
 	return newInode, newKey, nil
-
 }
 
 // Rename moves or renames a directory entry.
@@ -353,44 +319,51 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 	macNew.Write([]byte(newName))
 	encNewName := hex.EncodeToString(macNew.Sum(nil))
 
-	req := metadata.RenameRequest{
-		OldParentID: oldParentID,
-		OldName:     encOldName,
-		NewParentID: newParentID,
-		NewName:     encNewName,
+	// 1. Get Inode to move
+	oldParent, err := c.getInode(context.Background(), oldParentID)
+	if err != nil {
+		return fmt.Errorf("failed to get old parent: %w", err)
 	}
-	data, _ := json.Marshal(req)
-	return c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
+	childID, ok := oldParent.Children[encOldName]
+	if !ok {
+		return syscall.ENOENT
+	}
 
-		hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/rename", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(hReq, data); err != nil {
-			return err
-		}
+	child, err := c.getInode(context.Background(), childID)
+	if err != nil {
+		return fmt.Errorf("failed to get child: %w", err)
+	}
 
-		resp, err := c.httpClient.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
+	// 2. Update Old Parent
+	delete(oldParent.Children, encOldName)
+	if _, err := c.updateInode(context.Background(), *oldParent); err != nil {
+		return fmt.Errorf("failed to update old parent: %w", err)
+	}
 
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-		return nil
-	})
+	// 3. Update Child Links
+	if child.Links == nil {
+		child.Links = make(map[string]bool)
+	}
+	delete(child.Links, oldParentID+":"+encOldName)
+	child.Links[newParentID+":"+encNewName] = true
+	if _, err := c.updateInode(context.Background(), *child); err != nil {
+		return fmt.Errorf("failed to update child links: %w", err)
+	}
+
+	// 4. Update New Parent
+	newParent, err := c.getInode(context.Background(), newParentID)
+	if err != nil {
+		return fmt.Errorf("failed to get new parent: %w", err)
+	}
+	if newParent.Children == nil {
+		newParent.Children = make(map[string]string)
+	}
+	newParent.Children[encNewName] = childID
+	if _, err := c.updateInode(context.Background(), *newParent); err != nil {
+		return fmt.Errorf("failed to update new parent: %w", err)
+	}
+
+	return nil
 }
 
 // RemoveEntry deletes a directory entry.
@@ -413,40 +386,49 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	update := metadata.ChildUpdate{ParentID: parentID, Name: encName}
-	data, _ := json.Marshal(update)
+	// 1. Get Parent and find ChildID
+	parent, err := c.getInode(context.Background(), parentID)
+	if err != nil {
+		return fmt.Errorf("failed to get parent for removal: %w", err)
+	}
+	childID, ok := parent.Children[encName]
+	if !ok {
+		return nil // Already gone
+	}
 
-	return c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
+	// 2. Load Child
+	child, err := c.getInode(context.Background(), childID)
+	if err != nil {
+		return fmt.Errorf("failed to get child for removal: %w", err)
+	}
 
-		req, err := http.NewRequest("DELETE", c.serverURL+"/v1/meta/directory/"+parentID+"/entry", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(req); err != nil {
-			return err
-		}
-		if err := c.sealBody(req, data); err != nil {
-			return err
-		}
+	// 3. POSIX check: Directory must be empty
+	if child.Type == metadata.DirType && len(child.Children) > 0 {
+		return fmt.Errorf("directory not empty")
+	}
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
+	// 4. Update Parent
+	delete(parent.Children, encName)
+	if _, err := c.updateInode(context.Background(), *parent); err != nil {
+		return fmt.Errorf("failed to update parent: %w", err)
+	}
 
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-		return nil
-	})
+	// 5. Update Child
+	if child.NLink > 0 {
+		child.NLink--
+	}
+	if child.Links != nil {
+		delete(child.Links, parentID+":"+encName)
+	}
+
+	if child.NLink == 0 {
+		// Delete child inode
+		return c.DeleteInode(context.Background(), child.ID)
+	} else {
+		// Update child inode
+		_, err = c.updateInode(context.Background(), *child)
+		return err
+	}
 }
 
 // Link creates a hard link.
@@ -486,44 +468,32 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	req := metadata.LinkRequest{
-		ParentID: parentID,
-		Name:     encName,
-		TargetID: targetID,
+	// 1. Update Target (Link Count)
+	target, err := c.getInode(context.Background(), targetID)
+	if err != nil {
+		return fmt.Errorf("failed to get target for link: %w", err)
 	}
-	data, _ := json.Marshal(req)
+	target.NLink++
+	if target.Links == nil {
+		target.Links = make(map[string]bool)
+	}
+	target.Links[parentID+":"+encName] = true
+	_, err = c.updateInode(context.Background(), *target)
+	if err != nil {
+		return fmt.Errorf("failed to update target link count: %w", err)
+	}
 
-	return c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
-
-		hReq, err := http.NewRequest("POST", c.serverURL+"/v1/meta/link", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(hReq, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpClient.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-		return nil
-	})
+	// 2. Update Parent
+	parent, err := c.getInode(context.Background(), parentID)
+	if err != nil {
+		return fmt.Errorf("failed to get parent for link: %w", err)
+	}
+	if parent.Children == nil {
+		parent.Children = make(map[string]string)
+	}
+	parent.Children[encName] = targetID
+	_, err = c.updateInode(context.Background(), *parent)
+	return err
 }
 func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
 	path = strings.Trim(path, "/")

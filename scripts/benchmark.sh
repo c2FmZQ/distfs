@@ -4,9 +4,6 @@ set -e
 
 echo "--- Starting DistFS System Benchmark ---"
 
-# Fresh start for benchmark identity
-rm -f /tmp/bench-config.json
-
 # Wait for services
 sleep 2
 

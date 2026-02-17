@@ -532,6 +532,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			http.NotFound(w, r)
 			return
 		}
+		if strings.HasSuffix(id, "/sign/private") && r.Method == http.MethodGet {
+			id = strings.TrimSuffix(id, "/sign/private")
+			s.handleGetGroupSignKey(w, r, id)
+			return
+		}
 		if strings.HasSuffix(id, "/private") && r.Method == http.MethodGet {
 			id = strings.TrimSuffix(id, "/private")
 			s.handleGetGroupPrivateKey(w, r, id)
@@ -548,14 +553,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
 		s.handleAllocateChunk(w, r)
 		return
-	} else if r.URL.Path == "/v1/meta/rename" && r.Method == http.MethodPost {
-		s.handleRename(w, r)
-		return
 	} else if r.URL.Path == "/v1/meta/setattr" && r.Method == http.MethodPost {
 		s.handleSetAttr(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/link" && r.Method == http.MethodPost {
-		s.handleLink(w, r)
 		return
 	} else if r.URL.Path == "/v1/meta/lease/acquire" && r.Method == http.MethodPost {
 		s.handleAcquireLeases(w, r)
@@ -568,10 +567,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		id = strings.TrimSuffix(id, "/entry")
 		if r.Method == http.MethodPut {
 			s.handleAddChild(w, r, id)
-			return
-		}
-		if r.Method == http.MethodDelete {
-			s.handleRemoveChild(w, r, id)
 			return
 		}
 	}
@@ -1360,6 +1355,9 @@ func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id st
 }
 
 func (s *Server) checkReadPermission(user *User, inodeID string) error {
+	if s.fsm.IsAdmin(user.ID) {
+		return nil
+	}
 	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
@@ -1503,7 +1501,8 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
-	if err != nil {
+	isAdmin := s.fsm.IsAdmin(user.ID)
+	if err != nil && !isAdmin {
 		log.Printf("GROUP: handleGetGroup(%s) membership check failed for user %s: %v", id, user.ID, err)
 		// Check if group exists at all
 		var exists bool
@@ -1516,7 +1515,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 		http.Error(w, "group not found", http.StatusNotFound)
 		return
 	}
-	if !inGroup {
+	if !inGroup && !isAdmin {
 		log.Printf("GROUP: handleGetGroup(%s) forbidden for user %s", id, user.ID)
 		http.Error(w, "forbidden", http.StatusForbidden)
 		return
@@ -1560,37 +1559,6 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 	s.ApplyRaftCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
 }
 
-func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	body, err := io.ReadAll(r.Body)
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
-
-	var req RenameRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.checkWritePermission(user, req.OldParentID); err != nil {
-		http.Error(w, "forbidden (old parent): "+err.Error(), http.StatusForbidden)
-		return
-	}
-	if err := s.checkWritePermission(user, req.NewParentID); err != nil {
-		http.Error(w, "forbidden (new parent): "+err.Error(), http.StatusForbidden)
-		return
-	}
-
-	s.ApplyRaftCommandRaw(w, r, CmdRename, body, http.StatusOK)
-}
-
 func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
@@ -1618,10 +1586,6 @@ func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
 	s.ApplyRaftCommandRaw(w, r, CmdSetAttr, body, http.StatusOK)
 }
 
-func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
-	s.ApplyRaftCommand(w, r, CmdLink, 1024*1024, http.StatusOK)
-}
-
 func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id string) {
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
@@ -1644,30 +1608,6 @@ func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id strin
 	update.ParentID = id
 	body, _ := json.Marshal(update)
 	s.ApplyRaftCommandRaw(w, r, CmdAddChild, body, http.StatusOK)
-}
-
-func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id string) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := s.checkWritePermission(user, id); err != nil {
-		if err == ErrNotFound {
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
-			http.Error(w, err.Error(), http.StatusForbidden)
-		}
-		return
-	}
-	var update ChildUpdate
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	update.ParentID = id
-	body, _ := json.Marshal(update)
-	s.ApplyRaftCommandRaw(w, r, CmdRemoveChild, body, http.StatusOK)
 }
 
 func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
@@ -1826,6 +1766,9 @@ func (s *Server) sealResponse(user *User, payload []byte) ([]byte, error) {
 }
 
 func (s *Server) checkWritePermission(user *User, inodeID string) error {
+	if s.fsm.IsAdmin(user.ID) {
+		return nil
+	}
 	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
@@ -1911,6 +1854,63 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 	w.Write(data)
 }
 
+func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, id string) {
+	user, err := s.authenticate(r)
+	if err != nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
+	if err != nil {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+	if !inGroup {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	var group Group
+	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &group)
+	})
+	if err != nil {
+		http.Error(w, "group not found", http.StatusNotFound)
+		return
+	}
+
+	// Group Signing Key is stored in group.Lockbox with ":sign" suffix, encrypted for each member.
+	entry, ok := group.Lockbox[user.ID+":sign"]
+	if !ok {
+		// Old groups might not have this, or user wasn't added with it
+		http.Error(w, "group signing key not available for user", http.StatusNotFound)
+		return
+	}
+
+	data, _ := json.Marshal(entry)
+	w.Header().Set("Content-Type", "application/json")
+
+	// E2EE?
+	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
+}
+
 func (s *Server) checkRaftSecret(r *http.Request) bool {
 	if s.raftSecret == "" {
 		return false // Fail closed
@@ -1939,33 +1939,9 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 	case path == "promote" && r.Method == http.MethodPost:
 		s.handleAdminPromote(w, r)
-	case path == "chown" && r.Method == http.MethodPost:
-		s.handleAdminChown(w, r)
-	case path == "chmod" && r.Method == http.MethodPost:
-		s.handleAdminChmod(w, r)
 	default:
 		http.NotFound(w, r)
 	}
-}
-
-func (s *Server) handleAdminChown(w http.ResponseWriter, r *http.Request) {
-	var req AdminChownRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	body, _ := json.Marshal(req)
-	s.ApplyRaftCommandRaw(w, r, CmdAdminChown, body, http.StatusOK)
-}
-
-func (s *Server) handleAdminChmod(w http.ResponseWriter, r *http.Request) {
-	var req AdminChmodRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	body, _ := json.Marshal(req)
-	s.ApplyRaftCommandRaw(w, r, CmdAdminChmod, body, http.StatusOK)
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, successStatus int) {

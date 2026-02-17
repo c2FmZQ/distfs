@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -26,14 +27,19 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal(), 5*time.Second)
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
 
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: "u1", SignKey: sk.Public()})
+
 	// 2. Setup Inode with under-replication (n1, n3 are owners, but n3 will be "dead" soon)
 	inode := Inode{
-		ID:   "f1",
-		Type: FileType,
+		ID:      "f1",
+		Type:    FileType,
+		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1", "n3"}},
 		},
 	}
+	inode.SignInodeForTest("u1", sk)
 	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode)}.Marshal(), 5*time.Second)
 
 	// 3. Mock Data Node for n1

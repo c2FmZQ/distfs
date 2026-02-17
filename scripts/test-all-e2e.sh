@@ -38,8 +38,17 @@ while true; do
     sleep 2
 done
 
-distfs -use-pinentry=false chmod 0777 /
-echo "GLOBAL SETUP COMPLETE."
+echo "GLOBAL SETUP COMPLETE. Admin ID:"
+distfs -use-pinentry=false whoami
+
+echo "Creating /users directory..."
+distfs -use-pinentry=false mkdir /users
+distfs -use-pinentry=false chmod 0755 /users
+
+# Pre-register and promote benchmark user to avoid 403s during performance test
+BENCH_JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
+DISTFS_PASSWORD=benchpass distfs -use-pinentry=false -config /tmp/bench-config.json init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT"
+distfs -use-pinentry=false admin-promote bench-user@example.com || echo "bench-user promotion failed"
 
 FAILED=0
 
@@ -49,10 +58,10 @@ run_test "Garbage Collection" "/bin/test-gc.sh" || FAILED=1
 run_test "Stress Test" "/bin/test-stress.sh" || FAILED=1
 run_test "Data Integrity" "/bin/test-integrity.sh" || FAILED=1
 run_test "Public Sharing" "/bin/test-public.sh" || FAILED=1
-run_test "World Writable" "/bin/test-writable.sh" || FAILED=1
 run_test "Group Sharing" "/bin/test-group.sh" || FAILED=1
 run_test "KeySync Cloud Backup" "/bin/test-keysync-e2e.sh" || FAILED=1
 run_test "Hedged Reads Performance" "/bin/test-hedged-reads.sh" || FAILED=1
+run_test "Dump Inodes Debugging" "/bin/test-dump-inodes.sh" || FAILED=1
 
 echo "" | tee -a $REPORT_FILE
 echo "--- PERFORMANCE BENCHMARKS ---" | tee -a $REPORT_FILE

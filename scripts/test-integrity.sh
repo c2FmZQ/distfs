@@ -6,7 +6,7 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating integrity directory..."
-distfs -use-pinentry=false mkdir /integrity || echo "integrity dir already exists"
+distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /integrity || echo "integrity dir already exists"
 
 echo "Uploading critical file..."
 echo "integrity-protected-data" > /tmp/crit.txt

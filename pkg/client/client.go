@@ -122,15 +122,21 @@ type Client struct {
 	pathCache map[string]pathCacheEntry
 	pathMu    *sync.RWMutex
 
-	worldPublic  *mlkem.EncapsulationKey768
-	worldPrivate *mlkem.DecapsulationKey768
-	groupKeys    map[string]*mlkem.DecapsulationKey768
+	worldPublic   *mlkem.EncapsulationKey768
+	worldPrivate  *mlkem.DecapsulationKey768
+	groupKeys     map[string]*mlkem.DecapsulationKey768
+	groupSignKeys map[string]*crypto.IdentityKey
 
 	sessionToken  string
 	sessionExpiry time.Time
 	sessionKey    []byte // Cached shared secret for memoization
 	sessionMu     *sync.RWMutex
 	loginMu       *sync.Mutex
+
+	// Root Anchoring (Phase 31)
+	rootID      string
+	rootOwner   string
+	rootVersion uint64
 
 	concurrencySem chan struct{}
 }
@@ -152,6 +158,7 @@ func NewClient(serverAddr string) *Client {
 		pathCache:      make(map[string]pathCacheEntry),
 		pathMu:         &sync.RWMutex{},
 		groupKeys:      make(map[string]*mlkem.DecapsulationKey768),
+		groupSignKeys:  make(map[string]*crypto.IdentityKey),
 		sessionMu:      &sync.RWMutex{},
 		loginMu:        &sync.Mutex{},
 		concurrencySem: make(chan struct{}, 64), // Increased to 64 for higher throughput
@@ -179,6 +186,20 @@ func (c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client {
 	c2 := *c
 	c2.serverKey = key
 	return &c2
+}
+
+// WithRootAnchor returns a new client with the specified root anchoring information.
+func (c *Client) WithRootAnchor(id, owner string, version uint64) *Client {
+	c2 := *c
+	c2.rootID = id
+	c2.rootOwner = owner
+	c2.rootVersion = version
+	return &c2
+}
+
+// GetRootAnchor returns the current root anchoring information.
+func (c *Client) GetRootAnchor() (string, string, uint64) {
+	return c.rootID, c.rootOwner, c.rootVersion
 }
 
 // UserID returns the current user ID.
@@ -243,6 +264,7 @@ func (c *Client) Login() error {
 
 	c.sessionMu.Lock()
 	c.sessionToken = res.Token
+	c.sessionKey = nil
 	c.sessionExpiry = time.Now().Add(55 * time.Minute) // Buffer
 	c.sessionMu.Unlock()
 	return nil
@@ -732,70 +754,239 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 	return &user, nil
 }
 
+func (c *Client) signInode(inode *metadata.Inode) {
+	if len(inode.AuthorizedSigners) == 0 && inode.OwnerID != "" {
+		inode.AuthorizedSigners = []string{inode.OwnerID}
+	}
+
+	// Phase 31: Ensure signer is authorized in the manifest
+	found := false
+	for _, s := range inode.AuthorizedSigners {
+		if s == c.userID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		inode.AuthorizedSigners = append(inode.AuthorizedSigners, c.userID)
+	}
+
+	inode.Mode = metadata.SanitizeMode(inode.Mode, inode.Type)
+	inode.Version++ // Sign the version that will be stored on the server
+	inode.SignerID = c.userID
+	hash := inode.ManifestHash()
+	inode.UserSig = c.signKey.Sign(hash)
+
+	// Group Signing (if applicable)
+	if inode.GroupID != "" {
+		gsk, err := c.GetGroupSignKey(inode.GroupID)
+		if err == nil {
+			inode.GroupSig = gsk.Sign(hash)
+		}
+	}
+	inode.Version-- // Restore for the server's conflict check
+}
+
 func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
+
+	// Phase 31: Manifest Signing
+
+	c.signInode(&inode)
+
 	data, err := json.Marshal(inode)
+
 	if err != nil {
+
 		return nil, err
+
 	}
 
 	var created metadata.Inode
+
 	err = c.withRetry(ctx, func() error {
+
 		c.acquire()
+
 		defer c.release()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inode", nil)
+
 		if err != nil {
+
 			return err
+
 		}
+
 		if err := c.authenticateRequest(req); err != nil {
+
 			return err
+
 		}
+
 		if err := c.sealBody(req, data); err != nil {
+
 			return err
+
 		}
 
 		resp, err := c.httpClient.Do(req)
+
 		if err != nil {
+
 			return err
+
 		}
+
 		body, err := c.unsealResponse(resp)
+
 		if err != nil {
+
 			return err
+
 		}
+
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+
 			b, _ := io.ReadAll(body)
+
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+
 		}
 
-		return json.NewDecoder(body).Decode(&created)
+		if err := json.NewDecoder(body).Decode(&created); err != nil {
+
+			return err
+
+		}
+
+		// Phase 31: Root Anchoring
+
+		if created.ID == metadata.RootID {
+
+			c.rootOwner = created.OwnerID
+
+			c.rootVersion = created.Version
+
+		}
+
+		return nil
+
 	})
 
 	if err != nil {
+
 		return nil, err
-	}
-	return &created, nil
-}
-func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
-	data, err := json.Marshal(inode)
-	if err != nil {
-		return nil, err
+
 	}
 
+	return &created, nil
+
+}
+
+func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
 	var updated metadata.Inode
-	err = c.withRetry(ctx, func() error {
+	maxRetries := 5
+
+	for i := 0; i < maxRetries; i++ {
+		// Phase 31: Manifest Signing
+		// We must re-fetch and re-sign if we are retrying a conflict
+		if i > 0 {
+			latest, err := c.getInode(ctx, inode.ID)
+			if err != nil {
+				return nil, err
+			}
+			// Transfer updated fields to latest
+			latest.Size = inode.Size
+			latest.MTime = inode.MTime
+			latest.Mode = inode.Mode
+			latest.UID = inode.UID
+			latest.GID = inode.GID
+			latest.GroupID = inode.GroupID
+			latest.InlineData = inode.InlineData
+			latest.ChunkManifest = inode.ChunkManifest
+			latest.ChunkPages = inode.ChunkPages
+			latest.Children = inode.Children
+			latest.Lockbox = inode.Lockbox
+			latest.AuthorizedSigners = inode.AuthorizedSigners
+			inode = *latest
+		}
+
+		c.signInode(&inode)
+		data, err := json.Marshal(inode)
+		if err != nil {
+			return nil, err
+		}
+
+		err = c.withRetry(ctx, func() error {
+			c.acquire()
+			defer c.release()
+
+			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
+			if err != nil {
+				return err
+			}
+			if err := c.authenticateRequest(req); err != nil {
+				return err
+			}
+			if err := c.sealBody(req, data); err != nil {
+				return err
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if resp.StatusCode == http.StatusConflict {
+				return metadata.ErrConflict
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(body)
+				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+			}
+
+			if err := json.NewDecoder(body).Decode(&updated); err != nil {
+				return err
+			}
+
+			// Phase 31: Root Anchoring
+			if updated.ID == metadata.RootID {
+				c.rootOwner = updated.OwnerID
+				c.rootVersion = updated.Version
+			}
+			return nil
+		})
+
+		if err == nil {
+			return &updated, nil
+		}
+		if err != metadata.ErrConflict {
+			return nil, err
+		}
+		// On conflict, wait a bit and retry
+		time.Sleep(time.Duration(i*50) * time.Millisecond)
+	}
+
+	return nil, metadata.ErrConflict
+}
+func (c *Client) DeleteInode(ctx context.Context, id string) error {
+	return c.withRetry(ctx, func() error {
 		c.acquire()
 		defer c.release()
 
-		req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
+		req, err := http.NewRequestWithContext(ctx, "DELETE", c.serverURL+"/v1/meta/inode/"+id, nil)
 		if err != nil {
 			return err
 		}
 		if err := c.authenticateRequest(req); err != nil {
-			return err
-		}
-		if err := c.sealBody(req, data); err != nil {
 			return err
 		}
 
@@ -803,25 +994,16 @@ func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metada
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
+		defer resp.Body.Close()
 
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+			b, _ := io.ReadAll(resp.Body)
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
-
-		return json.NewDecoder(body).Decode(&updated)
+		return nil
 	})
-
-	if err != nil {
-		return nil, err
-	}
-	return &updated, nil
 }
+
 func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, error) {
 	var inode metadata.Inode
 	err := c.withRetry(ctx, func() error {
@@ -852,12 +1034,35 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
 
-		return json.NewDecoder(body).Decode(&inode)
+		if err := json.NewDecoder(body).Decode(&inode); err != nil {
+			return err
+		}
+
+		// Phase 31: Root Anchoring
+		if id == metadata.RootID {
+			if c.rootOwner != "" && inode.OwnerID != c.rootOwner {
+				return fmt.Errorf("ROOT COMPROMISE DETECTED: expected owner %s, got %s", c.rootOwner, inode.OwnerID)
+			}
+			if c.rootVersion > 0 && inode.Version < c.rootVersion {
+				return fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", c.rootVersion, inode.Version)
+			}
+			// Update anchor
+			c.rootOwner = inode.OwnerID
+			c.rootVersion = inode.Version
+		}
+
+		return nil
 	})
 
 	if err != nil {
 		return nil, err
 	}
+
+	// Phase 31: Verification
+	if err := c.VerifyInode(&inode); err != nil {
+		return nil, err
+	}
+
 	return &inode, nil
 }
 
@@ -906,6 +1111,14 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	if err != nil {
 		return nil, err
 	}
+
+	// Phase 31: Verification
+	for _, inode := range inodes {
+		if err := c.VerifyInode(inode); err != nil {
+			return nil, err
+		}
+	}
+
 	return inodes, nil
 }
 
@@ -1364,11 +1577,12 @@ func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
 
 	if strings.Contains(id, "/") {
 		inode, key, resolveErr = c.ResolvePath(id)
-		if resolveErr == nil {
-			rc, err = c.ReadFile(inode.ID, key)
-			if err == nil {
-				return rc, nil
-			}
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		rc, err = c.ReadFile(inode.ID, key)
+		if err == nil {
+			return rc, nil
 		}
 	}
 
@@ -1598,35 +1812,15 @@ func (w *FileWriter) Close() error {
 			return err
 		}
 		// 2. Link to Parent
-		update := metadata.ChildUpdate{
-			ParentID: w.parentID,
-			Name:     w.nameHMAC,
-			ChildID:  w.inode.ID,
+		parent, gerr := w.client.getInode(w.ctx, w.parentID)
+		if gerr != nil {
+			return fmt.Errorf("failed to get parent for link: %w", gerr)
 		}
-		data, _ := json.Marshal(update)
-		err = w.client.withRetry(w.ctx, func() error {
-			w.client.acquire()
-			defer w.client.release()
-
-			req, _ := http.NewRequestWithContext(w.ctx, "PUT", w.client.serverURL+"/v1/meta/directory/"+w.parentID+"/entry", nil)
-			if err := w.client.authenticateRequest(req); err != nil {
-				return err
-			}
-			if err := w.client.sealBody(req, data); err != nil {
-				return err
-			}
-
-			resp, err := w.client.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				b, _ := io.ReadAll(resp.Body)
-				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-			}
-			return nil
-		})
+		if parent.Children == nil {
+			parent.Children = make(map[string]string)
+		}
+		parent.Children[w.nameHMAC] = w.inode.ID
+		_, err = w.client.updateInode(w.ctx, *parent)
 	} else {
 		_, err = w.client.updateInode(w.ctx, w.inode)
 	}
@@ -1809,9 +2003,11 @@ func (c *Client) SaveDataFile(name string, data any) error {
 	if err != nil {
 		return err
 	}
-	defer wc.Close()
-	_, err = wc.Write(b)
-	return err
+	if _, err := wc.Write(b); err != nil {
+		wc.Close()
+		return err
+	}
+	return wc.Close()
 }
 
 func (c *Client) OpenForUpdate(name string, data any) (func(bool), error) {
@@ -1825,25 +2021,36 @@ func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), erro
 
 	ctx := context.Background()
 
+	// 1. Resolve all paths to InodeIDs
+	ids := make([]string, len(names))
+	for i, name := range names {
+		inode, _, err := c.ResolvePath(name)
+		if err != nil {
+			ids[i] = name // Fallback to path if not found (e.g. for creation)
+		} else {
+			ids[i] = inode.ID
+		}
+	}
+
 	// Pre-create lockbox for potential new files
 	fileKey := make([]byte, 32)
 	rand.Read(fileKey)
 	lb := c.createLockbox(fileKey, 0600, "")
 
-	// 1. Acquire leases for all files
-	if err := c.AcquireLeases(ctx, names, 2*time.Minute, lb); err != nil {
+	// 2. Acquire leases for all files
+	if err := c.AcquireLeases(ctx, ids, 2*time.Minute, lb); err != nil {
 		return nil, err
 	}
 
-	// 2. Read all files
+	// 3. Read all files
 	for i, name := range names {
 		if err := c.ReadDataFile(name, data[i]); err != nil {
-			c.ReleaseLeases(ctx, names)
+			c.ReleaseLeases(ctx, ids)
 			return nil, err
 		}
 	}
 
-	// 3. Return commit callback
+	// 4. Return commit callback
 	return func(commit bool) {
 		if commit {
 			for i, name := range names {
@@ -1852,7 +2059,7 @@ func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), erro
 				}
 			}
 		}
-		c.ReleaseLeases(ctx, names)
+		c.ReleaseLeases(ctx, ids)
 	}, nil
 }
 
@@ -1866,8 +2073,67 @@ func (c *Client) GetInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	return c.getInodes(ctx, ids)
 }
 
+// VerifyInode verifies the manifest signatures and authorized signers.
+func (c *Client) VerifyInode(inode *metadata.Inode) error {
+	if inode.SignerID == "" {
+		// If there are authorized signers, we expect a signature.
+		if len(inode.AuthorizedSigners) > 0 {
+			return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
+		}
+		return nil
+	}
+
+	// 1. Verify Signatures First
+	hash := inode.ManifestHash()
+	user, err := c.GetUser(inode.SignerID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch signer %s: %w", inode.SignerID, err)
+	}
+	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
+		return fmt.Errorf("invalid manifest signature by %s", inode.SignerID)
+	}
+
+	groupValid := false
+	if inode.GroupID != "" && len(inode.GroupSig) > 0 {
+		group, err := c.GetGroup(inode.GroupID)
+		if err == nil {
+			if crypto.VerifySignature(group.SignKey, hash, inode.GroupSig) {
+				groupValid = true
+			}
+		}
+	}
+
+	// 2. Check Authorization
+	// Either the Signer must be in AuthorizedSigners OR we have a valid Group Signature from the owning group
+	authorized := groupValid
+
+	if !authorized {
+		for _, s := range inode.AuthorizedSigners {
+			if s == inode.SignerID {
+				authorized = true
+				break
+			}
+		}
+		// Owner is implicitly authorized if no AuthorizedSigners listed
+		if !authorized && len(inode.AuthorizedSigners) == 0 && inode.SignerID == inode.OwnerID {
+			authorized = true
+		}
+	}
+
+	if !authorized {
+		return fmt.Errorf("signer %s is not authorized for inode %s (no valid group sig or ACL match)", inode.SignerID, inode.ID)
+	}
+
+	return nil
+}
+
 // UnlockInode attempts to decrypt the file key for the inode using the client's identity.
 func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
+	// Phase 31: Verification
+	if err := c.VerifyInode(inode); err != nil {
+		return nil, fmt.Errorf("integrity check failed: %w", err)
+	}
+
 	if c.decKey == nil {
 		return nil, fmt.Errorf("client has no identity to unlock file")
 	}
@@ -1981,6 +2247,55 @@ func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768,
 	c.groupKeys[groupID] = gk
 	c.keyMu.Unlock()
 	return gk, nil
+}
+
+// GetGroupSignKey retrieves and decrypts the group signing key.
+func (c *Client) GetGroupSignKey(groupID string) (*crypto.IdentityKey, error) {
+	c.keyMu.RLock()
+	gk, ok := c.groupSignKeys[groupID]
+	c.keyMu.RUnlock()
+	if ok {
+		return gk, nil
+	}
+
+	req, err := http.NewRequest("GET", c.serverURL+"/v1/group/"+groupID+"/sign/private", nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := c.authenticateRequest(req); err != nil {
+		return nil, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to fetch group signing key: %d", resp.StatusCode)
+	}
+
+	var entry crypto.LockboxEntry
+	if err := json.NewDecoder(resp.Body).Decode(&entry); err != nil {
+		return nil, err
+	}
+
+	// Group Signing Key is encrypted for Client's identity
+	secret, err := crypto.Decapsulate(c.decKey, entry.KEMCiphertext)
+	if err != nil {
+		return nil, fmt.Errorf("group sign key decapsulate failed: %w", err)
+	}
+	privBytes, err := crypto.DecryptDEM(secret, entry.DEMCiphertext)
+	if err != nil {
+		return nil, fmt.Errorf("group sign key decrypt failed: %w", err)
+	}
+
+	gsk := crypto.UnmarshalIdentityKey(privBytes)
+
+	c.keyMu.Lock()
+	c.groupSignKeys[groupID] = gsk
+	c.keyMu.Unlock()
+	return gsk, nil
 }
 
 // GetWorldPublicKey fetches the cluster's world public key.
@@ -2111,18 +2426,28 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 
 // CreateGroup creates a new cryptographic group.
 func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
+	// 1. Generate Encryption Key (ML-KEM)
 	dk, _ := crypto.GenerateEncryptionKey()
 	pk := dk.EncapsulationKey().Bytes()
 	priv := crypto.MarshalDecapsulationKey(dk)
 
+	// 2. Generate Signing Key (ML-DSA/Ed25519)
+	sk, _ := crypto.GenerateIdentityKey()
+	spk := sk.Public()
+	spriv := sk.MarshalPrivate()
+
 	lb := crypto.NewLockbox()
-	// Encrypt group private key for the creator (owner)
+	// Encrypt group private encryption key for the creator (owner)
 	if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), priv); err != nil {
+		return nil, err
+	}
+	// Encrypt group private signing key for the creator (owner)
+	// We use a different ID suffix to distinguish in the lockbox
+	if err := lb.AddRecipient(c.userID+":sign", c.decKey.EncapsulationKey(), spriv); err != nil {
 		return nil, err
 	}
 
 	// Encrypt Group Name using Group Key (Sealed)
-	// Anyone with the Group Private Key can decrypt this.
 	encName, err := crypto.Seal([]byte(name), dk.EncapsulationKey(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt group name: %w", err)
@@ -2132,6 +2457,7 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 		"name":     name, // Server needs plaintext to compute GroupID = HMAC(Owner:Name)
 		"enc_name": encName,
 		"enc_key":  pk,
+		"sign_key": spk,
 		"lockbox":  lb,
 	}
 
@@ -2184,12 +2510,19 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 		return err
 	}
 
-	// Decrypt group private key using our identity
+	// Decrypt group private encryption key using our identity
 	gk, err := c.GetGroupPrivateKey(groupID)
 	if err != nil {
 		return err
 	}
 	priv := crypto.MarshalDecapsulationKey(gk)
+
+	// Decrypt group private signing key using our identity
+	gsk, err := c.GetGroupSignKey(groupID)
+	if err != nil {
+		return err
+	}
+	spriv := gsk.MarshalPrivate()
 
 	// Add new member to lockbox
 	userEK, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
@@ -2199,7 +2532,13 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	if err := group.Lockbox.AddRecipient(userID, userEK, priv); err != nil {
 		return err
 	}
+	if err := group.Lockbox.AddRecipient(userID+":sign", userEK, spriv); err != nil {
+		return err
+	}
 
+	if group.Members == nil {
+		group.Members = make(map[string]bool)
+	}
 	group.Members[userID] = true
 
 	data, _ := json.Marshal(group)
@@ -2242,158 +2581,67 @@ func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 }
 
 // SetAttrByID updates the attributes of an inode by ID.
+// SetAttrByID updates the attributes of an inode by ID.
 func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
-	var err error
-	// 1. Handle Cryptographic Access (World & Group)
-	if attr.Mode != nil || attr.GroupID != nil {
-		oldMode := inode.Mode
-		newMode := inode.Mode
-		if attr.Mode != nil {
-			newMode = *attr.Mode
+	// 1. Update local fields
+	if attr.Mode != nil {
+		inode.Mode = *attr.Mode
+	}
+	if attr.UID != nil {
+		inode.UID = *attr.UID
+	}
+	if attr.GID != nil {
+		inode.GID = *attr.GID
+	}
+	if attr.GroupID != nil {
+		inode.GroupID = *attr.GroupID
+	}
+	if attr.Size != nil {
+		inode.Size = *attr.Size
+	}
+	if attr.MTime != nil {
+		inode.MTime = *attr.MTime
+	}
+
+	// 2. Handle Lockbox updates (World & Group)
+	worldRead := (inode.Mode & 0004) != 0
+	groupRW := (inode.Mode & 0060) != 0
+
+	// 2.1 World Access
+	_, worldInLockbox := inode.Lockbox[metadata.WorldID]
+	if worldRead && !worldInLockbox {
+		wpk, err := c.GetWorldPublicKey()
+		if err == nil {
+			inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
 		}
+	} else if !worldRead && worldInLockbox {
+		delete(inode.Lockbox, metadata.WorldID)
+	}
 
-		oldGroupID := inode.GroupID
-		newGroupID := inode.GroupID
-		if attr.GroupID != nil {
-			newGroupID = *attr.GroupID
-		}
-
-		worldReadOld := (oldMode & 0004) != 0
-		worldReadNew := (newMode & 0004) != 0
-
-		groupRWNew := (newMode & 0060) != 0
-
-		groupChanged := oldGroupID != newGroupID
-
-		updated := false
-		// 1.1 World Access
-		worldInLockbox := false
-		if _, exists := inode.Lockbox[metadata.WorldID]; exists {
-			worldInLockbox = true
-		}
-
-		if worldReadNew != worldInLockbox || (worldReadNew && worldReadOld != worldReadNew) {
-			if worldReadNew {
-				wpk, err := c.GetWorldPublicKey()
+	// 2.2 Group Access
+	if inode.GroupID != "" {
+		_, groupInLockbox := inode.Lockbox[inode.GroupID]
+		if groupRW && !groupInLockbox {
+			group, err := c.GetGroup(inode.GroupID)
+			if err == nil {
+				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 				if err == nil {
-					if err := inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key); err == nil {
-						updated = true
-					}
-				} else {
-					log.Printf("SetAttr: failed to get world public key: %v", err)
-				}
-			} else {
-				delete(inode.Lockbox, metadata.WorldID)
-				updated = true
-			}
-		}
-
-		// 1.2 Group Access
-		groupInLockbox := false
-		if _, exists := inode.Lockbox[newGroupID]; exists {
-			groupInLockbox = true
-		}
-
-		if (groupChanged || groupRWNew != groupInLockbox) && groupRWNew {
-			// If group changed, remove OLD
-			if groupChanged && oldGroupID != "" {
-				delete(inode.Lockbox, oldGroupID)
-				updated = true
-			}
-
-			// Add NEW
-			if newGroupID != "" {
-				group, err := c.GetGroup(newGroupID)
-				if err == nil {
-					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-					if err == nil {
-						if err := inode.Lockbox.AddRecipient(newGroupID, gpk, key); err == nil {
-							updated = true
-						}
-					}
+					inode.Lockbox.AddRecipient(inode.GroupID, gpk, key)
 				}
 			}
-		} else if !groupRWNew && groupInLockbox {
-			delete(inode.Lockbox, newGroupID)
-			updated = true
-		}
-
-		if updated {
-			// Update the local inode state before sending to server
-			inode.Mode = newMode
-			inode.GroupID = newGroupID
-			_, err = c.updateInode(context.Background(), *inode)
-			if err != nil {
-				return err
-			}
+		} else if !groupRW && groupInLockbox {
+			delete(inode.Lockbox, inode.GroupID)
 		}
 	}
 
-	// 2. Push remaining attributes to FSM SetAttr handler
-	attr.InodeID = inode.ID
-	var data []byte
-	data, err = json.Marshal(attr)
-	if err != nil {
-		return err
-	}
-
-	var hReq *http.Request
-	hReq, err = http.NewRequest("POST", c.serverURL+"/v1/meta/setattr", nil)
-	if err != nil {
-		return err
-	}
-	if err = c.authenticateRequest(hReq); err != nil {
-		return err
-	}
-	if err = c.sealBody(hReq, data); err != nil {
-		return err
-	}
-
-	var resp *http.Response
-	resp, err = c.httpClient.Do(hReq)
-	if err != nil {
-		return err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-	}
-
-	return nil
+	// 3. Final Metadata Update (Signs everything)
+	_, err := c.updateInode(context.Background(), *inode)
+	return err
 }
 
 // Remove deletes an inode at the given path.
 func (c *Client) Remove(path string) error {
-	inode, _, err := c.ResolvePath(path)
-	if err != nil {
-		return err
-	}
-
-	req, err := http.NewRequest("DELETE", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
-	if err != nil {
-		return err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		b, _ := io.ReadAll(resp.Body)
-		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-	}
-	c.invalidatePathCache(path)
-	return nil
+	return c.RemoveEntry(path)
 }
 
 // PushKeySync uploads an encrypted configuration blob to the server.
@@ -2847,73 +3095,108 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 }
 
 func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
-	req.InodeID = inodeID
-	payload, _ := json.Marshal(req)
-	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+	inode, err := c.getInode(ctx, inodeID)
+	if err != nil {
+		return err
+	}
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/chown", nil)
-		if err != nil {
-			return err
+	// Try to unlock so we can re-key for the new owner/group
+	key, unlockErr := c.UnlockInode(inode)
+
+	if req.OwnerID != nil {
+		inode.OwnerID = *req.OwnerID
+		// When changing owner, we should also update AuthorizedSigners to ensure
+		// the new owner can actually modify the file.
+		found := false
+		for _, s := range inode.AuthorizedSigners {
+			if s == inode.OwnerID {
+				found = true
+				break
+			}
 		}
-		if err := c.authenticateRequest(httpReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(httpReq, payload); err != nil {
-			return err
+		if !found {
+			inode.AuthorizedSigners = append(inode.AuthorizedSigners, inode.OwnerID)
 		}
 
-		resp, err := c.httpClient.Do(httpReq)
-		if err != nil {
-			return err
+		// If we have the key, add the new owner to the lockbox
+		if unlockErr == nil {
+			newUser, err := c.GetUser(inode.OwnerID)
+			if err == nil {
+				pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
+				if err == nil {
+					inode.Lockbox.AddRecipient(inode.OwnerID, pubKey, key)
+				}
+			}
 		}
-		body, err := c.unsealResponse(resp)
-		if err != nil {
-			return err
+	}
+	if req.GroupID != nil {
+		inode.GroupID = *req.GroupID
+		// If we have the key, add the new group to the lockbox
+		if unlockErr == nil && inode.GroupID != "" {
+			group, err := c.GetGroup(inode.GroupID)
+			if err == nil {
+				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				if err == nil {
+					inode.Lockbox.AddRecipient(inode.GroupID, gpk, key)
+				}
+			}
 		}
-		defer body.Close()
+	}
+	if req.UID != nil {
+		inode.UID = *req.UID
+	}
+	if req.GID != nil {
+		inode.GID = *req.GID
+	}
 
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-		return nil
-	})
+	_, err = c.updateInode(ctx, *inode)
+	return err
 }
 
 func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) error {
-	req := metadata.AdminChmodRequest{InodeID: inodeID, Mode: mode}
-	payload, _ := json.Marshal(req)
-	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+	inode, err := c.getInode(ctx, inodeID)
+	if err != nil {
+		return err
+	}
 
-		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/chmod", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(httpReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(httpReq, payload); err != nil {
-			return err
+	// 1. Try to unlock so we can re-key for group/world if bits changed
+	key, unlockErr := c.UnlockInode(inode)
+
+	inode.Mode = mode
+
+	// 2. Handle Lockbox updates (World & Group)
+	if unlockErr == nil {
+		worldRead := (inode.Mode & 0004) != 0
+		groupRW := (inode.Mode & 0060) != 0
+
+		// 2.1 World Access
+		_, worldInLockbox := inode.Lockbox[metadata.WorldID]
+		if worldRead && !worldInLockbox {
+			wpk, err := c.GetWorldPublicKey()
+			if err == nil {
+				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
+			}
+		} else if !worldRead && worldInLockbox {
+			delete(inode.Lockbox, metadata.WorldID)
 		}
 
-		resp, err := c.httpClient.Do(httpReq)
-		if err != nil {
-			return err
+		// 2.2 Group Access
+		if inode.GroupID != "" {
+			_, groupInLockbox := inode.Lockbox[inode.GroupID]
+			if groupRW && !groupInLockbox {
+				group, err := c.GetGroup(inode.GroupID)
+				if err == nil {
+					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+					if err == nil {
+						inode.Lockbox.AddRecipient(inode.GroupID, gpk, key)
+					}
+				}
+			} else if !groupRW && groupInLockbox {
+				delete(inode.Lockbox, inode.GroupID)
+			}
 		}
-		body, err := c.unsealResponse(resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
+	}
 
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-		return nil
-	})
+	_, err = c.updateInode(ctx, *inode)
+	return err
 }

@@ -32,11 +32,14 @@ import (
 
 // Config represents the client-side configuration.
 type Config struct {
-	ServerURL string `json:"server_url"`
-	UserID    string `json:"user_id"`
-	EncKey    string `json:"enc_key"`
-	SignKey   string `json:"sign_key"`
-	ServerKey string `json:"server_key"`
+	ServerURL   string `json:"server_url"`
+	UserID      string `json:"user_id"`
+	EncKey      string `json:"enc_key"`
+	SignKey     string `json:"sign_key"`
+	ServerKey   string `json:"server_key"`
+	RootID      string `json:"root_id,omitempty"`
+	RootOwner   string `json:"root_owner,omitempty"`
+	RootVersion uint64 `json:"root_version,omitempty"`
 }
 
 // Encrypt wraps a config into an encrypted blob.

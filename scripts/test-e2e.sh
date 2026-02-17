@@ -46,7 +46,7 @@ COUNT=0
 while true; do
   # Use Client to join node via admin API (discovery via internal cluster address)
   echo "DEBUG: Joining node-2..."
-  if distfs -use-pinentry=false admin-join "https://storage-node-2:9090"; then
+  if distfs -use-pinentry=false -config /root/.distfs/config.json admin-join "https://storage-node-2:9090"; then
     echo "node-2 joined"
     break
   fi
@@ -59,7 +59,7 @@ done
 COUNT=0
 while true; do
   echo "DEBUG: Joining node-3..."
-  if distfs -use-pinentry=false admin-join "https://storage-node-3:9090"; then
+  if distfs -use-pinentry=false -config /root/.distfs/config.json admin-join "https://storage-node-3:9090"; then
     echo "node-3 joined"
     break
   fi
@@ -73,17 +73,17 @@ echo "Waiting for cluster stability..."
 sleep 5
 
 echo "Creating directory..."
-distfs -use-pinentry=false mkdir /testdir || echo "testdir already exists"
+distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /testdir || echo "testdir already exists"
 
 echo "Uploading file..."
 echo "hello from e2e test" > /tmp/hello.txt
-distfs -use-pinentry=false put /tmp/hello.txt /testdir/world.txt
+distfs -use-pinentry=false -config /root/.distfs/config.json put /tmp/hello.txt /testdir/world.txt
 
 echo "Listing directory..."
-distfs -use-pinentry=false ls /testdir
+distfs -use-pinentry=false -config /root/.distfs/config.json ls /testdir
 
 echo "Downloading file..."
-distfs -use-pinentry=false get /testdir/world.txt /tmp/hello-back.txt
+distfs -use-pinentry=false -config /root/.distfs/config.json get /testdir/world.txt /tmp/hello-back.txt
 
 echo "Verifying content..."
 if grep -q "hello from e2e test" /tmp/hello-back.txt; then

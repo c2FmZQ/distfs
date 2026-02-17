@@ -6,7 +6,7 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating ha directory..."
-until distfs -use-pinentry=false mkdir /ha; do
+until distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /ha; do
     echo "Retrying ha mkdir..."
     sleep 1
 done

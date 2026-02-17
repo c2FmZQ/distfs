@@ -15,11 +15,12 @@ echo "Initializing Reader (user2)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-public@example.com")
 distfs -use-pinentry=false -config /tmp/u2-public.json init --new -server http://storage-node-1:8080 -jwt "$JWT2"
 
-echo "User 1: Creating public test dir..."
-until distfs -use-pinentry=false -config /tmp/u1-public.json mkdir /public; do
-    echo "Retrying public mkdir..."
-    sleep 1
-done
+echo "Admin: Creating public test dir..."
+distfs -use-pinentry=false mkdir /public
+sleep 2
+
+echo "Admin: Chowning to user1..."
+echo "y" | distfs -use-pinentry=false admin-chown user1-public@example.com /public
 
 echo "User 1: Making directory public (chmod 0755)..."
 distfs -use-pinentry=false -config /tmp/u1-public.json chmod 0755 /public

@@ -114,5 +114,8 @@ func loadClient(conf *config.Config) *client.Client {
 		log.Fatalf("failed to unmarshal server key: %v", err)
 	}
 
-	return c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
+	return c.WithIdentity(conf.UserID, dk).
+		WithSignKey(sk).
+		WithServerKey(svKey).
+		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion)
 }

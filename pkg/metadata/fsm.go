@@ -185,11 +185,8 @@ const (
 	CmdCreateGroup     CommandType = 7
 	CmdUpdateGroup     CommandType = 8
 	CmdAddChild        CommandType = 9
-	CmdRemoveChild     CommandType = 10
 	CmdAddChunkReplica CommandType = 11
-	CmdRename          CommandType = 12
 	CmdSetAttr         CommandType = 13
-	CmdLink            CommandType = 14
 	CmdGCRemove        CommandType = 15
 	CmdInitSecret      CommandType = 16
 	CmdSetUserQuota    CommandType = 17
@@ -336,16 +333,10 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeUpdateGroup(tx, data)
 	case CmdAddChild:
 		return fsm.executeAddChild(tx, data)
-	case CmdRemoveChild:
-		return fsm.executeRemoveChild(tx, data)
 	case CmdAddChunkReplica:
 		return fsm.executeAddChunkReplica(tx, data)
-	case CmdRename:
-		return fsm.executeRename(tx, data)
 	case CmdSetAttr:
 		return fsm.executeSetAttr(tx, data)
-	case CmdLink:
-		return fsm.executeLink(tx, data)
 	case CmdGCRemove:
 		return fsm.executeGCRemove(tx, data)
 	case CmdInitSecret:
@@ -395,6 +386,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 			inode.Mode = 0644
 		}
 	}
+	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 
 	b := tx.Bucket([]byte("inodes"))
 	if b.Get([]byte(inode.ID)) != nil {
@@ -439,21 +431,44 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 		return ErrConflict
 	}
 
+	ownerChanged := inode.OwnerID != existing.OwnerID
+	if ownerChanged {
+		// 1. Check Quota for new owner
+		if inode.OwnerID != "" {
+			if err := checkQuota(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+				return err
+			}
+		}
+		// 2. Decrement old owner
+		if existing.OwnerID != "" {
+			if err := updateUserUsage(tx, existing.OwnerID, -1, -int64(existing.Size)); err != nil {
+				return err
+			}
+		}
+		// 3. Increment new owner
+		if inode.OwnerID != "" {
+			if err := updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+				return err
+			}
+		}
+	}
+
 	oldPages := existing.ChunkPages
 	diffBytes := int64(inode.Size) - int64(existing.Size)
 
-	if inode.OwnerID != "" && diffBytes > 0 {
+	if !ownerChanged && inode.OwnerID != "" && diffBytes > 0 {
 		if err := checkQuota(tx, inode.OwnerID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
 
 	inode.Version++
+	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	if err := saveInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
 
-	if inode.OwnerID != "" && diffBytes != 0 {
+	if !ownerChanged && inode.OwnerID != "" && diffBytes != 0 {
 		if err := updateUserUsage(tx, inode.OwnerID, 0, diffBytes); err != nil {
 			return err
 		}
@@ -494,6 +509,7 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{}
 					return err
 				}
 			}
+			enqueueGC(tx, &inode)
 		}
 	}
 	return b.Delete([]byte(id))
@@ -660,66 +676,6 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 	return &group
 }
 
-func (fsm *MetadataFSM) executeLink(tx *bolt.Tx, data []byte) interface{} {
-	var req LinkRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	b := tx.Bucket([]byte("inodes"))
-
-	// 1. Load Target
-	vTarget := b.Get([]byte(req.TargetID))
-	if vTarget == nil {
-		return ErrNotFound
-	}
-	var target Inode
-	if err := json.Unmarshal(vTarget, &target); err != nil {
-		return err
-	}
-
-	if target.Type == DirType {
-		return fmt.Errorf("cannot link directory")
-	}
-
-	// 2. Load Parent
-	vParent := b.Get([]byte(req.ParentID))
-	if vParent == nil {
-		return ErrNotFound
-	}
-	var parent Inode
-	if err := json.Unmarshal(vParent, &parent); err != nil {
-		return err
-	}
-
-	// 3. Add to Parent
-	if parent.Children == nil {
-		parent.Children = make(map[string]string)
-	}
-	if _, exists := parent.Children[req.Name]; exists {
-		return ErrExists
-	}
-	parent.Children[req.Name] = req.TargetID
-	parent.Version++
-
-	// 4. Update Target
-	target.NLink++
-	if target.Links == nil {
-		target.Links = make(map[string]bool)
-	}
-	target.Links[req.ParentID+":"+req.Name] = true
-	target.Version++
-
-	// 5. Save
-	if err := saveInodeWithPages(tx, &parent); err != nil {
-		return err
-	}
-	if err := saveInodeWithPages(tx, &target); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 	var req SetAttrRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -737,7 +693,7 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 	}
 
 	if req.Mode != nil {
-		inode.Mode = *req.Mode
+		inode.Mode = SanitizeMode(*req.Mode, inode.Type)
 	}
 	if req.UID != nil {
 		inode.UID = *req.UID
@@ -748,144 +704,11 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 	if req.GroupID != nil {
 		inode.GroupID = *req.GroupID
 	}
-	diffBytes := int64(0)
-	if req.Size != nil {
-		diffBytes = int64(*req.Size) - int64(inode.Size)
-		inode.Size = *req.Size
-	}
 	if req.MTime != nil {
 		inode.MTime = *req.MTime
 	}
 
-	if inode.OwnerID != "" && diffBytes > 0 {
-		if err := checkQuota(tx, inode.OwnerID, 0, diffBytes); err != nil {
-			return err
-		}
-	}
-
 	inode.CTime = time.Now().UnixNano()
-	inode.Version++
-
-	if err := saveInodeWithPages(tx, &inode); err != nil {
-		return err
-	}
-	if inode.OwnerID != "" && diffBytes != 0 {
-		if err := updateUserUsage(tx, inode.OwnerID, 0, diffBytes); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (fsm *MetadataFSM) executeRename(tx *bolt.Tx, data []byte) interface{} {
-	var req RenameRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	b := tx.Bucket([]byte("inodes"))
-
-	// 1. Load Old Parent
-	vOld := b.Get([]byte(req.OldParentID))
-	if vOld == nil {
-		return ErrNotFound
-	}
-	var oldParent Inode
-	if err := json.Unmarshal(vOld, &oldParent); err != nil {
-		return err
-	}
-
-	// 2. Identify Child
-	childID, ok := oldParent.Children[req.OldName]
-	if !ok {
-		return ErrNotFound
-	}
-
-	// 3. Load New Parent
-	var newParent Inode
-	if req.NewParentID == req.OldParentID {
-		newParent = oldParent
-	} else {
-		vNew := b.Get([]byte(req.NewParentID))
-		if vNew == nil {
-			return ErrNotFound
-		}
-		if err := json.Unmarshal(vNew, &newParent); err != nil {
-			return err
-		}
-	}
-
-	// 4. Handle Overwrite
-	if targetID, exists := newParent.Children[req.NewName]; exists {
-		vTarget := b.Get([]byte(targetID))
-		if vTarget != nil {
-			var target Inode
-			if err := json.Unmarshal(vTarget, &target); err == nil {
-				if target.Type == DirType && len(target.Children) > 0 {
-					return fmt.Errorf("cannot overwrite non-empty directory")
-				}
-				// Decrement nlink of overwritten entry
-				if target.NLink > 0 {
-					target.NLink--
-				}
-				if target.Links != nil {
-					delete(target.Links, req.NewParentID+":"+req.NewName)
-				}
-				if target.NLink == 0 {
-					b.Delete([]byte(target.ID))
-					enqueueGC(tx, &target)
-					if target.OwnerID != "" {
-						if err := updateUserUsage(tx, target.OwnerID, -1, -int64(target.Size)); err != nil {
-							return err
-						}
-					}
-				} else {
-					if err := saveInodeWithPages(tx, &target); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-
-	// 5. Update
-	delete(oldParent.Children, req.OldName)
-	oldParent.Version++
-
-	if newParent.Children == nil {
-		newParent.Children = make(map[string]string)
-	}
-	newParent.Children[req.NewName] = childID
-	newParent.Version++
-
-	// 6. Update Child Metadata (Links)
-	vChild := b.Get([]byte(childID))
-	if vChild != nil {
-		var child Inode
-		if err := json.Unmarshal(vChild, &child); err == nil {
-			if child.Links == nil {
-				child.Links = make(map[string]bool)
-			}
-			delete(child.Links, req.OldParentID+":"+req.OldName)
-			child.Links[req.NewParentID+":"+req.NewName] = true
-			child.Version++
-			if err := saveInodeWithPages(tx, &child); err != nil {
-				return err
-			}
-		}
-	}
-
-	// 6. Save
-	if err := saveInodeWithPages(tx, &oldParent); err != nil {
-		return err
-	}
-
-	if req.NewParentID != req.OldParentID {
-		if err := saveInodeWithPages(tx, &newParent); err != nil {
-			return err
-		}
-	}
-
 	return nil
 }
 
@@ -940,80 +763,6 @@ func (fsm *MetadataFSM) executeAddChild(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 	return &inode
-}
-
-func (fsm *MetadataFSM) executeRemoveChild(tx *bolt.Tx, data []byte) interface{} {
-	var update ChildUpdate
-	if err := json.Unmarshal(data, &update); err != nil {
-		return err
-	}
-
-	ib := tx.Bucket([]byte("inodes"))
-
-	// 1. Load Parent
-	vParent := ib.Get([]byte(update.ParentID))
-	if vParent == nil {
-		return ErrNotFound
-	}
-	var parent Inode
-	if err := json.Unmarshal(vParent, &parent); err != nil {
-		return err
-	}
-
-	// 2. Identify Child
-	childID, ok := parent.Children[update.Name]
-	if !ok {
-		return ErrNotFound
-	}
-
-	// 3. Load Child
-	vChild := ib.Get([]byte(childID))
-	if vChild == nil {
-		return ErrNotFound
-	}
-	var child Inode
-	if err := json.Unmarshal(vChild, &child); err != nil {
-		return err
-	}
-
-	// 4. POSIX Checks
-	if child.Type == DirType && len(child.Children) > 0 {
-		return fmt.Errorf("directory not empty")
-	}
-
-	// 5. Remove from Parent
-	delete(parent.Children, update.Name)
-	parent.Version++
-	if err := saveInodeWithPages(tx, &parent); err != nil {
-		return err
-	}
-
-	// 6. Update Child
-	if child.NLink > 0 {
-		child.NLink--
-	}
-	if child.Links != nil {
-		delete(child.Links, update.ParentID+":"+update.Name)
-	}
-	child.Version++
-
-	if child.NLink == 0 {
-		// Delete Inode
-		ib.Delete([]byte(child.ID))
-		// Cleanup chunks (Garbage Collection)
-		enqueueGC(tx, &child)
-		if child.OwnerID != "" {
-			if err := updateUserUsage(tx, child.OwnerID, -1, -int64(child.Size)); err != nil {
-				return err
-			}
-		}
-	} else {
-		if err := saveInodeWithPages(tx, &child); err != nil {
-			return err
-		}
-	}
-
-	return nil
 }
 
 func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interface{} {
@@ -1588,7 +1337,6 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		}
 		inode.LeaseOwner = req.OwnerID
 		inode.LeaseExpiry = expiry
-		inode.Version++
 		if err := saveInodeWithPages(tx, inode); err != nil {
 			return err
 		}
@@ -1618,7 +1366,6 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 		if inode.LeaseOwner == req.OwnerID {
 			inode.LeaseOwner = ""
 			inode.LeaseExpiry = 0
-			inode.Version++
 			if err := saveInodeWithPages(tx, &inode); err != nil {
 				return err
 			}
@@ -1674,6 +1421,18 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 		}
 		// 3. Update Inode
 		inode.OwnerID = *req.OwnerID
+		// Update AuthorizedSigners to include new owner
+		found := false
+		for _, s := range inode.AuthorizedSigners {
+			if s == inode.OwnerID {
+				found = true
+				break
+			}
+		}
+		if !found {
+			inode.AuthorizedSigners = append(inode.AuthorizedSigners, inode.OwnerID)
+		}
+
 		// 4. Increment new owner
 		if err := updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
 			return err
@@ -1712,7 +1471,7 @@ func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} 
 		return err
 	}
 
-	inode.Mode = req.Mode
+	inode.Mode = SanitizeMode(req.Mode, inode.Type)
 	inode.CTime = time.Now().UnixNano()
 	inode.Version++
 
