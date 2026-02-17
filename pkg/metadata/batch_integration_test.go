@@ -52,7 +52,7 @@ func TestRequestBatching(t *testing.T) {
 			}
 			body, _ := json.Marshal(user)
 
-			_, err := server.ApplyRaftCommand(metadata.CmdCreateUser, body)
+			_, err := server.ApplyRaftCommandInternal(metadata.CmdCreateUser, body)
 			if err != nil {
 				errCh <- err
 			}

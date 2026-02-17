@@ -22,7 +22,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"embed"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -45,9 +44,6 @@ import (
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
-
-//go:embed ui/*
-var uiAssets embed.FS
 
 // Server is the HTTP server for the Metadata Node.
 // It handles client requests and coordinates with the Raft cluster.
@@ -133,7 +129,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		stopCh:         make(chan struct{}),
 		batchQueue:     make([]*LogCommand, 0),
 		batchResps:     make([]chan interface{}, 0),
-		batchApplyCh:   make(chan batchRequest, 100),
+		batchApplyCh:   make(chan batchRequest, 1000),
 	}
 	if oidcDiscoveryURL != "" {
 		go s.discoverOIDC(oidcDiscoveryURL)
@@ -293,46 +289,55 @@ type contextKey string
 const userContextKey contextKey = "user"
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Public Health
+	if r.URL.Path == "/v1/health" && r.Method == http.MethodGet {
+		s.handleHealth(w, r)
+		return
+	}
+
+	// Cluster Epoch Key (Public for encapsulation)
 	if r.URL.Path == "/v1/meta/key" && r.Method == http.MethodGet {
 		s.handleGetClusterKey(w, r)
 		return
 	}
 
+	// Server Sign Key (Public for verification)
 	if r.URL.Path == "/v1/meta/key/sign" && r.Method == http.MethodGet {
 		s.handleGetServerSignKey(w, r)
 		return
 	}
 
+	// World Public Key (Public)
 	if r.URL.Path == "/v1/meta/key/world" && r.Method == http.MethodGet {
 		s.handleGetWorldPublicKey(w, r)
 		return
 	}
 
+	// World Private Key (Authenticated encapsulation)
 	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
 		s.handleGetWorldPrivateKey(w, r)
 		return
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/api/cluster") {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.handleClusterDashboard(w, r)
-		return
-	}
-
-	if r.URL.Path == "/v1/cluster/status" && r.Method == http.MethodGet {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.handleClusterStatus(w, r)
-		return
-	}
-
+	// Debug Routes (Protected by shared secret)
 	if s.handleDebugRoutes(w, r) {
 		return
+	}
+
+	// Node registration (Internal Heartbeat / Shared Secret)
+	if r.URL.Path == "/v1/node" {
+		if r.Method == http.MethodPost {
+			if !s.checkRaftSecret(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			s.handleRegisterNode(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			s.handleGetNodes(w, r)
+			return
+		}
 	}
 
 	// For all other requests, if we are not the leader, forward to the leader.
@@ -340,6 +345,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Mutation & Protected Routes
 	if r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost {
 		s.handleRegisterUser(w, r)
 		return
@@ -366,34 +372,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleAuthChallenge(w, r)
 		return
 	}
-	if r.URL.Path == "/v1/node" {
-		if r.Method == http.MethodPost {
-			if !s.checkRaftSecret(r) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
-			s.handleRegisterNode(w, r)
-			return
-		}
-		if r.Method == http.MethodGet {
-			s.handleGetNodes(w, r)
-			return
-		}
-	}
-	if r.URL.Path == "/v1/cluster/join" && r.Method == http.MethodPost {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.handleClusterJoin(w, r)
-		return
-	}
 
 	if r.URL.Path == "/v1/cluster/stats" && r.Method == http.MethodGet {
 		s.handleGetClusterStats(w, r)
 		return
 	}
 
+	// Authenticate User for remaining routes
 	user, err := s.authenticate(r)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
@@ -409,18 +394,37 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			r.Body = io.NopCloser(bytes.NewReader(payload))
 			r.ContentLength = int64(len(payload))
-		} else if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
-			// X-DistFS-Sealed set but no body provided for mutation.
 		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
 			// Enforce E2EE for mutations
-			http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
-			return
+			if r.Header.Get("X-DistFS-Sealed") != "true" {
+				http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
+				return
+			}
 		}
 
 		ctx := context.WithValue(r.Context(), userContextKey, user)
 		r = r.WithContext(ctx)
 	}
 
+	// Admin Routes (Individual PQC Authorization)
+	if strings.HasPrefix(r.URL.Path, "/v1/admin/") {
+		if user == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.Header.Get("X-DistFS-Sealed") != "true" {
+			http.Error(w, "E2EE mandatory for admin operations", http.StatusForbidden)
+			return
+		}
+		if !s.fsm.IsAdmin(user.ID) {
+			http.Error(w, "forbidden", http.StatusForbidden)
+			return
+		}
+		s.handleAdmin(w, r)
+		return
+	}
+
+	// Standard Inode / User / Group routes
 	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
 		s.handleGetUser(w, r, id)
@@ -574,27 +578,14 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 	return true
 }
 
-func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
-	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader: "+s.raft.State().String(), http.StatusServiceUnavailable)
-		return
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	status := map[string]interface{}{
+		"id":     s.nodeID,
+		"state":  s.raft.State().String(),
+		"leader": s.raft.Leader(),
 	}
-
-	var req struct {
-		ID      string `json:"id"`
-		Address string `json:"address"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	f := s.raft.AddVoter(raft.ServerID(req.ID), raft.ServerAddress(req.Address), 0, 0)
-	if err := f.Error(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(status)
 }
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -604,8 +595,7 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"leader": s.raft.Leader(),
 		"stats":  s.raft.Stats(),
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	s.writeJSON(w, r, status, http.StatusOK)
 }
 
 func (s *Server) authenticate(r *http.Request) (*User, error) {
@@ -958,7 +948,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 	body, _ := json.Marshal(user)
 
-	s.applyCommandRaw(w, r, CmdCreateUser, body, http.StatusCreated)
+	s.ApplyRaftCommandRaw(w, r, CmdCreateUser, body, http.StatusCreated)
 }
 
 func (s *Server) handleGetKeySync(w http.ResponseWriter, r *http.Request) {
@@ -1022,7 +1012,7 @@ func (s *Server) handleStoreKeySync(w http.ResponseWriter, r *http.Request) {
 	}
 	data, _ := json.Marshal(req)
 
-	s.applyCommandRaw(w, r, CmdStoreKeySync, data, http.StatusCreated)
+	s.ApplyRaftCommandRaw(w, r, CmdStoreKeySync, data, http.StatusCreated)
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -1069,7 +1059,7 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(v, &n); err != nil {
 				continue
 			}
-			if n.Status == NodeStatusActive {
+			if n.Status == NodeStatusActive && n.Address != "" {
 				nodes = append(nodes, n)
 			}
 		}
@@ -1262,7 +1252,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdCreateInode, 10*1024*1024, http.StatusCreated)
+	s.ApplyRaftCommand(w, r, CmdCreateInode, 10*1024*1024, http.StatusCreated)
 }
 
 func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id string) {
@@ -1279,7 +1269,7 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 		}
 		return
 	}
-	s.applyCommand(w, r, CmdUpdateInode, 10*1024*1024, http.StatusOK)
+	s.ApplyRaftCommand(w, r, CmdUpdateInode, 10*1024*1024, http.StatusOK)
 }
 
 func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
@@ -1296,7 +1286,7 @@ func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id st
 		}
 		return
 	}
-	s.applyCommandRaw(w, r, CmdDeleteInode, []byte(id), http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdDeleteInode, []byte(id), http.StatusOK)
 }
 
 func (s *Server) checkReadPermission(user *User, inodeID string) error {
@@ -1331,7 +1321,7 @@ func (s *Server) checkReadPermission(user *User, inodeID string) error {
 }
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
+	s.ApplyRaftCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -1406,7 +1396,7 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	body, _ := json.Marshal(group)
 
 	log.Printf("GROUP: handleCreateGroup applying Raft command for ID=%s", groupID)
-	_, err = s.applyRaftCommand(CmdCreateGroup, body)
+	_, err = s.ApplyRaftCommandInternal(CmdCreateGroup, body)
 	if err != nil {
 		log.Printf("GROUP: handleCreateGroup raft apply failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1497,7 +1487,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
+	s.ApplyRaftCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
 }
 
 func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
@@ -1528,7 +1518,7 @@ func (s *Server) handleRename(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.applyCommandRaw(w, r, CmdRename, body, http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdRename, body, http.StatusOK)
 }
 
 func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
@@ -1555,11 +1545,11 @@ func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.applyCommandRaw(w, r, CmdSetAttr, body, http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdSetAttr, body, http.StatusOK)
 }
 
 func (s *Server) handleLink(w http.ResponseWriter, r *http.Request) {
-	s.applyCommand(w, r, CmdLink, 1024*1024, http.StatusOK)
+	s.ApplyRaftCommand(w, r, CmdLink, 1024*1024, http.StatusOK)
 }
 
 func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id string) {
@@ -1583,7 +1573,7 @@ func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id strin
 	}
 	update.ParentID = id
 	body, _ := json.Marshal(update)
-	s.applyCommandRaw(w, r, CmdAddChild, body, http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdAddChild, body, http.StatusOK)
 }
 
 func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id string) {
@@ -1607,10 +1597,10 @@ func (s *Server) handleRemoveChild(w http.ResponseWriter, r *http.Request, id st
 	}
 	update.ParentID = id
 	body, _ := json.Marshal(update)
-	s.applyCommandRaw(w, r, CmdRemoveChild, body, http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdRemoveChild, body, http.StatusOK)
 }
 
-func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
+func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
 	if s.raft.State() != raft.Leader {
 		http.Error(w, "not leader", http.StatusServiceUnavailable)
 		return
@@ -1623,11 +1613,11 @@ func (s *Server) applyCommand(w http.ResponseWriter, r *http.Request, cmdType Co
 		return
 	}
 
-	s.applyCommandRaw(w, r, cmdType, body, successCode)
+	s.ApplyRaftCommandRaw(w, r, cmdType, body, successCode)
 }
 
-func (s *Server) applyCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
-	resp, err := s.applyRaftCommand(cmdType, data)
+func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
+	resp, err := s.ApplyRaftCommandInternal(cmdType, data)
 	if err != nil {
 		if w == nil {
 			return
@@ -1649,13 +1639,13 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, r *http.Request, cmdType
 
 	if w != nil {
 		if resp != nil {
-			data, _ := json.Marshal(resp)
+			dataJSON, _ := json.Marshal(resp)
 			w.Header().Set("Content-Type", "application/json")
 
 			// E2EE?
 			user, _ := r.Context().Value(userContextKey).(*User)
 			if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-				sealed, err := s.sealResponse(user, data)
+				sealed, err := s.sealResponse(user, dataJSON)
 				if err == nil {
 					w.Header().Set("X-DistFS-Sealed", "true")
 					w.WriteHeader(successCode)
@@ -1665,10 +1655,85 @@ func (s *Server) applyCommandRaw(w http.ResponseWriter, r *http.Request, cmdType
 			}
 
 			w.WriteHeader(successCode)
-			w.Write(data)
+			w.Write(dataJSON)
 			return
 		}
 		w.WriteHeader(successCode)
+	}
+}
+
+func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte) (interface{}, error) {
+	if s.raft.State() != raft.Leader {
+		return nil, fmt.Errorf("not leader")
+	}
+
+	respCh := make(chan interface{}, 1)
+	cmd := &LogCommand{Type: cmdType, Data: data}
+
+	s.batchMu.Lock()
+	s.batchQueue = append(s.batchQueue, cmd)
+	s.batchResps = append(s.batchResps, respCh)
+
+	if len(s.batchQueue) >= 100 {
+		if s.batchTimer != nil {
+			s.batchTimer.Stop()
+		}
+		s.flushBatchLocked()
+	} else if s.batchTimer == nil {
+		s.batchTimer = time.AfterFunc(2*time.Millisecond, s.flushBatch)
+	}
+	s.batchMu.Unlock()
+
+	res := <-respCh
+	if err, ok := res.(error); ok && err != nil {
+		return nil, err
+	}
+	return res, nil
+}
+
+func (s *Server) FSM() *MetadataFSM {
+	return s.fsm
+}
+
+func (s *Server) SessionKeyCacheSize() int {
+	s.sessionKeyMu.RLock()
+	defer s.sessionKeyMu.RUnlock()
+	return len(s.sessionKeyCache)
+}
+
+func (fsm *MetadataFSM) DB() *bolt.DB {
+	return fsm.db
+}
+
+func (s *Server) flushBatch() {
+	s.batchMu.Lock()
+	defer s.batchMu.Unlock()
+	s.flushBatchLocked()
+}
+
+func (s *Server) flushBatchLocked() {
+	if len(s.batchQueue) == 0 {
+		s.batchTimer = nil
+		return
+	}
+
+	batch := batchRequest{
+		cmds:  make([]*LogCommand, len(s.batchQueue)),
+		resps: make([]chan interface{}, len(s.batchResps)),
+	}
+	copy(batch.cmds, s.batchQueue)
+	copy(batch.resps, s.batchResps)
+
+	s.batchQueue = nil
+	s.batchResps = nil
+	s.batchTimer = nil
+
+	select {
+	case s.batchApplyCh <- batch:
+	default:
+		for _, ch := range batch.resps {
+			ch <- fmt.Errorf("server busy")
+		}
 	}
 }
 
@@ -1775,86 +1840,6 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 	w.Write(data)
 }
 
-func (s *Server) ApplyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
-	return s.applyRaftCommand(cmdType, data)
-}
-
-func (s *Server) FSM() *MetadataFSM {
-	return s.fsm
-}
-
-func (s *Server) SessionKeyCacheSize() int {
-	s.sessionKeyMu.RLock()
-	defer s.sessionKeyMu.RUnlock()
-	return len(s.sessionKeyCache)
-}
-
-func (fsm *MetadataFSM) DB() *bolt.DB {
-	return fsm.db
-}
-
-func (s *Server) applyRaftCommand(cmdType CommandType, data []byte) (interface{}, error) {
-	if s.raft.State() != raft.Leader {
-		return nil, fmt.Errorf("not leader")
-	}
-
-	cmd := &LogCommand{Type: cmdType, Data: data}
-	respCh := make(chan interface{}, 1)
-
-	s.batchMu.Lock()
-	s.batchQueue = append(s.batchQueue, cmd)
-	s.batchResps = append(s.batchResps, respCh)
-
-	// Trigger immediately if threshold reached
-	const batchThreshold = 50
-	if len(s.batchQueue) >= batchThreshold {
-		if s.batchTimer != nil {
-			s.batchTimer.Stop()
-			s.batchTimer = nil
-		}
-		req := batchRequest{
-			cmds:  s.batchQueue,
-			resps: s.batchResps,
-		}
-		s.batchQueue = make([]*LogCommand, 0)
-		s.batchResps = make([]chan interface{}, 0)
-		s.batchMu.Unlock()
-		s.batchApplyCh <- req
-	} else {
-		if s.batchTimer == nil {
-			s.batchTimer = time.AfterFunc(10*time.Millisecond, func() {
-				s.batchMu.Lock()
-				if s.batchTimer == nil {
-					// Timer was stopped by threshold trigger
-					s.batchMu.Unlock()
-					return
-				}
-				s.batchTimer = nil
-				if len(s.batchQueue) > 0 {
-					req := batchRequest{
-						cmds:  s.batchQueue,
-						resps: s.batchResps,
-					}
-					s.batchQueue = make([]*LogCommand, 0)
-					s.batchResps = make([]chan interface{}, 0)
-					s.batchMu.Unlock()
-					s.batchApplyCh <- req
-				} else {
-					s.batchMu.Unlock()
-				}
-			})
-		}
-		s.batchMu.Unlock()
-	}
-
-	// Wait for result
-	resp := <-respCh
-	if err, ok := resp.(error); ok && err != nil {
-		return nil, err
-	}
-	return resp, nil
-}
-
 func (s *Server) checkRaftSecret(r *http.Request) bool {
 	if s.raftSecret == "" {
 		return false // Fail closed
@@ -1862,6 +1847,198 @@ func (s *Server) checkRaftSecret(r *http.Request) bool {
 	provided := sha256.Sum256([]byte(r.Header.Get("X-Raft-Secret")))
 	expected := sha256.Sum256([]byte(s.raftSecret))
 	return subtle.ConstantTimeCompare(provided[:], expected[:]) == 1
+}
+
+func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/v1/admin/")
+	switch {
+	case path == "users" && r.Method == http.MethodGet:
+		s.handleClusterUsers(w, r)
+	case path == "nodes" && r.Method == http.MethodGet:
+		s.handleClusterNodes(w, r)
+	case path == "status" && r.Method == http.MethodGet:
+		s.handleClusterStatus(w, r)
+	case path == "lookup" && r.Method == http.MethodPost:
+		s.handleClusterLookup(w, r)
+	case path == "join" && r.Method == http.MethodPost:
+		s.handleClusterJoin(w, r)
+	case path == "remove" && r.Method == http.MethodPost:
+		s.handleClusterRemove(w, r)
+	case path == "node" && r.Method == http.MethodPost:
+		s.handleRegisterNode(w, r)
+	case path == "promote" && r.Method == http.MethodPost:
+		s.handleAdminPromote(w, r)
+	default:
+		http.NotFound(w, r)
+	}
+}
+
+func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, successStatus int) {
+	b, err := json.Marshal(data)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+
+	// E2EE?
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(ctxUser, b)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(successStatus)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(successStatus)
+	w.Write(b)
+}
+
+func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
+	var users []User
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("users"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var u User
+			if err := json.Unmarshal(v, &u); err == nil {
+				users = append(users, u)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, r, users, http.StatusOK)
+}
+
+func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
+	var nodes []Node
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				nodes = append(nodes, n)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, r, nodes, http.StatusOK)
+}
+
+func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	secret, err := s.fsm.GetClusterSecret()
+	if err != nil {
+		http.Error(w, "cluster secret unavailable", http.StatusInternalServerError)
+		return
+	}
+
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte(req.Email))
+	hash := hex.EncodeToString(mac.Sum(nil))
+
+	s.writeJSON(w, r, map[string]string{"id": hash}, http.StatusOK)
+}
+
+func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
+	if s.raft.State() != raft.Leader {
+		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	f := s.raft.RemoveServer(raft.ServerID(req.ID), 0, 0)
+	if err := f.Error(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
+	if s.raft.State() != raft.Leader {
+		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	var req struct {
+		ID      string `json:"id"`
+		Address string `json:"address"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// 1. Add to Raft
+	f := s.raft.AddVoter(raft.ServerID(req.ID), raft.ServerAddress(req.Address), 0, 0)
+	if err := f.Error(); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Register/Update Node metadata in FSM
+	// We might not have full metadata here, but we can at least ensure it's in the registry
+	var node Node
+	s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		v := b.Get([]byte(req.ID))
+		if v != nil {
+			json.Unmarshal(v, &node)
+		}
+		return nil
+	})
+
+	if node.ID == "" {
+		node.ID = req.ID
+		node.Status = NodeStatusActive
+	} else if node.Address == "" {
+		// If we had a partial record, keep it?
+		// Actually, heartbeat will set it.
+	}
+	// Update Raft address if changed (e.g. dynamic port)
+	node.RaftAddress = req.Address
+
+	data, _ := json.Marshal(node)
+	s.ApplyRaftCommandRaw(w, r, CmdRegisterNode, data, http.StatusOK)
+}
+
+func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	s.ApplyRaftCommandRaw(w, r, CmdPromoteAdmin, []byte(req.UserID), http.StatusOK)
 }
 
 func (s *Server) handleGetServerSignKey(w http.ResponseWriter, r *http.Request) {
@@ -2194,7 +2371,7 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	body, _ := json.Marshal(req)
-	s.applyCommandRaw(w, r, CmdAcquireLeases, body, http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdAcquireLeases, body, http.StatusOK)
 }
 
 func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
@@ -2219,5 +2396,5 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 	req.OwnerID = sessionToken
 	req.UserID = user.ID
 	body, _ := json.Marshal(req)
-	s.applyCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
+	s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
 }

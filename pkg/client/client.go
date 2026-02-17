@@ -548,9 +548,13 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 	if len(nodes) > 1 {
 		var replicas []string
 		for _, n := range nodes[1:] {
-			replicas = append(replicas, n.Address)
+			if n.Address != "" {
+				replicas = append(replicas, n.Address)
+			}
 		}
-		url += "?replicas=" + strings.Join(replicas, ",")
+		if len(replicas) > 0 {
+			url += "?replicas=" + strings.Join(replicas, ",")
+		}
 	}
 
 	return c.withRetry(context.Background(), func() error {
@@ -2246,50 +2250,61 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 		worldReadOld := (oldMode & 0004) != 0
 		worldReadNew := (newMode & 0004) != 0
 
-		groupRWOld := (oldMode & 0060) != 0
 		groupRWNew := (newMode & 0060) != 0
 
 		groupChanged := oldGroupID != newGroupID
 
 		updated := false
-		if worldReadOld != worldReadNew {
+		// 1.1 World Access
+		worldInLockbox := false
+		if _, exists := inode.Lockbox[metadata.WorldID]; exists {
+			worldInLockbox = true
+		}
+
+		if worldReadNew != worldInLockbox || (worldReadNew && worldReadOld != worldReadNew) {
 			if worldReadNew {
 				wpk, err := c.GetWorldPublicKey()
-				if err != nil {
-					return err
-				}
-				if err := inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key); err != nil {
-					return err
+				if err == nil {
+					if err := inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key); err == nil {
+						updated = true
+					}
+				} else {
+					log.Printf("SetAttr: failed to get world public key: %v", err)
 				}
 			} else {
 				delete(inode.Lockbox, metadata.WorldID)
+				updated = true
 			}
-			updated = true
 		}
 
-		// Handle Group Access Synchronization
-		if groupChanged || groupRWOld != groupRWNew {
-			// If group changed or was removed, delete the OLD recipient from the lockbox
-			if oldGroupID != "" {
+		// 1.2 Group Access
+		groupInLockbox := false
+		if _, exists := inode.Lockbox[newGroupID]; exists {
+			groupInLockbox = true
+		}
+
+		if (groupChanged || groupRWNew != groupInLockbox) && groupRWNew {
+			// If group changed, remove OLD
+			if groupChanged && oldGroupID != "" {
 				delete(inode.Lockbox, oldGroupID)
 				updated = true
 			}
 
-			// If we HAVE a new group and the new mode allows group access, add it
-			if newGroupID != "" && groupRWNew {
+			// Add NEW
+			if newGroupID != "" {
 				group, err := c.GetGroup(newGroupID)
-				if err != nil {
-					return fmt.Errorf("failed to fetch new group info: %w", err)
+				if err == nil {
+					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+					if err == nil {
+						if err := inode.Lockbox.AddRecipient(newGroupID, gpk, key); err == nil {
+							updated = true
+						}
+					}
 				}
-				gk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				if err != nil {
-					return fmt.Errorf("failed to unmarshal group public key: %w", err)
-				}
-				if err := inode.Lockbox.AddRecipient(newGroupID, gk, key); err != nil {
-					return err
-				}
-				updated = true
 			}
+		} else if !groupRWNew && groupInLockbox {
+			delete(inode.Lockbox, newGroupID)
+			updated = true
 		}
 
 		if updated {
@@ -2588,6 +2603,221 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 		}
 
 		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
+func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
+	var users []metadata.User
+	err := c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/users", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-DistFS-Sealed", "true") // Required
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&users)
+	})
+	return users, err
+}
+
+func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
+	var nodes []metadata.Node
+	err := c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/nodes", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-DistFS-Sealed", "true") // Required
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&nodes)
+	})
+	return nodes, err
+}
+
+func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
+	var status map[string]interface{}
+	err := c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/status", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-DistFS-Sealed", "true") // Required
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&status)
+	})
+	return status, err
+}
+
+func (c *Client) AdminLookup(ctx context.Context, email string) (string, error) {
+	payload, _ := json.Marshal(map[string]string{"email": email})
+	var result struct {
+		ID string `json:"id"`
+	}
+	err := c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/lookup", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, payload); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&result)
+	})
+	return result.ID, err
+}
+
+func (c *Client) AdminPromote(ctx context.Context, userID string) error {
+	payload, _ := json.Marshal(map[string]string{"user_id": userID})
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/promote", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, payload); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
+func (c *Client) AdminJoinNode(ctx context.Context, id, address string) error {
+	payload, _ := json.Marshal(map[string]string{"id": id, "address": address})
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/join", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, payload); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
 		if err != nil {
 			return err
 		}

@@ -24,6 +24,9 @@ wget -qO- --header "X-Raft-Secret: supersecret" --post-data "" http://storage-no
 echo "Waiting for cluster to detect failure..."
 sleep 5
 
+echo "Verifying cluster state via Admin CLI..."
+echo "q" | distfs -use-pinentry=false admin
+
 echo "Verifying file is STILL readable from remaining nodes..."
 distfs -use-pinentry=false get /ha/ha-test.bin /tmp/ha-back.txt
 if grep -q "ha-resilience-data" /tmp/ha-back.txt; then

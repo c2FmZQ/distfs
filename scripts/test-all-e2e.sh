@@ -21,6 +21,26 @@ run_test() {
 echo "Starting Unified E2E Test Suite..."
 sleep 2
 
+# GLOBAL SETUP: Create Admin and make root world-writable
+echo "PERFORMING GLOBAL SETUP..."
+MAX_RETRIES=30
+COUNT=0
+while true; do
+    JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
+    if distfs -use-pinentry=false init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
+        break
+    fi
+    COUNT=$((COUNT + 1))
+    if [ $COUNT -ge $MAX_RETRIES ]; then
+        echo "GLOBAL SETUP FAILED: Could not initialize admin"
+        exit 1
+    fi
+    sleep 2
+done
+
+distfs -use-pinentry=false chmod 0777 /
+echo "GLOBAL SETUP COMPLETE."
+
 FAILED=0
 
 run_test "Core CLI E2E" "/bin/test-e2e.sh" || FAILED=1

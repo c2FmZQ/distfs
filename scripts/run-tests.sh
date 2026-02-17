@@ -37,9 +37,11 @@ echo "Cleaning up Docker environment..."
 docker compose down -v --remove-orphans > /dev/null 2>&1
 
 # 4. Run E2E Tests & Benchmarks
-echo "Starting E2E and FUSE tests..."
+echo "Starting E2E and FUSE tests (15m timeout)..."
 # Capture all output
-docker compose up --build --exit-code-from e2e-runner > /tmp/all-logs.log 2>&1 || E2E_FAILED=1
+if ! timeout 15m docker compose up --build --exit-code-from e2e-runner > /tmp/all-logs.log 2>&1; then
+    E2E_FAILED=1
+fi
 
 # Extract clean logs from the e2e-runner service
 docker compose logs --no-color --no-log-prefix e2e-runner > /tmp/e2e-runner.log 2>&1 || true

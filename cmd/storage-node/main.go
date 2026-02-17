@@ -199,20 +199,22 @@ func main() {
 	publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 	publicMux.Handle("/v1/meta/key", metaServer)
 	publicMux.Handle("/v1/node", metaServer)
+	publicMux.Handle("/v1/health", metaServer)
 
 	publicMux.Handle("/v1/user/", metaServer)
 	publicMux.Handle("/v1/group/", metaServer)
 	publicMux.Handle("/v1/cluster/", metaServer)
 	publicMux.Handle("/v1/auth/", metaServer)
 	publicMux.Handle("/v1/login", metaServer)
-	publicMux.Handle("/v1/data/", dataServer)    // Data access
-	publicMux.Handle("/api/cluster", metaServer) // Dashboard & Management
-	publicMux.Handle("/api/cluster/", metaServer)
+	publicMux.Handle("/v1/admin/", metaServer)
+	publicMux.Handle("/v1/data/", dataServer) // Data access
 	publicMux.Handle("/api/debug/", metaServer)
 
 	// 6. Internal Router (Cluster)
 	clusterMux := http.NewServeMux()
-	clusterMux.Handle("/v1/node", metaServer)     // Registration
+	clusterMux.Handle("/v1/node", metaServer) // Registration
+	clusterMux.Handle("/v1/health", metaServer)
+	clusterMux.Handle("/v1/admin/", metaServer)
 	clusterMux.Handle("/v1/cluster/", metaServer) // Management
 	clusterMux.Handle("/v1/meta/", metaServer)
 	clusterMux.Handle("/v1/user/", metaServer)  // Forwarded writes
@@ -268,8 +270,8 @@ func main() {
 				if rn.ClientTLSConfig != nil {
 					protocol = "https"
 				}
-				// Use 127.0.0.1 instead of localhost to avoid IPv6 resolution issues
-				target := protocol + "://127.0.0.1:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
+				// Use 0.0.0.0 instead of 127.0.0.1 to avoid Docker resolution issues
+				target := protocol + "://0.0.0.0:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
 
 				req, _ := http.NewRequest("POST", target, bytes.NewReader(body))
 				req.Header.Set("Content-Type", "application/json")

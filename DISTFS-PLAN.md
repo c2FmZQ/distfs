@@ -453,4 +453,27 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Automatically release all leases owned by a session if its heartbeat times out or the session is revoked.
     *   **Action:** Add a "Lease" view to the operator dashboard.
 
+---
+
+## Phase 30: Admin CUI & Individual Authorization
+**Goal:** Transition cluster management to an individually authorized, PQC-powered Command-line User Interface (CUI).
+
+*   **Step 30.1: Admin Bucket & Authorization**
+    *   **Action:** Add `admins` bucket to BoltDB FSM.
+    *   **Action:** Implement `CmdPromoteAdmin` Raft command.
+    *   **Action:** Update `CmdCreateUser` logic to automatically add the first-ever registered user to the `admins` bucket (Bootstrap).
+    *   **Action:** Implement `isAdmin(userID)` check in the Metadata Server.
+*   **Step 30.2: Sealed Admin API**
+    *   **Action:** Implement `/v1/admin/*` endpoint prefix.
+    *   **Action:** Enforce mandatory **SealedRequests** and verify admin status for all endpoints in this group.
+    *   **Action:** Port existing dashboard functions (Users, Nodes, Stats, Lookup, Join/Remove) to this new authenticated API.
+*   **Step 30.3: Admin CUI (`distfs admin`)**
+    *   **Action:** Implement the Elm-style CUI loop using **Charmbracelet Bubble Tea**.
+    *   **Action:** Create a multi-tab interface (Overview, Users, Nodes, Tools).
+    *   **Action:** Use **Lip Gloss** for a polished, modern terminal aesthetic.
+    *   **Action:** Implement real-time polling for cluster status and usage metrics.
+*   **Step 30.4: Legacy Cleanup**
+    *   **Action:** Remove `dashboard.go` and the `ui/` directory.
+    *   **Action:** Deprecate the shared `X-Raft-Secret` auth mechanism in favor of individual PQC signatures.
+
 

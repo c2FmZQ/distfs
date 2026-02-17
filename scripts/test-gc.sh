@@ -16,6 +16,7 @@ echo "Deleting file..."
 distfs -use-pinentry=false rm /gc/trash.txt
 
 echo "Waiting for background GC..."
-wget -qO- --header "X-Raft-Secret: supersecret" http://storage-node-1:8080/api/cluster/nodes
+# Use admin CLI to check status (proves we are authenticated and authorized)
+echo "q" | distfs -use-pinentry=false admin
 
 echo "GC E2E Logic Verified (Script Scaffolded)"

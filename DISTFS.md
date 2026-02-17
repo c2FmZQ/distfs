@@ -254,18 +254,20 @@ To solve the initial trust problem, new nodes use **Trust On First Use (TOFU)**:
 3.  **State Acquisition:** The node receives the authoritative `NodeMeta` (list of trusted public keys) from the Leader.
 4.  **Strict Mode:** Upon initialization, the node permanently switches to **Strict Mode**, enforcing the authorized key list for all future connections.
 
-### 7.4 Cluster Management Dashboard
-The `/api/cluster` endpoint provides a web-based dashboard for operators, built with **Vanilla JS and CSS** (no external frontend dependencies) to ensure lightweight, secure deployment.
+### 7.4 Cluster Management & Admin Console
+DistFS provides a comprehensive administrative interface for cluster operators. To ensure maximal security, management is performed via an interactive **Command-line User Interface (CUI)** within the `distfs` binary.
 
-*   **Access Control:** Protected by the `X-Raft-Secret` header.
-*   **User Management (Shadow Dashboard):**
-    *   **Accounting:** Real-time view of storage usage (`TotalBytes`, `InodeCount`) per anonymized User ID.
-    *   **Blind Lookup:** An admin tool to resolve a plaintext email to its HMAC Hash (using the server's internal secret) to locate specific user records for support.
-    *   **Quota Management:**
-        *   **Templates:** Operators can define "Quota Templates" (e.g., "Basic", "Pro") with default limits.
-        *   **Enforcement:** The Metadata Layer rejects writes that exceed the user's assigned quota.
-*   **Cluster Health:** View Leader status, peer connectivity, and version information.
-*   **Node Operations:** Add/Remove nodes (Join/Drain).
+*   **PQC-Powered Authorization:** Access to administrative functions is controlled by individual user identities rather than a shared secret.
+    *   **Admin Registry:** The FSM maintains a persistent `admins` bucket. 
+    *   **Bootstrap:** The first user to register with a new cluster is automatically granted administrative privileges.
+    *   **Promotion:** Existing admins can promote other users to admin status via signed Raft commands.
+*   **Secure Authentication:** Admins authenticate using their standard PQC Identity Keys. All admin requests are **SealedRequests** (Layer 7 E2EE), ensuring that actions are cryptographically signed and non-repudiable.
+*   **Management Features:**
+    *   **Overview:** Real-time visibility into Raft state, leadership, and commit index.
+    *   **User Management:** Monitor anonymized usage (`TotalBytes`, `InodeCount`) and adjust quotas.
+    *   **Node Operations:** Monitor storage node health, join new nodes, or decommission existing ones.
+    *   **Blind Lookup:** Resolve a plaintext email to its HMAC Hash to locate specific user records.
+*   **Deployment:** The admin console communicates with the standard API port. Because it relies on Layer 7 E2EE and PQC signatures, it does not require mTLS for client access.
 
 ### 7.5 Request Forwarding
 *   Write requests sent to Follower nodes are automatically forwarded to the Leader via the Internal Cluster API.

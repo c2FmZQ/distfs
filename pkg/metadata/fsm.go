@@ -59,7 +59,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -161,6 +161,7 @@ const (
 	CmdBatch           CommandType = 21
 	CmdAcquireLeases   CommandType = 22
 	CmdReleaseLeases   CommandType = 23
+	CmdPromoteAdmin    CommandType = 24
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -321,6 +322,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeAcquireLeases(tx, data)
 	case CmdReleaseLeases:
 		return fsm.executeReleaseLeases(tx, data)
+	case CmdPromoteAdmin:
+		return fsm.executePromoteAdmin(tx, data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -478,9 +481,16 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 
 	ub := tx.Bucket([]byte("users"))
 	idx := tx.Bucket([]byte("uids"))
+	ab := tx.Bucket([]byte("admins"))
 
 	if ub.Get([]byte(user.ID)) != nil {
 		return ErrExists
+	}
+
+	// Bootstrap: First user is admin
+	isFirst := false
+	if stats := ub.Stats(); stats.KeyN == 0 {
+		isFirst = true
 	}
 
 	// Allocate unique UID if not provided or 0
@@ -513,7 +523,36 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 	if err := idx.Put(uint32ToBytes(user.UID), []byte(user.ID)); err != nil {
 		return err
 	}
+
+	if isFirst {
+		if err := ab.Put([]byte(user.ID), []byte("true")); err != nil {
+			return err
+		}
+	}
+
 	return &user
+}
+
+func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{} {
+	userID := string(data)
+	ub := tx.Bucket([]byte("users"))
+	if ub.Get([]byte(userID)) == nil {
+		return ErrNotFound
+	}
+	ab := tx.Bucket([]byte("admins"))
+	return ab.Put([]byte(userID), []byte("true"))
+}
+
+func (fsm *MetadataFSM) IsAdmin(userID string) bool {
+	isAdmin := false
+	_ = fsm.db.View(func(tx *bolt.Tx) error {
+		ab := tx.Bucket([]byte("admins"))
+		if ab.Get([]byte(userID)) != nil {
+			isAdmin = true
+		}
+		return nil
+	})
+	return isAdmin
 }
 
 func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{} {

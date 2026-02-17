@@ -18,7 +18,7 @@ echo "Waiting for cluster leader..."
 COUNT=0
 LEADER_URL=""
 while true; do
-  STATUS=$(wget -qO- --timeout=2 --header "X-Raft-Secret: supersecret" http://storage-node-1:8080/v1/cluster/status 2>&1 || true)
+  STATUS=$(wget -qO- --timeout=2 http://storage-node-1:8080/v1/health 2>&1 || true)
   echo "DEBUG STATUS: $STATUS"
   if echo "$STATUS" | grep -q '"state":"Leader"'; then
     echo "storage-node-1 is Leader"
@@ -40,13 +40,13 @@ while true; do
   sleep 1
 done
 
-echo "Joining nodes to cluster..."
+echo "Joining nodes to cluster via Admin CLI..."
 
 # Fetch Node 2 ID with retry
 COUNT=0
 NODE2_ID=""
 while [ -z "$NODE2_ID" ]; do
-  NODE2_STATUS=$(wget -qO- --timeout=2 --header "X-Raft-Secret: supersecret" http://storage-node-2:8080/v1/cluster/status 2>&1 || true)
+  NODE2_STATUS=$(wget -qO- --timeout=2 http://storage-node-2:8080/v1/health 2>&1 || true)
   NODE2_ID=$(echo "$NODE2_STATUS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [ -n "$NODE2_ID" ]; then break; fi
   echo "Waiting for Node 2 ID... ($NODE2_STATUS)"
@@ -58,7 +58,9 @@ echo "Node 2 ID: $NODE2_ID"
 
 COUNT=0
 while true; do
-  if wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data "{\"id\":\"$NODE2_ID\",\"address\":\"storage-node-2:5000\"}" $LEADER_URL/api/cluster/join > /dev/null 2>&1; then
+  # Use Client to join node via admin API
+  echo "DEBUG: Joining node-2..."
+  if distfs -use-pinentry=false admin-join "$NODE2_ID" "storage-node-2:5000"; then
     echo "node-2 joined"
     break
   fi
@@ -72,7 +74,7 @@ done
 COUNT=0
 NODE3_ID=""
 while [ -z "$NODE3_ID" ]; do
-  NODE3_STATUS=$(wget -qO- --timeout=2 --header "X-Raft-Secret: supersecret" http://storage-node-3:8080/v1/cluster/status 2>&1 || true)
+  NODE3_STATUS=$(wget -qO- --timeout=2 http://storage-node-3:8080/v1/health 2>&1 || true)
   NODE3_ID=$(echo "$NODE3_STATUS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
   if [ -n "$NODE3_ID" ]; then break; fi
   echo "Waiting for Node 3 ID... ($NODE3_STATUS)"
@@ -84,7 +86,8 @@ echo "Node 3 ID: $NODE3_ID"
 
 COUNT=0
 while true; do
-  if wget -qO- --timeout=5 --header "X-Raft-Secret: supersecret" --post-data "{\"id\":\"$NODE3_ID\",\"address\":\"storage-node-3:5000\"}" $LEADER_URL/api/cluster/join > /dev/null 2>&1; then
+  echo "DEBUG: Joining node-3..."
+  if distfs -use-pinentry=false admin-join "$NODE3_ID" "storage-node-3:5000"; then
     echo "node-3 joined"
     break
   fi
@@ -96,14 +99,6 @@ done
 
 echo "Waiting for cluster stability..."
 sleep 5
-
-if [ ! -f /root/.distfs/config.json ]; then
-  echo "Initializing and Registering User (Unified)..."
-  JWT=$(wget -qO- "http://test-auth:8080/mint?email=test@example.com")
-  distfs -use-pinentry=false init --new -server $LEADER_URL -jwt "$JWT"
-  echo "Making root world-writable for concurrent tests..."
-  distfs -use-pinentry=false chmod 0777 /
-fi
 
 echo "Creating directory..."
 distfs -use-pinentry=false mkdir /testdir || echo "testdir already exists"

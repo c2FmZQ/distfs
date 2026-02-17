@@ -107,11 +107,12 @@ The client implements **Hedged Requests** for data retrieval. It initiates a fet
 Onboarding is handled via an OIDC Device Flow. The client authenticates with a federated provider, initializes its PQC keys, and performs a zero-knowledge backup of its configuration to the metadata cluster, enabling seamless multi-device usage.
 
 ### 7.2 Cluster Management
-A web-based dashboard, built with vanilla JavaScript and protected by mTLS and a cluster secret, provides real-time visibility into:
-*   Raft cluster health and leadership.
-*   Node capacity and usage.
-*   Anonymized user accounting and quota enforcement.
-*   Lease state.
+Cluster administration is performed via an interactive, PQC-powered **Command-line User Interface (CUI)** within the `distfs` CLI. To ensure high security and non-repudiation, management does not rely on a shared secret.
+
+*   **Individual Authorization:** Access to administrative endpoints (`/v1/admin/*`) is restricted to users present in the FSM's `admins` bucket.
+*   **Bootstrap Logic:** The first user to register with a new cluster is automatically designated as the initial administrator.
+*   **Auditability:** Every administrative action is a **SealedRequest** cryptographically signed by the admin's PQC identity key, providing a permanent, verifiable audit trail within the Raft log.
+*   **Visibility:** The console provides real-time visibility into Raft consensus health, storage node utilization, anonymized user accounting, and lease states.
 
 ---
-*This document reflects the implementation as of Phase 29. For upcoming features and the long-term roadmap, see [DISTFS-PLAN.md](DISTFS-PLAN.md).*
+*This document reflects the implementation as of Phase 30. For upcoming features and the long-term roadmap, see [DISTFS-PLAN.md](DISTFS-PLAN.md).*

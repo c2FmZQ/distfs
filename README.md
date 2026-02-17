@@ -126,11 +126,16 @@ New nodes must be registered using their public identity key and the cluster sec
   --raft-secret <cluster-secret>
 ```
 
-### 6.4 Management Dashboard
-The cluster provides a lightweight, dependency-free dashboard at `/api/cluster` (requires `X-Raft-Secret` header or session auth). It provides visibility into:
+### 6.4 Management CLI
+The cluster provides an interactive, PQC-powered administrative console within the `distfs` binary.
+```bash
+./distfs admin
+```
+Access is individually authorized based on the user's registered identity. The first registered user automatically becomes the cluster administrator. The console provides visibility into:
 *   Raft replication state and leadership.
-*   Cluster-wide storage utilization.
-*   Anonymized user accounting and active leases.
+*   Anonymized user inventory and storage accounting.
+*   Storage node health and liveness.
+*   Privacy-preserving "Blind Lookup" for user IDs.
 
 ---
 

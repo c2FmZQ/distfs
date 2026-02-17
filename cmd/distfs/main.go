@@ -70,6 +70,10 @@ func main() {
 		cmdGroupCreate(args)
 	case "group-add":
 		cmdGroupAdd(args)
+	case "admin":
+		cmdAdmin(args)
+	case "admin-join":
+		cmdAdminJoin(args)
 	default:
 		usage()
 	}
@@ -88,6 +92,8 @@ func usage() {
 	fmt.Println("  group-add <group_id> <user_id>  Add user to group")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
+	fmt.Println("  admin                           Open interactive cluster management console")
+	fmt.Println("  admin-join <id> <addr>          Add a node to the cluster")
 	os.Exit(1)
 }
 
