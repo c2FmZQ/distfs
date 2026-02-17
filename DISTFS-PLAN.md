@@ -481,4 +481,27 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement `distfs admin-chown <email> <path>` and `distfs admin-chmod <mode> <path>` commands.
     *   **Action:** Ensure the CLI prints explicit warnings regarding Zero-Knowledge data access limitations.
 
+---
+
+## Phase 31: Manifest Signing & Integrity
+**Goal:** Implement cryptographic attribution and authorization for file metadata.
+
+*   **Step 31.1: Group ML-DSA Keys**
+    *   **Action:** Update `Group` struct to include `SignKey` (Public) and `EncryptedSignKey` (Wrapped Private).
+    *   **Action:** Update `CreateGroup` to generate ML-DSA signing pair.
+    *   **Action:** Update `AddUserToGroup` to wrap the group signing key for the new member.
+*   **Step 31.2: Inode Signature Fields**
+    *   **Action:** Add `SignerID`, `UserSig`, and `GroupSig` to the `Inode` struct.
+    *   **Action:** Add `AuthorizedSigners` list to Inodes (Owner by default).
+*   **Step 31.3: Client-side Dual Signing**
+    *   **Action:** Implement `ChunkManifest` hashing.
+    *   **Action:** Update `UpdateInode` to sign the hash with the User's Identity Key.
+    *   **Action:** If in a group context, also sign with the Group Signing Key.
+*   **Step 31.4: Client-side Verification**
+    *   **Action:** Update `UnlockInode` or `Open` to verify both signatures against the manifest.
+    *   **Action:** Reject files with mismatched or unauthorized signatures.
+*   **Step 31.5: Prohibition of World-Writable**
+    *   **Action:** Update `MetadataServer` to explicitly reject any mutation that attempts to set the `Other-Write` bit (0002).
+    *   **Action:** Update `FSM` validation logic to ignore world-write bits during apply.
+
 

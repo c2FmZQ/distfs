@@ -98,33 +98,37 @@ This layer implements a distributed consensus architecture using the Raft protoc
 ### 4.1 State Machine (FSM)
 The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
-    *   `ID` (HMAC Hash)
-    *   `UID` (POSIX UID)
-    *   `Keys` (Sign/Enc)
-    *   `Usage` (Struct: `TotalBytes`, `InodeCount`)
-    *   `Quota` (Struct: `MaxBytes`, `MaxInodes`)
+    *   `HMAC(email) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
+*   **Group Structure:**
+    *   `UUID -> {GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox}`.
 *   **Inode Structure:**
-    *   `ID` (UUID)
-    *   `Type` (File | Directory)
-    *   `ParentID` (UUID)
-    *   `OwnerID` (HMAC Hash)
-    *   `GroupID` (UUID)
-    *   `Mode` (Unix Permission Bits, e.g., 0755)
-    *   `Size` (File size in bytes)
-    *   `EncryptedName` ([]byte)
-    *   `Lockbox` (Map[ID] -> EncryptedKey)
-    *   `Version` (Lamport Clock / Raft Index)
+    *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, UserSig, GroupSig}`.
 *   **Directory Structure:** The Metadata Layer MUST know the file system hierarchy to enforce permissions and perform Garbage Collection.
     *   **Directory Inodes:** Store a list of children: `EncryptedName -> InodeID`. This allows traversal and GC traversing without knowing plaintext names.
     *   **File Inodes:** Store `ChunkManifest` (List of Chunk IDs + DataNode locations).
     *   **Garbage Collection:** Orphaned Inodes and Chunks (not referenced by any live Inode) are garbage collected.
 
-### 4.2 Persistence & Snapshots
+### 4.2 Metadata Integrity & Attribution
+DistFS ensures the integrity of file metadata (chunk manifests) using **Dual-Signature Authorization**. This prevents a compromised Metadata Server from silently modifying file contents or rolling back to old versions.
+
+*   **Individual Attribution (UserSig):** Every manifest update is signed by the writer's PQC Identity Key (ML-DSA). This provides non-repudiable proof of *who* modified the file.
+*   **Group Authorization (GroupSig):** If a file is modified in a group context, it is also signed with the **Group Signing Key**. This proves the writer was an authorized member of the group at the time of the write.
+*   **Verification:** Readers verify both signatures before processing data chunks. If the signatures do not match the current manifest, the client rejects the file as tampered.
+
+### 4.3 Permissions Model
+DistFS follows a strict subset of POSIX permissions designed for Zero-Knowledge security:
+
+*   **Owner:** Full `rwx` support.
+*   **Group:** Full `rwx` support via shared cryptographic keys.
+*   **Other (World):** Strictly **Read-Only** or **None**.
+    *   **Prohibition:** The "Write" bit for 'Other' (0002) is strictly prohibited. The Metadata Server will reject any `chmod` or `mkdir` request that attempts to grant world-write access. Verifiable integrity cannot be maintained for anonymous writers.
+
+### 4.4 Persistence & Snapshots
 *   **Engine:** Hashicorp Raft with BoltDB.
 *   **Snapshot Strategy:** Use `MetadataSnapshot` (Streaming BoltDB).
     *   **Fast Startup:** `NoSnapshotRestoreOnStart = true`. MetaNodes rely on disk persistence and only replay trailing logs on startup to ensure fast recovery.
 
-### 4.3 Consistency
+### 4.5 Consistency
 *   All metadata changes (Create, Delete, Share, Append) go through the Raft Leader.
 *   Reads can be served by Followers with `Index` verification (Read-Index) for scalability.
 
