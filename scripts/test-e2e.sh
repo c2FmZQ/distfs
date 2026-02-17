@@ -44,9 +44,9 @@ echo "Joining nodes to cluster via Admin CLI..."
 
 COUNT=0
 while true; do
-  # Use Client to join node via admin API (discovery address)
+  # Use Client to join node via admin API (discovery via internal cluster address)
   echo "DEBUG: Joining node-2..."
-  if distfs -use-pinentry=false admin-join "http://storage-node-2:8080"; then
+  if distfs -use-pinentry=false admin-join "https://storage-node-2:9090"; then
     echo "node-2 joined"
     break
   fi
@@ -59,7 +59,7 @@ done
 COUNT=0
 while true; do
   echo "DEBUG: Joining node-3..."
-  if distfs -use-pinentry=false admin-join "http://storage-node-3:8080"; then
+  if distfs -use-pinentry=false admin-join "https://storage-node-3:9090"; then
     echo "node-3 joined"
     break
   fi

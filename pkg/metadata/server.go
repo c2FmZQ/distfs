@@ -17,11 +17,13 @@ package metadata
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -60,7 +62,8 @@ type Server struct {
 
 	raftSecret string
 
-	httpClient *http.Client
+	httpClient          *http.Client
+	discoveryHTTPClient *http.Client
 
 	challengeCache map[string]challengeEntry // Base64(Challenge) -> Entry
 	challengeMu    sync.Mutex
@@ -123,7 +126,27 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		signKey:    signKey,
 		raftSecret: raftSecret,
 		httpClient: &http.Client{
+			Transport: &http.Transport{
+				TLSClientConfig: clientTLSConfig,
+			},
 			Timeout: 10 * time.Second,
+		},
+		discoveryHTTPClient: &http.Client{Transport: &http.Transport{
+			TLSClientConfig: func() *tls.Config {
+				if clientTLSConfig == nil {
+					return nil
+				}
+				cfg := clientTLSConfig.Clone()
+				cfg.InsecureSkipVerify = true
+				cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+					// Always succeed the handshake during discovery, but we'll
+					// verify the key match in the handler.
+					return nil
+				}
+				return cfg
+			}(),
+		},
+			Timeout: 5 * time.Second,
 		},
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),
@@ -359,21 +382,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Node registration (Internal Heartbeat / Shared Secret)
-	if r.URL.Path == "/v1/node" || r.URL.Path == "/v1/node/info" {
+	if r.URL.Path == "/v1/node/info" {
 		if !s.checkRaftSecret(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		if r.URL.Path == "/v1/node/info" && r.Method == http.MethodGet {
-			s.handleNodeInfo(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
-			s.handleRegisterNode(w, r)
-			return
-		}
 		if r.Method == http.MethodGet {
-			s.handleGetNodes(w, r)
+			s.handleNodeInfo(w, r)
 			return
 		}
 	}
@@ -384,6 +399,21 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Mutation & Protected Routes
+	if r.URL.Path == "/v1/node" {
+		if r.Method == http.MethodPost {
+			if !s.checkRaftSecret(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+			s.handleRegisterNode(w, r)
+			return
+		}
+		if r.Method == http.MethodGet {
+			s.handleGetNodes(w, r)
+			return
+		}
+	}
+
 	if r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost {
 		s.handleRegisterUser(w, r)
 		return
@@ -1766,11 +1796,12 @@ func (s *Server) flushBatchLocked() {
 	s.batchResps = nil
 	s.batchTimer = nil
 
+	// Use blocking send to provide backpressure instead of 503 Busy
 	select {
 	case s.batchApplyCh <- batch:
-	default:
+	case <-s.stopCh:
 		for _, ch := range batch.resps {
-			ch <- fmt.Errorf("server busy")
+			ch <- fmt.Errorf("server stopping")
 		}
 	}
 }
@@ -2059,16 +2090,30 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 1. Discover node metadata via internal API
-	infoURL := req.Address + "/v1/node/info"
+	infoURL := strings.TrimSuffix(req.Address, "/") + "/v1/node/info"
 	discoveryReq, _ := http.NewRequest("GET", infoURL, nil)
 	discoveryReq.Header.Set("X-Raft-Secret", s.raftSecret)
 
-	resp, err := s.httpClient.Do(discoveryReq)
+	resp, err := s.discoveryHTTPClient.Do(discoveryReq)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("discovery failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+		http.Error(w, "discovery requires mTLS connection", http.StatusInternalServerError)
+		return
+	}
+
+	// Capture probed key from TLS Handshake
+	probedCert := resp.TLS.PeerCertificates[0]
+	probedEdKey, ok := probedCert.PublicKey.(ed25519.PublicKey)
+	if !ok {
+		http.Error(w, "probed peer key is not Ed25519", http.StatusInternalServerError)
+		return
+	}
+
 	if resp.StatusCode != http.StatusOK {
 		http.Error(w, fmt.Sprintf("discovery failed: status %d", resp.StatusCode), http.StatusInternalServerError)
 		return
@@ -2083,6 +2128,12 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		http.Error(w, "invalid discovery response", http.StatusInternalServerError)
+		return
+	}
+
+	// Cryptographic TOFU Match: Handshake Key must match reported Key
+	if !bytes.Equal(probedEdKey, info.PublicKey) {
+		http.Error(w, "CRITICAL: TOFU key mismatch (man-in-the-middle detected?)", http.StatusForbidden)
 		return
 	}
 

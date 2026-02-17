@@ -102,6 +102,12 @@ func main() {
 		log.Fatalf("failed to load node key: %v", err)
 	}
 
+	// 1.1 Load Sign Key (PQC)
+	signKey, err := loadOrGenerateSignKey(st)
+	if err != nil {
+		log.Fatalf("failed to init keys: %v", err)
+	}
+
 	// Finalize ID
 	derivedID := metadata.NodeIDFromKey(raftKey)
 	if *nodeID != "" && *nodeID != derivedID {
@@ -153,6 +159,7 @@ func main() {
 				break SecretInitLoop
 			case <-ticker.C:
 				if rn.Raft.State() == raft.Leader {
+					// 1. Initialize Secret if needed
 					_, err := rn.FSM.GetClusterSecret()
 					if err != nil {
 						log.Println("Initializing Cluster Secret...")
@@ -166,16 +173,28 @@ func main() {
 							log.Fatalf("failed to apply secret: %v", err)
 						}
 					}
+
+					// 2. Register self in FSM (seeds discovery for heartbeats)
+					log.Println("Registering bootstrap node in FSM...")
+					node := metadata.Node{
+						ID:             *nodeID,
+						Address:        *apiURL,
+						ClusterAddress: *clusterAdvertise,
+						RaftAddress:    *raftAdvertise,
+						Status:         metadata.NodeStatusActive,
+						PublicKey:      raftKey.Public(),
+						SignKey:        signKey.Public(),
+					}
+					nodeBytes, _ := json.Marshal(node)
+					cmd := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nodeBytes}
+					if err := rn.Raft.Apply(cmd.Marshal(), 5*time.Second).Error(); err != nil {
+						log.Fatalf("failed to register bootstrap node: %v", err)
+					}
+
 					break SecretInitLoop
 				}
 			}
 		}
-	}
-
-	// 3. Initialize Keys for API
-	signKey, err := loadOrGenerateSignKey(st)
-	if err != nil {
-		log.Fatalf("failed to init keys: %v", err)
 	}
 
 	// 4. Initialize Servers
@@ -265,7 +284,8 @@ func main() {
 
 		ticker := time.NewTicker(30 * time.Second)
 		for {
-			if rn.Raft.Leader() != "" {
+			leaderAddr, _ := rn.Raft.LeaderWithID()
+			if leaderAddr != "" {
 				node.LastHeartbeat = time.Now().Unix()
 				if c, u, err := store.Stats(); err == nil {
 					node.Capacity = c
@@ -273,24 +293,30 @@ func main() {
 				}
 				body, _ := json.Marshal(node)
 
-				protocol := "http"
-				if rn.ClientTLSConfig != nil {
-					protocol = "https"
-				}
-				// Use 0.0.0.0 instead of 127.0.0.1 to avoid Docker resolution issues
-				target := protocol + "://0.0.0.0:" + strings.Split(*clusterAddr, ":")[1] + "/v1/node"
-
-				req, _ := http.NewRequest("POST", target, bytes.NewReader(body))
-				req.Header.Set("Content-Type", "application/json")
-				if *raftSecret != "" {
-					req.Header.Set("X-Raft-Secret", *raftSecret)
+				// Find Leader's Cluster Address from FSM
+				var target string
+				nodes, _ := rn.FSM.GetNodes()
+				for _, n := range nodes {
+					if n.RaftAddress == string(leaderAddr) {
+						target = n.ClusterAddress
+						break
+					}
 				}
 
-				resp, err := hbClient.Do(req)
-				if err != nil {
-					log.Printf("Heartbeat failed to %s: %v", target, err)
-				} else if resp != nil {
-					resp.Body.Close()
+				if target != "" {
+					target = strings.TrimSuffix(target, "/") + "/v1/node"
+					req, _ := http.NewRequest("POST", target, bytes.NewReader(body))
+					req.Header.Set("Content-Type", "application/json")
+					if *raftSecret != "" {
+						req.Header.Set("X-Raft-Secret", *raftSecret)
+					}
+
+					resp, err := hbClient.Do(req)
+					if err != nil {
+						log.Printf("Heartbeat failed to %s: %v", target, err)
+					} else if resp != nil {
+						resp.Body.Close()
+					}
 				}
 			}
 			<-ticker.C
