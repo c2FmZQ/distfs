@@ -2096,6 +2096,19 @@ func (c *Client) GetGroup(id string) (*metadata.Group, error) {
 	return &group, nil
 }
 
+// GetGroupName retrieves and decrypts the human-readable name of a group.
+func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
+	gk, err := c.GetGroupPrivateKey(group.ID)
+	if err != nil {
+		return "", err
+	}
+	nameBytes, err := crypto.Unseal(group.EncryptedName, gk)
+	if err != nil {
+		return "", fmt.Errorf("failed to decrypt group name: %w", err)
+	}
+	return string(nameBytes), nil
+}
+
 // CreateGroup creates a new cryptographic group.
 func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	dk, _ := crypto.GenerateEncryptionKey()
@@ -2108,11 +2121,9 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 		return nil, err
 	}
 
-	// Encrypt Group Name using Group Key (DEM)
-	// Group private key is 64 bytes (mlkem), but DEM needs 32 bytes.
-	// We hash the private key to get a 32-byte symmetric key.
-	h := sha256.Sum256(priv)
-	encName, err := crypto.EncryptDEM(h[:], []byte(name))
+	// Encrypt Group Name using Group Key (Sealed)
+	// Anyone with the Group Private Key can decrypt this.
+	encName, err := crypto.Seal([]byte(name), dk.EncapsulationKey(), 0)
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt group name: %w", err)
 	}

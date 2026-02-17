@@ -213,3 +213,59 @@ func OpenResponse(clientSK *mlkem.DecapsulationKey768, serverPK []byte, sealed [
 
 	return ts, payload, nil
 }
+
+// Seal performs authenticated encryption of a payload for a recipient's public key.
+// It is intended for metadata like encrypted group names or keys.
+func Seal(payload []byte, recipientPK *mlkem.EncapsulationKey768, nonce int64) ([]byte, error) {
+	// 1. Encapsulate shared secret
+	sharedSecret, kemCT := Encapsulate(recipientPK)
+
+	// 2. Prepare inner: [Nonce][Payload]
+	// Using nonce for replay protection if needed by caller
+	inner := make([]byte, 8+len(payload))
+	binary.BigEndian.PutUint64(inner[0:8], uint64(nonce))
+	copy(inner[8:], payload)
+
+	// 3. Encrypt with shared secret (DEM)
+	demCT, err := EncryptDEM(sharedSecret, inner)
+	if err != nil {
+		return nil, fmt.Errorf("dem encrypt failed: %w", err)
+	}
+
+	// Result: [KEM CT][DEM CT]
+	result := make([]byte, len(kemCT)+len(demCT))
+	copy(result[0:len(kemCT)], kemCT)
+	copy(result[len(kemCT):], demCT)
+
+	return result, nil
+}
+
+// Unseal decrypts an authenticated payload using the recipient's private key.
+func Unseal(sealed []byte, recipientSK *mlkem.DecapsulationKey768) ([]byte, error) {
+	kemSize := mlkem.CiphertextSize768
+	if len(sealed) < kemSize {
+		return nil, fmt.Errorf("sealed data too short")
+	}
+
+	kemCT := sealed[:kemSize]
+	demCT := sealed[kemSize:]
+
+	// 1. Decapsulate shared secret
+	sharedSecret, err := recipientSK.Decapsulate(kemCT)
+	if err != nil {
+		return nil, fmt.Errorf("decapsulate failed: %w", err)
+	}
+
+	// 2. Decrypt DEM
+	inner, err := DecryptDEM(sharedSecret, demCT)
+	if err != nil {
+		return nil, fmt.Errorf("dem decrypt failed: %w", err)
+	}
+
+	if len(inner) < 8 {
+		return nil, fmt.Errorf("decrypted data too short")
+	}
+
+	// Return payload (ignoring nonce, as it's for caller to verify if needed)
+	return inner[8:], nil
+}
