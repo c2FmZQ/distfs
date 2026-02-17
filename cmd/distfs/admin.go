@@ -342,15 +342,15 @@ func cmdAdmin(args []string) {
 }
 
 func cmdAdminJoin(args []string) {
-	if len(args) < 2 {
-		log.Fatal("node_id and address required")
+	if len(args) < 1 {
+		log.Fatal("node address required (e.g. http://node-2:8080)")
 	}
-	id, address := args[0], args[1]
+	address := args[0]
 	c := loadClient()
-	if err := c.AdminJoinNode(context.Background(), id, address); err != nil {
+	if err := c.AdminJoinNode(context.Background(), address); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Node %s joined at %s\n", id, address)
+	fmt.Printf("Join request for %s submitted to cluster.\n", address)
 }
 
 func cmdAdminChown(args []string) {

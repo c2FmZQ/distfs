@@ -2800,8 +2800,8 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	})
 }
 
-func (c *Client) AdminJoinNode(ctx context.Context, id, address string) error {
-	payload, _ := json.Marshal(map[string]string{"id": id, "address": address})
+func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
+	payload, _ := json.Marshal(map[string]string{"address": address})
 	return c.withRetry(ctx, func() error {
 		c.acquire()
 		defer c.release()

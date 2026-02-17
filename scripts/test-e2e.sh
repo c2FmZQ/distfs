@@ -42,25 +42,11 @@ done
 
 echo "Joining nodes to cluster via Admin CLI..."
 
-# Fetch Node 2 ID with retry
-COUNT=0
-NODE2_ID=""
-while [ -z "$NODE2_ID" ]; do
-  NODE2_STATUS=$(wget -qO- --timeout=2 http://storage-node-2:8080/v1/health 2>&1 || true)
-  NODE2_ID=$(echo "$NODE2_STATUS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-  if [ -n "$NODE2_ID" ]; then break; fi
-  echo "Waiting for Node 2 ID... ($NODE2_STATUS)"
-  COUNT=$((COUNT + 1))
-  if [ $COUNT -ge 30 ]; then echo "Timeout fetching Node 2 ID"; exit 1; fi
-  sleep 1
-done
-echo "Node 2 ID: $NODE2_ID"
-
 COUNT=0
 while true; do
-  # Use Client to join node via admin API
+  # Use Client to join node via admin API (discovery address)
   echo "DEBUG: Joining node-2..."
-  if distfs -use-pinentry=false admin-join "$NODE2_ID" "storage-node-2:5000"; then
+  if distfs -use-pinentry=false admin-join "http://storage-node-2:8080"; then
     echo "node-2 joined"
     break
   fi
@@ -70,24 +56,10 @@ while true; do
   sleep 2
 done
 
-# Fetch Node 3 ID with retry
-COUNT=0
-NODE3_ID=""
-while [ -z "$NODE3_ID" ]; do
-  NODE3_STATUS=$(wget -qO- --timeout=2 http://storage-node-3:8080/v1/health 2>&1 || true)
-  NODE3_ID=$(echo "$NODE3_STATUS" | grep -o '"id":"[^"]*"' | head -1 | cut -d'"' -f4)
-  if [ -n "$NODE3_ID" ]; then break; fi
-  echo "Waiting for Node 3 ID... ($NODE3_STATUS)"
-  COUNT=$((COUNT + 1))
-  if [ $COUNT -ge 30 ]; then echo "Timeout fetching Node 3 ID"; exit 1; fi
-  sleep 1
-done
-echo "Node 3 ID: $NODE3_ID"
-
 COUNT=0
 while true; do
   echo "DEBUG: Joining node-3..."
-  if distfs -use-pinentry=false admin-join "$NODE3_ID" "storage-node-3:5000"; then
+  if distfs -use-pinentry=false admin-join "http://storage-node-3:8080"; then
     echo "node-3 joined"
     break
   fi

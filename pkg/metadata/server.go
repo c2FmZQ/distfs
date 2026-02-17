@@ -48,14 +48,19 @@ import (
 // Server is the HTTP server for the Metadata Node.
 // It handles client requests and coordinates with the Raft cluster.
 type Server struct {
-	nodeID string
-	raft   *raft.Raft
-	fsm    *MetadataFSM
-	jwks   *jwks.Remote
+	nodeID       string
+	apiURL       string
+	raftAddress  string
+	tlsPublicKey []byte
+	raft         *raft.Raft
+	fsm          *MetadataFSM
+	jwks         *jwks.Remote
 	// nodeKey removed - used for mTLS but not passed to Server for auth anymore
 	signKey *crypto.IdentityKey
 
 	raftSecret string
+
+	httpClient *http.Client
 
 	challengeCache map[string]challengeEntry // Base64(Challenge) -> Entry
 	challengeMu    sync.Mutex
@@ -111,12 +116,15 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	remote := jwks.NewRemote(retryClient, nil)
 
 	s := &Server{
-		nodeID:              nodeID,
-		raft:                r,
-		fsm:                 fsm,
-		jwks:                remote,
-		signKey:             signKey,
-		raftSecret:          raftSecret,
+		nodeID:     nodeID,
+		raft:       r,
+		fsm:        fsm,
+		jwks:       remote,
+		signKey:    signKey,
+		raftSecret: raftSecret,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),
 		sessionKeyCache:     make(map[string]sessionKeyEntry),
@@ -288,6 +296,32 @@ type contextKey string
 
 const userContextKey contextKey = "user"
 
+func (s *Server) SetRaftAddress(addr string) {
+	s.raftAddress = addr
+}
+
+func (s *Server) SetAPIURL(url string) {
+	s.apiURL = url
+}
+
+func (s *Server) SetTLSPublicKey(k []byte) {
+	s.tlsPublicKey = k
+}
+
+func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
+	info := map[string]interface{}{
+		"id":           s.nodeID,
+		"api_url":      s.apiURL,
+		"raft_address": s.raftAddress,
+		"public_key":   s.tlsPublicKey,
+	}
+	if s.signKey != nil {
+		info["sign_key"] = s.signKey.Public()
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(info)
+}
+
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Public Health
 	if r.URL.Path == "/v1/health" && r.Method == http.MethodGet {
@@ -325,12 +359,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Node registration (Internal Heartbeat / Shared Secret)
-	if r.URL.Path == "/v1/node" {
+	if r.URL.Path == "/v1/node" || r.URL.Path == "/v1/node/info" {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		if r.URL.Path == "/v1/node/info" && r.Method == http.MethodGet {
+			s.handleNodeInfo(w, r)
+			return
+		}
 		if r.Method == http.MethodPost {
-			if !s.checkRaftSecret(r) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
 			s.handleRegisterNode(w, r)
 			return
 		}
@@ -2013,42 +2051,66 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		ID      string `json:"id"`
-		Address string `json:"address"`
+		Address string `json:"address"` // Node API address (e.g. http://node-2:8080)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// 1. Add to Raft
-	f := s.raft.AddVoter(raft.ServerID(req.ID), raft.ServerAddress(req.Address), 0, 0)
+	// 1. Discover node metadata via internal API
+	infoURL := req.Address + "/v1/node/info"
+	discoveryReq, _ := http.NewRequest("GET", infoURL, nil)
+	discoveryReq.Header.Set("X-Raft-Secret", s.raftSecret)
+
+	resp, err := s.httpClient.Do(discoveryReq)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("discovery failed: %v", err), http.StatusInternalServerError)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		http.Error(w, fmt.Sprintf("discovery failed: status %d", resp.StatusCode), http.StatusInternalServerError)
+		return
+	}
+
+	var info struct {
+		ID          string `json:"id"`
+		APIURL      string `json:"api_url"`
+		RaftAddress string `json:"raft_address"`
+		PublicKey   []byte `json:"public_key"`
+		SignKey     []byte `json:"sign_key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		http.Error(w, "invalid discovery response", http.StatusInternalServerError)
+		return
+	}
+
+	// 2. Add to Raft
+	f := s.raft.AddVoter(raft.ServerID(info.ID), raft.ServerAddress(info.RaftAddress), 0, 0)
 	if err := f.Error(); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 2. Register/Update Node metadata in FSM
-	// We might not have full metadata here, but we can at least ensure it's in the registry
+	// 3. Register/Update Node metadata in FSM
 	var node Node
 	s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("nodes"))
-		v := b.Get([]byte(req.ID))
+		v := b.Get([]byte(info.ID))
 		if v != nil {
 			json.Unmarshal(v, &node)
 		}
 		return nil
 	})
 
-	if node.ID == "" {
-		node.ID = req.ID
-		node.Status = NodeStatusActive
-	} else if node.Address == "" {
-		// If we had a partial record, keep it?
-		// Actually, heartbeat will set it.
-	}
-	// Update Raft address if changed (e.g. dynamic port)
-	node.RaftAddress = req.Address
+	node.ID = info.ID
+	node.Status = NodeStatusActive
+	node.Address = info.APIURL
+	node.ClusterAddress = req.Address
+	node.RaftAddress = info.RaftAddress
+	node.PublicKey = info.PublicKey
+	node.SignKey = info.SignKey
 
 	data, _ := json.Marshal(node)
 	s.ApplyRaftCommandRaw(w, r, CmdRegisterNode, data, http.StatusOK)

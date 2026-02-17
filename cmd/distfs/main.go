@@ -97,7 +97,7 @@ func usage() {
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	fmt.Println("  admin                           Open interactive cluster management console")
-	fmt.Println("  admin-join <id> <addr>          Add a node to the cluster")
+	fmt.Println("  admin-join <addr>               Add a node to the cluster (discovered via address)")
 	fmt.Println("  admin-chown <email>[:<group>] <path> Override ownership (Admin only)")
 	fmt.Println("  admin-chmod <mode> <path>       Override permissions (Admin only)")
 	os.Exit(1)

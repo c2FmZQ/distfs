@@ -180,6 +180,9 @@ func main() {
 
 	// 4. Initialize Servers
 	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour)
+	metaServer.SetRaftAddress(*raftAdvertise)
+	metaServer.SetAPIURL(*apiURL)
+	metaServer.SetTLSPublicKey(raftKey.Public())
 	// DiskStore uses separate storage instance rooted at chunks/
 	chunkDir := filepath.Join(baseDir, "chunks")
 	if err := os.MkdirAll(chunkDir, 0700); err != nil {
@@ -199,6 +202,7 @@ func main() {
 	publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 	publicMux.Handle("/v1/meta/key", metaServer)
 	publicMux.Handle("/v1/node", metaServer)
+	publicMux.Handle("/v1/node/info", metaServer)
 	publicMux.Handle("/v1/health", metaServer)
 
 	publicMux.Handle("/v1/user/", metaServer)
@@ -213,6 +217,7 @@ func main() {
 	// 6. Internal Router (Cluster)
 	clusterMux := http.NewServeMux()
 	clusterMux.Handle("/v1/node", metaServer) // Registration
+	clusterMux.Handle("/v1/node/info", metaServer)
 	clusterMux.Handle("/v1/health", metaServer)
 	clusterMux.Handle("/v1/admin/", metaServer)
 	clusterMux.Handle("/v1/cluster/", metaServer) // Management
@@ -236,6 +241,8 @@ func main() {
 			ClusterAddress: clusterURL,
 			RaftAddress:    *raftAdvertise, // Raft address
 			Status:         metadata.NodeStatusActive,
+			PublicKey:      raftKey.Public(),
+			SignKey:        signKey.Public(),
 		}
 
 		// Wait for cluster ready

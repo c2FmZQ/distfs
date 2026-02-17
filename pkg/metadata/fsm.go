@@ -135,6 +135,17 @@ func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
 	return fsm.trusted[string(pubKey)]
 }
 
+func (fsm *MetadataFSM) IsTrustedBySig(data, sig []byte) bool {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	for k := range fsm.trusted {
+		if crypto.VerifySignature([]byte(k), data, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // CommandType identifies the type of operation in the Raft log.
 type CommandType uint8
 
@@ -468,8 +479,17 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 	}
 
 	fsm.mu.Lock()
-	fsm.trusted[string(node.PublicKey)] = true
+	if len(node.PublicKey) > 0 {
+		fsm.trusted[string(node.PublicKey)] = true
+	}
+	if len(node.SignKey) > 0 {
+		fsm.trusted[string(node.SignKey)] = true
+	}
 	fsm.mu.Unlock()
+
+	if len(node.PublicKey) > 0 || len(node.SignKey) > 0 {
+		fsm.saveTrustState()
+	}
 
 	b := tx.Bucket([]byte("nodes"))
 	encoded, err := json.Marshal(node)

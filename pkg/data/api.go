@@ -39,16 +39,17 @@ type Validator interface {
 type Server struct {
 	store      Store
 	metaPubKey []byte
+	fsm        *metadata.MetadataFSM
 	validator  Validator
 	client     *http.Client
 }
 
 // NewServer creates a new Data Node API server.
-func NewServer(store Store, metaPubKey []byte, validator Validator) *Server {
+func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM) *Server {
 	return &Server{
 		store:      store,
 		metaPubKey: metaPubKey,
-		validator:  validator,
+		fsm:        fsm,
 		client:     &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -117,7 +118,17 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) err
 		return fmt.Errorf("invalid token structure")
 	}
 
-	if !crypto.VerifySignature(s.metaPubKey, signed.Payload, signed.Signature) {
+	valid := false
+	if s.metaPubKey != nil && crypto.VerifySignature(s.metaPubKey, signed.Payload, signed.Signature) {
+		valid = true
+	} else if s.fsm != nil {
+		// Fallback: check all trusted keys
+		if s.fsm.IsTrustedBySig(signed.Payload, signed.Signature) {
+			valid = true
+		}
+	}
+
+	if !valid {
 		return fmt.Errorf("invalid signature")
 	}
 

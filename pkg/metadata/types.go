@@ -115,7 +115,8 @@ type Node struct {
 	ClusterAddress string     `json:"cluster_address"` // Internal Cluster API Address
 	RaftAddress    string     `json:"raft_address"`
 	Status         NodeStatus `json:"status"`
-	PublicKey      []byte     `json:"public_key"`
+	PublicKey      []byte     `json:"public_key"` // TLS Public Key (Ed25519)
+	SignKey        []byte     `json:"sign_key"`   // Metadata Sign Key (PQC)
 	LastHeartbeat  int64      `json:"last_heartbeat"`
 	Capacity       int64      `json:"capacity"`
 	Used           int64      `json:"used"`
