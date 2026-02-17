@@ -220,8 +220,6 @@ func main() {
 	publicMux := http.NewServeMux()
 	publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 	publicMux.Handle("/v1/meta/key", metaServer)
-	publicMux.Handle("/v1/node", metaServer)
-	publicMux.Handle("/v1/node/info", metaServer)
 	publicMux.Handle("/v1/health", metaServer)
 
 	publicMux.Handle("/v1/user/", metaServer)
@@ -230,7 +228,13 @@ func main() {
 	publicMux.Handle("/v1/auth/", metaServer)
 	publicMux.Handle("/v1/login", metaServer)
 	publicMux.Handle("/v1/admin/", metaServer)
-	publicMux.Handle("/v1/data/", dataServer) // Data access
+	publicMux.Handle("/v1/data/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/replicate") {
+			http.NotFound(w, r)
+			return
+		}
+		dataServer.ServeHTTP(w, r)
+	}))
 	publicMux.Handle("/api/debug/", metaServer)
 
 	// 6. Internal Router (Cluster)
