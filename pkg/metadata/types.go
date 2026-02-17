@@ -213,6 +213,7 @@ type CapabilityToken struct {
 
 // SignedAuthToken is a CapabilityToken signed by the Metadata Server.
 type SignedAuthToken struct {
+	SignerID  string `json:"signer_id,omitempty"`
 	Payload   []byte `json:"payload"`
 	Signature []byte `json:"sig"`
 }

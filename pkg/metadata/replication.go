@@ -216,7 +216,11 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 		}
 		capBytes, _ := json.Marshal(capToken)
 		sig := rm.server.signKey.Sign(capBytes)
-		signed := SignedAuthToken{Payload: capBytes, Signature: sig}
+		signed := SignedAuthToken{
+			SignerID:  rm.server.nodeID,
+			Payload:   capBytes,
+			Signature: sig,
+		}
 		b, _ := json.Marshal(signed)
 		token := base64.StdEncoding.EncodeToString(b)
 		req.Header.Set("Authorization", "Bearer "+token)

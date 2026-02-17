@@ -121,10 +121,12 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) err
 	valid := false
 	if s.metaPubKey != nil && crypto.VerifySignature(s.metaPubKey, signed.Payload, signed.Signature) {
 		valid = true
-	} else if s.fsm != nil {
-		// Fallback: check all trusted keys
-		if s.fsm.IsTrustedBySig(signed.Payload, signed.Signature) {
-			valid = true
+	} else if s.fsm != nil && signed.SignerID != "" {
+		// Use SignerID for O(1) lookup
+		if node, err := s.fsm.GetNode(signed.SignerID); err == nil && len(node.SignKey) > 0 {
+			if crypto.VerifySignature(node.SignKey, signed.Payload, signed.Signature) {
+				valid = true
+			}
 		}
 	}
 

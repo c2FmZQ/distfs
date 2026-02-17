@@ -135,15 +135,42 @@ func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
 	return fsm.trusted[string(pubKey)]
 }
 
-func (fsm *MetadataFSM) IsTrustedBySig(data, sig []byte) bool {
-	fsm.mu.RLock()
-	defer fsm.mu.RUnlock()
-	for k := range fsm.trusted {
-		if crypto.VerifySignature([]byte(k), data, sig) {
-			return true
+func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
+	var node Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		v := b.Get([]byte(id))
+		if v == nil {
+			return ErrNotFound
 		}
+		return json.Unmarshal(v, &node)
+	})
+	if err != nil {
+		return nil, err
 	}
-	return false
+	return &node, nil
+}
+
+func (fsm *MetadataFSM) GetNodeByRaftAddress(raftAddr string) (*Node, error) {
+	var node Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				if n.RaftAddress == raftAddr {
+					node = n
+					return nil
+				}
+			}
+		}
+		return ErrNotFound
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &node, nil
 }
 
 // CommandType identifies the type of operation in the Raft log.

@@ -295,12 +295,8 @@ func main() {
 
 				// Find Leader's Cluster Address from FSM
 				var target string
-				nodes, _ := rn.FSM.GetNodes()
-				for _, n := range nodes {
-					if n.RaftAddress == string(leaderAddr) {
-						target = n.ClusterAddress
-						break
-					}
+				if n, err := rn.FSM.GetNodeByRaftAddress(string(leaderAddr)); err == nil {
+					target = n.ClusterAddress
 				}
 
 				if target != "" {

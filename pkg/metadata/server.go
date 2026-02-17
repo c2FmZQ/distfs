@@ -285,6 +285,7 @@ func (s *Server) generateSelfToken(chunks []string, mode string) (string, error)
 	sig := s.signKey.Sign(payload)
 
 	signed := SignedAuthToken{
+		SignerID:  s.nodeID,
 		Payload:   payload,
 		Signature: sig,
 	}
@@ -454,7 +455,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if user != nil {
 		// Handle Sealed Request (Layer 7 E2EE)
-		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet && r.ContentLength > 0 {
+		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
 			payload, err := s.unsealRequest(r, user)
 			if err != nil {
 				http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
@@ -918,6 +919,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	sig := s.signKey.Sign(payload)
 
 	signed := SignedAuthToken{
+		SignerID:  s.nodeID,
 		Payload:   payload,
 		Signature: sig,
 	}

@@ -247,6 +247,9 @@ func TestAdminOverrides(t *testing.T) {
 	if uBUpdated.Usage.TotalBytes != 100 {
 		t.Errorf("Expected User B usage 100, got %d", uBUpdated.Usage.TotalBytes)
 	}
+	if uBUpdated.Usage.InodeCount != 1 {
+		t.Errorf("Expected User B inode count 1, got %d", uBUpdated.Usage.InodeCount)
+	}
 
 	// 7. Admin Chmod
 	if err := c.AdminChmod(context.Background(), "file1", 0777); err != nil {
