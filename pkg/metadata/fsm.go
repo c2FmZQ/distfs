@@ -162,6 +162,8 @@ const (
 	CmdAcquireLeases   CommandType = 22
 	CmdReleaseLeases   CommandType = 23
 	CmdPromoteAdmin    CommandType = 24
+	CmdAdminChown      CommandType = 25
+	CmdAdminChmod      CommandType = 26
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -324,6 +326,10 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeReleaseLeases(tx, data)
 	case CmdPromoteAdmin:
 		return fsm.executePromoteAdmin(tx, data)
+	case CmdAdminChown:
+		return fsm.executeAdminChown(tx, data)
+	case CmdAdminChmod:
+		return fsm.executeAdminChmod(tx, data)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -1589,4 +1595,79 @@ func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
 		return nil
 	})
 	return nodes, err
+}
+
+func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} {
+	var req AdminChownRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	b := tx.Bucket([]byte("inodes"))
+	v := b.Get([]byte(req.InodeID))
+	if v == nil {
+		return ErrNotFound
+	}
+	var inode Inode
+	if err := json.Unmarshal(v, &inode); err != nil {
+		return err
+	}
+
+	ownerChanged := req.OwnerID != nil && *req.OwnerID != inode.OwnerID
+	if ownerChanged {
+		// 1. Check Quota for new owner
+		if err := checkQuota(tx, *req.OwnerID, 1, int64(inode.Size)); err != nil {
+			return err
+		}
+		// 2. Decrement old owner
+		if inode.OwnerID != "" {
+			if err := updateUserUsage(tx, inode.OwnerID, -1, -int64(inode.Size)); err != nil {
+				return err
+			}
+		}
+		// 3. Update Inode
+		inode.OwnerID = *req.OwnerID
+		// 4. Increment new owner
+		if err := updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+			return err
+		}
+	}
+
+	if req.GroupID != nil {
+		inode.GroupID = *req.GroupID
+	}
+	if req.UID != nil {
+		inode.UID = *req.UID
+	}
+	if req.GID != nil {
+		inode.GID = *req.GID
+	}
+
+	inode.CTime = time.Now().UnixNano()
+	inode.Version++
+
+	return saveInodeWithPages(tx, &inode)
+}
+
+func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} {
+	var req AdminChmodRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	b := tx.Bucket([]byte("inodes"))
+	v := b.Get([]byte(req.InodeID))
+	if v == nil {
+		return ErrNotFound
+	}
+	var inode Inode
+	if err := json.Unmarshal(v, &inode); err != nil {
+		return err
+	}
+
+	inode.Mode = req.Mode
+	inode.CTime = time.Now().UnixNano()
+	inode.Version++
+
+	return saveInodeWithPages(tx, &inode)
 }

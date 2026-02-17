@@ -13,6 +13,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestAdminCUI(t *testing.T) {
@@ -180,5 +181,82 @@ func TestAdminAPI(t *testing.T) {
 	}
 	if id == "" {
 		t.Error("Lookup returned empty ID")
+	}
+}
+
+func TestAdminOverrides(t *testing.T) {
+	node, ts, _, _, _ := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create Admin
+	adminID := "admin"
+	dkA, _ := crypto.GenerateEncryptionKey()
+	skA, _ := crypto.GenerateIdentityKey()
+	uA := metadata.User{ID: adminID, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
+	uABytes, _ := json.Marshal(uA)
+	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uABytes}.Marshal(), 5*time.Second)
+
+	// 2. Create User B
+	userID := "userB"
+	dkB, _ := crypto.GenerateEncryptionKey()
+	skB, _ := crypto.GenerateIdentityKey()
+	uB := metadata.User{ID: userID, SignKey: skB.Public(), EncKey: dkB.EncapsulationKey().Bytes()}
+	uBBytes, _ := json.Marshal(uB)
+	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uBBytes}.Marshal(), 5*time.Second)
+
+	// 3. Create a File owned by Admin
+	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600}
+	iBytes, _ := json.Marshal(inode)
+	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Setup Client
+	c := client.NewClient(ts.URL)
+	c = c.WithIdentity(adminID, dkA).WithSignKey(skA)
+	ekBytes, _ := c.GetServerSignKey()
+	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
+	c = c.WithServerKey(ek)
+	if err := c.Login(); err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	// 4. Admin Chown to User B
+	req := metadata.AdminChownRequest{OwnerID: &userID}
+	if err := c.AdminChown(context.Background(), "file1", req); err != nil {
+		t.Fatalf("AdminChown failed: %v", err)
+	}
+
+	// 5. Verify Metadata
+	var updated metadata.Inode
+	node.FSM.DB().View(func(tx *bolt.Tx) error {
+		v := tx.Bucket([]byte("inodes")).Get([]byte("file1"))
+		return json.Unmarshal(v, &updated)
+	})
+	if updated.OwnerID != userID {
+		t.Errorf("Expected owner %s, got %s", userID, updated.OwnerID)
+	}
+
+	// 6. Verify Quota accounting
+	var uBUpdated metadata.User
+	node.FSM.DB().View(func(tx *bolt.Tx) error {
+		v := tx.Bucket([]byte("users")).Get([]byte(userID))
+		return json.Unmarshal(v, &uBUpdated)
+	})
+	if uBUpdated.Usage.TotalBytes != 100 {
+		t.Errorf("Expected User B usage 100, got %d", uBUpdated.Usage.TotalBytes)
+	}
+
+	// 7. Admin Chmod
+	if err := c.AdminChmod(context.Background(), "file1", 0777); err != nil {
+		t.Fatalf("AdminChmod failed: %v", err)
+	}
+	node.FSM.DB().View(func(tx *bolt.Tx) error {
+		v := tx.Bucket([]byte("inodes")).Get([]byte("file1"))
+		return json.Unmarshal(v, &updated)
+	})
+	if updated.Mode != 0777 {
+		t.Errorf("Expected mode 0777, got %04o", updated.Mode)
 	}
 }

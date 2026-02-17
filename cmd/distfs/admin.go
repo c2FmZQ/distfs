@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -350,4 +351,83 @@ func cmdAdminJoin(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Node %s joined at %s\n", id, address)
+}
+
+func cmdAdminChown(args []string) {
+	if len(args) < 2 {
+		log.Fatal("usage: admin-chown <email>[:<group_id>] <path>")
+	}
+	ownerSpec, path := args[0], args[1]
+	c := loadClient()
+
+	var req metadata.AdminChownRequest
+	parts := strings.Split(ownerSpec, ":")
+	email := parts[0]
+
+	// 1. Resolve email to UserID
+	userID, err := c.AdminLookup(context.Background(), email)
+	if err != nil {
+		log.Fatalf("failed to resolve email %s: %v", email, err)
+	}
+	req.OwnerID = &userID
+
+	// 2. Resolve Group if provided
+	if len(parts) > 1 {
+		groupID := parts[1]
+		req.GroupID = &groupID
+	}
+
+	// 3. Resolve Path to InodeID
+	inode, _, err := c.ResolvePath(path)
+	if err != nil {
+		log.Fatalf("failed to resolve path %s: %v", path, err)
+	}
+
+	// 4. Warning
+	fmt.Printf("WARNING: Changing ownership of %s to %s.\n", path, email)
+	fmt.Println("Existing encrypted data will NOT be readable by the new owner.")
+	fmt.Print("Proceed? [y/N]: ")
+	var confirm string
+	fmt.Scanln(&confirm)
+	if strings.ToLower(confirm) != "y" {
+		fmt.Println("Aborted.")
+		return
+	}
+
+	if err := c.AdminChown(context.Background(), inode.ID, req); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Ownership updated successfully.")
+}
+
+func cmdAdminChmod(args []string) {
+	if len(args) < 2 {
+		log.Fatal("usage: admin-chmod <mode> <path>")
+	}
+	modeStr, path := args[0], args[1]
+	mode, err := strconv.ParseUint(modeStr, 8, 32)
+	if err != nil {
+		log.Fatalf("invalid mode: %v", err)
+	}
+
+	c := loadClient()
+	inode, _, err := c.ResolvePath(path)
+	if err != nil {
+		log.Fatalf("failed to resolve path %s: %v", path, err)
+	}
+
+	fmt.Printf("WARNING: Overriding permissions of %s to %s.\n", path, modeStr)
+	fmt.Println("This only affects metadata visibility.")
+	fmt.Print("Proceed? [y/N]: ")
+	var confirm string
+	fmt.Scanln(&confirm)
+	if strings.ToLower(confirm) != "y" {
+		fmt.Println("Aborted.")
+		return
+	}
+
+	if err := c.AdminChmod(context.Background(), inode.ID, uint32(mode)); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Permissions updated successfully.")
 }

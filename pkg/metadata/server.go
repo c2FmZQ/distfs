@@ -1868,9 +1868,33 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 	case path == "promote" && r.Method == http.MethodPost:
 		s.handleAdminPromote(w, r)
+	case path == "chown" && r.Method == http.MethodPost:
+		s.handleAdminChown(w, r)
+	case path == "chmod" && r.Method == http.MethodPost:
+		s.handleAdminChmod(w, r)
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (s *Server) handleAdminChown(w http.ResponseWriter, r *http.Request) {
+	var req AdminChownRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	body, _ := json.Marshal(req)
+	s.ApplyRaftCommandRaw(w, r, CmdAdminChown, body, http.StatusOK)
+}
+
+func (s *Server) handleAdminChmod(w http.ResponseWriter, r *http.Request) {
+	var req AdminChmodRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	body, _ := json.Marshal(req)
+	s.ApplyRaftCommandRaw(w, r, CmdAdminChmod, body, http.StatusOK)
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, successStatus int) {

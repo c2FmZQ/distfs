@@ -475,5 +475,10 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 30.4: Legacy Cleanup**
     *   **Action:** Remove `dashboard.go` and the `ui/` directory.
     *   **Action:** Deprecate the shared `X-Raft-Secret` auth mechanism in favor of individual PQC signatures.
+*   **Step 30.5: Metadata Overrides (chown/chmod)**
+    *   **Action:** Implement `CmdAdminChown` and `CmdAdminChmod` Raft commands in the FSM.
+    *   **Action:** Add `/v1/admin/chown` and `/v1/admin/chmod` endpoints to the Metadata Server.
+    *   **Action:** Implement `distfs admin-chown <email> <path>` and `distfs admin-chmod <mode> <path>` commands.
+    *   **Action:** Ensure the CLI prints explicit warnings regarding Zero-Knowledge data access limitations.
 
 

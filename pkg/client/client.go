@@ -2834,3 +2834,75 @@ func (c *Client) AdminJoinNode(ctx context.Context, id, address string) error {
 		return nil
 	})
 }
+
+func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
+	req.InodeID = inodeID
+	payload, _ := json.Marshal(req)
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/chown", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(httpReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(httpReq, payload); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
+func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) error {
+	req := metadata.AdminChmodRequest{InodeID: inodeID, Mode: mode}
+	payload, _ := json.Marshal(req)
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		httpReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/chmod", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(httpReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(httpReq, payload); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(httpReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}

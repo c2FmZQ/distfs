@@ -74,6 +74,10 @@ func main() {
 		cmdAdmin(args)
 	case "admin-join":
 		cmdAdminJoin(args)
+	case "admin-chown":
+		cmdAdminChown(args)
+	case "admin-chmod":
+		cmdAdminChmod(args)
 	default:
 		usage()
 	}
@@ -94,6 +98,8 @@ func usage() {
 	fmt.Println("  get <remote> <local>            Download file")
 	fmt.Println("  admin                           Open interactive cluster management console")
 	fmt.Println("  admin-join <id> <addr>          Add a node to the cluster")
+	fmt.Println("  admin-chown <email>[:<group>] <path> Override ownership (Admin only)")
+	fmt.Println("  admin-chmod <mode> <path>       Override permissions (Admin only)")
 	os.Exit(1)
 }
 

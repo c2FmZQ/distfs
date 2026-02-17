@@ -128,6 +128,19 @@ type ClusterStats struct {
 	NodeCount     int   `json:"node_count"`
 }
 
+type AdminChownRequest struct {
+	InodeID string  `json:"inode_id"`
+	OwnerID *string `json:"owner_id,omitempty"` // New DistFS User ID
+	GroupID *string `json:"group_id,omitempty"` // New DistFS Group ID
+	UID     *uint32 `json:"uid,omitempty"`      // New POSIX UID
+	GID     *uint32 `json:"gid,omitempty"`      // New POSIX GID
+}
+
+type AdminChmodRequest struct {
+	InodeID string `json:"inode_id"`
+	Mode    uint32 `json:"mode"`
+}
+
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID            string            `json:"id"`
