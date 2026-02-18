@@ -281,7 +281,7 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 
 	var result interface{}
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		res := fsm.executeCommand(tx, cmd.Type, cmd.Data)
+		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, 0)
 		if err, ok := res.(error); ok {
 			return err
 		}
@@ -295,27 +295,33 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 }
 
 func (fsm *MetadataFSM) applyBatch(data []byte) interface{} {
-	var cmds []LogCommand
-	if err := json.Unmarshal(data, &cmds); err != nil {
-		return err
-	}
-
-	results := make([]interface{}, len(cmds))
+	var results []interface{}
 	// We use a single transaction for performance.
-	// We do NOT return the error to BoltDB if an individual command fails,
-	// because we want to commit the successful ones in the batch.
-	// A return of nil from Update means the transaction commits.
 	_ = fsm.db.Update(func(tx *bolt.Tx) error {
-		for i, cmd := range cmds {
-			res := fsm.executeCommand(tx, cmd.Type, cmd.Data)
-			results[i] = res
-		}
+		results = fsm.applyBatchTx(tx, data, 0)
 		return nil
 	})
 	return results
 }
 
-func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte) interface{} {
+func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, depth int) []interface{} {
+	if depth > 4 {
+		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
+	}
+	var cmds []LogCommand
+	if err := json.Unmarshal(data, &cmds); err != nil {
+		return []interface{}{err}
+	}
+
+	results := make([]interface{}, len(cmds))
+	for i, cmd := range cmds {
+		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, depth)
+		results[i] = res
+	}
+	return results
+}
+
+func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, depth int) interface{} {
 	switch cmdType {
 	case CmdCreateInode:
 		return fsm.executeCreateInode(tx, data)
@@ -359,6 +365,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeAdminChown(tx, data)
 	case CmdAdminChmod:
 		return fsm.executeAdminChmod(tx, data)
+	case CmdBatch:
+		return fsm.applyBatchTx(tx, data, depth+1)
 	}
 	return fmt.Errorf("unknown command")
 }
