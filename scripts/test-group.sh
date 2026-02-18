@@ -41,7 +41,7 @@ distfs -use-pinentry=false -config /tmp/u1-group.json group-add "$G1_ID" "$U2_ID
 echo "Admin: Creating directory and assigning to user1..."
 distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /group-shared
 sleep 2
-echo "y" | distfs -use-pinentry=false -config /root/.distfs/config.json admin-chown "$U1_ID" /group-shared
+echo "y" | distfs -use-pinentry=false -admin -config /root/.distfs/config.json admin-chown "$U1_ID" /group-shared
 
 echo "User 1: Assigning directory to group..."
 distfs -use-pinentry=false -config /tmp/u1-group.json chgrp "$G1_ID" /group-shared

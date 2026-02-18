@@ -221,7 +221,7 @@ func TestAdminOverrides(t *testing.T) {
 	c = c.WithIdentity(adminID, dkA).WithSignKey(skA)
 	ekBytes, _ := c.GetServerSignKey()
 	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
-	c = c.WithServerKey(ek)
+	c = c.WithServerKey(ek).WithAdmin(true)
 	if err := c.Login(); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}

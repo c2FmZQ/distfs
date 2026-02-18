@@ -41,6 +41,10 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+type contextKey string
+
+const adminBypassContextKey contextKey = "admin-bypass"
+
 func (c *Client) GetServerSignKey() ([]byte, error) {
 	c.keyMu.RLock()
 	sk := c.serverSignPK
@@ -139,6 +143,8 @@ type Client struct {
 	rootVersion uint64
 
 	concurrencySem chan struct{}
+
+	admin bool
 }
 
 // NewClient creates a new DistFS client.
@@ -194,6 +200,13 @@ func (c *Client) WithRootAnchor(id, owner string, version uint64) *Client {
 	c2.rootID = id
 	c2.rootOwner = owner
 	c2.rootVersion = version
+	return &c2
+}
+
+// WithAdmin returns a new client with the admin bypass enabled.
+func (c *Client) WithAdmin(admin bool) *Client {
+	c2 := *c
+	c2.admin = admin
 	return &c2
 }
 
@@ -332,6 +345,11 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 	}
 
 	req.Header.Set("Session-Token", token)
+	if c.admin {
+		req.Header.Set("X-DistFS-Admin-Bypass", "true")
+	} else if bypass, _ := req.Context().Value(adminBypassContextKey).(bool); bypass {
+		req.Header.Set("X-DistFS-Admin-Bypass", "true")
+	}
 	return nil
 }
 
@@ -432,6 +450,11 @@ func (c *Client) sealBody(req *http.Request, payload []byte) error {
 	req.ContentLength = int64(len(data))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Content-Type", "application/json")
+	if c.admin {
+		req.Header.Set("X-DistFS-Admin-Bypass", "true")
+	} else if bypass, _ := req.Context().Value(adminBypassContextKey).(bool); bypass {
+		req.Header.Set("X-DistFS-Admin-Bypass", "true")
+	}
 	return nil
 }
 func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {

@@ -20,7 +20,7 @@ FUSE_USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 echo "Admin: Provisioning home directory for $FUSE_USER_ID..."
 /bin/distfs -use-pinentry=false -config /root/.distfs/config.json mkdir "/users/$FUSE_USER_ID" || true
-echo "y" | /bin/distfs -use-pinentry=false -config /root/.distfs/config.json admin-chown "$FUSE_USER_ID" "/users/$FUSE_USER_ID"
+echo "y" | /bin/distfs -use-pinentry=false -admin -config /root/.distfs/config.json admin-chown "$FUSE_USER_ID" "/users/$FUSE_USER_ID"
 
 echo "Mounting FUSE..."
 mkdir -p /mnt/distfs

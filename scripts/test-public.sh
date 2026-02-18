@@ -20,7 +20,7 @@ distfs -use-pinentry=false mkdir /public
 sleep 2
 
 echo "Admin: Chowning to user1..."
-echo "y" | distfs -use-pinentry=false admin-chown user1-public@example.com /public
+echo "y" | distfs -use-pinentry=false -admin admin-chown user1-public@example.com /public
 
 echo "User 1: Making directory public (chmod 0755)..."
 distfs -use-pinentry=false -config /tmp/u1-public.json chmod 0755 /public

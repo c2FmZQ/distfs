@@ -318,7 +318,10 @@ func (s *Server) StopKeyRotation() {
 
 type contextKey string
 
-const userContextKey contextKey = "user"
+const (
+	userContextKey        contextKey = "user"
+	adminBypassContextKey contextKey = "admin-bypass"
+)
 
 func (s *Server) SetRaftAddress(addr string) {
 	s.raftAddress = addr
@@ -472,6 +475,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 
 		ctx := context.WithValue(r.Context(), userContextKey, user)
+		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
+			ctx = context.WithValue(ctx, adminBypassContextKey, true)
+		}
 		r = r.WithContext(ctx)
 	}
 
@@ -1187,7 +1193,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	if err := s.checkReadPermission(user, id); err != nil {
+	if err := s.checkReadPermission(r, user, id); err != nil {
 		if err == ErrNotFound {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
@@ -1275,7 +1281,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		for _, id := range ids {
-			if s.checkReadPermission(user, id) != nil {
+			if s.checkReadPermission(r, user, id) != nil {
 				continue // Skip unauthorized inodes in batch fetch
 			}
 			v := b.Get([]byte(id))
@@ -1326,7 +1332,7 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := s.checkWritePermission(user, id); err != nil {
+	if err := s.checkWritePermission(r, user, id); err != nil {
 		if err == ErrNotFound {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
@@ -1343,7 +1349,7 @@ func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id st
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := s.checkWritePermission(user, id); err != nil {
+	if err := s.checkWritePermission(r, user, id); err != nil {
 		if err == ErrNotFound {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
@@ -1354,8 +1360,9 @@ func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id st
 	s.ApplyRaftCommandRaw(w, r, CmdDeleteInode, []byte(id), http.StatusOK)
 }
 
-func (s *Server) checkReadPermission(user *User, inodeID string) error {
-	if s.fsm.IsAdmin(user.ID) {
+func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string) error {
+	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+	if bypass && s.fsm.IsAdmin(user.ID) {
 		return nil
 	}
 	var inode Inode
@@ -1578,7 +1585,7 @@ func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := s.checkWritePermission(user, req.InodeID); err != nil {
+	if err := s.checkWritePermission(r, user, req.InodeID); err != nil {
 		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
 		return
 	}
@@ -1592,7 +1599,7 @@ func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id strin
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if err := s.checkWritePermission(user, id); err != nil {
+	if err := s.checkWritePermission(r, user, id); err != nil {
 		if err == ErrNotFound {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
@@ -1765,8 +1772,9 @@ func (s *Server) sealResponse(user *User, payload []byte) ([]byte, error) {
 	return json.Marshal(res)
 }
 
-func (s *Server) checkWritePermission(user *User, inodeID string) error {
-	if s.fsm.IsAdmin(user.ID) {
+func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID string) error {
+	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+	if bypass && s.fsm.IsAdmin(user.ID) {
 		return nil
 	}
 	var inode Inode

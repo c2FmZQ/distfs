@@ -34,6 +34,7 @@ import (
 var (
 	configPath  = flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry = flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
+	adminFlag   = flag.Bool("admin", false, "Enable admin bypass mode")
 )
 
 func main() {
@@ -95,7 +96,7 @@ func cmdWhoami(args []string) {
 }
 
 func usage() {
-	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] <command> [args]")
+	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] [-admin] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  init [--new] -server <url>      Initialize client config (pulls existing keys by default)")
 	fmt.Println("  ls <path>                       List directory")
@@ -172,7 +173,8 @@ func loadClient() *client.Client {
 	return c.WithIdentity(conf.UserID, dk).
 		WithSignKey(sk).
 		WithServerKey(svKey).
-		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion)
+		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
+		WithAdmin(*adminFlag)
 }
 
 func saveClient(c *client.Client) {

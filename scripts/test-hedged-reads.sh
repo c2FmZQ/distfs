@@ -22,7 +22,7 @@ USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 echo "Admin: Provisioning home directory for $USER_ID..."
 /bin/distfs -use-pinentry=false -config /root/.distfs/config.json mkdir "/users/$USER_ID" || true
 sleep 2
-echo "y" | /bin/distfs -use-pinentry=false -config /root/.distfs/config.json admin-chown "$USER_ID" "/users/$USER_ID"
+echo "y" | /bin/distfs -use-pinentry=false -admin -config /root/.distfs/config.json admin-chown "$USER_ID" "/users/$USER_ID"
 
 # 2. Write a file
 echo "Uploading test file..."

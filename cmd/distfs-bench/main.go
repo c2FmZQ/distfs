@@ -40,6 +40,7 @@ var (
 	workers   = flag.Int("workers", 10, "Number of concurrent workers")
 	count     = flag.Int("count", 100, "Total number of operations to perform")
 	size      = flag.Int64("size", 1024, "Size of files for put mode (in bytes)")
+	adminFlag = flag.Bool("admin", false, "Enable admin bypass mode")
 )
 
 type stats struct {
@@ -152,7 +153,7 @@ func main() {
 		log.Fatalf("failed to unmarshal server key: %v", err)
 	}
 
-	c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
+	c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey).WithAdmin(*adminFlag)
 
 	// Ensure we are logged in
 	if err := c.Login(); err != nil {

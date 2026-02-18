@@ -35,7 +35,7 @@ echo "Admin: Provisioning home directory for $USER_ID..."
 /bin/distfs -use-pinentry=false -config /root/.distfs/config.json mkdir "/users" || true
 /bin/distfs -use-pinentry=false -config /root/.distfs/config.json mkdir "/users/$USER_ID"
 sleep 2
-echo "y" | /bin/distfs -use-pinentry=false -config /root/.distfs/config.json admin-chown "$USER_ID" "/users/$USER_ID"
+echo "y" | /bin/distfs -use-pinentry=false -admin -config /root/.distfs/config.json admin-chown "$USER_ID" "/users/$USER_ID"
 
 # 3. Pull Keys to Config 2 (Flow 2: Auth + Pull + Decrypt)
 echo "Pulling Keys to Config 2 (New Device simulation)..."

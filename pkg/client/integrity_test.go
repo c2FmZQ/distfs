@@ -101,7 +101,7 @@ func TestManifestIntegrity(t *testing.T) {
 	}
 
 	// 5. Admin Operations (Client-side Signing)
-	clientA := NewClient(ts.URL).WithIdentity(adminID, dkA).WithSignKey(skA).WithServerKey(ek)
+	clientA := NewClient(ts.URL).WithIdentity(adminID, dkA).WithSignKey(skA).WithServerKey(ek).WithAdmin(true)
 	if err := clientA.Login(); err != nil {
 		t.Fatalf("Admin login failed: %v", err)
 	}
