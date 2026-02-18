@@ -319,51 +319,119 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 	macNew.Write([]byte(newName))
 	encNewName := hex.EncodeToString(macNew.Sum(nil))
 
-	// 1. Get Inode to move
-	oldParent, err := c.getInode(context.Background(), oldParentID)
-	if err != nil {
-		return fmt.Errorf("failed to get old parent: %w", err)
-	}
-	childID, ok := oldParent.Children[encOldName]
-	if !ok {
-		return syscall.ENOENT
-	}
+	return c.withConflictRetry(context.Background(), func() error {
+		// 1. Get Inode to move
+		oldParent, err := c.getInode(context.Background(), oldParentID)
+		if err != nil {
+			return fmt.Errorf("failed to get old parent: %w", err)
+		}
+		childID, ok := oldParent.Children[encOldName]
+		if !ok {
+			return syscall.ENOENT
+		}
 
-	child, err := c.getInode(context.Background(), childID)
-	if err != nil {
-		return fmt.Errorf("failed to get child: %w", err)
-	}
+		child, err := c.getInode(context.Background(), childID)
+		if err != nil {
+			return fmt.Errorf("failed to get child: %w", err)
+		}
 
-	// 2. Update Old Parent
-	delete(oldParent.Children, encOldName)
-	if _, err := c.updateInode(context.Background(), *oldParent); err != nil {
-		return fmt.Errorf("failed to update old parent: %w", err)
-	}
+		var newParent *metadata.Inode
+		if oldParentID == newParentID {
+			newParent = oldParent
+		} else {
+			newParent, err = c.getInode(context.Background(), newParentID)
+			if err != nil {
+				return fmt.Errorf("failed to get new parent: %w", err)
+			}
+		}
 
-	// 3. Update Child Links
-	if child.Links == nil {
-		child.Links = make(map[string]bool)
-	}
-	delete(child.Links, oldParentID+":"+encOldName)
-	child.Links[newParentID+":"+encNewName] = true
-	if _, err := c.updateInode(context.Background(), *child); err != nil {
-		return fmt.Errorf("failed to update child links: %w", err)
-	}
+		// 2. Prepare Updates
+		var cmds []metadata.LogCommand
 
-	// 4. Update New Parent
-	newParent, err := c.getInode(context.Background(), newParentID)
-	if err != nil {
-		return fmt.Errorf("failed to get new parent: %w", err)
-	}
-	if newParent.Children == nil {
-		newParent.Children = make(map[string]string)
-	}
-	newParent.Children[encNewName] = childID
-	if _, err := c.updateInode(context.Background(), *newParent); err != nil {
-		return fmt.Errorf("failed to update new parent: %w", err)
-	}
+		// Update Old Parent (Remove)
+		delete(oldParent.Children, encOldName)
+		// If parents are same, we update newParent later (which is same pointer)
 
-	return nil
+		// Handle Overwrite: If target exists, unlink it
+		if existingID, exists := newParent.Children[encNewName]; exists {
+			existing, err := c.getInode(context.Background(), existingID)
+			if err == nil {
+				if existing.NLink > 0 {
+					existing.NLink--
+				}
+				delete(existing.Links, newParentID+":"+encNewName)
+
+				if existing.NLink == 0 {
+					cmd, err := c.PrepareDelete(existing.ID)
+					if err != nil {
+						return err
+					}
+					cmds = append(cmds, cmd)
+				} else {
+					cmd, err := c.PrepareUpdate(*existing)
+					if err != nil {
+						return err
+					}
+					cmds = append(cmds, cmd)
+				}
+			} else {
+				// If we can't load the existing file, it might be corrupted or we lack permissions.
+				// For rename, we should arguably fail if we can't clean up.
+				// But we definitely shouldn't leave a dangling pointer.
+				// If it's 404, just proceed.
+				if apiErr, ok := err.(*APIError); !ok || apiErr.StatusCode != http.StatusNotFound {
+					return fmt.Errorf("failed to handle overwrite: %w", err)
+				}
+			}
+		}
+
+		// Update New Parent (Add)
+		if newParent.Children == nil {
+			newParent.Children = make(map[string]string)
+		}
+		newParent.Children[encNewName] = childID
+
+		// If parents are different, we add both. If same, we add "oldParent" (which is modified twice).
+		if oldParentID != newParentID {
+			cmd, err := c.PrepareUpdate(*oldParent)
+			if err != nil {
+				return err
+			}
+			cmds = append(cmds, cmd)
+
+			cmd2, err := c.PrepareUpdate(*newParent)
+			if err != nil {
+				return err
+			}
+			cmds = append(cmds, cmd2)
+		} else {
+			cmd, err := c.PrepareUpdate(*oldParent)
+			if err != nil {
+				return err
+			}
+			cmds = append(cmds, cmd)
+		}
+
+		// Update Child Links
+		if child.Links == nil {
+			child.Links = make(map[string]bool)
+		}
+		delete(child.Links, oldParentID+":"+encOldName)
+		child.Links[newParentID+":"+encNewName] = true
+		cmdChild, err := c.PrepareUpdate(*child)
+		if err != nil {
+			return err
+		}
+		cmds = append(cmds, cmdChild)
+
+		// 3. Apply Batch
+		if err := c.ApplyBatch(context.Background(), cmds); err != nil {
+			// Don't wrap error here, return raw error so withConflictRetry detects it
+			return err
+		}
+
+		return nil
+	})
 }
 
 // RemoveEntry deletes a directory entry.
@@ -386,49 +454,64 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	// 1. Get Parent and find ChildID
-	parent, err := c.getInode(context.Background(), parentID)
-	if err != nil {
-		return fmt.Errorf("failed to get parent for removal: %w", err)
-	}
-	childID, ok := parent.Children[encName]
-	if !ok {
-		return nil // Already gone
-	}
+	return c.withConflictRetry(context.Background(), func() error {
+		// 1. Get Parent and find ChildID
+		parent, err := c.getInode(context.Background(), parentID)
+		if err != nil {
+			return fmt.Errorf("failed to get parent for removal: %w", err)
+		}
+		childID, ok := parent.Children[encName]
+		if !ok {
+			return nil // Already gone
+		}
 
-	// 2. Load Child
-	child, err := c.getInode(context.Background(), childID)
-	if err != nil {
-		return fmt.Errorf("failed to get child for removal: %w", err)
-	}
+		// 2. Load Child
+		child, err := c.getInode(context.Background(), childID)
+		if err != nil {
+			return fmt.Errorf("failed to get child for removal: %w", err)
+		}
 
-	// 3. POSIX check: Directory must be empty
-	if child.Type == metadata.DirType && len(child.Children) > 0 {
-		return fmt.Errorf("directory not empty")
-	}
+		// 3. POSIX check: Directory must be empty
+		if child.Type == metadata.DirType && len(child.Children) > 0 {
+			return fmt.Errorf("directory not empty")
+		}
 
-	// 4. Update Parent
-	delete(parent.Children, encName)
-	if _, err := c.updateInode(context.Background(), *parent); err != nil {
-		return fmt.Errorf("failed to update parent: %w", err)
-	}
+		var cmds []metadata.LogCommand
 
-	// 5. Update Child
-	if child.NLink > 0 {
-		child.NLink--
-	}
-	if child.Links != nil {
-		delete(child.Links, parentID+":"+encName)
-	}
+		// 4. Update Parent
+		delete(parent.Children, encName)
+		cmdParent, err := c.PrepareUpdate(*parent)
+		if err != nil {
+			return err
+		}
+		cmds = append(cmds, cmdParent)
 
-	if child.NLink == 0 {
-		// Delete child inode
-		return c.DeleteInode(context.Background(), child.ID)
-	} else {
-		// Update child inode
-		_, err = c.updateInode(context.Background(), *child)
-		return err
-	}
+		// 5. Update Child
+		if child.NLink > 0 {
+			child.NLink--
+		}
+		if child.Links != nil {
+			delete(child.Links, parentID+":"+encName)
+		}
+
+		if child.NLink == 0 {
+			// Delete child inode
+			cmdChild, err := c.PrepareDelete(child.ID)
+			if err != nil {
+				return err
+			}
+			cmds = append(cmds, cmdChild)
+		} else {
+			// Update child inode
+			cmdChild, err := c.PrepareUpdate(*child)
+			if err != nil {
+				return err
+			}
+			cmds = append(cmds, cmdChild)
+		}
+
+		return c.ApplyBatch(context.Background(), cmds)
+	})
 }
 
 // Link creates a hard link.
@@ -436,6 +519,10 @@ func (c *Client) Link(targetPath, linkPath string) error {
 	target, _, err := c.ResolvePath(targetPath)
 	if err != nil {
 		return fmt.Errorf("resolve target: %w", err)
+	}
+
+	if target.Type == metadata.DirType {
+		return syscall.EISDIR
 	}
 
 	dir, name := filepath.Split(strings.TrimRight(linkPath, "/"))
@@ -468,32 +555,38 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	// 1. Update Target (Link Count)
-	target, err := c.getInode(context.Background(), targetID)
-	if err != nil {
-		return fmt.Errorf("failed to get target for link: %w", err)
-	}
-	target.NLink++
-	if target.Links == nil {
-		target.Links = make(map[string]bool)
-	}
-	target.Links[parentID+":"+encName] = true
-	_, err = c.updateInode(context.Background(), *target)
-	if err != nil {
-		return fmt.Errorf("failed to update target link count: %w", err)
-	}
+	return c.withConflictRetry(context.Background(), func() error {
+		// 1. Update Target (Link Count)
+		target, err := c.getInode(context.Background(), targetID)
+		if err != nil {
+			return fmt.Errorf("failed to get target for link: %w", err)
+		}
+		target.NLink++
+		if target.Links == nil {
+			target.Links = make(map[string]bool)
+		}
+		target.Links[parentID+":"+encName] = true
+		cmdTarget, err := c.PrepareUpdate(*target)
+		if err != nil {
+			return err
+		}
 
-	// 2. Update Parent
-	parent, err := c.getInode(context.Background(), parentID)
-	if err != nil {
-		return fmt.Errorf("failed to get parent for link: %w", err)
-	}
-	if parent.Children == nil {
-		parent.Children = make(map[string]string)
-	}
-	parent.Children[encName] = targetID
-	_, err = c.updateInode(context.Background(), *parent)
-	return err
+		// 2. Update Parent
+		parent, err := c.getInode(context.Background(), parentID)
+		if err != nil {
+			return fmt.Errorf("failed to get parent for link: %w", err)
+		}
+		if parent.Children == nil {
+			parent.Children = make(map[string]string)
+		}
+		parent.Children[encName] = targetID
+		cmdParent, err := c.PrepareUpdate(*parent)
+		if err != nil {
+			return err
+		}
+
+		return c.ApplyBatch(context.Background(), []metadata.LogCommand{cmdTarget, cmdParent})
+	})
 }
 func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
 	path = strings.Trim(path, "/")
