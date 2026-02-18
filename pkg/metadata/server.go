@@ -981,7 +981,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
 	if err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
 		return
@@ -1655,7 +1655,7 @@ func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(r.Body)
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
