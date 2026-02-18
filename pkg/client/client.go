@@ -679,7 +679,8 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 					return
 				}
 
-				d, err := io.ReadAll(resp.Body)
+				limit := int64(crypto.ChunkSize + 4096) // 1MB + overhead buffer
+				d, err := io.ReadAll(io.LimitReader(resp.Body, limit))
 				resCh <- result{data: d, err: err}
 			}(url)
 
@@ -811,6 +812,16 @@ func (c *Client) signInode(inode *metadata.Inode) {
 }
 
 func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
+	now := time.Now().UnixNano()
+	if inode.MTime == 0 {
+		inode.MTime = now
+	}
+	if inode.CTime == 0 {
+		inode.CTime = now
+	}
+	if inode.NLink == 0 {
+		inode.NLink = 1
+	}
 
 	// Phase 31: Manifest Signing
 

@@ -190,6 +190,42 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(v)
 	h.Write([]byte("|"))
 
+	m := make([]byte, 4)
+	binary.LittleEndian.PutUint32(m, i.Mode)
+	h.Write([]byte("mode:"))
+	h.Write(m)
+	h.Write([]byte("|"))
+
+	uid := make([]byte, 4)
+	binary.LittleEndian.PutUint32(uid, i.UID)
+	h.Write([]byte("uid:"))
+	h.Write(uid)
+	h.Write([]byte("|"))
+
+	gid := make([]byte, 4)
+	binary.LittleEndian.PutUint32(gid, i.GID)
+	h.Write([]byte("gid:"))
+	h.Write(gid)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("gid_str:" + i.GroupID + "|"))
+
+	if i.SymlinkTarget != "" {
+		h.Write([]byte("symlink:" + i.SymlinkTarget + "|"))
+	}
+
+	mt := make([]byte, 8)
+	binary.LittleEndian.PutUint64(mt, uint64(i.MTime))
+	h.Write([]byte("mtime:"))
+	h.Write(mt)
+	h.Write([]byte("|"))
+
+	nl := make([]byte, 4)
+	binary.LittleEndian.PutUint32(nl, i.NLink)
+	h.Write([]byte("nlink:"))
+	h.Write(nl)
+	h.Write([]byte("|"))
+
 	s := make([]byte, 8)
 	binary.LittleEndian.PutUint64(s, i.Size)
 	h.Write([]byte("s:"))

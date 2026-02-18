@@ -869,7 +869,10 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if exists {
-		if inode.OwnerID != user.ID {
+		bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+		if bypass && s.fsm.IsAdmin(user.ID) {
+			// Bypass enabled and authorized
+		} else if inode.OwnerID != user.ID {
 			// World Readable/Writable?
 			if req.Mode == "R" && (inode.Mode&0004) != 0 {
 				// Authorized for reading
