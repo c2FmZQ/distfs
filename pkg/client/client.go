@@ -1011,6 +1011,59 @@ func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metada
 
 	return nil, metadata.ErrConflict
 }
+
+func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) error {
+	data, err := json.Marshal(cmds)
+	if err != nil {
+		return err
+	}
+
+	return c.withRetry(ctx, func() error {
+		c.acquire()
+		defer c.release()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/batch", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
+func (c *Client) PrepareUpdate(inode metadata.Inode) (metadata.LogCommand, error) {
+	c.signInode(&inode)
+	data, err := json.Marshal(inode)
+	if err != nil {
+		return metadata.LogCommand{}, err
+	}
+	return metadata.LogCommand{Type: metadata.CmdUpdateInode, Data: data}, nil
+}
+
+func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
+	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: []byte(id)}, nil
+}
+
 func (c *Client) DeleteInode(ctx context.Context, id string) error {
 	return c.withRetry(ctx, func() error {
 		c.acquire()
@@ -2797,6 +2850,24 @@ func (c *Client) isRetryable(err error) bool {
 		}
 	}
 	return false
+}
+
+func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
+	for i := 0; i < 10; i++ {
+		if i > 0 {
+			time.Sleep(time.Duration(i*50) * time.Millisecond)
+		}
+		err := op()
+		if err == nil {
+			return nil
+		}
+		var apiErr *APIError
+		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+			continue
+		}
+		return err
+	}
+	return metadata.ErrConflict
 }
 
 func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {

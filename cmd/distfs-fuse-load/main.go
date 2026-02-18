@@ -20,17 +20,92 @@ var (
 	maxSize   = flag.Int64("max-total-size", 1024*1024*1024, "Max total data size (1GB)")
 )
 
-type fileInfo struct {
-	path string
-	hash [32]byte
-	size int64
+type FileType int
+
+const (
+	TypeFile FileType = iota
+	// TypeDir // Directory renaming logic is complex to track safely, skipping for this iteration
+)
+
+type Item struct {
+	Path string
+	Hash [32]byte
+	Size int64
+}
+
+type State struct {
+	mu    sync.Mutex
+	items map[string]*Item // Path -> Item
+	busy  map[string]bool  // Path -> IsBusy (checked out by a worker)
+}
+
+func NewState() *State {
+	return &State{
+		items: make(map[string]*Item),
+		busy:  make(map[string]bool),
+	}
+}
+
+// Checkout attempts to lock a random file.
+func (s *State) Checkout(rng *rand.Rand) *Item {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Reservoir sampling to pick random item efficiently-ish
+	var candidates []*Item
+	for path, item := range s.items {
+		if !s.busy[path] {
+			candidates = append(candidates, item)
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	item := candidates[rng.Intn(len(candidates))]
+	s.busy[item.Path] = true
+	return item
+}
+
+func (s *State) Checkin(item *Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.busy, item.Path)
+}
+
+func (s *State) Add(item *Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.items[item.Path] = item
+}
+
+func (s *State) Remove(item *Item) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.items, item.Path)
+	delete(s.busy, item.Path)
+}
+
+// Rename updates the path in the state map. The item MUST be checked out.
+func (s *State) Rename(item *Item, newPath string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	oldPath := item.Path
+	delete(s.items, oldPath)
+	delete(s.busy, oldPath)
+
+	item.Path = newPath
+	s.items[newPath] = item
+	s.busy[newPath] = true
 }
 
 type metrics struct {
-	ops      uint64
-	bytes    int64
-	failures uint64
-	files    sync.Map // path -> fileInfo
+	ops         uint64
+	bytes       int64 // Current usage
+	transferred int64 // Total I/O bytes
+	failures    uint64
 }
 
 func main() {
@@ -40,6 +115,7 @@ func main() {
 		os.Exit(1)
 	}
 
+	state := NewState()
 	m := &metrics{}
 	start := time.Now()
 	ctx_done := make(chan struct{})
@@ -50,7 +126,7 @@ func main() {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			worker(id, *mountPath, ctx_done, m)
+			worker(id, *mountPath, ctx_done, m, state)
 		}(i)
 	}
 
@@ -62,7 +138,7 @@ func main() {
 			case <-ticker.C:
 				elapsed := time.Since(start)
 				ops := atomic.LoadUint64(&m.ops)
-				throughput := float64(atomic.LoadInt64(&m.bytes)) / 1024 / 1024 / elapsed.Seconds()
+				throughput := float64(atomic.LoadInt64(&m.transferred)) / 1024 / 1024 / elapsed.Seconds()
 				fmt.Printf("[%v] Ops: %d, Failures: %d, Speed: %.2f MB/s\n", elapsed.Truncate(time.Second), ops, atomic.LoadUint64(&m.failures), throughput)
 			case <-ctx_done:
 				return
@@ -75,13 +151,17 @@ func main() {
 	fmt.Printf("Total Time: %v\n", time.Since(start))
 	fmt.Printf("Total Ops:  %d\n", atomic.LoadUint64(&m.ops))
 	fmt.Printf("Failures:   %d\n", atomic.LoadUint64(&m.failures))
-	fmt.Printf("Avg Speed:  %.2f MB/s\n", float64(atomic.LoadInt64(&m.bytes))/1024/1024/time.Since(start).Seconds())
+	fmt.Printf("Avg Speed:  %.2f MB/s\n", float64(atomic.LoadInt64(&m.transferred))/1024/1024/time.Since(start).Seconds())
 }
 
-func worker(id int, base string, done chan struct{}, m *metrics) {
+func worker(id int, base string, done chan struct{}, m *metrics, state *State) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
 	workerDir := filepath.Join(base, fmt.Sprintf("worker-%d", id))
-	os.MkdirAll(workerDir, 0755)
+	// Create deep hierarchy
+	subDirs := []string{"", "a", "a/b", "c", "d/e"}
+	for _, d := range subDirs {
+		os.MkdirAll(filepath.Join(workerDir, d), 0755)
+	}
 
 	for {
 		select {
@@ -90,26 +170,30 @@ func worker(id int, base string, done chan struct{}, m *metrics) {
 		default:
 			op := rng.Intn(100)
 			performed := false
+
 			switch {
-			case op < 40: // Write (40%)
-				// Check total size
+			case op < 40: // Write (Create)
 				if atomic.LoadInt64(&m.bytes) < *maxSize {
-					doWrite(rng, workerDir, m)
+					subDir := subDirs[rng.Intn(len(subDirs))]
+					targetDir := filepath.Join(workerDir, subDir)
+					doWrite(rng, targetDir, m, state)
 					performed = true
 				} else {
-					// Size limit reached, use randomized sleep to prevent synchronized wake-ups
-					time.Sleep(time.Duration(rng.Intn(500)) * time.Millisecond)
+					time.Sleep(100 * time.Millisecond)
 				}
-			case op < 70: // Read & Verify (30%)
-				doRead(rng, m)
+			case op < 70: // Read
+				doRead(rng, m, state)
 				performed = true
-			case op < 85: // Rename/Link (15%)
-				doMetadata(rng, workerDir, m)
+			case op < 85: // Rename
+				subDir := subDirs[rng.Intn(len(subDirs))]
+				targetDir := filepath.Join(workerDir, subDir)
+				doRename(rng, targetDir, m, state)
 				performed = true
-			default: // Delete (15%)
-				doDelete(rng, m)
+			default: // Delete
+				doDelete(rng, m, state)
 				performed = true
 			}
+
 			if performed {
 				atomic.AddUint64(&m.ops, 1)
 			}
@@ -117,10 +201,10 @@ func worker(id int, base string, done chan struct{}, m *metrics) {
 	}
 }
 
-func doWrite(rng *rand.Rand, base string, m *metrics) {
-	name := fmt.Sprintf("file-%d", rng.Int63())
+func doWrite(rng *rand.Rand, base string, m *metrics, state *State) {
+	name := fmt.Sprintf("file-%d-%d", time.Now().UnixNano(), rng.Int63())
 	path := filepath.Join(base, name)
-	size := rng.Int63n(10 * 1024 * 1024) // Up to 10MB
+	size := rng.Int63n(5*1024*1024) + 1024 // 1KB to 5MB
 	data := make([]byte, size)
 	rng.Read(data)
 
@@ -131,96 +215,75 @@ func doWrite(rng *rand.Rand, base string, m *metrics) {
 	}
 
 	hash := sha256.Sum256(data)
-	m.files.Store(path, fileInfo{path: path, hash: hash, size: size})
+	state.Add(&Item{Path: path, Hash: hash, Size: size})
 	atomic.AddInt64(&m.bytes, size)
+	atomic.AddInt64(&m.transferred, size)
 }
 
-func doRead(rng *rand.Rand, m *metrics) {
-	var target fileInfo
-	found := false
-	m.files.Range(func(key, value interface{}) bool {
-		target = value.(fileInfo)
-		found = true
-		return false // pick first
-	})
-
-	if !found {
+func doRead(rng *rand.Rand, m *metrics, state *State) {
+	item := state.Checkout(rng)
+	if item == nil {
 		return
 	}
+	defer state.Checkin(item)
 
-	data, err := os.ReadFile(target.path)
+	data, err := os.ReadFile(item.Path)
 	if err != nil {
-		fmt.Printf("READ FAILURE: %s: %v\n", target.path, err)
+		fmt.Printf("READ FAILURE: %s: %v\n", item.Path, err)
 		atomic.AddUint64(&m.failures, 1)
 		return
 	}
 
-	if sha256.Sum256(data) != target.hash {
-		fmt.Printf("INTEGRITY FAILURE: %s\n", target.path)
+	atomic.AddInt64(&m.transferred, int64(len(data)))
+
+	if sha256.Sum256(data) != item.Hash {
+		fmt.Printf("INTEGRITY FAILURE: %s\n", item.Path)
 		atomic.AddUint64(&m.failures, 1)
 	}
 }
 
-func doMetadata(rng *rand.Rand, base string, m *metrics) {
-	var target fileInfo
-	found := false
-	m.files.Range(func(key, value interface{}) bool {
-		target = value.(fileInfo)
-		found = true
-		return false
-	})
-
-	if !found {
+func doRename(rng *rand.Rand, destDir string, m *metrics, state *State) {
+	item := state.Checkout(rng)
+	if item == nil {
 		return
 	}
-
-	op := rng.Intn(2)
-	newName := fmt.Sprintf("new-%d", rng.Int63())
-	newPath := filepath.Join(base, newName)
-
-	if op == 0 { // Rename
-		if err := os.Rename(target.path, newPath); err == nil {
-			m.files.Delete(target.path)
-			target.path = newPath
-			m.files.Store(newPath, target)
-		} else {
-			fmt.Printf("RENAME FAILURE: %v\n", err)
-			atomic.AddUint64(&m.failures, 1)
+	// Note: We don't defer Checkin here because Rename modifies the item/map
+	// and handles checkin logic or we call it explicitly.
+	// But to be safe, if we fail, we must Checkin.
+	success := false
+	defer func() {
+		if !success {
+			state.Checkin(item)
 		}
-	} else { // Link
-		if err := os.Link(target.path, newPath); err == nil {
-			m.files.Store(newPath, fileInfo{path: newPath, hash: target.hash, size: target.size})
-		} else {
-			fmt.Printf("LINK FAILURE: %v\n", err)
-			atomic.AddUint64(&m.failures, 1)
-		}
-	}
-}
+	}()
 
-func doDelete(rng *rand.Rand, m *metrics) {
-	var path string
-	found := false
-	m.files.Range(func(key, value interface{}) bool {
-		path = key.(string)
-		found = true
-		return false
-	})
+	newName := fmt.Sprintf("renamed-%d-%d", time.Now().UnixNano(), rng.Int63())
+	newPath := filepath.Join(destDir, newName)
 
-	if !found {
-		return
-	}
-
-	var sz int64
-	fi, err := os.Stat(path)
-	if err == nil {
-		sz = fi.Size()
-	}
-	if err := os.Remove(path); err == nil {
-		m.files.Delete(path)
-		atomic.AddInt64(&m.bytes, -sz)
+	if err := os.Rename(item.Path, newPath); err == nil {
+		state.Rename(item, newPath)
+		state.Checkin(item) // Check in with new path
+		success = true
 	} else {
-		if !os.IsNotExist(err) {
-			atomic.AddUint64(&m.failures, 1)
-		}
+		fmt.Printf("RENAME FAILURE: %v\n", err)
+		atomic.AddUint64(&m.failures, 1)
+	}
+}
+
+func doDelete(rng *rand.Rand, m *metrics, state *State) {
+	item := state.Checkout(rng)
+	if item == nil {
+		return
+	}
+	// If delete succeeds, we Remove (which clears busy).
+	// If fail, we Checkin.
+
+	if err := os.Remove(item.Path); err == nil {
+		state.Remove(item)
+		atomic.AddInt64(&m.bytes, -item.Size)
+	} else {
+		fmt.Printf("DELETE FAILURE: %s: %v\n", item.Path, err)
+		atomic.AddUint64(&m.failures, 1)
+		state.Checkin(item)
 	}
 }
