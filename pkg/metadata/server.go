@@ -168,6 +168,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 
 	go s.batchProcessor()
 	go s.sessionCleanupWorker()
+	go s.metricsFlusher()
 
 	s.replMonitor = NewReplicationMonitor(s)
 	s.replMonitor.Start()
@@ -213,6 +214,24 @@ func (s *Server) batchProcessor() {
 		select {
 		case req := <-s.batchApplyCh:
 			s.applyBatch(req)
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *Server) metricsFlusher() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if s.raft.State() == raft.Leader {
+				snap := s.fsm.metrics.SnapshotAndReset()
+				data, _ := json.Marshal(snap)
+				s.ApplyRaftCommandInternal(CmdStoreMetrics, data)
+			}
 		case <-s.stopCh:
 			return
 		}
@@ -528,6 +547,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
 		s.handleIssueToken(w, r)
+		return
+	} else if r.URL.Path == "/v1/meta/batch" && r.Method == http.MethodPost {
+		s.handleBatch(w, r)
 		return
 	} else if r.URL.Path == "/v1/group/" && r.Method == http.MethodPost {
 		s.handleCreateGroup(w, r)
@@ -945,6 +967,63 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Write(data)
+}
+
+func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
+	if s.raft.State() != raft.Leader {
+		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		return
+	}
+
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	var cmds []LogCommand
+	if err := json.Unmarshal(body, &cmds); err != nil {
+		http.Error(w, "bad batch format", http.StatusBadRequest)
+		return
+	}
+
+	for _, cmd := range cmds {
+		switch cmd.Type {
+		case CmdUpdateInode:
+			var inode Inode
+			if err := json.Unmarshal(cmd.Data, &inode); err != nil {
+				http.Error(w, "invalid inode data", http.StatusBadRequest)
+				return
+			}
+			if err := s.checkWritePermission(r, user, inode.ID); err != nil {
+				if err != ErrNotFound {
+					http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+					return
+				}
+			}
+		case CmdDeleteInode:
+			id := string(cmd.Data)
+			if err := s.checkWritePermission(r, user, id); err != nil {
+				if err != ErrNotFound {
+					http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+					return
+				}
+			}
+		case CmdCreateInode:
+			// Allowed
+		default:
+			http.Error(w, "unsupported batch command", http.StatusBadRequest)
+			return
+		}
+	}
+
+	s.ApplyRaftCommandRaw(w, r, CmdBatch, body, http.StatusOK)
 }
 
 func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string, error) {

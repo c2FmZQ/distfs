@@ -49,6 +49,8 @@ type MetadataFSM struct {
 	st      *storage.Storage
 	trusted map[string]bool // PubKey(bytes) -> true
 	mu      sync.RWMutex
+
+	metrics *MetricsCollector
 }
 
 // NewMetadataFSM creates a new FSM backed by a BoltDB file at the given path.
@@ -59,7 +61,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -77,6 +79,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 		path:    path,
 		st:      st,
 		trusted: make(map[string]bool),
+		metrics: NewMetricsCollector(),
 	}
 	fsm.loadTrustState()
 	return fsm, nil
@@ -199,6 +202,7 @@ const (
 	CmdPromoteAdmin    CommandType = 24
 	CmdAdminChown      CommandType = 25
 	CmdAdminChmod      CommandType = 26
+	CmdStoreMetrics    CommandType = 27
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -322,6 +326,11 @@ func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, depth int) []inte
 }
 
 func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, depth int) interface{} {
+	start := time.Now()
+	defer func() {
+		fsm.metrics.RecordOp(cmdType, time.Since(start))
+	}()
+
 	switch cmdType {
 	case CmdCreateInode:
 		return fsm.executeCreateInode(tx, data)
@@ -365,6 +374,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeAdminChown(tx, data)
 	case CmdAdminChmod:
 		return fsm.executeAdminChmod(tx, data)
+	case CmdStoreMetrics:
+		return fsm.executeStoreMetrics(tx, data)
 	case CmdBatch:
 		return fsm.applyBatchTx(tx, data, depth+1)
 	}
@@ -1484,4 +1495,20 @@ func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} 
 	inode.Version++
 
 	return saveInodeWithPages(tx, &inode)
+}
+
+func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{} {
+	var snap MetricSnapshot
+	if err := json.Unmarshal(data, &snap); err != nil {
+		return err
+	}
+
+	b := tx.Bucket([]byte("metrics"))
+	return b.Put(int64ToBytes(snap.Timestamp), data)
+}
+
+func int64ToBytes(v int64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v))
+	return b
 }

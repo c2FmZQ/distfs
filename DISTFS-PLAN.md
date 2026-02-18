@@ -507,4 +507,34 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update client configuration to store the Root Inode ID, Owner, and last seen Version.
     *   **Action:** Implement a safety check during initialization: warn or abort if the Root Owner changes or the Version decreases (Rollback Protection).
 
+---
 
+## Phase 32: Scalability & Performance Optimization
+**Goal:** Address identified bottlenecks in metadata, storage, and client interaction to support high throughput and large datasets.
+
+*   **Step 32.1: Parallel Metadata Batching**
+    *   **Action:** Refactor \`batchProcessor\` in \`MetadataServer\` to support parallel request preparation (decoding, signature verification) before serialization into the Raft log.
+    *   **Test:** Benchmark metadata write throughput with high concurrent client load.
+    *   **Success Criteria:** Increased throughput for \`CreateInode\`/\`UpdateInode\` operations compared to single-channel baseline.
+
+*   **Step 32.2: FSM Transaction Optimization**
+    *   **Action:** Optimize \`executeCommand\` logic to minimize time spent inside the global BoltDB write lock.
+    *   **Action:** Investigate and implement sharding strategies for metadata (e.g., separate buckets or DB instances) if necessary for write concurrency.
+    *   **Test:** Measure FSM apply latency under heavy write load.
+    *   **Success Criteria:** Reduced Raft commit latency and improved responsiveness during heavy write bursts.
+
+*   **Step 32.3: Optimized DiskStore Operations**
+    *   **Action:** Refactor \`DeleteChunk\` and \`ListChunks\` in \`DiskStore\` to avoid \`filepath.WalkDir\` (O(N) scan).
+    *   **Action:** Implement a deterministic directory sharding scheme (e.g., \`ab/cd/chunk_id\`) for the underlying \`storage\` backend to ensure O(1) access.
+    *   **Test:** Benchmark \`DeleteChunk\` and \`ListChunks\` with >100k chunks.
+    *   **Success Criteria:** \`DeleteChunk\` latency remains constant regardless of total chunk count.
+
+*   **Step 32.4: Client Concurrency Management**
+    *   **Action:** Split the global \`concurrencySem\` in \`Client\` into separate semaphores for Control Plane (Metadata) and Data Plane (Chunk I/O).
+    *   **Test:** Simulate heavy data I/O and measure latency of concurrent metadata operations.
+    *   **Success Criteria:** Metadata operations remain responsive even when data throughput is saturated.
+
+*   **Step 32.5: FUSE Initialization Optimization**
+    *   **Action:** Replace the blocking recursive retry loop in \`FS.Root()\` with a non-blocking or lazy initialization mechanism.
+    *   **Test:** Verify FUSE mount returns immediately and handles subsequent access gracefully if the cluster is initially unavailable.
+    *   **Success Criteria:** \`distfs-fuse\` command returns successfully without hanging, even if the server is offline.
