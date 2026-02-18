@@ -230,6 +230,31 @@ func (i *Inode) ManifestHash() []byte {
 	}
 	h.Write([]byte("|"))
 
+	// Write Lockbox (sorted for canonicality)
+	if len(i.Lockbox) > 0 {
+		h.Write([]byte("lockbox:"))
+		recipients := make([]string, 0, len(i.Lockbox))
+		for k := range i.Lockbox {
+			recipients = append(recipients, k)
+		}
+		sort.Strings(recipients)
+		for _, k := range recipients {
+			entry := i.Lockbox[k]
+			h.Write([]byte(k + ":"))
+			h.Write(entry.KEMCiphertext)
+			h.Write(entry.DEMCiphertext)
+			h.Write([]byte(","))
+		}
+		h.Write([]byte("|"))
+	}
+
+	// Write EncryptedName
+	if len(i.EncryptedName) > 0 {
+		h.Write([]byte("encname:"))
+		h.Write(i.EncryptedName)
+		h.Write([]byte("|"))
+	}
+
 	// Write AuthorizedSigners (sorted for canonicality)
 	if len(i.AuthorizedSigners) > 0 {
 		signers := make([]string, len(i.AuthorizedSigners))

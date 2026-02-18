@@ -3128,18 +3128,8 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 
 	if req.OwnerID != nil {
 		inode.OwnerID = *req.OwnerID
-		// When changing owner, we should also update AuthorizedSigners to ensure
-		// the new owner can actually modify the file.
-		found := false
-		for _, s := range inode.AuthorizedSigners {
-			if s == inode.OwnerID {
-				found = true
-				break
-			}
-		}
-		if !found {
-			inode.AuthorizedSigners = append(inode.AuthorizedSigners, inode.OwnerID)
-		}
+		// Reset authorized signers to just the new owner to ensure clean hand-off
+		inode.AuthorizedSigners = []string{inode.OwnerID}
 
 		// If we have the key, add the new owner to the lockbox
 		if unlockErr == nil {

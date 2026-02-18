@@ -1793,9 +1793,6 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 	if inode.OwnerID == user.ID {
 		return nil
 	}
-	if (inode.Mode & 0002) != 0 {
-		return nil
-	}
 	if inode.GroupID != "" {
 		inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
 		if inGroup && (inode.Mode&0020) != 0 {
