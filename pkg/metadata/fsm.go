@@ -730,37 +730,54 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 	mb := tx.Bucket([]byte("user_memberships"))
 	ob := tx.Bucket([]byte("owner_groups"))
 
-	// 1. Remove old indices if existing group provided
-	if existing != nil {
-		// Remove from members index
+	// 1. Membership Updates
+	if existing == nil {
+		// New group: Add all members
+		for uid := range group.Members {
+			sub, err := mb.CreateBucketIfNotExists([]byte(uid))
+			if err != nil {
+				return err
+			}
+			sub.Put([]byte(group.ID), []byte("1"))
+		}
+	} else {
+		// Existing group: Delta update
+		// 1a. Remove users who left
 		for uid := range existing.Members {
-			sub := mb.Bucket([]byte(uid))
+			if !group.Members[uid] {
+				sub := mb.Bucket([]byte(uid))
+				if sub != nil {
+					sub.Delete([]byte(existing.ID))
+				}
+			}
+		}
+		// 1b. Add users who joined
+		for uid := range group.Members {
+			if !existing.Members[uid] {
+				sub, err := mb.CreateBucketIfNotExists([]byte(uid))
+				if err != nil {
+					return err
+				}
+				sub.Put([]byte(group.ID), []byte("1"))
+			}
+		}
+	}
+
+	// 2. Ownership Updates
+	if existing == nil || existing.OwnerID != group.OwnerID {
+		// Owner changed or new group
+		if existing != nil {
+			sub := ob.Bucket([]byte(existing.OwnerID))
 			if sub != nil {
 				sub.Delete([]byte(existing.ID))
 			}
 		}
-		// Remove from owner index
-		sub := ob.Bucket([]byte(existing.OwnerID))
-		if sub != nil {
-			sub.Delete([]byte(existing.ID))
-		}
-	}
-
-	// 2. Add new indices
-	// Add to members index
-	for uid := range group.Members {
-		sub, err := mb.CreateBucketIfNotExists([]byte(uid))
+		sub, err := ob.CreateBucketIfNotExists([]byte(group.OwnerID))
 		if err != nil {
 			return err
 		}
 		sub.Put([]byte(group.ID), []byte("1"))
 	}
-	// Add to owner index
-	sub, err := ob.CreateBucketIfNotExists([]byte(group.OwnerID))
-	if err != nil {
-		return err
-	}
-	sub.Put([]byte(group.ID), []byte("1"))
 
 	return nil
 }
@@ -1659,12 +1676,24 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 			}
 			var g Group
 			if err := json.Unmarshal(v, &g); err == nil {
+				// Optimization: Filter lockbox to only relevant entries
+				filteredLockbox := make(crypto.Lockbox)
+				if entry, ok := g.Lockbox[userID]; ok {
+					filteredLockbox[userID] = entry
+				}
+				if g.OwnerID != "" && g.OwnerID != userID {
+					if entry, ok := g.Lockbox[g.OwnerID]; ok {
+						filteredLockbox[g.OwnerID] = entry
+					}
+				}
+
 				entries = append(entries, GroupListEntry{
 					ID:            g.ID,
+					OwnerID:       g.OwnerID,
 					EncryptedName: g.EncryptedName,
 					Role:          role,
 					EncKey:        g.EncKey,
-					Lockbox:       g.Lockbox,
+					Lockbox:       filteredLockbox,
 				})
 			}
 		}

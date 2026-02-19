@@ -125,6 +125,7 @@ const (
 
 type GroupListEntry struct {
 	ID            string         `json:"id"`
+	OwnerID       string         `json:"owner_id"`
 	EncryptedName []byte         `json:"enc_name"`
 	Role          GroupRole      `json:"role"`
 	EncKey        []byte         `json:"enc_key"` // Group Public Key

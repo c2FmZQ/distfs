@@ -2636,11 +2636,20 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 
 // DecryptGroupName decrypts a group name from a list entry using cached or provided keys.
 func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error) {
-	// 1. Try to unlock group key from entry's lockbox
+	// 1. Try personal access
 	gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
+	if err != nil && entry.OwnerID != "" && entry.OwnerID != c.userID {
+		// 2. Try delegated access
+		if _, exists := entry.Lockbox[entry.OwnerID]; exists {
+			if gdk, gerr := c.GetGroupPrivateKey(entry.OwnerID); gerr == nil {
+				gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, gdk)
+			}
+		}
+	}
 	if err != nil {
 		return "", err
 	}
+
 	gdk, err := crypto.UnmarshalDecapsulationKey(gk)
 	if err != nil {
 		return "", err
