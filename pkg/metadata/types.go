@@ -91,20 +91,28 @@ type RegisterUserRequest struct {
 	EncKey  []byte `json:"enc_key"`
 }
 
+// MemberEntry represents a record in the encrypted member registry.
+type MemberEntry struct {
+	UserID string `json:"uid"`
+	Email  string `json:"email"`
+}
+
 // Group represents a user group for sharing access.
 type Group struct {
-	ID               string          `json:"id"`
-	EncryptedName    []byte          `json:"enc_name"`
-	GID              uint32          `json:"gid"`
-	OwnerID          string          `json:"owner_id"` // User ID or Group ID
-	Members          map[string]bool `json:"members"`
-	EncKey           []byte          `json:"enc_key"`                // ML-KEM Public Key
-	SignKey          []byte          `json:"sign_key"`               // ML-DSA Public Key
-	EncryptedSignKey []byte          `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
-	Lockbox          crypto.Lockbox  `json:"lockbox"`
-	Version          uint64          `json:"version"`
-	SignerID         string          `json:"signer_id,omitempty"`
-	Signature        []byte          `json:"signature,omitempty"`
+	ID                string          `json:"id"`
+	EncryptedName     []byte          `json:"enc_name"`
+	GID               uint32          `json:"gid"`
+	OwnerID           string          `json:"owner_id"` // User ID or Group ID
+	Members           map[string]bool `json:"members"`
+	EncKey            []byte          `json:"enc_key"`                // ML-KEM Public Key
+	SignKey           []byte          `json:"sign_key"`               // ML-DSA Public Key
+	EncryptedSignKey  []byte          `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
+	Lockbox           crypto.Lockbox  `json:"lockbox"`
+	RegistryLockbox   crypto.Lockbox  `json:"registry_lockbox"` // Only for authorized managers
+	EncryptedRegistry []byte          `json:"enc_registry"`     // Member list encrypted with Registry Key
+	Version           uint64          `json:"version"`
+	SignerID          string          `json:"signer_id,omitempty"`
+	Signature         []byte          `json:"signature,omitempty"`
 }
 
 // Hash calculates a cryptographic hash of the group metadata for signing.
@@ -135,7 +143,7 @@ func (g *Group) Hash() []byte {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		h.Write([]byte(k + ","))
+		h.Write([]byte(k + ":" + iif(g.Members[k], "1", "0") + ","))
 	}
 	h.Write([]byte("|"))
 
@@ -173,7 +181,36 @@ func (g *Group) Hash() []byte {
 		h.Write([]byte("|"))
 	}
 
+	// Write RegistryLockbox (sorted for canonicality)
+	if len(g.RegistryLockbox) > 0 {
+		h.Write([]byte("registry_lockbox:"))
+		recipients := make([]string, 0, len(g.RegistryLockbox))
+		for k := range g.RegistryLockbox {
+			recipients = append(recipients, k)
+		}
+		sort.Strings(recipients)
+		for _, k := range recipients {
+			entry := g.RegistryLockbox[k]
+			h.Write([]byte(k + ":"))
+			h.Write(entry.KEMCiphertext)
+			h.Write(entry.DEMCiphertext)
+			h.Write([]byte(","))
+		}
+		h.Write([]byte("|"))
+	}
+
+	h.Write([]byte("enc_registry:"))
+	h.Write(g.EncryptedRegistry)
+	h.Write([]byte("|"))
+
 	return h.Sum(nil)
+}
+
+func iif(cond bool, t, f string) string {
+	if cond {
+		return t
+	}
+	return f
 }
 
 // SignGroupForTest signs a group using a provided identity key.

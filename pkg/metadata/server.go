@@ -1494,10 +1494,12 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		EncName []byte         `json:"enc_name"`
-		Lockbox crypto.Lockbox `json:"lockbox"`
-		EncKey  []byte         `json:"enc_key"`
-		SignKey []byte         `json:"sign_key"`
+		EncName           []byte         `json:"enc_name"`
+		Lockbox           crypto.Lockbox `json:"lockbox"`
+		RegistryLockbox   crypto.Lockbox `json:"registry_lockbox"`
+		EncryptedRegistry []byte         `json:"enc_registry"`
+		EncKey            []byte         `json:"enc_key"`
+		SignKey           []byte         `json:"sign_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("GROUP: handleCreateGroup decode failed: %v", err)
@@ -1543,15 +1545,17 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	log.Printf("GROUP: handleCreateGroup creating (ID: %s, GID: %d) for user %s", groupID, gid, user.ID)
 
 	group := Group{
-		ID:            groupID,
-		EncryptedName: req.EncName,
-		GID:           gid,
-		OwnerID:       user.ID,
-		Members:       map[string]bool{user.ID: true},
-		EncKey:        req.EncKey,
-		SignKey:       req.SignKey,
-		Lockbox:       req.Lockbox,
-		Version:       1,
+		ID:                groupID,
+		EncryptedName:     req.EncName,
+		GID:               gid,
+		OwnerID:           user.ID,
+		Members:           map[string]bool{user.ID: true},
+		EncKey:            req.EncKey,
+		SignKey:           req.SignKey,
+		Lockbox:           req.Lockbox,
+		RegistryLockbox:   req.RegistryLockbox,
+		EncryptedRegistry: req.EncryptedRegistry,
+		Version:           1,
 	}
 	body, _ := json.Marshal(group)
 

@@ -100,8 +100,11 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
     *   `HMAC(email) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
-    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox, Version, SignerID, Signature}`.
+    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Version, SignerID, Signature}`.
         *   **OwnerID:** Can be a `UserID` or another `GroupID`.
+        *   **Lockbox:** Shares Group Private Keys among all members.
+        *   **RegistryLockbox:** Shares a symmetric **Registry Key** only among authorized managers (`OwnerID`).
+        *   **EncryptedRegistry:** An opaque blob containing member emails and UserIDs, encrypted with the Registry Key.
         *   **Version:** Incremental counter for optimistic concurrency control.
         *   **Signature:** ML-DSA signature over the group metadata, signed by the `SignerID`.
 *   **Inode Structure:**
@@ -139,12 +142,13 @@ DistFS follows a strict subset of POSIX permissions designed for Zero-Knowledge 
 To prevent unauthorized hijacking and support collaborative administration, group mutations (updates to membership, keys, or names) are subject to strict cryptographic authorization.
 
 1.  **Ownership Model:**
-    *   **User-Owned:** If `OwnerID` matches a `UserID`, only that user can sign updates for the group.
-    *   **Group-Owned:** If `OwnerID` matches a `GroupID`, any registered member of the owning group can sign updates for the target group.
-    *   **Self-Managed:** If `OwnerID` equals the group's own `ID`, any member of the group can sign updates (collaborative management).
-2.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
-3.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
-4.  **Optimistic Concurrency:** Every group update must include the expected current `Version`. The server rejects updates where the version has changed since the client last fetched the metadata.
+    *   **User-Owned:** If `OwnerID` matches a `UserID`, only that user can sign updates for the group and access the **Member Registry**.
+    *   **Group-Owned:** If `OwnerID` matches a `GroupID`, any registered member of the owning group can sign updates and access the **Member Registry** of the target group.
+    *   **Self-Managed:** If `OwnerID` equals the group's own `ID`, any member of the group can sign updates and access the **Member Registry**.
+2.  **Member Registry (PII Isolation):** To comply with Zero-Knowledge principles while allowing administrative oversight, member emails are stored in the `EncryptedRegistry`. This blob is encrypted with a unique symmetric key shared only via the `RegistryLockbox`. Regular members who are not authorized managers cannot decrypt this registry and thus cannot see the emails of other members.
+3.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
+4.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
+5.  **Optimistic Concurrency:** Every group update must include the expected current `Version`. The server rejects updates where the version has changed since the client last fetched the metadata.
 
 ---
 

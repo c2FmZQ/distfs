@@ -230,6 +230,12 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** **Security Test:** Verify that a non-member is rejected when attempting to update a group.
     *   **Action:** **Security Test:** Verify that a member can update a self-managed group but a non-member cannot.
     *   **Action:** **Integration Test:** Demonstrate "Group A owned by Group B" where a member of B successfully adds a user to A.
+*   **Step 13.6: PII Isolation (Encrypted Member Registry)**
+    *   **Action:** Add `RegistryLockbox` and `EncryptedRegistry` fields to `Group` struct.
+    *   **Action:** Implement client-side logic to generate a symmetric **Registry Key** during group creation.
+    *   **Action:** Implement `RegistryLockbox.AddRecipient` to share the Registry Key with authorized managers (`OwnerID`).
+    *   **Action:** Update `group-add` to update the `EncryptedRegistry` blob (containing member emails) whenever a user is added.
+    *   **Action:** Update `group-info` to attempt Registry Key decryption and display member emails only if authorized.
 
 ---
 

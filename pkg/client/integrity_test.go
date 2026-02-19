@@ -155,7 +155,7 @@ func TestManifestIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
-	if err := clientA.AddUserToGroup(group.ID, userID); err != nil {
+	if err := clientA.AddUserToGroup(group.ID, userID, "userB@example.com"); err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
 

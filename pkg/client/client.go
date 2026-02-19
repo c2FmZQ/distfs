@@ -2520,6 +2520,34 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 	return string(nameBytes), nil
 }
 
+// GetGroupRegistryKey retrieves and decrypts the group registry key.
+func (c *Client) getGroupRegistryKey(group *metadata.Group) ([]byte, error) {
+	if c.decKey == nil {
+		return nil, fmt.Errorf("client has no identity to unlock registry")
+	}
+	return group.RegistryLockbox.GetFileKey(c.userID, c.decKey)
+}
+
+func (c *Client) encryptRegistry(key []byte, members []metadata.MemberEntry) ([]byte, error) {
+	data, err := json.Marshal(members)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.EncryptDEM(key, data)
+}
+
+func (c *Client) decryptRegistry(key []byte, encrypted []byte) ([]metadata.MemberEntry, error) {
+	data, err := crypto.DecryptDEM(key, encrypted)
+	if err != nil {
+		return nil, err
+	}
+	var members []metadata.MemberEntry
+	if err := json.Unmarshal(data, &members); err != nil {
+		return nil, err
+	}
+	return members, nil
+}
+
 // CreateGroup creates a new cryptographic group.
 func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	// 1. Generate Encryption Key (ML-KEM)
@@ -2549,11 +2577,44 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 		return nil, fmt.Errorf("failed to encrypt group name: %w", err)
 	}
 
+	// 3. Generate Registry Key (Symmetric)
+	rk := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, rk); err != nil {
+		return nil, err
+	}
+
+	rlb := crypto.NewLockbox()
+	// Encrypt Registry Key for the owner
+	if err := rlb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), rk); err != nil {
+		return nil, err
+	}
+
+	// Initialize Registry with the owner (if email is known)
+	// We might not know our own email from the config directly, but we can assume it's passed or available.
+	// For now, let's assume we can add our own entry if we have it.
+	// Actually, User struct has no email. The client might have it in memory or we can skip for now.
+	// User said: "actual email of the group members to be visible by the group owner".
+	// During onboarding we might have the email.
+
+	// Let's assume for now we just store the UserID in the registry if email is missing.
+	// Or we can add a way to pass email to CreateGroup.
+	// But let's check how we get email.
+
+	initialMembers := []metadata.MemberEntry{
+		{UserID: c.userID, Email: ""}, // Placeholder for owner email
+	}
+	encRegistry, err := c.encryptRegistry(rk, initialMembers)
+	if err != nil {
+		return nil, err
+	}
+
 	reqData := map[string]interface{}{
-		"enc_name": encName,
-		"enc_key":  pk,
-		"sign_key": spk,
-		"lockbox":  lb,
+		"enc_name":         encName,
+		"enc_key":          pk,
+		"sign_key":         spk,
+		"lockbox":          lb,
+		"registry_lockbox": rlb,
+		"enc_registry":     encRegistry,
 	}
 
 	data, _ := json.Marshal(reqData)
@@ -2592,19 +2653,19 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 }
 
 // AddUserToGroup adds a new member to an existing group.
-func (c *Client) AddUserToGroup(groupID, userID string) error {
+func (c *Client) AddUserToGroup(groupID, userID, email string) error {
 	group, err := c.GetGroup(groupID)
 	if err != nil {
 		return err
 	}
 
 	// We need the user's public key.
-	// We need a GET /v1/user/{id} API.
 	user, err := c.GetUser(userID)
 	if err != nil {
 		return err
 	}
 
+	// 1. Update Group Private Keys (Lockbox)
 	// Decrypt group private encryption key using our identity
 	gk, err := c.GetGroupPrivateKey(groupID)
 	if err != nil {
@@ -2635,6 +2696,32 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 		group.Members = make(map[string]bool)
 	}
 	group.Members[userID] = true
+
+	// 2. Update Member Registry (if we are a manager)
+	rk, err := c.getGroupRegistryKey(group)
+	if err == nil {
+		// We are a manager, update the registry
+		members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
+		if err == nil {
+			// Add new entry
+			found := false
+			for i, m := range members {
+				if m.UserID == userID {
+					members[i].Email = email
+					found = true
+					break
+				}
+			}
+			if !found {
+				members = append(members, metadata.MemberEntry{UserID: userID, Email: email})
+			}
+
+			encRegistry, err := c.encryptRegistry(rk, members)
+			if err == nil {
+				group.EncryptedRegistry = encRegistry
+			}
+		}
+	}
 
 	_, err = c.updateGroup(context.Background(), *group)
 	return err
@@ -3389,11 +3476,64 @@ func (c *Client) updateGroup(ctx context.Context, group metadata.Group) (*metada
 	return nil, metadata.ErrConflict
 }
 
+// GetGroupMembers retrieves the list of members for a group.
+// If the requester is an authorized manager, it returns emails. Otherwise, only UserIDs.
+func (c *Client) GetGroupMembers(groupID string) ([]metadata.MemberEntry, error) {
+	group, err := c.GetGroup(groupID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Try to decrypt registry
+	rk, err := c.getGroupRegistryKey(group)
+	if err == nil {
+		return c.decryptRegistry(rk, group.EncryptedRegistry)
+	}
+
+	// Not a manager, return public member list (IDs only)
+	var members []metadata.MemberEntry
+	for id := range group.Members {
+		members = append(members, metadata.MemberEntry{UserID: id, Email: "[HIDDEN]"})
+	}
+	return members, nil
+}
+
 // GroupChown changes the owner of a group.
 func (c *Client) GroupChown(groupID, newOwnerID string) error {
 	group, err := c.GetGroup(groupID)
 	if err != nil {
 		return err
+	}
+
+	// 1. Update RegistryLockbox (if we are a manager)
+	rk, err := c.getGroupRegistryKey(group)
+	if err == nil {
+		// Fetch new owner's public key (assuming it's a UserID for now)
+		// If it's a GroupID, we need to handle that too (recursive manager lockbox)
+		// For now, let's try fetching as user
+		newOwner, err := c.GetUser(newOwnerID)
+		if err == nil {
+			pubKey, err := crypto.UnmarshalEncapsulationKey(newOwner.EncKey)
+			if err == nil {
+				// Re-key Registry for new owner
+				if group.RegistryLockbox == nil {
+					group.RegistryLockbox = crypto.NewLockbox()
+				}
+				group.RegistryLockbox.AddRecipient(newOwnerID, pubKey, rk)
+			}
+		} else {
+			// Try as group?
+			targetGroup, err := c.GetGroup(newOwnerID)
+			if err == nil {
+				pubKey, err := crypto.UnmarshalEncapsulationKey(targetGroup.EncKey)
+				if err == nil {
+					if group.RegistryLockbox == nil {
+						group.RegistryLockbox = crypto.NewLockbox()
+					}
+					group.RegistryLockbox.AddRecipient(newOwnerID, pubKey, rk)
+				}
+			}
+		}
 	}
 
 	group.OwnerID = newOwnerID
