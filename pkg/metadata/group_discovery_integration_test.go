@@ -129,12 +129,16 @@ func TestGroupDiscovery(t *testing.T) {
 	// 8. Verify Cryptographic Authorization Transfer (Fix #3)
 	// Bob: Create Group C.
 	groupC, err := clientBob.CreateGroup("group-c")
-	if err != nil { t.Fatalf("Bob CreateGroup C failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("Bob CreateGroup C failed: %v", err)
+	}
+
 	// Bob: Transfer Group C to Alice.
 	err = clientBob.GroupChown(groupC.ID, "alice")
-	if err != nil { t.Fatalf("Bob GroupChown C to Alice failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("Bob GroupChown C to Alice failed: %v", err)
+	}
+
 	// Alice: Should now be able to manage C (e.g., fetch its private signing key)
 	_, err = clientAlice.GetGroupSignKey(groupC.ID)
 	if err != nil {
