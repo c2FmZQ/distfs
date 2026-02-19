@@ -111,7 +111,7 @@ func usage() {
 	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  chgrp <group_id> <path>         Change group")
 	fmt.Println("  group-create <name>             Create a new group")
-	fmt.Println("  group-add <group_id> <user_id|contact_string> [info] Add user to group")
+	fmt.Println("  group-add [-f] <group_id> <user_id|contact_string> [info] Add user to group")
 	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
 	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
 	fmt.Println("  contact-info                    Display your signed contact string for sharing")
@@ -295,13 +295,17 @@ func cmdGroupCreate(args []string) {
 }
 
 func cmdGroupAdd(args []string) {
-	if len(args) < 2 {
+	fs := flag.NewFlagSet("group-add", flag.ExitOnError)
+	force := fs.Bool("f", false, "Force add without confirmation")
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
 		log.Fatal("group_id and user_id/contact_string required")
 	}
-	groupID, userArg := args[0], args[1]
+	groupID, userArg := fs.Arg(0), fs.Arg(1)
 	info := ""
-	if len(args) > 2 {
-		info = args[2]
+	if fs.NArg() > 2 {
+		info = fs.Arg(2)
 	}
 	c := loadClient()
 
@@ -312,7 +316,19 @@ func cmdGroupAdd(args []string) {
 			log.Fatalf("Invalid contact string: %v", err)
 		}
 		userID = ci.UserID
-		fmt.Printf("Parsed contact string for User ID: %s\n", userID)
+		fmt.Printf("Parsed contact string:\n")
+		fmt.Printf("  User ID:    %s\n", ci.UserID)
+		fmt.Printf("  Created At: %s\n", time.Unix(ci.Timestamp, 0).Format(time.RFC3339))
+
+		if !*force {
+			fmt.Printf("Add this user to group %s? [y/N]: ", groupID)
+			var response string
+			fmt.Scanln(&response)
+			if strings.ToLower(response) != "y" {
+				fmt.Println("Aborted.")
+				return
+			}
+		}
 	}
 
 	if err := c.AddUserToGroup(groupID, userID, info); err != nil {
