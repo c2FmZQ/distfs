@@ -96,12 +96,95 @@ type Group struct {
 	ID               string          `json:"id"`
 	EncryptedName    []byte          `json:"enc_name"`
 	GID              uint32          `json:"gid"`
-	OwnerID          string          `json:"owner_id"` // User ID (string)
+	OwnerID          string          `json:"owner_id"` // User ID or Group ID
 	Members          map[string]bool `json:"members"`
 	EncKey           []byte          `json:"enc_key"`                // ML-KEM Public Key
 	SignKey          []byte          `json:"sign_key"`               // ML-DSA Public Key
 	EncryptedSignKey []byte          `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
 	Lockbox          crypto.Lockbox  `json:"lockbox"`
+	Version          uint64          `json:"version"`
+	SignerID         string          `json:"signer_id,omitempty"`
+	Signature        []byte          `json:"signature,omitempty"`
+}
+
+// Hash calculates a cryptographic hash of the group metadata for signing.
+func (g *Group) Hash() []byte {
+	h := crypto.NewHash()
+	h.Write([]byte("group-id:" + g.ID + "|"))
+
+	v := make([]byte, 8)
+	binary.LittleEndian.PutUint64(v, g.Version)
+	h.Write([]byte("v:"))
+	h.Write(v)
+	h.Write([]byte("|"))
+
+	gid := make([]byte, 4)
+	binary.LittleEndian.PutUint32(gid, g.GID)
+	h.Write([]byte("gid:"))
+	h.Write(gid)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("owner:" + g.OwnerID + "|"))
+	h.Write([]byte("signer:" + g.SignerID + "|"))
+
+	// Write Members (sorted for canonicality)
+	h.Write([]byte("members:"))
+	keys := make([]string, 0, len(g.Members))
+	for k := range g.Members {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		h.Write([]byte(k + ","))
+	}
+	h.Write([]byte("|"))
+
+	h.Write([]byte("enc_name:"))
+	h.Write(g.EncryptedName)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("enc_key:"))
+	h.Write(g.EncKey)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("sign_key:"))
+	h.Write(g.SignKey)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("enc_sign_key:"))
+	h.Write(g.EncryptedSignKey)
+	h.Write([]byte("|"))
+
+	// Write Lockbox (sorted for canonicality)
+	if len(g.Lockbox) > 0 {
+		h.Write([]byte("lockbox:"))
+		recipients := make([]string, 0, len(g.Lockbox))
+		for k := range g.Lockbox {
+			recipients = append(recipients, k)
+		}
+		sort.Strings(recipients)
+		for _, k := range recipients {
+			entry := g.Lockbox[k]
+			h.Write([]byte(k + ":"))
+			h.Write(entry.KEMCiphertext)
+			h.Write(entry.DEMCiphertext)
+			h.Write([]byte(","))
+		}
+		h.Write([]byte("|"))
+	}
+
+	return h.Sum(nil)
+}
+
+// SignGroupForTest signs a group using a provided identity key.
+func (g *Group) SignGroupForTest(signerID string, key *crypto.IdentityKey) {
+	g.SignerID = signerID
+	// Note: FSM increments version during apply
+	orig := g.Version
+	g.Version++
+	hash := g.Hash()
+	g.Signature = key.Sign(hash)
+	g.Version = orig
 }
 
 // NodeStatus indicates the health/lifecycle state of a storage node.

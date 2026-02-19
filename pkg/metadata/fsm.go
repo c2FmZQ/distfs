@@ -670,6 +670,7 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
 	}
 
+	group.Version = 1
 	encoded, err := json.Marshal(group)
 	if err != nil {
 		return err
@@ -690,9 +691,21 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 	b := tx.Bucket([]byte("groups"))
-	if b.Get([]byte(group.ID)) == nil {
+	v := b.Get([]byte(group.ID))
+	if v == nil {
 		return ErrNotFound
 	}
+
+	var existing Group
+	if err := json.Unmarshal(v, &existing); err != nil {
+		return err
+	}
+
+	if group.Version != existing.Version {
+		return ErrConflict
+	}
+
+	group.Version++
 	encoded, err := json.Marshal(group)
 	if err != nil {
 		return err

@@ -1494,10 +1494,10 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name    string         `json:"name"`
 		EncName []byte         `json:"enc_name"`
 		Lockbox crypto.Lockbox `json:"lockbox"`
 		EncKey  []byte         `json:"enc_key"`
+		SignKey []byte         `json:"sign_key"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		log.Printf("GROUP: handleCreateGroup decode failed: %v", err)
@@ -1512,16 +1512,9 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	secret, err := s.fsm.GetClusterSecret()
-	if err != nil {
-		log.Printf("GROUP: handleCreateGroup cluster secret failed: %v", err)
-		http.Error(w, "cluster secret not available", http.StatusInternalServerError)
-		return
-	}
-
 	// 1. Generate unique GID (POSIX)
 	var gid uint32
-	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		idx := tx.Bucket([]byte("gids"))
 		for {
 			gid = generateID32()
@@ -1539,21 +1532,26 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Hash OwnerID + Name for Secure GroupID
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(fmt.Sprintf("%s:%s", user.ID, req.Name)))
-	groupID := hex.EncodeToString(mac.Sum(nil))
+	// 2. Generate Random GroupID (UUID replacement)
+	idBytes := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
+		http.Error(w, "random failed", http.StatusInternalServerError)
+		return
+	}
+	groupID := hex.EncodeToString(idBytes)
 
-	log.Printf("GROUP: handleCreateGroup creating '%s' (ID: %s, GID: %d) for user %s", req.Name, groupID, gid, user.ID)
+	log.Printf("GROUP: handleCreateGroup creating (ID: %s, GID: %d) for user %s", groupID, gid, user.ID)
 
 	group := Group{
 		ID:            groupID,
 		EncryptedName: req.EncName,
 		GID:           gid,
 		OwnerID:       user.ID,
-		Members:       make(map[string]bool),
+		Members:       map[string]bool{user.ID: true},
 		EncKey:        req.EncKey,
+		SignKey:       req.SignKey,
 		Lockbox:       req.Lockbox,
+		Version:       1,
 	}
 	body, _ := json.Marshal(group)
 
@@ -1586,7 +1584,6 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id string) {
 	log.Printf("GROUP: handleGetGroup(%s) starting", id)
-	// Must be member to see group?
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
 		log.Printf("GROUP: handleGetGroup(%s) unauthorized", id)
@@ -1594,29 +1591,9 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
-	isAdmin := s.fsm.IsAdmin(user.ID)
-	if err != nil && !isAdmin {
-		log.Printf("GROUP: handleGetGroup(%s) membership check failed for user %s: %v", id, user.ID, err)
-		// Check if group exists at all
-		var exists bool
-		s.fsm.db.View(func(tx *bolt.Tx) error {
-			exists = tx.Bucket([]byte("groups")).Get([]byte(id)) != nil
-			return nil
-		})
-		log.Printf("GROUP: handleGetGroup(%s) exists in DB: %v", id, exists)
-
-		http.Error(w, "group not found", http.StatusNotFound)
-		return
-	}
-	if !inGroup && !isAdmin {
-		log.Printf("GROUP: handleGetGroup(%s) forbidden for user %s", id, user.ID)
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
-
+	// 1. Fetch group first to check ownership/membership
 	var group Group
-	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("groups"))
 		v := b.Get([]byte(id))
 		if v == nil {
@@ -1627,6 +1604,27 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	if err != nil {
 		log.Printf("GROUP: handleGetGroup(%s) retrieval failed: %v", id, err)
 		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	// 2. Check Authorization
+	authorized := false
+	if group.OwnerID == user.ID {
+		authorized = true
+	} else if group.Members != nil && group.Members[user.ID] {
+		authorized = true
+	} else {
+		// Check if OwnerID is a group we are in
+		inOwningGroup, _ := s.fsm.IsUserInGroup(user.ID, group.OwnerID)
+		if inOwningGroup {
+			authorized = true
+		}
+	}
+
+	isAdmin := s.fsm.IsAdmin(user.ID)
+	if !authorized && !isAdmin {
+		log.Printf("GROUP: handleGetGroup(%s) forbidden for user %s", id, user.ID)
+		http.Error(w, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -1650,7 +1648,87 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 }
 
 func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
-	s.ApplyRaftCommand(w, r, CmdUpdateGroup, 10*1024*1024, http.StatusOK)
+	id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
+	if id == "" {
+		http.NotFound(w, r)
+		return
+	}
+
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var group Group
+	if err := json.Unmarshal(body, &group); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if group.ID != id {
+		http.Error(w, "ID mismatch", http.StatusBadRequest)
+		return
+	}
+
+	if err := s.checkGroupWritePermission(r, user, &group); err != nil {
+		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+		return
+	}
+
+	s.ApplyRaftCommandRaw(w, r, CmdUpdateGroup, body, http.StatusOK)
+}
+
+func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedGroup *Group) error {
+	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+	if bypass && s.fsm.IsAdmin(user.ID) {
+		return nil
+	}
+
+	// 1. Fetch existing group
+	existing, err := s.fsm.GetGroup(updatedGroup.ID)
+	if err != nil {
+		return err
+	}
+
+	// 2. Check Authorization based on OwnerID
+	authorized := false
+	if existing.OwnerID == user.ID {
+		authorized = true
+	} else {
+		// Check if OwnerID is a group we are in
+		inGroup, _ := s.fsm.IsUserInGroup(user.ID, existing.OwnerID)
+		if inGroup {
+			authorized = true
+		}
+	}
+
+	if !authorized {
+		return fmt.Errorf("user %s not authorized to manage group %s", user.ID, updatedGroup.ID)
+	}
+
+	// 3. Verify Signature
+	if len(updatedGroup.Signature) == 0 {
+		return fmt.Errorf("missing signature")
+	}
+	if updatedGroup.SignerID != user.ID {
+		return fmt.Errorf("signer ID mismatch")
+	}
+
+	updatedGroup.Version++ // Sign the version that will be stored on the server
+	hash := updatedGroup.Hash()
+	updatedGroup.Version-- // Restore for the server's conflict check
+	if !crypto.VerifySignature(user.SignKey, hash, updatedGroup.Signature) {
+		return fmt.Errorf("invalid signature")
+	}
+
+	return nil
 }
 
 func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {

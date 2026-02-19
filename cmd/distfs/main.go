@@ -71,6 +71,8 @@ func main() {
 		cmdGroupCreate(args)
 	case "group-add":
 		cmdGroupAdd(args)
+	case "group-chown":
+		cmdGroupChown(args)
 	case "admin":
 		cmdAdmin(args)
 	case "admin-join":
@@ -106,6 +108,7 @@ func usage() {
 	fmt.Println("  chgrp <group_id> <path>         Change group")
 	fmt.Println("  group-create <name>             Create a new group")
 	fmt.Println("  group-add <group_id> <user_id>  Add user to group")
+	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	fmt.Println("  admin                           Open interactive cluster management console")
@@ -347,4 +350,16 @@ func cmdGet(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s downloaded to %s.\n", remote, local)
+}
+
+func cmdGroupChown(args []string) {
+	if len(args) < 2 {
+		log.Fatal("group_id and owner required")
+	}
+	groupID, ownerID := args[0], args[1]
+	c := loadClient()
+	if err := c.GroupChown(groupID, ownerID); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Owner of group %s changed to %s\n", groupID, ownerID)
 }

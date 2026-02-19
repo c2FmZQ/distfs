@@ -2550,7 +2550,6 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	}
 
 	reqData := map[string]interface{}{
-		"name":     name, // Server needs plaintext to compute GroupID = HMAC(Owner:Name)
 		"enc_name": encName,
 		"enc_key":  pk,
 		"sign_key": spk,
@@ -2637,34 +2636,8 @@ func (c *Client) AddUserToGroup(groupID, userID string) error {
 	}
 	group.Members[userID] = true
 
-	data, _ := json.Marshal(group)
-	req, err := http.NewRequest("PUT", c.serverURL+"/v1/group/"+groupID, nil)
-	if err != nil {
-		return err
-	}
-	if err := c.authenticateRequest(req); err != nil {
-		return err
-	}
-	if err := c.sealBody(req, data); err != nil {
-		return err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return err
-	}
-	body, err := c.unsealResponse(resp)
-	if err != nil {
-		return err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return fmt.Errorf("update group failed: %d %s", resp.StatusCode, string(b))
-	}
-
-	return nil
+	_, err = c.updateGroup(context.Background(), *group)
+	return err
 }
 
 // SetAttr updates the attributes of an inode at the given path.
@@ -3322,6 +3295,109 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 	}
 
 	_, err = c.updateInode(ctx, *inode)
+	return err
+}
+
+func (c *Client) signGroup(group *metadata.Group) {
+	group.SignerID = c.userID
+	group.Version++ // Sign the version that will be stored on the server
+	hash := group.Hash()
+	group.Signature = c.signKey.Sign(hash)
+	group.Version-- // Restore for the server's conflict check
+}
+
+func (c *Client) updateGroup(ctx context.Context, group metadata.Group) (*metadata.Group, error) {
+	var updated metadata.Group
+	maxRetries := 5
+
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			latest, err := c.GetGroup(group.ID)
+			if err != nil {
+				return nil, err
+			}
+			// Transfer updated fields to latest
+			latest.Members = make(map[string]bool)
+			for k, v := range group.Members {
+				latest.Members[k] = v
+			}
+			latest.Lockbox = make(crypto.Lockbox)
+			for k, v := range group.Lockbox {
+				latest.Lockbox[k] = v
+			}
+			latest.EncryptedName = group.EncryptedName
+			latest.OwnerID = group.OwnerID
+			latest.EncKey = group.EncKey
+			latest.SignKey = group.SignKey
+			latest.EncryptedSignKey = group.EncryptedSignKey
+			group = *latest
+		}
+
+		c.signGroup(&group)
+		data, err := json.Marshal(group)
+		if err != nil {
+			return nil, err
+		}
+
+		err = c.withRetry(ctx, func() error {
+			c.acquireControl()
+			defer c.releaseControl()
+
+			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+group.ID, bytes.NewReader(data))
+			if err != nil {
+				return err
+			}
+			if err := c.authenticateRequest(req); err != nil {
+				return err
+			}
+			if err := c.sealBody(req, data); err != nil {
+				return err
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if resp.StatusCode == http.StatusConflict {
+				return metadata.ErrConflict
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(body)
+				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+			}
+
+			return json.NewDecoder(body).Decode(&updated)
+		})
+
+		if err == nil {
+			return &updated, nil
+		}
+		if err != metadata.ErrConflict {
+			return nil, err
+		}
+		// On conflict, wait a bit and retry
+		time.Sleep(time.Duration(i*50) * time.Millisecond)
+	}
+
+	return nil, metadata.ErrConflict
+}
+
+// GroupChown changes the owner of a group.
+func (c *Client) GroupChown(groupID, newOwnerID string) error {
+	group, err := c.GetGroup(groupID)
+	if err != nil {
+		return err
+	}
+
+	group.OwnerID = newOwnerID
+	_, err = c.updateGroup(context.Background(), *group)
 	return err
 }
 

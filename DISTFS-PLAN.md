@@ -209,18 +209,27 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 13: Group-Based Sharing
-**Goal:** Implement cryptographic group sharing.
+## Phase 13: Group-Based Sharing & Management
+**Goal:** Implement cryptographic group sharing and secure, owner-delegated management.
 
-*   **Step 13.1: Group Authorization**
-    *   **Action:** Update `handleIssueToken` and `checkWritePermission` in MetaNode to verify user membership in `inode.GroupID`.
-*   **Step 13.2: Group Key Retrieval**
-    *   **Action:** Implement `GET /v1/group/{id}/private` to retrieve the Group Private Key (encapsulated for the requester).
-*   **Step 13.3: Client Group Logic**
-    *   **Action:** Update `UnlockInode` to attempt group-based decryption if personal access fails.
-    *   **Action:** Implement memory caching for Group Private Keys.
-*   **Step 13.4: Group Management CLI**
-    *   **Action:** Implement `chgrp` and `group-create`/`group-add` commands.
+*   **Step 13.1: Group Authorization & Signatures**
+    *   **Action:** Update `Group` struct with `Version`, `SignerID`, and `Signature` in `pkg/metadata/types.go`.
+    *   **Action:** Implement `Group.Hash()` for metadata integrity verification.
+    *   **Action:** Update `handleUpdateGroup` in `MetadataServer` to enforce **Signature Verification** and **Version Matching**.
+*   **Step 13.2: Delegated & Self-Managed Groups**
+    *   **Action:** Update `checkGroupWritePermission` in `MetadataServer` to support `OwnerID` being a User or Group ID.
+    *   **Action:** Implement non-recursive group-membership check for group-owned groups.
+*   **Step 13.3: Client Group Management Signing**
+    *   **Action:** Update `Client.AddUserToGroup` to sign the updated group metadata using the user's ML-DSA identity key.
+    *   **Action:** Implement `Client.UpdateGroup` to handle optimistic concurrency retries (fetch-modify-retry).
+*   **Step 13.4: Group Management CLI (Advanced)**
+    *   **Action:** Implement `group-chown` to transfer group ownership to another User or Group.
+    *   **Action:** Implement `group-list-members` and `group-info` to display ownership and management status.
+*   **Step 13.5: Testing & Verification**
+    *   **Action:** **Unit Test:** FSM `executeUpdateGroup` correctly verifies signatures and increments versions.
+    *   **Action:** **Security Test:** Verify that a non-member is rejected when attempting to update a group.
+    *   **Action:** **Security Test:** Verify that a member can update a self-managed group but a non-member cannot.
+    *   **Action:** **Integration Test:** Demonstrate "Group A owned by Group B" where a member of B successfully adds a user to A.
 
 ---
 

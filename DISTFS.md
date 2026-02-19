@@ -100,7 +100,10 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
     *   `HMAC(email) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
-    *   `UUID -> {GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox}`.
+    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox, Version, SignerID, Signature}`.
+        *   **OwnerID:** Can be a `UserID` or another `GroupID`.
+        *   **Version:** Incremental counter for optimistic concurrency control.
+        *   **Signature:** ML-DSA signature over the group metadata, signed by the `SignerID`.
 *   **Inode Structure:**
     *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, UserSig, GroupSig}`.
 *   **Directory Structure:** The Metadata Layer MUST know the file system hierarchy to enforce permissions and perform Garbage Collection.
@@ -131,6 +134,17 @@ DistFS follows a strict subset of POSIX permissions designed for Zero-Knowledge 
 ### 4.5 Consistency
 *   All metadata changes (Create, Delete, Share, Append) go through the Raft Leader.
 *   Reads can be served by Followers with `Index` verification (Read-Index) for scalability.
+
+### 4.6 Group Management & Authorization
+To prevent unauthorized hijacking and support collaborative administration, group mutations (updates to membership, keys, or names) are subject to strict cryptographic authorization.
+
+1.  **Ownership Model:**
+    *   **User-Owned:** If `OwnerID` matches a `UserID`, only that user can sign updates for the group.
+    *   **Group-Owned:** If `OwnerID` matches a `GroupID`, any registered member of the owning group can sign updates for the target group.
+    *   **Self-Managed:** If `OwnerID` equals the group's own `ID`, any member of the group can sign updates (collaborative management).
+2.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
+3.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
+4.  **Optimistic Concurrency:** Every group update must include the expected current `Version`. The server rejects updates where the version has changed since the client last fetched the metadata.
 
 ---
 
