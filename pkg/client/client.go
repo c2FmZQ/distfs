@@ -820,6 +820,45 @@ func (e *APIError) ToPOSIX() error {
 	}
 }
 
+// ListGroups retrieves all groups associated with the current user.
+func (c *Client) ListGroups() ([]metadata.GroupListEntry, error) {
+	var resp metadata.GroupListResponse
+	err := c.withRetry(context.Background(), func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/groups", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(res)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if res.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: res.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&resp)
+	})
+
+	if err != nil {
+		return nil, err
+	}
+	return resp.Groups, nil
+}
+
 func (c *Client) GetUser(id string) (*metadata.User, error) {
 	var user metadata.User
 	err := c.withRetry(context.Background(), func() error {

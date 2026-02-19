@@ -236,6 +236,12 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement `RegistryLockbox.AddRecipient` to share the Registry Key with authorized managers (`OwnerID`).
     *   **Action:** Update `group-add` to update the `EncryptedRegistry` blob (containing member emails) whenever a user is added.
     *   **Action:** Update `group-info` to attempt Registry Key decryption and display member emails only if authorized.
+*   **Step 13.7: Group Discovery (Membership Indexing)**
+    *   **Action:** Add `user_memberships` and `owner_groups` buckets to BoltDB FSM.
+    *   **Action:** Implement indexing logic in `executeCreateGroup` and `executeUpdateGroup` to maintain consistency between group state and membership indices.
+    *   **Action:** Implement `GET /v1/user/groups` endpoint in `MetadataServer` to return groups associated with the authenticated user.
+    *   **Action:** Implement role resolution logic (Owner, Manager, Member) on the server.
+    *   **Action:** Add `distfs group-list` command to CLI with local decryption of group names.
 
 ---
 

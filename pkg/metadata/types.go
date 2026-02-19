@@ -115,6 +115,24 @@ type Group struct {
 	Signature         []byte          `json:"signature,omitempty"`
 }
 
+type GroupRole string
+
+const (
+	RoleOwner   GroupRole = "owner"
+	RoleManager GroupRole = "manager"
+	RoleMember  GroupRole = "member"
+)
+
+type GroupListEntry struct {
+	ID            string    `json:"id"`
+	EncryptedName []byte    `json:"enc_name"`
+	Role          GroupRole `json:"role"`
+}
+
+type GroupListResponse struct {
+	Groups []GroupListEntry `json:"groups"`
+}
+
 // Hash calculates a cryptographic hash of the group metadata for signing.
 func (g *Group) Hash() []byte {
 	h := crypto.NewHash()

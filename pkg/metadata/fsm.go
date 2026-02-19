@@ -61,7 +61,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -682,6 +682,11 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 	if err := idx.Put(uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
 		return err
 	}
+
+	if err := fsm.updateGroupIndices(tx, &group, nil); err != nil {
+		return err
+	}
+
 	return &group
 }
 
@@ -713,7 +718,51 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 	if err := b.Put([]byte(group.ID), encoded); err != nil {
 		return err
 	}
+
+	if err := fsm.updateGroupIndices(tx, &group, &existing); err != nil {
+		return err
+	}
+
 	return &group
+}
+
+func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *Group) error {
+	mb := tx.Bucket([]byte("user_memberships"))
+	ob := tx.Bucket([]byte("owner_groups"))
+
+	// 1. Remove old indices if existing group provided
+	if existing != nil {
+		// Remove from members index
+		for uid := range existing.Members {
+			sub := mb.Bucket([]byte(uid))
+			if sub != nil {
+				sub.Delete([]byte(existing.ID))
+			}
+		}
+		// Remove from owner index
+		sub := ob.Bucket([]byte(existing.OwnerID))
+		if sub != nil {
+			sub.Delete([]byte(existing.ID))
+		}
+	}
+
+	// 2. Add new indices
+	// Add to members index
+	for uid := range group.Members {
+		sub, err := mb.CreateBucketIfNotExists([]byte(uid))
+		if err != nil {
+			return err
+		}
+		sub.Put([]byte(group.ID), []byte("1"))
+	}
+	// Add to owner index
+	sub, err := ob.CreateBucketIfNotExists([]byte(group.OwnerID))
+	if err != nil {
+		return err
+	}
+	sub.Put([]byte(group.ID), []byte("1"))
+
+	return nil
 }
 
 func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
@@ -1550,4 +1599,70 @@ func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
 		return nil, err
 	}
 	return &snap, nil
+}
+
+func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
+	var entries []GroupListEntry
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		gb := tx.Bucket([]byte("groups"))
+		mb := tx.Bucket([]byte("user_memberships"))
+		ob := tx.Bucket([]byte("owner_groups"))
+
+		groupsFound := make(map[string]GroupRole)
+
+		// 1. Direct Memberships
+		if sub := mb.Bucket([]byte(userID)); sub != nil {
+			c := sub.Cursor()
+			for k, _ := c.First(); k != nil; k, _ = c.Next() {
+				groupsFound[string(k)] = RoleMember
+			}
+		}
+
+		// 2. Direct Ownership
+		if sub := ob.Bucket([]byte(userID)); sub != nil {
+			c := sub.Cursor()
+			for k, _ := c.First(); k != nil; k, _ = c.Next() {
+				groupsFound[string(k)] = RoleOwner
+			}
+		}
+
+		// 3. Delegated Management (Manager role)
+		// Find all groups the user is a member/owner of, then find groups owned by those groups.
+		// Note: we take a snapshot of keys to avoid concurrent map iteration/mutation issues
+		var currentGroups []string
+		for gid := range groupsFound {
+			currentGroups = append(currentGroups, gid)
+		}
+
+		for _, gid := range currentGroups {
+			if sub := ob.Bucket([]byte(gid)); sub != nil {
+				c := sub.Cursor()
+				for k, _ := c.First(); k != nil; k, _ = c.Next() {
+					targetGID := string(k)
+					// Prioritize roles: Owner > Manager > Member
+					if existing, ok := groupsFound[targetGID]; !ok || existing == RoleMember {
+						groupsFound[targetGID] = RoleManager
+					}
+				}
+			}
+		}
+
+		// 4. Resolve metadata
+		for gid, role := range groupsFound {
+			v := gb.Get([]byte(gid))
+			if v == nil {
+				continue
+			}
+			var g Group
+			if err := json.Unmarshal(v, &g); err == nil {
+				entries = append(entries, GroupListEntry{
+					ID:            g.ID,
+					EncryptedName: g.EncryptedName,
+					Role:          role,
+				})
+			}
+		}
+		return nil
+	})
+	return entries, err
 }

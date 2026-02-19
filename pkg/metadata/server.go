@@ -524,6 +524,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Standard Inode / User / Group routes
+	if r.URL.Path == "/v1/user/groups" && r.Method == http.MethodGet {
+		s.handleListGroups(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
 		s.handleGetUser(w, r, id)
@@ -1171,6 +1175,38 @@ func (s *Server) handleStoreKeySync(w http.ResponseWriter, r *http.Request) {
 	data, _ := json.Marshal(req)
 
 	s.ApplyRaftCommandRaw(w, r, CmdStoreKeySync, data, http.StatusCreated)
+}
+
+func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	entries, err := s.fsm.GetUserGroups(user.ID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := GroupListResponse{Groups: entries}
+	data, _ := json.Marshal(resp)
+	w.Header().Set("Content-Type", "application/json")
+
+	// E2EE?
+	if r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(user, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {

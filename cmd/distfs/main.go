@@ -70,6 +70,8 @@ func main() {
 		cmdChgrp(args)
 	case "group-create":
 		cmdGroupCreate(args)
+	case "group-list":
+		cmdGroupList(args)
 	case "group-add":
 		cmdGroupAdd(args)
 	case "group-chown":
@@ -112,6 +114,7 @@ func usage() {
 	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  chgrp <group_id> <path>         Change group")
 	fmt.Println("  group-create <name>             Create a new group")
+	fmt.Println("  group-list                      List groups you are member or manager of")
 	fmt.Println("  group-add [-f] <group_id> <user_id|contact_string> [info] Add user to group")
 	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
 	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
@@ -364,6 +367,27 @@ func cmdGroupMembers(args []string) {
 	fmt.Println(strings.Repeat("-", 80))
 	for _, m := range members {
 		fmt.Printf("%-64s %s\n", m.UserID, m.Info)
+	}
+}
+
+func cmdGroupList(args []string) {
+	c := loadClient()
+	entries, err := c.ListGroups()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%-32s %-20s %s\n", "Group ID", "Name", "Role")
+	fmt.Println(strings.Repeat("-", 80))
+	for _, e := range entries {
+		name := "[HIDDEN]"
+		// Try to decrypt name
+		if group, err := c.GetGroup(e.ID); err == nil {
+			if decrypted, err := c.GetGroupName(group); err == nil {
+				name = decrypted
+			}
+		}
+		fmt.Printf("%-32s %-20s %s\n", e.ID, name, e.Role)
 	}
 }
 

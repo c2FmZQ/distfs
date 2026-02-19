@@ -107,6 +107,9 @@ The Raft FSM stores the "Inode" table and Directory Structure.
         *   **EncryptedRegistry:** An opaque blob containing member emails and UserIDs, encrypted with the Registry Key.
         *   **Version:** Incremental counter for optimistic concurrency control.
         *   **Signature:** ML-DSA signature over the group metadata, signed by the `SignerID`.
+*   **Membership Indices:**
+    *   `UserID -> List[GroupID]` (Direct Membership Index).
+    *   `OwnerID -> List[GroupID]` (Ownership/Management Index).
 *   **Inode Structure:**
     *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, UserSig, GroupSig}`.
 *   **Directory Structure:** The Metadata Layer MUST know the file system hierarchy to enforce permissions and perform Garbage Collection.
@@ -149,6 +152,16 @@ To prevent unauthorized hijacking and support collaborative administration, grou
 3.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
 4.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
 5.  **Optimistic Concurrency:** Every group update must include the expected current `Version`. The server rejects updates where the version has changed since the client last fetched the metadata.
+
+### 4.7 Group Discovery
+To support collaboration without a central directory, the metadata layer provides authenticated users with a way to discover groups they are involved in.
+
+1.  **Group List API:** An authenticated user can query for a list of groups where they have a defined role.
+2.  **Role Resolution:** The server identifies the user's role for each group:
+    *   **Owner:** The user is the direct `OwnerID`.
+    *   **Manager:** The user is a member of a group that is the `OwnerID`.
+    *   **Member:** The user is a direct member of the group.
+3.  **Privacy Preservation:** The server returns only the `GroupID`, `EncryptedName`, and the resolved `Role`. The MetaNode does not know the plaintext names; the client must use its local keys to decrypt and display the group names to the user.
 
 ---
 
