@@ -142,7 +142,8 @@ type Client struct {
 	rootOwner   string
 	rootVersion uint64
 
-	concurrencySem chan struct{}
+	controlSem chan struct{}
+	dataSem    chan struct{}
 
 	admin bool
 
@@ -170,7 +171,8 @@ func NewClient(serverAddr string) *Client {
 		groupSignKeys:  make(map[string]*crypto.IdentityKey),
 		sessionMu:      &sync.RWMutex{},
 		loginMu:        &sync.Mutex{},
-		concurrencySem: make(chan struct{}, 64), // Increased to 64 for higher throughput
+		controlSem:     make(chan struct{}, 128), // High throughput for metadata
+		dataSem:        make(chan struct{}, 64),  // Limit chunk I/O
 		mutationLocks:  make(map[string]*sync.Mutex),
 	}
 }
@@ -495,8 +497,8 @@ func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 	var nodes []metadata.Node
 	err := c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/allocate", nil)
 		if err != nil {
@@ -547,8 +549,8 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 
 	var token string
 	err := c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/token", nil)
 		if err != nil {
@@ -607,8 +609,8 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 	}
 
 	return c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireData()
+		defer c.releaseData()
 
 		req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
 		if err != nil {
@@ -659,8 +661,8 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				}
 			}
 			go func(targetURL string) {
-				c.acquire()
-				defer c.release()
+				c.acquireData()
+				defer c.releaseData()
 
 				req, err := http.NewRequestWithContext(lctx, "GET", targetURL+"/v1/data/"+id, nil)
 				if err != nil {
@@ -746,8 +748,8 @@ func (e *APIError) ToPOSIX() error {
 func (c *Client) GetUser(id string) (*metadata.User, error) {
 	var user metadata.User
 	err := c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/"+id, nil)
 		if err != nil {
@@ -843,9 +845,9 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 
 	err = c.withRetry(ctx, func() error {
 
-		c.acquire()
+		c.acquireControl()
 
-		defer c.release()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inode", nil)
 
@@ -961,8 +963,8 @@ func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metada
 		}
 
 		err = c.withRetry(ctx, func() error {
-			c.acquire()
-			defer c.release()
+			c.acquireControl()
+			defer c.releaseControl()
 
 			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
 			if err != nil {
@@ -1026,8 +1028,8 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 	}
 
 	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/batch", nil)
 		if err != nil {
@@ -1073,8 +1075,8 @@ func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
 
 func (c *Client) DeleteInode(ctx context.Context, id string) error {
 	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "DELETE", c.serverURL+"/v1/meta/inode/"+id, nil)
 		if err != nil {
@@ -1101,8 +1103,8 @@ func (c *Client) DeleteInode(ctx context.Context, id string) error {
 func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, error) {
 	var inode metadata.Inode
 	err := c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/inode/"+id, nil)
 		if err != nil {
@@ -1171,8 +1173,8 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 
 	var inodes []*metadata.Inode
 	err = c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inodes", nil)
 		if err != nil {
@@ -2795,12 +2797,20 @@ func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
 	return &blob, nil
 }
 
-func (c *Client) acquire() {
-	c.concurrencySem <- struct{}{}
+func (c *Client) acquireControl() {
+	c.controlSem <- struct{}{}
 }
 
-func (c *Client) release() {
-	<-c.concurrencySem
+func (c *Client) releaseControl() {
+	<-c.controlSem
+}
+
+func (c *Client) acquireData() {
+	c.dataSem <- struct{}{}
+}
+
+func (c *Client) releaseData() {
+	<-c.dataSem
 }
 
 func (c *Client) withRetry(ctx context.Context, op func() error) error {
@@ -2892,8 +2902,8 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {
 	var stats metadata.ClusterStats
 	err := c.withRetry(context.Background(), func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequest("GET", c.serverURL+"/v1/cluster/stats", nil)
 		if err != nil {
@@ -2932,8 +2942,8 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 	data, _ := json.Marshal(req)
 
 	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/lease/acquire", nil)
 		if err != nil {
@@ -2971,8 +2981,8 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 	data, _ := json.Marshal(req)
 
 	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/lease/release", nil)
 		if err != nil {
@@ -3006,8 +3016,8 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 	var users []metadata.User
 	err := c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/users", nil)
 		if err != nil {
@@ -3041,8 +3051,8 @@ func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 	var nodes []metadata.Node
 	err := c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/nodes", nil)
 		if err != nil {
@@ -3076,8 +3086,8 @@ func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
 	var status map[string]interface{}
 	err := c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/status", nil)
 		if err != nil {
@@ -3114,8 +3124,8 @@ func (c *Client) AdminLookup(ctx context.Context, email string) (string, error) 
 		ID string `json:"id"`
 	}
 	err := c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/lookup", nil)
 		if err != nil {
@@ -3151,8 +3161,8 @@ func (c *Client) AdminLookup(ctx context.Context, email string) (string, error) 
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
 	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/promote", nil)
 		if err != nil {
@@ -3186,8 +3196,8 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	payload, _ := json.Marshal(map[string]string{"address": address})
 	return c.withRetry(ctx, func() error {
-		c.acquire()
-		defer c.release()
+		c.acquireControl()
+		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/join", nil)
 		if err != nil {
