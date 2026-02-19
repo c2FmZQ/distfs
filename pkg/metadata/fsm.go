@@ -299,30 +299,38 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 }
 
 func (fsm *MetadataFSM) applyBatch(data []byte) interface{} {
-	var results []interface{}
-	// We use a single transaction for performance.
-	_ = fsm.db.Update(func(tx *bolt.Tx) error {
-		results = fsm.applyBatchTx(tx, data, 0)
-		return nil
-	})
-	return results
-}
-
-func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, depth int) []interface{} {
-	if depth > 4 {
-		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
-	}
 	var cmds []LogCommand
 	if err := json.Unmarshal(data, &cmds); err != nil {
 		return []interface{}{err}
 	}
 
+	var results []interface{}
+	// We use a single transaction for performance.
+	_ = fsm.db.Update(func(tx *bolt.Tx) error {
+		results = fsm.executeBatchCommands(tx, cmds, 0)
+		return nil
+	})
+	return results
+}
+
+func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int) []interface{} {
+	if depth > 4 {
+		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
+	}
 	results := make([]interface{}, len(cmds))
 	for i, cmd := range cmds {
 		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, depth)
 		results[i] = res
 	}
 	return results
+}
+
+func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, depth int) []interface{} {
+	var cmds []LogCommand
+	if err := json.Unmarshal(data, &cmds); err != nil {
+		return []interface{}{err}
+	}
+	return fsm.executeBatchCommands(tx, cmds, depth)
 }
 
 func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, depth int) interface{} {
