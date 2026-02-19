@@ -553,3 +553,21 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Replace the blocking recursive retry loop in \`FS.Root()\` with a non-blocking or lazy initialization mechanism.
     *   **Test:** Verify FUSE mount returns immediately and handles subsequent access gracefully if the cluster is initially unavailable.
     *   **Success Criteria:** \`distfs-fuse\` command returns successfully without hanging, even if the server is offline.
+
+---
+
+## Phase 33: Secure Contact Exchange
+**Goal:** Enable users to securely share their identity for group membership and collaboration via out-of-band communication.
+
+*   **Step 33.1: Contact String Specification**
+    *   **Action:** Define the `distfs-contact` URI scheme.
+    *   **Action:** Include UserID, Public Encryption Key (ML-KEM), and Public Signing Key (ML-DSA) in the payload.
+    *   **Action:** Implement signing logic where the user signs their contact data to prevent tampering during OOB transit.
+*   **Step 33.2: Contact Generation & Verification**
+    *   **Action:** Implement `GenerateContactString()` in `pkg/client`.
+    *   **Action:** Implement `VerifyContactString(uri)` in `pkg/client` to parse and validate signatures.
+*   **Step 33.3: CLI Integration**
+    *   **Action:** Add `distfs contact-info` command to display the user's signed URI.
+    *   **Action:** Update `distfs group-add` to accept a contact URI, automatically verifying and extracting the UserID.
+*   **Step 33.4: Testing**
+    *   **Action:** Verify that tampered contact strings (e.g., modified UserID) are rejected during verification.

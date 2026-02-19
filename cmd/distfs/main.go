@@ -75,6 +75,8 @@ func main() {
 		cmdGroupChown(args)
 	case "group-members":
 		cmdGroupMembers(args)
+	case "contact-info":
+		cmdContactInfo(args)
 	case "admin":
 		cmdAdmin(args)
 	case "admin-join":
@@ -109,9 +111,10 @@ func usage() {
 	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  chgrp <group_id> <path>         Change group")
 	fmt.Println("  group-create <name>             Create a new group")
-	fmt.Println("  group-add <group_id> <user_id> [info] Add user to group (info e.g. email)")
+	fmt.Println("  group-add <group_id> <user_id|contact_string> [info] Add user to group")
 	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
 	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
+	fmt.Println("  contact-info                    Display your signed contact string for sharing")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	fmt.Println("  admin                           Open interactive cluster management console")
@@ -293,18 +296,39 @@ func cmdGroupCreate(args []string) {
 
 func cmdGroupAdd(args []string) {
 	if len(args) < 2 {
-		log.Fatal("group_id and user_id required")
+		log.Fatal("group_id and user_id/contact_string required")
 	}
-	groupID, userID := args[0], args[1]
+	groupID, userArg := args[0], args[1]
 	info := ""
 	if len(args) > 2 {
 		info = args[2]
 	}
 	c := loadClient()
+
+	userID := userArg
+	if strings.HasPrefix(userArg, "distfs-contact:v1:") {
+		ci, err := c.ParseContactString(userArg)
+		if err != nil {
+			log.Fatalf("Invalid contact string: %v", err)
+		}
+		userID = ci.UserID
+		fmt.Printf("Parsed contact string for User ID: %s\n", userID)
+	}
+
 	if err := c.AddUserToGroup(groupID, userID, info); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s added to group %s\n", userID, groupID)
+}
+
+func cmdContactInfo(args []string) {
+	c := loadClient()
+	s, err := c.GenerateContactString()
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Println("Your DistFS Contact String:")
+	fmt.Println(s)
 }
 
 func cmdGroupMembers(args []string) {

@@ -110,6 +110,81 @@ type fileMetadata struct {
 	inlined bool
 }
 
+// ContactInfo represents a signed identity for out-of-band discovery.
+type ContactInfo struct {
+	UserID    string `json:"uid"`
+	EncKey    []byte `json:"ek"` // ML-KEM Public Key
+	SignKey   []byte `json:"sk"` // ML-DSA Public Key
+	Timestamp int64  `json:"ts"`
+	Signature []byte `json:"sig"`
+}
+
+// GenerateContactString generates a signed DistFS contact string.
+func (c *Client) GenerateContactString() (string, error) {
+	if c.userID == "" || c.decKey == nil || c.signKey == nil {
+		return "", fmt.Errorf("client identity not fully configured")
+	}
+
+	info := ContactInfo{
+		UserID:    c.userID,
+		EncKey:    c.decKey.EncapsulationKey().Bytes(),
+		SignKey:   c.signKey.Public(),
+		Timestamp: time.Now().Unix(),
+	}
+
+	// Sign: HMAC(uid | ek | sk | ts)
+	h := crypto.NewHash()
+	h.Write([]byte(info.UserID))
+	h.Write(info.EncKey)
+	h.Write(info.SignKey)
+	binary.Write(h, binary.BigEndian, info.Timestamp)
+
+	info.Signature = c.signKey.Sign(h.Sum(nil))
+
+	b, err := json.Marshal(info)
+	if err != nil {
+		return "", err
+	}
+
+	return "distfs-contact:v1:" + base64.URLEncoding.EncodeToString(b), nil
+}
+
+// ParseContactString parses and verifies a DistFS contact string.
+func (c *Client) ParseContactString(s string) (*ContactInfo, error) {
+	prefix := "distfs-contact:v1:"
+	if !strings.HasPrefix(s, prefix) {
+		return nil, fmt.Errorf("invalid contact string prefix")
+	}
+
+	b, err := base64.URLEncoding.DecodeString(strings.TrimPrefix(s, prefix))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode contact string: %w", err)
+	}
+
+	var info ContactInfo
+	if err := json.Unmarshal(b, &info); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal contact info: %w", err)
+	}
+
+	// Verify Signature
+	h := crypto.NewHash()
+	h.Write([]byte(info.UserID))
+	h.Write(info.EncKey)
+	h.Write(info.SignKey)
+	binary.Write(h, binary.BigEndian, info.Timestamp)
+
+	if !crypto.VerifySignature(info.SignKey, h.Sum(nil), info.Signature) {
+		return nil, fmt.Errorf("invalid contact signature")
+	}
+
+	// Expiry check (e.g., 30 days)
+	if time.Now().Unix() > info.Timestamp+(30*24*3600) {
+		return nil, fmt.Errorf("contact info expired")
+	}
+
+	return &info, nil
+}
+
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
