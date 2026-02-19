@@ -2841,6 +2841,52 @@ func (c *Client) AddUserToGroup(groupID, userID, info string) error {
 	return err
 }
 
+// RemoveUserFromGroup removes a member from an existing group.
+func (c *Client) RemoveUserFromGroup(groupID, userID string) error {
+	group, err := c.GetGroup(groupID)
+	if err != nil {
+		return err
+	}
+
+	// 1. Remove from Members map
+	if group.Members != nil {
+		delete(group.Members, userID)
+	}
+
+	// 2. Remove from Lockbox
+	if group.Lockbox != nil {
+		delete(group.Lockbox, userID)
+		delete(group.Lockbox, userID+":sign")
+	}
+
+	// 3. Remove from Registry (if we are a manager)
+	rk, err := c.getGroupRegistryKey(group)
+	if err == nil {
+		// We are a manager, update the registry
+		members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
+		if err == nil {
+			var newMembers []metadata.MemberEntry
+			for _, m := range members {
+				if m.UserID != userID {
+					newMembers = append(newMembers, m)
+				}
+			}
+			encRegistry, err := c.encryptRegistry(rk, newMembers)
+			if err == nil {
+				group.EncryptedRegistry = encRegistry
+			}
+		}
+
+		// Also remove from RegistryLockbox
+		if group.RegistryLockbox != nil {
+			delete(group.RegistryLockbox, userID)
+		}
+	}
+
+	_, err = c.updateGroup(context.Background(), *group)
+	return err
+}
+
 // SetAttr updates the attributes of an inode at the given path.
 func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
 	inode, key, err := c.ResolvePath(path)

@@ -82,4 +82,31 @@ else
     exit 1
 fi
 
+echo "User 2 (Member): Verifying group-list..."
+if distfs -use-pinentry=false -config /tmp/u2-group.json group-list | grep -q "project-x"; then
+    echo "PASS: Group listed in user2's memberships"
+else
+    echo "FAIL: Group project-x not found in user2's list"
+    exit 1
+fi
+
+echo "User 1 (Owner): Removing user2 from group..."
+distfs -use-pinentry=false -config /tmp/u1-group.json group-remove "$G1_ID" "$U2_ID"
+
+echo "User 2 (Ex-Member): Verifying group-list after removal..."
+if distfs -use-pinentry=false -config /tmp/u2-group.json group-list | grep -q "project-x"; then
+    echo "FAIL: Group project-x still found in user2's list after removal"
+    exit 1
+else
+    echo "PASS: Group project-x removed from user2's list"
+fi
+
+echo "User 2 (Ex-Member): Attempting to read file (should fail)..."
+if distfs -use-pinentry=false -config /tmp/u2-group.json get /group-shared/plan.txt /tmp/u2-fail.txt 2>/dev/null; then
+    echo "FAIL: Ex-member could still read group file"
+    exit 1
+else
+    echo "PASS: Ex-member blocked from group file"
+fi
+
 echo "GROUP SHARING TEST PASSED"

@@ -74,6 +74,8 @@ func main() {
 		cmdGroupList(args)
 	case "group-add":
 		cmdGroupAdd(args)
+	case "group-remove":
+		cmdGroupRemove(args)
 	case "group-chown":
 		cmdGroupChown(args)
 	case "group-members":
@@ -116,6 +118,7 @@ func usage() {
 	fmt.Println("  group-create <name>             Create a new group")
 	fmt.Println("  group-list                      List groups you are member or manager of")
 	fmt.Println("  group-add [-f] <group_id> <user_id|contact_string> [info] Add user to group")
+	fmt.Println("  group-remove <group_id> <user_id> Remove user from group")
 	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
 	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
 	fmt.Println("  contact-info                    Display your signed contact string for sharing")
@@ -368,6 +371,18 @@ func cmdGroupMembers(args []string) {
 	for _, m := range members {
 		fmt.Printf("%-64s %s\n", m.UserID, m.Info)
 	}
+}
+
+func cmdGroupRemove(args []string) {
+	if len(args) < 2 {
+		log.Fatal("group_id and user_id required")
+	}
+	groupID, userID := args[0], args[1]
+	c := loadClient()
+	if err := c.RemoveUserFromGroup(groupID, userID); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("User %s removed from group %s\n", userID, groupID)
 }
 
 func cmdGroupList(args []string) {
