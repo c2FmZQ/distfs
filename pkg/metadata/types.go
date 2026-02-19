@@ -139,6 +139,7 @@ type GroupListResponse struct {
 // Hash calculates a cryptographic hash of the group metadata for signing.
 func (g *Group) Hash() []byte {
 	h := crypto.NewHash()
+	h.Write([]byte("DistFS-Group-v1|"))
 	h.Write([]byte("group-id:" + g.ID + "|"))
 
 	v := make([]byte, 8)

@@ -764,7 +764,7 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 	}
 
 	// 2. Ownership Updates
-	if existing == nil || existing.OwnerID != group.OwnerID {
+	if (existing == nil && group.OwnerID != "") || (existing != nil && existing.OwnerID != group.OwnerID) {
 		// Owner changed or new group
 		if existing != nil {
 			sub := ob.Bucket([]byte(existing.OwnerID))

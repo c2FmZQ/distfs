@@ -3771,6 +3771,13 @@ func (c *Client) GroupChown(groupID, newOwnerID string) error {
 			}
 		}
 
+		// 3. Remove old owner access if they are not a member
+		if group.Members == nil || !group.Members[c.userID] {
+			delete(group.Lockbox, c.userID)
+			delete(group.Lockbox, c.userID+":sign")
+			delete(group.RegistryLockbox, c.userID)
+		}
+
 		group.OwnerID = newOwnerID
 		_, err = c.updateGroup(context.Background(), *group)
 		return err
