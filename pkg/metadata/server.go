@@ -1025,7 +1025,18 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		case CmdCreateInode:
-			// Allowed
+			var inode Inode
+			if err := json.Unmarshal(cmd.Data, &inode); err != nil {
+				http.Error(w, "invalid inode data", http.StatusBadRequest)
+				return
+			}
+			bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+			if !(bypass && s.fsm.IsAdmin(user.ID)) {
+				if inode.OwnerID != user.ID {
+					http.Error(w, "forbidden: cannot create inode for another user", http.StatusForbidden)
+					return
+				}
+			}
 		default:
 			http.Error(w, "unsupported batch command", http.StatusBadRequest)
 			return
@@ -1446,7 +1457,33 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
-	s.ApplyRaftCommand(w, r, CmdCreateInode, 10*1024*1024, http.StatusCreated)
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var inode Inode
+	if err := json.Unmarshal(body, &inode); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+	if !(bypass && s.fsm.IsAdmin(user.ID)) {
+		if inode.OwnerID != user.ID {
+			http.Error(w, "forbidden: cannot create inode for another user", http.StatusForbidden)
+			return
+		}
+	}
+
+	s.ApplyRaftCommandRaw(w, r, CmdCreateInode, body, http.StatusCreated)
 }
 
 func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id string) {

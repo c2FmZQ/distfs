@@ -125,4 +125,19 @@ func TestGroupDiscovery(t *testing.T) {
 	if !foundAlice {
 		t.Errorf("Bob should see Alice in B's registry via delegated management")
 	}
+
+	// 8. Verify Cryptographic Authorization Transfer (Fix #3)
+	// Bob: Create Group C.
+	groupC, err := clientBob.CreateGroup("group-c")
+	if err != nil { t.Fatalf("Bob CreateGroup C failed: %v", err) }
+	
+	// Bob: Transfer Group C to Alice.
+	err = clientBob.GroupChown(groupC.ID, "alice")
+	if err != nil { t.Fatalf("Bob GroupChown C to Alice failed: %v", err) }
+	
+	// Alice: Should now be able to manage C (e.g., fetch its private signing key)
+	_, err = clientAlice.GetGroupSignKey(groupC.ID)
+	if err != nil {
+		t.Errorf("Alice failed to fetch sign key for group C after transfer: %v", err)
+	}
 }

@@ -2636,23 +2636,44 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 
 // DecryptGroupName decrypts a group name from a list entry using cached or provided keys.
 func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error) {
-	// 1. Try personal access
-	gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
-	if err != nil && entry.OwnerID != "" && entry.OwnerID != c.userID {
-		// 2. Try delegated access
-		if _, exists := entry.Lockbox[entry.OwnerID]; exists {
-			if gdk, gerr := c.GetGroupPrivateKey(entry.OwnerID); gerr == nil {
-				gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, gdk)
+	// 1. Try Cache
+	c.keyMu.RLock()
+	gdk, ok := c.groupKeys[entry.ID]
+	c.keyMu.RUnlock()
+
+	if !ok {
+		// 2. Try to unlock group key from entry's lockbox
+		// 2a. Try personal access
+		gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
+		if err != nil && entry.OwnerID != "" && entry.OwnerID != c.userID {
+			// 2b. Try delegated access (requires owner group key)
+			// Check if we have the owner group key cached
+			c.keyMu.RLock()
+			ogdk, gok := c.groupKeys[entry.OwnerID]
+			c.keyMu.RUnlock()
+
+			if gok {
+				gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, ogdk)
+			} else {
+				// Fallback to network if not cached
+				if ogdk, gerr := c.GetGroupPrivateKey(entry.OwnerID); gerr == nil {
+					gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, ogdk)
+				}
 			}
 		}
-	}
-	if err != nil {
-		return "", err
-	}
+		if err != nil {
+			return "", err
+		}
 
-	gdk, err := crypto.UnmarshalDecapsulationKey(gk)
-	if err != nil {
-		return "", err
+		gdk, err = crypto.UnmarshalDecapsulationKey(gk)
+		if err != nil {
+			return "", err
+		}
+
+		// Cache it
+		c.keyMu.Lock()
+		c.groupKeys[entry.ID] = gdk
+		c.keyMu.Unlock()
 	}
 
 	nameBytes, err := crypto.Unseal(entry.EncryptedName, gdk)
@@ -3722,6 +3743,31 @@ func (c *Client) GroupChown(groupID, newOwnerID string) error {
 						group.RegistryLockbox.AddRecipient(newOwnerID, pubKey, rk)
 					}
 				}
+			}
+		}
+
+		// 2. Update Primary Lockbox (Encryption & Signing Keys)
+		// Try to fetch new owner's public key
+		var newOwnerEK *mlkem.EncapsulationKey768
+		newOwner, err := c.GetUser(newOwnerID)
+		if err == nil {
+			newOwnerEK, _ = crypto.UnmarshalEncapsulationKey(newOwner.EncKey)
+		} else {
+			targetGroup, err := c.GetGroup(newOwnerID)
+			if err == nil {
+				newOwnerEK, _ = crypto.UnmarshalEncapsulationKey(targetGroup.EncKey)
+			}
+		}
+
+		if newOwnerEK != nil {
+			// Fetch group keys to re-key
+			gk, err := c.GetGroupPrivateKey(groupID)
+			if err == nil {
+				group.Lockbox.AddRecipient(newOwnerID, newOwnerEK, crypto.MarshalDecapsulationKey(gk))
+			}
+			gsk, err := c.GetGroupSignKey(groupID)
+			if err == nil {
+				group.Lockbox.AddRecipient(newOwnerID+":sign", newOwnerEK, gsk.MarshalPrivate())
 			}
 		}
 
