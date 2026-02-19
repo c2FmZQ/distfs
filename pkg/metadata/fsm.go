@@ -748,8 +748,9 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 		inode.MTime = *req.MTime
 	}
 
+	inode.Version++
 	inode.CTime = time.Now().UnixNano()
-	return nil
+	return saveInodeWithPages(tx, &inode)
 }
 
 func (fsm *MetadataFSM) executeAddChild(tx *bolt.Tx, data []byte) interface{} {
