@@ -852,9 +852,16 @@ func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse
 		return mapError(err)
 	}
 
-	// Update local cache
-	if updated, err := c.GetInode(context.Background(), inode.ID); err == nil {
-		*inode = *updated
+	respAttr.Mode = os.FileMode(inode.Mode)
+	if inode.Type == metadata.SymlinkType {
+		respAttr.Mode |= os.ModeSymlink
 	}
+	respAttr.Size = inode.Size
+	respAttr.Uid = inode.UID
+	respAttr.Gid = inode.GID
+	respAttr.Mtime = time.Unix(0, inode.MTime)
+	respAttr.Ctime = time.Unix(0, inode.CTime)
+	respAttr.Nlink = inode.NLink
+
 	return nil
 }

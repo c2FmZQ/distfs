@@ -2866,7 +2866,10 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	}
 
 	// 3. Final Metadata Update (Signs everything)
-	_, err := c.updateInode(context.Background(), *inode)
+	updated, err := c.updateInode(context.Background(), *inode)
+	if err == nil {
+		*inode = *updated
+	}
 	return err
 }
 
