@@ -126,7 +126,7 @@ fi
 
 echo "TEST 8: SetAttr (Chmod/Truncate)"
 echo "original" > $MNT/f4
-chmod 0777 $MNT/f4
+chmod 0775 $MNT/f4
 STAT_MODE=$(stat -c %a $MNT/f4)
 if [ "$STAT_MODE" = "775" ]; then
     truncate -s 4 $MNT/f4
