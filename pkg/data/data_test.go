@@ -118,8 +118,9 @@ func TestIntegrityScrubber(t *testing.T) {
 	}
 
 	// Corrupt it manually
-	// Storage files are flat in root (assumed implementation)
-	path := filepath.Join(tmpDir, id)
+	// Storage files are sharded
+	shard := id[:2]
+	path := filepath.Join(tmpDir, shard, id)
 
 	// Overwrite with garbage
 	if err := os.WriteFile(path, []byte("garbage"), 0600); err != nil {

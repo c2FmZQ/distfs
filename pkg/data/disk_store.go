@@ -43,6 +43,13 @@ func (s *DiskStore) Close() error {
 	return nil
 }
 
+func getShardPath(id string) string {
+	if len(id) < 2 {
+		return id
+	}
+	return filepath.Join(id[:2], id)
+}
+
 func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -51,13 +58,21 @@ func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
 		return fmt.Errorf("invalid chunk id format")
 	}
 
+	name := getShardPath(id)
+
 	// Idempotency: If chunk exists, don't overwrite.
 	// This avoids race conditions with concurrent uploads of identical chunks (e.g. zeros).
 	if exists, _ := s.HasChunk(id); exists {
 		return nil
 	}
 
-	wc, err := s.st.OpenBlobWrite(id, id)
+	// Ensure shard directory exists
+	shardDir := filepath.Dir(filepath.Join(s.st.Dir(), name))
+	if err := os.MkdirAll(shardDir, 0700); err != nil {
+		return err
+	}
+
+	wc, err := s.st.OpenBlobWrite(name, name)
 	if err != nil {
 		return err
 	}
@@ -73,11 +88,11 @@ func (s *DiskStore) ReadChunk(id string) (io.ReadCloser, error) {
 	if !validChunkID.MatchString(id) {
 		return nil, fmt.Errorf("invalid chunk id format")
 	}
-	return s.st.OpenBlobRead(id)
+	return s.st.OpenBlobRead(getShardPath(id))
 }
 
 func (s *DiskStore) HasChunk(id string) (bool, error) {
-	rc, err := s.st.OpenBlobRead(id)
+	rc, err := s.st.OpenBlobRead(getShardPath(id))
 	if err == nil {
 		rc.Close()
 		return true, nil
@@ -89,7 +104,7 @@ func (s *DiskStore) HasChunk(id string) (bool, error) {
 }
 
 func (s *DiskStore) GetChunkSize(id string) (int64, error) {
-	rc, err := s.st.OpenBlobRead(id)
+	rc, err := s.st.OpenBlobRead(getShardPath(id))
 	if err != nil {
 		return 0, err
 	}
@@ -106,32 +121,13 @@ func (s *DiskStore) DeleteChunk(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	found := false
-	var path string
+	name := getShardPath(id)
+	path := filepath.Join(s.st.Dir(), name)
 
-	err := filepath.WalkDir(s.st.Dir(), func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Name() == id {
-			found = true
-			path = p
-			return fmt.Errorf("stop")
-		}
-		return nil
-	})
-
-	if found && path != "" {
-		return os.Remove(path)
-	}
-	if err != nil && err.Error() != "stop" {
+	if err := os.Remove(path); err != nil {
 		return err
 	}
-
-	return os.ErrNotExist
+	return nil
 }
 
 // ListChunks returns an iterator.
