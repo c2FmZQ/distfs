@@ -46,13 +46,13 @@ func TestGroupMemberRegistry(t *testing.T) {
 	}
 	groupID := group.ID
 
-	// 3. Alice adds Bob with email
-	err = clientAlice.AddUserToGroup(groupID, "bob", "bob@example.com")
+	// 3. Alice adds Bob with info
+	err = clientAlice.AddUserToGroup(groupID, "bob", "bob@example.com (Staff)")
 	if err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
 
-	// 4. Alice (Owner) views members - should see Bob's email
+	// 4. Alice (Owner) views members - should see Bob's info
 	members, err := clientAlice.GetGroupMembers(groupID)
 	if err != nil {
 		t.Fatalf("GetGroupMembers Alice failed: %v", err)
@@ -61,8 +61,8 @@ func TestGroupMemberRegistry(t *testing.T) {
 	foundBob := false
 	for _, m := range members {
 		if m.UserID == "bob" {
-			if m.Email != "bob@example.com" {
-				t.Errorf("Alice saw wrong email for Bob: %s", m.Email)
+			if m.Info != "bob@example.com (Staff)" {
+				t.Errorf("Alice saw wrong info for Bob: %s", m.Info)
 			}
 			foundBob = true
 		}
@@ -71,7 +71,7 @@ func TestGroupMemberRegistry(t *testing.T) {
 		t.Error("Alice didn't find Bob in registry")
 	}
 
-	// 5. Bob (Member) views members - should NOT see emails
+	// 5. Bob (Member) views members - should NOT see info
 	clientBob := client.NewClient(ts.URL)
 	clientBob = clientBob.WithIdentity("bob", uBobDK).WithSignKey(uBobSign).WithServerKey(serverPK)
 
@@ -85,8 +85,8 @@ func TestGroupMemberRegistry(t *testing.T) {
 	}
 
 	for _, m := range membersBob {
-		if m.Email != "[HIDDEN]" && m.UserID != "alice" { // Alice's email might be hidden too if she didn't set it
-			t.Errorf("Bob saw email for %s: %s", m.UserID, m.Email)
+		if m.Info != "[HIDDEN]" && m.UserID != "alice" {
+			t.Errorf("Bob saw info for %s: %s", m.UserID, m.Info)
 		}
 	}
 }

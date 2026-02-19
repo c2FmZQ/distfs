@@ -2601,7 +2601,7 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 	// But let's check how we get email.
 
 	initialMembers := []metadata.MemberEntry{
-		{UserID: c.userID, Email: ""}, // Placeholder for owner email
+		{UserID: c.userID, Info: ""}, // Placeholder for owner info
 	}
 	encRegistry, err := c.encryptRegistry(rk, initialMembers)
 	if err != nil {
@@ -2653,7 +2653,7 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 }
 
 // AddUserToGroup adds a new member to an existing group.
-func (c *Client) AddUserToGroup(groupID, userID, email string) error {
+func (c *Client) AddUserToGroup(groupID, userID, info string) error {
 	group, err := c.GetGroup(groupID)
 	if err != nil {
 		return err
@@ -2707,13 +2707,13 @@ func (c *Client) AddUserToGroup(groupID, userID, email string) error {
 			found := false
 			for i, m := range members {
 				if m.UserID == userID {
-					members[i].Email = email
+					members[i].Info = info
 					found = true
 					break
 				}
 			}
 			if !found {
-				members = append(members, metadata.MemberEntry{UserID: userID, Email: email})
+				members = append(members, metadata.MemberEntry{UserID: userID, Info: info})
 			}
 
 			encRegistry, err := c.encryptRegistry(rk, members)
@@ -3493,7 +3493,7 @@ func (c *Client) GetGroupMembers(groupID string) ([]metadata.MemberEntry, error)
 	// Not a manager, return public member list (IDs only)
 	var members []metadata.MemberEntry
 	for id := range group.Members {
-		members = append(members, metadata.MemberEntry{UserID: id, Email: "[HIDDEN]"})
+		members = append(members, metadata.MemberEntry{UserID: id, Info: "[HIDDEN]"})
 	}
 	return members, nil
 }

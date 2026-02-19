@@ -109,9 +109,9 @@ func usage() {
 	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  chgrp <group_id> <path>         Change group")
 	fmt.Println("  group-create <name>             Create a new group")
-	fmt.Println("  group-add <group_id> <user_id> [email] Add user to group")
+	fmt.Println("  group-add <group_id> <user_id> [info] Add user to group (info e.g. email)")
 	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
-	fmt.Println("  group-members <group_id>        List group members (emails shown if owner)")
+	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	fmt.Println("  admin                           Open interactive cluster management console")
@@ -296,12 +296,12 @@ func cmdGroupAdd(args []string) {
 		log.Fatal("group_id and user_id required")
 	}
 	groupID, userID := args[0], args[1]
-	email := ""
+	info := ""
 	if len(args) > 2 {
-		email = args[2]
+		info = args[2]
 	}
 	c := loadClient()
-	if err := c.AddUserToGroup(groupID, userID, email); err != nil {
+	if err := c.AddUserToGroup(groupID, userID, info); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s added to group %s\n", userID, groupID)
@@ -319,10 +319,10 @@ func cmdGroupMembers(args []string) {
 	}
 
 	fmt.Printf("Members of group %s:\n", groupID)
-	fmt.Printf("%-64s %s\n", "User ID", "Email")
+	fmt.Printf("%-64s %s\n", "User ID", "User Info")
 	fmt.Println(strings.Repeat("-", 80))
 	for _, m := range members {
-		fmt.Printf("%-64s %s\n", m.UserID, m.Email)
+		fmt.Printf("%-64s %s\n", m.UserID, m.Info)
 	}
 }
 

@@ -94,7 +94,7 @@ type RegisterUserRequest struct {
 // MemberEntry represents a record in the encrypted member registry.
 type MemberEntry struct {
 	UserID string `json:"uid"`
-	Email  string `json:"email"`
+	Info   string `json:"info"`
 }
 
 // Group represents a user group for sharing access.
