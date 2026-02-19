@@ -47,7 +47,7 @@ func TestGroupMemberRegistry(t *testing.T) {
 	groupID := group.ID
 
 	// 3. Alice adds Bob with info
-	err = clientAlice.AddUserToGroup(groupID, "bob", "bob@example.com (Staff)")
+	err = clientAlice.AddUserToGroup(groupID, "bob", "bob@example.com (Staff)", nil)
 	if err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}

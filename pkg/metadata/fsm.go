@@ -781,6 +781,10 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 
+	if err := loadInodeWithPages(tx, &inode); err != nil {
+		return err
+	}
+
 	if req.Mode != nil {
 		inode.Mode = SanitizeMode(*req.Mode, inode.Type)
 	}
@@ -1659,6 +1663,8 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 					ID:            g.ID,
 					EncryptedName: g.EncryptedName,
 					Role:          role,
+					EncKey:        g.EncKey,
+					Lockbox:       g.Lockbox,
 				})
 			}
 		}

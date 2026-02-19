@@ -2634,12 +2634,46 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 	return string(nameBytes), nil
 }
 
+// DecryptGroupName decrypts a group name from a list entry using cached or provided keys.
+func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error) {
+	// 1. Try to unlock group key from entry's lockbox
+	gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
+	if err != nil {
+		return "", err
+	}
+	gdk, err := crypto.UnmarshalDecapsulationKey(gk)
+	if err != nil {
+		return "", err
+	}
+
+	nameBytes, err := crypto.Unseal(entry.EncryptedName, gdk)
+	if err != nil {
+		return "", err
+	}
+	return string(nameBytes), nil
+}
+
 // GetGroupRegistryKey retrieves and decrypts the group registry key.
 func (c *Client) getGroupRegistryKey(group *metadata.Group) ([]byte, error) {
 	if c.decKey == nil {
 		return nil, fmt.Errorf("client has no identity to unlock registry")
 	}
-	return group.RegistryLockbox.GetFileKey(c.userID, c.decKey)
+	// 1. Try personal access
+	key, err := group.RegistryLockbox.GetFileKey(c.userID, c.decKey)
+	if err == nil {
+		return key, nil
+	}
+
+	// 2. Try group-based management access
+	if group.OwnerID != "" && group.OwnerID != c.userID {
+		if _, exists := group.RegistryLockbox[group.OwnerID]; exists {
+			gk, gerr := c.GetGroupPrivateKey(group.OwnerID)
+			if gerr == nil {
+				return group.RegistryLockbox.GetFileKey(group.OwnerID, gk)
+			}
+		}
+	}
+	return nil, err
 }
 
 func (c *Client) encryptRegistry(key []byte, members []metadata.MemberEntry) ([]byte, error) {
@@ -2767,124 +2801,140 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 }
 
 // AddUserToGroup adds a new member to an existing group.
-func (c *Client) AddUserToGroup(groupID, userID, info string) error {
-	group, err := c.GetGroup(groupID)
-	if err != nil {
-		return err
-	}
-
-	// We need the user's public key.
-	user, err := c.GetUser(userID)
-	if err != nil {
-		return err
-	}
-
-	// 1. Update Group Private Keys (Lockbox)
-	// Decrypt group private encryption key using our identity
-	gk, err := c.GetGroupPrivateKey(groupID)
-	if err != nil {
-		return err
-	}
-	priv := crypto.MarshalDecapsulationKey(gk)
-
-	// Decrypt group private signing key using our identity
-	gsk, err := c.GetGroupSignKey(groupID)
-	if err != nil {
-		return err
-	}
-	spriv := gsk.MarshalPrivate()
-
-	// Add new member to lockbox
-	userEK, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-	if err != nil {
-		return err
-	}
-	if err := group.Lockbox.AddRecipient(userID, userEK, priv); err != nil {
-		return err
-	}
-	if err := group.Lockbox.AddRecipient(userID+":sign", userEK, spriv); err != nil {
-		return err
-	}
-
-	if group.Members == nil {
-		group.Members = make(map[string]bool)
-	}
-	group.Members[userID] = true
-
-	// 2. Update Member Registry (if we are a manager)
-	rk, err := c.getGroupRegistryKey(group)
-	if err == nil {
-		// We are a manager, update the registry
-		members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
-		if err == nil {
-			// Add new entry
-			found := false
-			for i, m := range members {
-				if m.UserID == userID {
-					members[i].Info = info
-					found = true
-					break
-				}
-			}
-			if !found {
-				members = append(members, metadata.MemberEntry{UserID: userID, Info: info})
-			}
-
-			encRegistry, err := c.encryptRegistry(rk, members)
-			if err == nil {
-				group.EncryptedRegistry = encRegistry
-			}
+func (c *Client) AddUserToGroup(groupID, userID, info string, ci *ContactInfo) error {
+	var userEK *mlkem.EncapsulationKey768
+	if ci != nil {
+		if ci.UserID != userID {
+			return fmt.Errorf("contact string user ID mismatch")
+		}
+		var err error
+		userEK, err = crypto.UnmarshalEncapsulationKey(ci.EncKey)
+		if err != nil {
+			return fmt.Errorf("invalid contact enc key: %w", err)
+		}
+	} else {
+		// We need the user's public key from the server
+		user, err := c.GetUser(userID)
+		if err != nil {
+			return err
+		}
+		userEK, err = crypto.UnmarshalEncapsulationKey(user.EncKey)
+		if err != nil {
+			return err
 		}
 	}
 
-	_, err = c.updateGroup(context.Background(), *group)
-	return err
+	return c.withConflictRetry(context.Background(), func() error {
+		group, err := c.GetGroup(groupID)
+		if err != nil {
+			return err
+		}
+
+		// 1. Update Group Private Keys (Lockbox)
+		gk, err := c.GetGroupPrivateKey(groupID)
+		if err != nil {
+			return err
+		}
+		priv := crypto.MarshalDecapsulationKey(gk)
+
+		gsk, err := c.GetGroupSignKey(groupID)
+		if err != nil {
+			return err
+		}
+		spriv := gsk.MarshalPrivate()
+
+		// Add new member to lockbox
+		if err := group.Lockbox.AddRecipient(userID, userEK, priv); err != nil {
+			return err
+		}
+		if err := group.Lockbox.AddRecipient(userID+":sign", userEK, spriv); err != nil {
+			return err
+		}
+
+		if group.Members == nil {
+			group.Members = make(map[string]bool)
+		}
+		group.Members[userID] = true
+
+		// 2. Update Member Registry (if we are a manager)
+		rk, err := c.getGroupRegistryKey(group)
+		if err == nil {
+			// We are a manager, update the registry
+			members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
+			if err == nil {
+				// Merge or update entry
+				found := false
+				for i, m := range members {
+					if m.UserID == userID {
+						members[i].Info = info
+						found = true
+						break
+					}
+				}
+				if !found {
+					members = append(members, metadata.MemberEntry{UserID: userID, Info: info})
+				}
+
+				encRegistry, err := c.encryptRegistry(rk, members)
+				if err != nil {
+					return err
+				}
+				group.EncryptedRegistry = encRegistry
+			}
+		}
+
+		_, err = c.updateGroup(context.Background(), *group)
+		return err
+	})
 }
 
 // RemoveUserFromGroup removes a member from an existing group.
 func (c *Client) RemoveUserFromGroup(groupID, userID string) error {
-	group, err := c.GetGroup(groupID)
-	if err != nil {
-		return err
-	}
+	return c.withConflictRetry(context.Background(), func() error {
+		group, err := c.GetGroup(groupID)
+		if err != nil {
+			return err
+		}
 
-	// 1. Remove from Members map
-	if group.Members != nil {
-		delete(group.Members, userID)
-	}
+		// 1. Remove from Members map
+		if group.Members != nil {
+			delete(group.Members, userID)
+		}
 
-	// 2. Remove from Lockbox
-	if group.Lockbox != nil {
-		delete(group.Lockbox, userID)
-		delete(group.Lockbox, userID+":sign")
-	}
+		// 2. Remove from Lockbox
+		if group.Lockbox != nil {
+			delete(group.Lockbox, userID)
+			delete(group.Lockbox, userID+":sign")
+		}
 
-	// 3. Remove from Registry (if we are a manager)
-	rk, err := c.getGroupRegistryKey(group)
-	if err == nil {
-		// We are a manager, update the registry
-		members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
+		// 3. Remove from Registry (if we are a manager)
+		rk, err := c.getGroupRegistryKey(group)
 		if err == nil {
-			var newMembers []metadata.MemberEntry
-			for _, m := range members {
-				if m.UserID != userID {
-					newMembers = append(newMembers, m)
-				}
-			}
-			encRegistry, err := c.encryptRegistry(rk, newMembers)
+			// We are a manager, update the registry
+			members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
 			if err == nil {
+				var newMembers []metadata.MemberEntry
+				for _, m := range members {
+					if m.UserID != userID {
+						newMembers = append(newMembers, m)
+					}
+				}
+				encRegistry, err := c.encryptRegistry(rk, newMembers)
+				if err != nil {
+					return err
+				}
 				group.EncryptedRegistry = encRegistry
 			}
+
+			// Also remove from RegistryLockbox
+			if group.RegistryLockbox != nil {
+				delete(group.RegistryLockbox, userID)
+			}
 		}
 
-		// Also remove from RegistryLockbox
-		if group.RegistryLockbox != nil {
-			delete(group.RegistryLockbox, userID)
-		}
-	}
-
-	_, err = c.updateGroup(context.Background(), *group)
-	return err
+		_, err = c.updateGroup(context.Background(), *group)
+		return err
+	})
 }
 
 // SetAttr updates the attributes of an inode at the given path.
@@ -3558,85 +3608,53 @@ func (c *Client) signGroup(group *metadata.Group) {
 
 func (c *Client) updateGroup(ctx context.Context, group metadata.Group) (*metadata.Group, error) {
 	var updated metadata.Group
-	maxRetries := 5
-
-	for i := 0; i < maxRetries; i++ {
-		if i > 0 {
-			latest, err := c.GetGroup(group.ID)
-			if err != nil {
-				return nil, err
-			}
-			// Transfer updated fields to latest
-			latest.Members = make(map[string]bool)
-			for k, v := range group.Members {
-				latest.Members[k] = v
-			}
-			latest.Lockbox = make(crypto.Lockbox)
-			for k, v := range group.Lockbox {
-				latest.Lockbox[k] = v
-			}
-			latest.EncryptedName = group.EncryptedName
-			latest.OwnerID = group.OwnerID
-			latest.EncKey = group.EncKey
-			latest.SignKey = group.SignKey
-			latest.EncryptedSignKey = group.EncryptedSignKey
-			group = *latest
-		}
-
-		c.signGroup(&group)
-		data, err := json.Marshal(group)
-		if err != nil {
-			return nil, err
-		}
-
-		err = c.withRetry(ctx, func() error {
-			c.acquireControl()
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+group.ID, bytes.NewReader(data))
-			if err != nil {
-				return err
-			}
-			if err := c.authenticateRequest(req); err != nil {
-				return err
-			}
-			if err := c.sealBody(req, data); err != nil {
-				return err
-			}
-
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode == http.StatusConflict {
-				return metadata.ErrConflict
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				b, _ := io.ReadAll(body)
-				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-			}
-
-			return json.NewDecoder(body).Decode(&updated)
-		})
-
-		if err == nil {
-			return &updated, nil
-		}
-		if err != metadata.ErrConflict {
-			return nil, err
-		}
-		// On conflict, wait a bit and retry
-		time.Sleep(time.Duration(i*50) * time.Millisecond)
+	c.signGroup(&group)
+	data, err := json.Marshal(group)
+	if err != nil {
+		return nil, err
 	}
 
-	return nil, metadata.ErrConflict
+	err = c.withRetry(ctx, func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+group.ID, bytes.NewReader(data))
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode == http.StatusConflict {
+			return metadata.ErrConflict
+		}
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&updated)
+	})
+
+	if err == nil {
+		return &updated, nil
+	}
+	return nil, err
 }
 
 // GetGroupMembers retrieves the list of members for a group.
@@ -3663,45 +3681,45 @@ func (c *Client) GetGroupMembers(groupID string) ([]metadata.MemberEntry, error)
 
 // GroupChown changes the owner of a group.
 func (c *Client) GroupChown(groupID, newOwnerID string) error {
-	group, err := c.GetGroup(groupID)
-	if err != nil {
-		return err
-	}
+	return c.withConflictRetry(context.Background(), func() error {
+		group, err := c.GetGroup(groupID)
+		if err != nil {
+			return err
+		}
 
-	// 1. Update RegistryLockbox (if we are a manager)
-	rk, err := c.getGroupRegistryKey(group)
-	if err == nil {
-		// Fetch new owner's public key (assuming it's a UserID for now)
-		// If it's a GroupID, we need to handle that too (recursive manager lockbox)
-		// For now, let's try fetching as user
-		newOwner, err := c.GetUser(newOwnerID)
+		// 1. Update RegistryLockbox (if we are a manager)
+		rk, err := c.getGroupRegistryKey(group)
 		if err == nil {
-			pubKey, err := crypto.UnmarshalEncapsulationKey(newOwner.EncKey)
+			// Fetch new owner's public key (assuming it's a UserID for now)
+			newOwner, err := c.GetUser(newOwnerID)
 			if err == nil {
-				// Re-key Registry for new owner
-				if group.RegistryLockbox == nil {
-					group.RegistryLockbox = crypto.NewLockbox()
-				}
-				group.RegistryLockbox.AddRecipient(newOwnerID, pubKey, rk)
-			}
-		} else {
-			// Try as group?
-			targetGroup, err := c.GetGroup(newOwnerID)
-			if err == nil {
-				pubKey, err := crypto.UnmarshalEncapsulationKey(targetGroup.EncKey)
+				pubKey, err := crypto.UnmarshalEncapsulationKey(newOwner.EncKey)
 				if err == nil {
+					// Re-key Registry for new owner
 					if group.RegistryLockbox == nil {
 						group.RegistryLockbox = crypto.NewLockbox()
 					}
 					group.RegistryLockbox.AddRecipient(newOwnerID, pubKey, rk)
 				}
+			} else {
+				// Try as group?
+				targetGroup, err := c.GetGroup(newOwnerID)
+				if err == nil {
+					pubKey, err := crypto.UnmarshalEncapsulationKey(targetGroup.EncKey)
+					if err == nil {
+						if group.RegistryLockbox == nil {
+							group.RegistryLockbox = crypto.NewLockbox()
+						}
+						group.RegistryLockbox.AddRecipient(newOwnerID, pubKey, rk)
+					}
+				}
 			}
 		}
-	}
 
-	group.OwnerID = newOwnerID
-	_, err = c.updateGroup(context.Background(), *group)
-	return err
+		group.OwnerID = newOwnerID
+		_, err = c.updateGroup(context.Background(), *group)
+		return err
+	})
 }
 
 func (c *Client) lockInode(id string) func() {

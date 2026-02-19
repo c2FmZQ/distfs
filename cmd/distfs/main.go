@@ -317,8 +317,10 @@ func cmdGroupAdd(args []string) {
 	c := loadClient()
 
 	userID := userArg
+	var ci *client.ContactInfo
 	if strings.HasPrefix(userArg, "distfs-contact:v1:") {
-		ci, err := c.ParseContactString(userArg)
+		var err error
+		ci, err = c.ParseContactString(userArg)
 		if err != nil {
 			log.Fatalf("Invalid contact string: %v", err)
 		}
@@ -338,7 +340,7 @@ func cmdGroupAdd(args []string) {
 		}
 	}
 
-	if err := c.AddUserToGroup(groupID, userID, info); err != nil {
+	if err := c.AddUserToGroup(groupID, userID, info, ci); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s added to group %s\n", userID, groupID)
@@ -396,11 +398,8 @@ func cmdGroupList(args []string) {
 	fmt.Println(strings.Repeat("-", 80))
 	for _, e := range entries {
 		name := "[HIDDEN]"
-		// Try to decrypt name
-		if group, err := c.GetGroup(e.ID); err == nil {
-			if decrypted, err := c.GetGroupName(group); err == nil {
-				name = decrypted
-			}
+		if decrypted, err := c.DecryptGroupName(e); err == nil {
+			name = decrypted
 		}
 		fmt.Printf("%-32s %-20s %s\n", e.ID, name, e.Role)
 	}

@@ -124,9 +124,11 @@ const (
 )
 
 type GroupListEntry struct {
-	ID            string    `json:"id"`
-	EncryptedName []byte    `json:"enc_name"`
-	Role          GroupRole `json:"role"`
+	ID            string         `json:"id"`
+	EncryptedName []byte         `json:"enc_name"`
+	Role          GroupRole      `json:"role"`
+	EncKey        []byte         `json:"enc_key"` // Group Public Key
+	Lockbox       crypto.Lockbox `json:"lockbox"` // For name decryption
 }
 
 type GroupListResponse struct {

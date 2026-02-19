@@ -51,7 +51,7 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 3. Alice adds Bob to Group A (Bob is Member)
-	err = clientAlice.AddUserToGroup(groupA.ID, "bob", "Bob info")
+	err = clientAlice.AddUserToGroup(groupA.ID, "bob", "Bob info", nil)
 	if err != nil {
 		t.Fatalf("AddUserToGroup Bob failed: %v", err)
 	}
@@ -108,5 +108,21 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 	if rolesBob[groupB.ID] != metadata.RoleManager {
 		t.Errorf("Bob role for B: got %s, want manager", rolesBob[groupB.ID])
+	}
+
+	// 7. Verify Delegated Registry Access (Fix #1)
+	// Bob is a member of A, and A owns B. Bob should be able to see B's members (PII).
+	membersB, err := clientBob.GetGroupMembers(groupB.ID)
+	if err != nil {
+		t.Fatalf("Bob GetGroupMembers B failed: %v", err)
+	}
+	foundAlice := false
+	for _, m := range membersB {
+		if m.UserID == "alice" && m.Info != "[HIDDEN]" {
+			foundAlice = true
+		}
+	}
+	if !foundAlice {
+		t.Errorf("Bob should see Alice in B's registry via delegated management")
 	}
 }
