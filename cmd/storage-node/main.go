@@ -21,7 +21,9 @@ import (
 	"flag"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -55,6 +57,26 @@ func main() {
 		tlsKey  = flag.String("tls-key", "", "TLS key for public API")
 	)
 	flag.Parse()
+
+	// Default and Validate Advertise Addresses
+	if *raftAdvertise == "" {
+		*raftAdvertise = *raftBind
+	}
+	if *clusterAdvertise == "" {
+		*clusterAdvertise = "https://" + *clusterAddr
+	}
+
+	// Validate Raft advertise address (host:port)
+	if _, _, err := net.SplitHostPort(*raftAdvertise); err != nil {
+		log.Fatalf("invalid raft-advertise %q: %v (expected host:port)", *raftAdvertise, err)
+	}
+
+	// Validate Cluster advertise address (https://host:port)
+	if u, err := url.Parse(*clusterAdvertise); err != nil {
+		log.Fatalf("invalid cluster-advertise %q: %v", *clusterAdvertise, err)
+	} else if u.Scheme != "https" {
+		log.Fatalf("cluster-advertise %q MUST use https:// scheme", *clusterAdvertise)
+	}
 
 	// Adjust baseDir logic
 	var baseDir string
@@ -115,12 +137,6 @@ func main() {
 	}
 	*nodeID = derivedID
 
-	if *raftAdvertise == "" {
-		*raftAdvertise = *raftBind
-	}
-	if *clusterAdvertise == "" {
-		*clusterAdvertise = *clusterAddr
-	}
 	if *apiURL == "" {
 		*apiURL = "http://" + *apiAddr
 	}
@@ -228,6 +244,7 @@ func main() {
 	publicMux.Handle("/v1/auth/", metaServer)
 	publicMux.Handle("/v1/login", metaServer)
 	publicMux.Handle("/v1/admin/", metaServer)
+	publicMux.Handle("/v1/system/", metaServer)
 	publicMux.Handle("/v1/data/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/replicate") {
 			http.NotFound(w, r)
@@ -253,15 +270,10 @@ func main() {
 
 	// 7. Registration & Heartbeat
 	go func() {
-		clusterURL := *clusterAdvertise
-		if !strings.HasPrefix(clusterURL, "http") {
-			clusterURL = "http://" + clusterURL
-		}
-
 		node := metadata.Node{
 			ID:             *nodeID,
 			Address:        *apiURL, // Public address for clients
-			ClusterAddress: clusterURL,
+			ClusterAddress: *clusterAdvertise,
 			RaftAddress:    *raftAdvertise, // Raft address
 			Status:         metadata.NodeStatusActive,
 			PublicKey:      raftKey.Public(),

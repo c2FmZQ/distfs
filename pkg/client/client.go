@@ -145,6 +145,9 @@ type Client struct {
 	concurrencySem chan struct{}
 
 	admin bool
+
+	mutationMu    sync.Mutex
+	mutationLocks map[string]*sync.Mutex
 }
 
 // NewClient creates a new DistFS client.
@@ -168,6 +171,7 @@ func NewClient(serverAddr string) *Client {
 		sessionMu:      &sync.RWMutex{},
 		loginMu:        &sync.Mutex{},
 		concurrencySem: make(chan struct{}, 64), // Increased to 64 for higher throughput
+		mutationLocks:  make(map[string]*sync.Mutex),
 	}
 }
 
@@ -920,6 +924,9 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 }
 
 func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
+	unlock := c.lockInode(inode.ID)
+	defer unlock()
+
 	var updated metadata.Inode
 	maxRetries := 5
 
@@ -2853,16 +2860,28 @@ func (c *Client) isRetryable(err error) bool {
 }
 
 func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
-	for i := 0; i < 10; i++ {
-		if i > 0 {
-			time.Sleep(time.Duration(i*50) * time.Millisecond)
-		}
+	backoff := 50 * time.Millisecond
+	maxBackoff := 5 * time.Second
+
+	for i := 0; i < 20; i++ {
 		err := op()
 		if err == nil {
 			return nil
 		}
 		var apiErr *APIError
-		if errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict {
+		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) || errors.Is(err, metadata.ErrConflict)
+
+		if isConflict {
+			jitter := time.Duration(mrand.Int63n(int64(backoff/2) + 1))
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff + jitter):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
 			continue
 		}
 		return err
@@ -3294,4 +3313,16 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 
 	_, err = c.updateInode(ctx, *inode)
 	return err
+}
+
+func (c *Client) lockInode(id string) func() {
+	c.mutationMu.Lock()
+	mu, ok := c.mutationLocks[id]
+	if !ok {
+		mu = &sync.Mutex{}
+		c.mutationLocks[id] = mu
+	}
+	c.mutationMu.Unlock()
+	mu.Lock()
+	return func() { mu.Unlock() }
 }

@@ -195,6 +195,14 @@ func main() {
 		wg.Add(1)
 		go func(workerID int) {
 			defer wg.Done()
+
+			// Create worker sub-directory to avoid parent contention
+			workerDir := fmt.Sprintf("%s/worker-%d", benchDir, workerID)
+			if err := c.Mkdir(workerDir); err != nil {
+				log.Printf("Worker %d failed to create subdir: %v", workerID, err)
+				return
+			}
+
 			for range opChan {
 				opStart := time.Now()
 				var err error
@@ -202,10 +210,10 @@ func main() {
 
 				switch *mode {
 				case "mkdir":
-					path := fmt.Sprintf("%s/dir-%d-%d", benchDir, workerID, time.Now().UnixNano())
+					path := fmt.Sprintf("%s/dir-%d-%d", workerDir, workerID, time.Now().UnixNano())
 					err = c.Mkdir(path)
 				case "put":
-					path := fmt.Sprintf("%s/file-%d-%d", benchDir, workerID, time.Now().UnixNano())
+					path := fmt.Sprintf("%s/file-%d-%d", workerDir, workerID, time.Now().UnixNano())
 					// Stream data to avoid OOM
 					err = c.CreateFile(path, io.LimitReader(rand.Reader, *size), *size)
 					bytesTransferred = uint64(*size)

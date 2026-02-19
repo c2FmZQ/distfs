@@ -469,6 +469,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet {
+		s.handleGetMetrics(w, r)
+		return
+	}
+
 	// Authenticate User for remaining routes
 	user, err := s.authenticate(r)
 	if err != nil {
@@ -2599,4 +2604,27 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 	req.UserID = user.ID
 	body, _ := json.Marshal(req)
 	s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
+}
+
+func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
+	if !s.checkRaftSecret(r) {
+		user, ok := r.Context().Value(userContextKey).(*User)
+		if !ok || user == nil || !s.fsm.IsAdmin(user.ID) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	snap, err := s.fsm.GetLatestMetrics()
+	if err != nil {
+		if err == ErrNotFound {
+			http.Error(w, "no metrics available", http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(snap)
 }

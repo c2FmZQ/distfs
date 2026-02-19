@@ -1512,3 +1512,20 @@ func int64ToBytes(v int64) []byte {
 	binary.BigEndian.PutUint64(b, uint64(v))
 	return b
 }
+
+func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
+	var snap MetricSnapshot
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("metrics"))
+		c := b.Cursor()
+		k, v := c.Last()
+		if k == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(v, &snap)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &snap, nil
+}
