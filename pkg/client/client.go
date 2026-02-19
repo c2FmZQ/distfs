@@ -163,17 +163,17 @@ func NewClient(serverAddr string) *Client {
 			Transport: t,
 			Timeout:   5 * time.Minute,
 		},
-		keyCache:       make(map[string]fileMetadata),
-		keyMu:          &sync.RWMutex{},
-		pathCache:      make(map[string]pathCacheEntry),
-		pathMu:         &sync.RWMutex{},
-		groupKeys:      make(map[string]*mlkem.DecapsulationKey768),
-		groupSignKeys:  make(map[string]*crypto.IdentityKey),
-		sessionMu:      &sync.RWMutex{},
-		loginMu:        &sync.Mutex{},
-		controlSem:     make(chan struct{}, 128), // High throughput for metadata
-		dataSem:        make(chan struct{}, 64),  // Limit chunk I/O
-		mutationLocks:  make(map[string]*sync.Mutex),
+		keyCache:      make(map[string]fileMetadata),
+		keyMu:         &sync.RWMutex{},
+		pathCache:     make(map[string]pathCacheEntry),
+		pathMu:        &sync.RWMutex{},
+		groupKeys:     make(map[string]*mlkem.DecapsulationKey768),
+		groupSignKeys: make(map[string]*crypto.IdentityKey),
+		sessionMu:     &sync.RWMutex{},
+		loginMu:       &sync.Mutex{},
+		controlSem:    make(chan struct{}, 128), // High throughput for metadata
+		dataSem:       make(chan struct{}, 64),  // Limit chunk I/O
+		mutationLocks: make(map[string]*sync.Mutex),
 	}
 }
 
