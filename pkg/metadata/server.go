@@ -611,10 +611,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-var (
-	errStopIteration = fmt.Errorf("internal: iteration break")
-)
-
 func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool {
 	if s.raft.State() == raft.Leader {
 		return false
@@ -640,14 +636,14 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 				if err := json.Unmarshal(v, &n); err == nil {
 					if n.RaftAddress == string(leaderAddr) {
 						leaderNode = n
-						return errStopIteration // Hack to break early
+						return ErrStopIteration // Hack to break early
 					}
 				}
 				return nil
 			})
 		})
 
-		if err != nil && err != errStopIteration {
+		if err != nil && err != ErrStopIteration {
 			http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
 			return true
 		}

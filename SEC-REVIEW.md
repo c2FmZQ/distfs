@@ -15,12 +15,12 @@ This document outlines the security vulnerabilities identified during the manual
 *   **Resolution:** Implemented value-level encryption using AES-256-GCM with a unique `fsmKey` derived from the node's MasterKey. Added `EncryptedStableStore` for Raft state and secured snapshots by including the `fsmKey` in the encrypted snapshot stream.
 
 ### 1.2. SSRF and Token Leakage in Data Replication
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Broken Access Control / SSRF
 *   **Location:** `pkg/data/api.go` (`replicate` method)
 *   **Severity:** **CRITICAL**
 *   **Description:** The `Validator` is uninitialized in `cmd/storage-node`, allowing a user with a Write token to specify an arbitrary URL. The node will send the chunk and the signed `CapabilityToken` to that URL.
-*   **Impact:** Information disclosure, SSRF, and theft of signed access tokens.
-*   **Recommendation:** Initialize `Validator` and enforce a strict allow-list of cluster nodes.
+*   **Resolution:** Refactored `data.NewServer` to mandate a non-nil `Validator`. Implemented `DenyAllValidator` as a secure default and `NoopValidator` for controlled testing. Updated `MetadataFSM.ValidateNode` to safely handle encrypted node metadata. Removed the nil-bypass in the `replicate` method, ensuring all replication targets are strictly validated against the cluster registry.
 
 ---
 

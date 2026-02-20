@@ -134,7 +134,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorageLocal(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), metaNode.FSM)
+	dataServer := data.NewServer(dataStore, signKey.Public(), metaNode.FSM, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 

@@ -19,6 +19,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -35,6 +36,20 @@ type Validator interface {
 	ValidateNode(address string) error
 }
 
+// DenyAllValidator rejects all replication requests.
+type DenyAllValidator struct{}
+
+func (d DenyAllValidator) ValidateNode(address string) error {
+	return fmt.Errorf("replication denied: no valid cluster registry")
+}
+
+// NoopValidator allows all replication requests. SHOULD ONLY BE USED IN TESTS.
+type NoopValidator struct{}
+
+func (n NoopValidator) ValidateNode(address string) error {
+	return nil
+}
+
 // Server is the HTTP server for the Data Node API.
 type Server struct {
 	store      Store
@@ -45,11 +60,19 @@ type Server struct {
 }
 
 // NewServer creates a new Data Node API server.
-func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM) *Server {
+func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM, validator Validator) *Server {
+	if validator == nil {
+		if fsm != nil {
+			validator = fsm
+		} else {
+			validator = DenyAllValidator{}
+		}
+	}
 	return &Server{
 		store:      store,
 		metaPubKey: metaPubKey,
 		fsm:        fsm,
+		validator:  validator,
 		client:     &http.Client{Timeout: 10 * time.Second},
 	}
 }
@@ -271,10 +294,9 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 }
 
 func (s *Server) replicate(id, target, remaining, token string) error {
-	if s.validator != nil {
-		if err := s.validator.ValidateNode(target); err != nil {
-			return fmt.Errorf("invalid replication target: %w", err)
-		}
+	if err := s.validator.ValidateNode(target); err != nil {
+		log.Printf("Data: Replication validation failed for %s: %v", target, err)
+		return fmt.Errorf("invalid replication target: %w", err)
 	}
 
 	rc, err := s.store.ReadChunk(id)

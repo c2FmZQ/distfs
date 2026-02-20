@@ -230,7 +230,7 @@ func main() {
 		log.Fatalf("failed to init disk store: %v", err)
 	}
 
-	dataServer := data.NewServer(store, signKey.Public(), rn.FSM)
+	dataServer := data.NewServer(store, signKey.Public(), rn.FSM, rn.FSM)
 
 	// 5. Combined Router (Public)
 	publicMux := http.NewServeMux()

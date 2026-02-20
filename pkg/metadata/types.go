@@ -368,17 +368,17 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(nl)
 	h.Write([]byte("|"))
 
-	s := make([]byte, 8)
-	binary.LittleEndian.PutUint64(s, i.Size)
-	h.Write([]byte("s:"))
-	h.Write(s)
-	h.Write([]byte("|"))
-
 	if len(i.EncryptedSymlinkTarget) > 0 {
 		h.Write([]byte("symlink:"))
 		h.Write(i.EncryptedSymlinkTarget)
 		h.Write([]byte("|"))
 	}
+
+	s := make([]byte, 8)
+	binary.LittleEndian.PutUint64(s, i.Size)
+	h.Write([]byte("s:"))
+	h.Write(s)
+	h.Write([]byte("|"))
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
 	h.Write([]byte("signer:" + i.SignerID + "|"))

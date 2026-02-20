@@ -72,7 +72,7 @@ func TestPathCache(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{

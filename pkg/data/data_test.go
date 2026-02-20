@@ -163,7 +163,7 @@ func TestAPI(t *testing.T) {
 	st, _ := createTestStorage(t, tmpDir)
 	store, _ := NewDiskStore(st)
 
-	server := NewServer(store, nil, nil)
+	server := NewServer(store, nil, nil, NoopValidator{})
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -282,7 +282,7 @@ func TestAPI_Delete(t *testing.T) {
 	st, _ := createTestStorage(t, tmpDir)
 	store, _ := NewDiskStore(st)
 
-	server := NewServer(store, nil, nil)
+	server := NewServer(store, nil, nil, NoopValidator{})
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

@@ -34,9 +34,10 @@ import (
 )
 
 var (
-	ErrExists   = errors.New("already exists")
-	ErrNotFound = errors.New("not found")
-	ErrConflict = errors.New("version conflict")
+	ErrExists        = errors.New("already exists")
+	ErrNotFound      = errors.New("not found")
+	ErrConflict      = errors.New("version conflict")
+	ErrStopIteration = errors.New("iteration stopped")
 )
 
 // MetadataFSM implements the Raft Finite State Machine for the metadata layer.
@@ -1125,21 +1126,26 @@ func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 }
 
 func (fsm *MetadataFSM) ValidateNode(address string) error {
-	return fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
 				// Address in FSM is full URL (e.g. http://1.2.3.4:8080)
-				// Target might be host:port or URL.
-				if strings.Contains(n.Address, address) {
-					return nil
+				// Target might be full URL or Host:Port string.
+				if n.Address == address || n.ClusterAddress == address || strings.HasSuffix(n.Address, "/"+address) || strings.HasSuffix(n.ClusterAddress, "/"+address) {
+					return ErrStopIteration
 				}
 			}
-		}
-		return fmt.Errorf("node address %s not found in registry", address)
+			return nil
+		})
 	})
+	if err == ErrStopIteration {
+		return nil
+	}
+	if err == nil {
+		return fmt.Errorf("node address %s not found in registry", address)
+	}
+	return err
 }
 
 // Restore restores the FSM from a snapshot.

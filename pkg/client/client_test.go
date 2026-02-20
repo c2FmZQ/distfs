@@ -150,7 +150,7 @@ func TestClientIntegration(t *testing.T) {
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
 
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -277,7 +277,7 @@ func TestReplication(t *testing.T) {
 		st, _ := createTestStorage(t, dir)
 		store, _ := data.NewDiskStore(st)
 		stores[i] = store
-		server := data.NewServer(store, signKey.Public(), nil)
+		server := data.NewServer(store, signKey.Public(), nil, data.NoopValidator{})
 		ts := httptest.NewServer(server)
 		nodes[i] = ts
 		defer ts.Close()
@@ -362,7 +362,7 @@ func TestDirectories(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -460,7 +460,7 @@ func TestReplicationRepair(t *testing.T) {
 	dataDir1 := t.TempDir()
 	st1, _ := createTestStorage(t, dataDir1)
 	store1, _ := data.NewDiskStore(st1)
-	server1 := data.NewServer(store1, signKey.Public(), nil)
+	server1 := data.NewServer(store1, signKey.Public(), nil, data.NoopValidator{})
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
 
@@ -494,14 +494,14 @@ func TestReplicationRepair(t *testing.T) {
 	dataDir2 := t.TempDir()
 	st2, _ := createTestStorage(t, dataDir2)
 	store2, _ := data.NewDiskStore(st2)
-	server2 := data.NewServer(store2, signKey.Public(), nil)
+	server2 := data.NewServer(store2, signKey.Public(), nil, data.NoopValidator{})
 	ts2 := httptest.NewServer(server2)
 	defer ts2.Close()
 
 	dataDir3 := t.TempDir()
 	st3, _ := createTestStorage(t, dataDir3)
 	store3, _ := data.NewDiskStore(st3)
-	server3 := data.NewServer(store3, signKey.Public(), nil)
+	server3 := data.NewServer(store3, signKey.Public(), nil, data.NoopValidator{})
 	ts3 := httptest.NewServer(server3)
 	defer ts3.Close()
 
@@ -569,7 +569,7 @@ func TestReadAhead(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	realHandler := data.NewServer(dataStore, signKey.Public(), nil)
+	realHandler := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
 
 	requestLog := make([]string, 0)
 	var logMu sync.Mutex
@@ -686,7 +686,7 @@ func TestGarbageCollection(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -779,7 +779,7 @@ func TestResolvePathComplex(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil)
+	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{
