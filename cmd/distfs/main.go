@@ -22,6 +22,8 @@ import (
 	"io"
 	"log"
 	"os"
+	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -226,20 +228,157 @@ func saveClient(c *client.Client) {
 	// In distfs-fuse it makes more sense.
 }
 
+type LSClient interface {
+	ResolvePath(path string) (*metadata.Inode, []byte, error)
+	ReadDirExtended(ctx context.Context, path string) ([]*client.DistDirEntry, error)
+	ReadDirRecursive(ctx context.Context, path string) (map[string][]*client.DistDirEntry, error)
+	NewDirEntry(inode *metadata.Inode, name string) *client.DistDirEntry
+	DecryptName(inode *metadata.Inode) (string, error)
+	UserID() string
+}
+
 func cmdLs(args []string) {
-	path := "/"
-	if len(args) > 0 {
-		path = args[0]
-	}
 	c := loadClient()
-	dfs := c.FS()
-	entries, err := dfs.ReadDir(path)
-	if err != nil {
-		log.Fatal(err)
+	runLs(c, args)
+}
+
+func runLs(c LSClient, args []string) {
+	fs := flag.NewFlagSet("ls", flag.ExitOnError)
+	long := fs.Bool("l", false, "Long format")
+	all := fs.Bool("a", false, "Show hidden files")
+	human := fs.Bool("h", false, "Human readable sizes")
+	inode := fs.Bool("i", false, "Print inode ID")
+	recursive := fs.Bool("R", false, "Recursive")
+	directory := fs.Bool("d", false, "List directory itself")
+	sortByTime := fs.Bool("t", false, "Sort by time")
+	sortBySize := fs.Bool("S", false, "Sort by size")
+	reverse := fs.Bool("r", false, "Reverse sort order")
+	oneCol := fs.Bool("1", false, "One per line")
+	classify := fs.Bool("F", false, "Classify entries")
+
+	fs.Parse(args)
+	path := "/"
+	if fs.NArg() > 0 {
+		path = fs.Arg(0)
 	}
+
+	if *directory {
+		// Resolve path to get its inode
+		inodeInfo, _, err := c.ResolvePath(path)
+		if err != nil {
+			log.Fatal(err)
+		}
+
+		name := path
+		if path == "/" {
+			name = "/"
+		} else {
+			if decrypted, err := c.DecryptName(inodeInfo); err == nil {
+				name = decrypted
+			} else {
+				name = filepath.Base(path)
+			}
+		}
+
+		entry := c.NewDirEntry(inodeInfo, name)
+		processAndPrintEntries(os.Stdout, []*client.DistDirEntry{entry}, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
+		return
+	}
+
+	if *recursive {
+		results, err := c.ReadDirRecursive(context.Background(), path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		// Sort paths for consistent output
+		var paths []string
+		for p := range results {
+			paths = append(paths, p)
+		}
+		sort.Strings(paths)
+
+		for i, p := range paths {
+			if len(paths) > 1 {
+				fmt.Printf("%s:\n", p)
+			}
+			entries := results[p]
+			processAndPrintEntries(os.Stdout, entries, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
+			if i < len(paths)-1 {
+				fmt.Println()
+			}
+		}
+	} else {
+		entries, err := c.ReadDirExtended(context.Background(), path)
+		if err != nil {
+			log.Fatal(err)
+		}
+		processAndPrintEntries(os.Stdout, entries, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
+	}
+}
+
+func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, all, human, inode, classify, oneCol, sortByTime, sortBySize, reverse bool) {
+	var filtered []*client.DistDirEntry
 	for _, e := range entries {
-		info, _ := e.Info()
-		fmt.Printf("%s\t%d\t%v\n", e.Name(), info.Size(), e.IsDir())
+		if !all && strings.HasPrefix(e.Name(), ".") {
+			continue
+		}
+		filtered = append(filtered, e)
+	}
+
+	sort.Slice(filtered, func(i, j int) bool {
+		var res bool
+		if sortByTime {
+			res = filtered[i].ModTime().After(filtered[j].ModTime())
+		} else if sortBySize {
+			res = filtered[i].Size() > filtered[j].Size()
+		} else {
+			res = filtered[i].Name() < filtered[j].Name()
+		}
+		if reverse {
+			return !res
+		}
+		return res
+	})
+
+	if long {
+		for _, e := range filtered {
+			if inode {
+				fmt.Fprintf(w, "%s ", e.InodeID())
+			}
+			mode := e.Mode().String()
+			sizeStr := strconv.FormatInt(e.Size(), 10)
+			if human {
+				sizeStr = client.FormatBytes(e.Size())
+			}
+			mtime := e.ModTime().Format("Jan _2 15:04")
+			name := e.Name()
+			if classify {
+				if e.IsDir() {
+					name += "/"
+				}
+			}
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", mode, sizeStr, mtime, name)
+		}
+	} else {
+		for i, e := range filtered {
+			name := e.Name()
+			if inode {
+				name = e.InodeID()[:8] + " " + name
+			}
+			if classify && e.IsDir() {
+				name += "/"
+			}
+			if oneCol {
+				fmt.Fprintln(w, name)
+			} else {
+				fmt.Fprint(w, name)
+				if i < len(filtered)-1 {
+					fmt.Fprint(w, "\t")
+				} else {
+					fmt.Fprint(w, "\n")
+				}
+			}
+		}
 	}
 }
 
@@ -521,9 +660,9 @@ func displayUsage(usage metadata.UserUsage, quota metadata.UserQuota) {
 		fmt.Println("Unlimited")
 	}
 
-	fmt.Printf("  Storage: %s / ", formatBytes(usage.TotalBytes))
+	fmt.Printf("  Storage: %s / ", client.FormatBytes(usage.TotalBytes))
 	if quota.MaxBytes > 0 {
-		fmt.Printf("%s\n", formatBytes(quota.MaxBytes))
+		fmt.Printf("%s\n", client.FormatBytes(quota.MaxBytes))
 	} else {
 		fmt.Println("Unlimited")
 	}

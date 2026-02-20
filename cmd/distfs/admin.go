@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -334,12 +335,12 @@ func (m *model) updateUserTable() {
 	for _, u := range m.users {
 		quota := "Unlim"
 		if u.Quota.MaxBytes > 0 {
-			quota = formatBytes(u.Quota.MaxBytes)
+			quota = client.FormatBytes(u.Quota.MaxBytes)
 		}
 		rows = append(rows, table.Row{
 			u.ID,
 			fmt.Sprintf("%d", u.Usage.InodeCount),
-			formatBytes(u.Usage.TotalBytes),
+			client.FormatBytes(u.Usage.TotalBytes),
 			quota,
 		})
 	}
@@ -365,7 +366,7 @@ func (m *model) updateGroupTable() {
 	for _, g := range m.groups {
 		quota := "Unlim"
 		if g.Quota.MaxBytes > 0 {
-			quota = formatBytes(g.Quota.MaxBytes)
+			quota = client.FormatBytes(g.Quota.MaxBytes)
 		}
 
 		name := "[HIDDEN]"
@@ -383,7 +384,7 @@ func (m *model) updateGroupTable() {
 			g.ID,
 			name,
 			fmt.Sprintf("%d", g.Usage.InodeCount),
-			formatBytes(g.Usage.TotalBytes),
+			client.FormatBytes(g.Usage.TotalBytes),
 			quota,
 		})
 	}
@@ -637,19 +638,6 @@ func (m model) modalView() string {
 	}
 	b.WriteString("\n  (enter: submit, esc: cancel, tab: next)\n")
 	return windowStyle.Render(b.String())
-}
-
-func formatBytes(bytes int64) string {
-	const unit = 1024
-	if bytes < unit {
-		return fmt.Sprintf("%d B", bytes)
-	}
-	div, exp := int64(unit), 0
-	for n := bytes / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
 func newInput(placeholder string) textinput.Model {

@@ -20,6 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -82,7 +83,7 @@ type DistFile struct {
 }
 
 func (f *DistFile) Stat() (fs.FileInfo, error) {
-	return &DistFileInfo{inode: f.reader.Stat()}, nil
+	return &DistFileInfo{inode: f.reader.Stat(), name: f.reader.inode.ID}, nil
 }
 
 func (f *DistFile) Read(p []byte) (int, error) {
@@ -103,7 +104,7 @@ type DistDir struct {
 }
 
 func (d *DistDir) Stat() (fs.FileInfo, error) {
-	return &DistFileInfo{inode: d.inode}, nil
+	return &DistFileInfo{inode: d.inode, name: d.inode.ID}, nil
 }
 
 func (d *DistDir) Read(p []byte) (int, error) {
@@ -200,17 +201,132 @@ func (e *DistDirEntry) Type() fs.FileMode {
 	return fs.FileMode(e.inode.Mode)
 }
 func (e *DistDirEntry) Info() (fs.FileInfo, error) {
-	return &DistFileInfo{inode: e.inode}, nil
+	return &DistFileInfo{inode: e.inode, name: e.name}, nil
 }
+
+func (e *DistDirEntry) InodeID() string { return e.inode.ID }
+func (e *DistDirEntry) Mode() fs.FileMode {
+	m := fs.FileMode(e.inode.Mode)
+	if e.IsDir() {
+		m |= fs.ModeDir
+	}
+	return m
+}
+func (e *DistDirEntry) Size() int64 { return int64(e.inode.Size) }
+
+func (e *DistDirEntry) ModTime() time.Time { return time.Unix(0, e.inode.MTime) }
 
 // DistFileInfo implements fs.FileInfo.
 type DistFileInfo struct {
 	inode *metadata.Inode
+	name  string
 }
 
-func (i *DistFileInfo) Name() string       { return i.inode.ID } // Info().Name() is usually the base name, but here ID is safer if name is unknown.
+func (i *DistFileInfo) Name() string       { return i.name }
 func (i *DistFileInfo) Size() int64        { return int64(i.inode.Size) }
 func (i *DistFileInfo) Mode() fs.FileMode  { return fs.FileMode(i.inode.Mode) }
-func (i *DistFileInfo) ModTime() time.Time { return time.Now() }
+func (i *DistFileInfo) ModTime() time.Time { return time.Unix(0, i.inode.MTime) }
 func (i *DistFileInfo) IsDir() bool        { return i.inode.Type == metadata.DirType }
 func (i *DistFileInfo) Sys() any           { return i.inode }
+
+// ReadDirExtended returns a list of directory entries with full metadata.
+func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEntry, error) {
+	inode, _, err := c.ResolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if inode.Type != metadata.DirType {
+		return nil, fmt.Errorf("not a directory")
+	}
+
+	if len(inode.Children) == 0 {
+		return nil, nil
+	}
+
+	ids := make([]string, 0, len(inode.Children))
+	for _, id := range inode.Children {
+		ids = append(ids, id)
+	}
+
+	inodes, err := c.getInodes(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+
+	var entries []*DistDirEntry
+	for _, childInode := range inodes {
+		var childName string
+		childKey, err := childInode.Lockbox.GetFileKey(c.userID, c.decKey)
+		if err == nil {
+			nameBytes, err := crypto.DecryptDEM(childKey, childInode.EncryptedName)
+			if err == nil {
+				childName = string(nameBytes)
+			} else {
+				childName = "decryption-failed-" + childInode.ID[:8]
+			}
+		} else {
+			childName = "locked-" + childInode.ID[:8]
+		}
+
+		entries = append(entries, &DistDirEntry{
+			inode: childInode,
+			name:  childName,
+		})
+	}
+
+	return entries, nil
+}
+
+// ReadDirRecursive returns all entries in the directory tree starting at path.
+func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string][]*DistDirEntry, error) {
+	results := make(map[string][]*DistDirEntry)
+	var walk func(string) error
+	walk = func(p string) error {
+		entries, err := c.ReadDirExtended(ctx, p)
+		if err != nil {
+			return err
+		}
+		results[p] = entries
+		for _, e := range entries {
+			if e.IsDir() {
+				childPath := p
+				if !strings.HasSuffix(childPath, "/") {
+					childPath += "/"
+				}
+				childPath += e.Name()
+				if err := walk(childPath); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+
+	if err := walk(path); err != nil {
+		return nil, err
+	}
+	return results, nil
+}
+
+// NewDirEntry creates a new DistDirEntry from an Inode and name.
+func (c *Client) NewDirEntry(inode *metadata.Inode, name string) *DistDirEntry {
+	return &DistDirEntry{inode: inode, name: name}
+}
+
+// DecryptName decrypts the name of an Inode using the client's identity.
+func (c *Client) DecryptName(inode *metadata.Inode) (string, error) {
+	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
+	if err != nil {
+		return "", err
+	}
+	nameBytes, err := crypto.DecryptDEM(key, inode.EncryptedName)
+	if err != nil {
+		return "", err
+	}
+	return string(nameBytes), nil
+}
+
+// NewDirEntryForTest is used for testing purposes to create a DistDirEntry.
+func NewDirEntryForTest(inode *metadata.Inode, name string) *DistDirEntry {
+	return &DistDirEntry{inode: inode, name: name}
+}

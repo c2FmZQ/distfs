@@ -603,3 +603,26 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 34.4: Health Indicators & Metrics**
     *   **Action:** Enhance the Overview tab with visual health indicators (Color-coded Raft status).
     *   **Action:** Implement a Metrics tab to visualize Raft commit latency and storage node utilization.
+
+---
+
+## Phase 35: Enhanced "ls" Command
+**Goal:** Implement a feature-rich `ls` command that supports standard POSIX flags for metadata visibility, sorting, and recursion.
+
+*   **Step 35.1: Client Library API Enhancement**
+    *   **Action:** Refactor `Client.ReadDir` (or add `ReadDirExtended`) to optionally fetch full `Inode` metadata for each entry in a single batch.
+    *   **Action:** Implement `ReadDirRecursive` using a depth-first or breadth-first traversal with efficient concurrency limiting.
+*   **Step 35.2: Metadata Formatting & Humanization**
+    *   **Action:** Implement a formatting package to handle human-readable sizes (`-h`), file modes, and time formatting.
+    *   **Action:** Add `-F` classification logic (e.g., appending `/` for directories).
+*   **Step 35.3: Sorting and Filtering**
+    *   **Action:** Implement client-side sorting logic for Alphabetical (default), Time (`-t`), and Size (`-S`).
+    *   **Action:** Implement reverse sorting (`-r`) and hidden file filtering (`-a` logic).
+*   **Step 35.4: CLI Flag Integration**
+    *   **Action:** Update `cmd/distfs/main.go` to support flags: `-l`, `-a`, `-h`, `-i`, `-R`, `-d`, `-t`, `-S`, `-r`, `-1`, `-F`.
+    *   **Action:** Implement long-format (`-l`) column alignment and colorized output support.
+*   **Step 35.5: Testing & Verification**
+    *   **Action:** **Unit Test:** Verify sorting logic with various metadata combinations.
+    *   **Action:** **Unit Test:** Verify human-readable formatting across different scales (B, KB, MB, GB).
+    *   **Action:** **Integration Test:** Perform a recursive `ls -R` on a complex directory tree and verify total entry count and metadata accuracy.
+    *   **Action:** **Integration Test:** Verify that `-a` correctly toggles visibility of hidden files.

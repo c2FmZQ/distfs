@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
@@ -302,8 +303,8 @@ func TestAdminConsole_Utilities(t *testing.T) {
 		{1024 * 1024 * 1024, "1.0 GB"},
 	}
 	for _, tt := range tests {
-		if got := formatBytes(tt.bytes); got != tt.want {
-			t.Errorf("formatBytes(%d) = %v, want %v", tt.bytes, got, tt.want)
+		if got := client.FormatBytes(tt.bytes); got != tt.want {
+			t.Errorf("FormatBytes(%d) = %v, want %v", tt.bytes, got, tt.want)
 		}
 	}
 
