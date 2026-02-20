@@ -234,53 +234,39 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	var newInode *metadata.Inode
 
 	if iType == metadata.FileType {
-
 		if err := c.writeInodeContent(context.Background(), newID, iType, newKey, r, size, encNameBlob, mode, groupID, parentID, encName); err != nil {
-
 			return nil, nil, err
-
 		}
-
 		newInode, err = c.GetInode(context.Background(), newID)
-
 		if err != nil {
-
 			return nil, nil, err
-
 		}
-
 	} else {
-
 		lb := c.createLockbox(newKey, mode, groupID)
 
+		var encTarget []byte
+		if iType == metadata.SymlinkType && symlinkTarget != "" {
+			encTarget, err = crypto.EncryptDEM(newKey, []byte(symlinkTarget))
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to encrypt symlink target: %w", err)
+			}
+		}
+
 		inode := metadata.Inode{
-
 			ID: newID,
-
 			Links: map[string]bool{
-
 				parentID + ":" + encName: true,
 			},
-
-			Type: iType,
-
-			Mode: mode,
-
-			UID: uid,
-
-			GID: gid,
-
-			Children: make(map[string]string),
-
-			Lockbox: lb,
-
-			EncryptedName: encNameBlob,
-
-			OwnerID: c.userID,
-
-			GroupID: groupID,
-
-			SymlinkTarget: symlinkTarget,
+			Type:                   iType,
+			Mode:                   mode,
+			UID:                    uid,
+			GID:                    gid,
+			Children:               make(map[string]string),
+			Lockbox:                lb,
+			EncryptedName:          encNameBlob,
+			OwnerID:                c.userID,
+			GroupID:                groupID,
+			EncryptedSymlinkTarget: encTarget,
 		}
 
 		newInode, err = c.createInode(context.Background(), inode)

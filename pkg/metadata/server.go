@@ -611,6 +611,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
+var (
+	errStopIteration = fmt.Errorf("internal: iteration break")
+)
+
 func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool {
 	if s.raft.State() == raft.Leader {
 		return false
@@ -631,21 +635,23 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 		// 2. Find Leader API Address in FSM
 		var leaderNode Node
 		err := s.fsm.db.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("nodes"))
-			c := b.Cursor()
-			for k, v := c.First(); k != nil; k, v = c.Next() {
+			return s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 				var n Node
 				if err := json.Unmarshal(v, &n); err == nil {
 					if n.RaftAddress == string(leaderAddr) {
 						leaderNode = n
-						return nil
+						return errStopIteration // Hack to break early
 					}
 				}
-			}
-			return fmt.Errorf("leader not registered")
+				return nil
+			})
 		})
 
-		if err != nil || leaderNode.Address == "" {
+		if err != nil && err != errStopIteration {
+			http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
+			return true
+		}
+		if leaderNode.Address == "" {
 			http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
 			return true
 		}
@@ -728,12 +734,14 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 
 	var user User
 	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(st.Token.UserID))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("users"), []byte(st.Token.UserID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return fmt.Errorf("user not found")
 		}
-		return json.Unmarshal(v, &user)
+		return json.Unmarshal(plain, &user)
 	})
 	if err != nil {
 		return nil, err
@@ -805,12 +813,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Verify User signature over challenge
 	var user User
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(solve.UserID))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("users"), []byte(solve.UserID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return fmt.Errorf("user not found")
 		}
-		return json.Unmarshal(v, &user)
+		return json.Unmarshal(plain, &user)
 	})
 	if err != nil {
 		http.Error(w, "user not found", http.StatusUnauthorized)
@@ -884,16 +894,18 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	var inode Inode
 	exists := true
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte(req.InodeID))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			exists = false
 			return nil
 		}
-		if err := json.Unmarshal(v, &inode); err != nil {
+		if err := json.Unmarshal(plain, &inode); err != nil {
 			return err
 		}
-		return loadInodeWithPages(tx, &inode)
+		return s.fsm.LoadInodeWithPages(tx, &inode)
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1101,12 +1113,14 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	// Check if exists
 	var existing User
 	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(userID))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &existing)
+		return json.Unmarshal(plain, &existing)
 	})
 	if err == nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -1224,12 +1238,14 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {
 	var user User
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("users"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &user)
+		return json.Unmarshal(plain, &user)
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
@@ -1258,18 +1274,15 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	var nodes []Node
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
-			if err := json.Unmarshal(v, &n); err != nil {
-				continue
+			if err := json.Unmarshal(v, &n); err == nil {
+				if n.Status == NodeStatusActive && n.Address != "" {
+					nodes = append(nodes, n)
+				}
 			}
-			if n.Status == NodeStatusActive && n.Address != "" {
-				nodes = append(nodes, n)
-			}
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1339,23 +1352,24 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 
 	var data []byte
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return os.ErrNotExist
 		}
 
 		var inode Inode
-		if err := json.Unmarshal(v, &inode); err != nil {
+		if err := json.Unmarshal(plain, &inode); err != nil {
 			return err
 		}
-		if err := loadInodeWithPages(tx, &inode); err != nil {
+		if err := s.fsm.LoadInodeWithPages(tx, &inode); err != nil {
 			return err
 		}
 
 		s.resolveURLs(inode.ChunkManifest)
 
-		var err error
 		data, err = json.Marshal(inode)
 		return err
 	})
@@ -1414,19 +1428,19 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 
 	result := make([]*Inode, 0, len(ids))
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
 		for _, id := range ids {
 			if s.checkReadPermission(r, user, id) != nil {
 				continue // Skip unauthorized inodes in batch fetch
 			}
-			v := b.Get([]byte(id))
-			if v != nil {
-				var inode Inode
-				if err := json.Unmarshal(v, &inode); err == nil {
-					if err := loadInodeWithPages(tx, &inode); err == nil {
-						s.resolveURLs(inode.ChunkManifest)
-						result = append(result, &inode)
-					}
+			plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
+			if err != nil || plain == nil {
+				continue
+			}
+			var inode Inode
+			if err := json.Unmarshal(plain, &inode); err == nil {
+				if err := s.fsm.LoadInodeWithPages(tx, &inode); err == nil {
+					s.resolveURLs(inode.ChunkManifest)
+					result = append(result, &inode)
 				}
 			}
 		}
@@ -1528,12 +1542,14 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 	}
 	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte(inodeID))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(inodeID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &inode)
+		return json.Unmarshal(plain, &inode)
 	})
 	if err != nil {
 		return err
@@ -1591,13 +1607,17 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	// 1. Generate unique GID (POSIX)
 	var gid uint32
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		idx := tx.Bucket([]byte("gids"))
 		for {
 			gid = generateID32()
 			if gid < 1000 {
 				continue
 			}
-			if idx.Get(uint32ToBytes(gid)) == nil {
+			v, err := s.fsm.Get(tx, []byte("gids"), uint32ToBytes(gid))
+			if err != nil {
+				log.Printf("GROUP: GID %d lookup error during allocation: %v", gid, err)
+				return err
+			}
+			if v == nil {
 				return nil
 			}
 		}
@@ -1672,12 +1692,14 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	// 1. Fetch group first to check ownership/membership
 	var group Group
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("groups"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &group)
+		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
 		log.Printf("GROUP: handleGetGroup(%s) retrieval failed: %v", id, err)
@@ -2022,12 +2044,14 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 	}
 	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte(inodeID))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(inodeID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &inode)
+		return json.Unmarshal(plain, &inode)
 	})
 	if err != nil {
 		return err
@@ -2064,12 +2088,14 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 
 	var group Group
 	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("groups"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &group)
+		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
 		http.Error(w, "group not found", http.StatusNotFound)
@@ -2121,12 +2147,14 @@ func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, i
 
 	var group Group
 	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := s.fsm.Get(tx, []byte("groups"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &group)
+		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
 		http.Error(w, "group not found", http.StatusNotFound)
@@ -2228,15 +2256,13 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 	var users []User
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return s.fsm.ForEach(tx, []byte("users"), func(k, v []byte) error {
 			var u User
 			if err := json.Unmarshal(v, &u); err == nil {
 				users = append(users, u)
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2279,15 +2305,13 @@ func (s *Server) handleClusterLeases(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 	var nodes []Node
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
 				nodes = append(nodes, n)
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -2412,10 +2436,12 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	// 3. Register/Update Node metadata in FSM
 	var node Node
 	s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		v := b.Get([]byte(info.ID))
-		if v != nil {
-			json.Unmarshal(v, &node)
+		plain, err := s.fsm.Get(tx, []byte("nodes"), []byte(info.ID))
+		if err != nil {
+			return err
+		}
+		if plain != nil {
+			json.Unmarshal(plain, &node)
 		}
 		return nil
 	})

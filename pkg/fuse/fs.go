@@ -558,7 +558,14 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
-	return f.inode.SymlinkTarget, nil
+	if len(f.inode.EncryptedSymlinkTarget) == 0 {
+		return "", nil
+	}
+	plain, err := crypto.DecryptDEM(f.key, f.inode.EncryptedSymlinkTarget)
+	if err != nil {
+		return "", mapError(err)
+	}
+	return string(plain), nil
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {

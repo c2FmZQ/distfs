@@ -17,6 +17,7 @@ package metadata
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -75,24 +76,26 @@ func (g *GCWorker) runGC() {
 	// 1. Scan for garbage
 	var items map[string][]string // ChunkID -> Nodes
 	err := g.server.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("garbage_collection"))
-		c := b.Cursor()
 		items = make(map[string][]string)
 		count := 0
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return g.server.fsm.ForEach(tx, []byte("garbage_collection"), func(k, v []byte) error {
 			var nodes []string
 			if err := json.Unmarshal(v, &nodes); err == nil {
 				items[string(k)] = nodes
 			}
 			count++
 			if count > 100 { // Batch size
-				break
+				return fmt.Errorf("batch_limit") // Hack to break ForEach early
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 
-	if err != nil || len(items) == 0 {
+	if err != nil && err.Error() != "batch_limit" {
+		log.Printf("GC: scan error: %v", err)
+		return
+	}
+	if len(items) == 0 {
 		return
 	}
 
@@ -106,19 +109,21 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 	// Generate Admin Token
 	token, err := g.server.generateSelfToken([]string{chunkID}, "D")
 	if err != nil {
-		fmt.Printf("GC: Failed to generate token: %v\n", err)
+		log.Printf("GC: Failed to generate token: %v", err)
 		return
 	}
 
 	// Resolve Nodes
 	var nodes []Node
 	err = g.server.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
 		for _, nid := range nodeIDs {
-			v := b.Get([]byte(nid))
-			if v != nil {
+			plain, err := g.server.fsm.Get(tx, []byte("nodes"), []byte(nid))
+			if err != nil {
+				continue
+			}
+			if plain != nil {
 				var n Node
-				if err := json.Unmarshal(v, &n); err == nil {
+				if err := json.Unmarshal(plain, &n); err == nil {
 					nodes = append(nodes, n)
 				}
 			}

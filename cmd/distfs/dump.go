@@ -69,6 +69,10 @@ func dumpInode(i *metadata.Inode) {
 	fmt.Printf("  SignerID: %s\n", i.SignerID)
 	fmt.Printf("  AuthorizedSigners: %v\n", i.AuthorizedSigners)
 
+	if len(i.EncryptedSymlinkTarget) > 0 {
+		fmt.Printf("  EncryptedSymlinkTarget: %x... (len=%d)\n", i.EncryptedSymlinkTarget[:8], len(i.EncryptedSymlinkTarget))
+	}
+
 	// Print raw signature bytes (truncated)
 	if len(i.UserSig) > 0 {
 		fmt.Printf("  UserSig: %x... (len=%d)\n", i.UserSig[:8], len(i.UserSig))

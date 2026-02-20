@@ -32,6 +32,10 @@ import (
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
 )
 
+const (
+	stableKeyName = "raft_stable.key"
+)
+
 // RaftNode wraps the Hashicorp Raft instance and its dependencies.
 type RaftNode struct {
 	Raft            *raft.Raft
@@ -63,7 +67,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	os.Remove(dbPath)
 	fsm, err := NewMetadataFSM(dbPath, st)
 	if err != nil {
-		return nil, fmt.Errorf("new fsm: %w", err)
+		return nil, fmt.Errorf("metadata fsm initialization: %w", err)
 	}
 
 	// 3. Transport (mTLS)
@@ -154,8 +158,24 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 		return nil, fmt.Errorf("bolt store: %w", err)
 	}
 
+	// 5. Stable Store Key (Node-Local)
+	var stableKey KeyData
+	err = st.ReadDataFile(stableKeyName, &stableKey)
+	if os.IsNotExist(err) {
+		k := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, k); err != nil {
+			return nil, err
+		}
+		stableKey.Bytes = k
+		if err := st.SaveDataFile(stableKeyName, stableKey); err != nil {
+			return nil, err
+		}
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to read stable key: %w", err)
+	}
+
 	logStore := NewEncryptedLogStore(boltStore, kr)
-	stableStore := boltStore
+	stableStore := NewEncryptedStableStore(boltStore, stableKey.Bytes)
 	snapStore := NewStorageSnapshotStore(st)
 
 	fsm.OnSnapshot = func() {

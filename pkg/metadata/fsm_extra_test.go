@@ -48,10 +48,12 @@ func TestFSM_Quota(t *testing.T) {
 
 	// Verify Quota Set
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(userID))
+		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
 		var u User
-		json.Unmarshal(v, &u)
+		json.Unmarshal(plain, &u)
 		if u.Quota.MaxInodes != 1 || u.Quota.MaxBytes != 100 {
 			return fmt.Errorf("quota not set correctly: %+v", u.Quota)
 		}
@@ -120,10 +122,12 @@ func TestFSM_Replication(t *testing.T) {
 
 	// Verify
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte("f1"))
+		plain, err := fsm.Get(tx, []byte("inodes"), []byte("f1"))
+		if err != nil {
+			return err
+		}
 		var i Inode
-		json.Unmarshal(v, &i)
+		json.Unmarshal(plain, &i)
 		// We need to load pages too if it was paginated, but here it's small.
 		// Actually fsm.Apply(CmdCreateInode) calls saveInodeWithPages which might move it to pages if it's large.
 		// For 1 chunk it stays in Inode.
@@ -188,8 +192,7 @@ func TestFSM_GCRemove(t *testing.T) {
 
 	// 1. Manually put something in GC bucket
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("garbage_collection"))
-		return b.Put([]byte("c1"), []byte(`["n1"]`))
+		return fsm.Put(tx, []byte("garbage_collection"), []byte("c1"), []byte(`["n1"]`))
 	})
 	if err != nil {
 		t.Fatal(err)

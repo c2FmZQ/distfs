@@ -17,6 +17,8 @@ package metadata
 import (
 	"encoding/binary"
 	"fmt"
+	"sync"
+
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/hashicorp/raft"
 	raftboltdb "github.com/hashicorp/raft-boltdb/v2"
@@ -86,4 +88,83 @@ func (e *EncryptedLogStore) StoreLogs(logs []*raft.Log) error {
 
 func (e *EncryptedLogStore) DeleteRange(min, max uint64) error {
 	return e.store.DeleteRange(min, max)
+}
+
+// EncryptedStableStore wraps a StableStore with encryption.
+type EncryptedStableStore struct {
+	store *raftboltdb.BoltStore
+	key   []byte
+
+	mu    sync.RWMutex
+	cache map[string]uint64
+}
+
+// NewEncryptedStableStore creates a new encrypted stable store.
+func NewEncryptedStableStore(store *raftboltdb.BoltStore, key []byte) *EncryptedStableStore {
+	return &EncryptedStableStore{
+		store: store,
+		key:   key,
+		cache: make(map[string]uint64),
+	}
+}
+
+func (e *EncryptedStableStore) Set(key, val []byte) error {
+	enc, err := crypto.EncryptDEM(e.key, val)
+	if err != nil {
+		return err
+	}
+	return e.store.Set(key, enc)
+}
+
+func (e *EncryptedStableStore) Get(key []byte) ([]byte, error) {
+	v, err := e.store.Get(key)
+	if err != nil || v == nil {
+		return v, err
+	}
+	return crypto.DecryptDEM(e.key, v)
+}
+
+func (e *EncryptedStableStore) SetUint64(key []byte, val uint64) error {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, val)
+	if err := e.Set(key, b); err != nil {
+		return err
+	}
+
+	e.mu.Lock()
+	e.cache[string(key)] = val
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *EncryptedStableStore) GetUint64(key []byte) (uint64, error) {
+	e.mu.RLock()
+	val, ok := e.cache[string(key)]
+	e.mu.RUnlock()
+	if ok {
+		return val, nil
+	}
+
+	b, err := e.Get(key)
+	if err != nil || b == nil {
+		return 0, err
+	}
+	if len(b) != 8 {
+		return 0, fmt.Errorf("invalid uint64 length: %d", len(b))
+	}
+	res := binary.BigEndian.Uint64(b)
+
+	e.mu.Lock()
+	e.cache[string(key)] = res
+	e.mu.Unlock()
+
+	return res, nil
+}
+
+// ClearCache resets the in-memory cache for protocol values.
+// Use only during initialization or recovery to ensure memory-disk consistency.
+func (e *EncryptedStableStore) ClearCache() {
+	e.mu.Lock()
+	e.cache = make(map[string]uint64)
+	e.mu.Unlock()
 }

@@ -32,8 +32,7 @@ func TestGCWorker_RunGC(t *testing.T) {
 
 	// 3. Manually add chunk to GC bucket
 	err := node.FSM.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("garbage_collection"))
-		return b.Put([]byte("gc-chunk-1"), mustMarshal([]string{"n1"}))
+		return node.FSM.Put(tx, []byte("garbage_collection"), []byte("gc-chunk-1"), mustMarshal([]string{"n1"}))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -52,8 +51,8 @@ func TestGCWorker_RunGC(t *testing.T) {
 
 	// 5. Verify removed from GC bucket
 	err = node.FSM.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("garbage_collection"))
-		if b.Get([]byte("gc-chunk-1")) != nil {
+		plain, _ := node.FSM.Get(tx, []byte("garbage_collection"), []byte("gc-chunk-1"))
+		if plain != nil {
 			return fmt.Errorf("still exists")
 		}
 		return nil

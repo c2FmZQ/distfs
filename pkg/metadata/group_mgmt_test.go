@@ -101,16 +101,18 @@ func TestGroupManagementSecurity(t *testing.T) {
 
 	// Update Bob to be a member of Group A
 	err := node.FSM.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(groupID))
+		plain, err := node.FSM.Get(tx, []byte("groups"), []byte(groupID))
+		if err != nil {
+			return err
+		}
 		var g Group
-		json.Unmarshal(v, &g)
+		json.Unmarshal(plain, &g)
 		if g.Members == nil {
 			g.Members = make(map[string]bool)
 		}
 		g.Members["bob"] = true
 		encoded, _ := json.Marshal(g)
-		return b.Put([]byte(groupID), encoded)
+		return node.FSM.Put(tx, []byte("groups"), []byte(groupID), encoded)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -164,16 +166,18 @@ func TestGroupManagementSecurity(t *testing.T) {
 
 	// Make Bob member of Group B
 	err = node.FSM.db.Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte("group-b"))
+		plain, err := node.FSM.Get(tx, []byte("groups"), []byte("group-b"))
+		if err != nil {
+			return err
+		}
 		var g Group
-		json.Unmarshal(v, &g)
+		json.Unmarshal(plain, &g)
 		if g.Members == nil {
 			g.Members = make(map[string]bool)
 		}
 		g.Members["bob"] = true
 		encoded, _ := json.Marshal(g)
-		return b.Put([]byte("group-b"), encoded)
+		return node.FSM.Put(tx, []byte("groups"), []byte("group-b"), encoded)
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -324,8 +328,8 @@ func TestGroupQuotaFallback(t *testing.T) {
 	// Verify Alice usage is now 1
 	var user User
 	node.FSM.db.View(func(tx *bolt.Tx) error {
-		v := tx.Bucket([]byte("users")).Get([]byte(userID))
-		json.Unmarshal(v, &user)
+		plain, _ := node.FSM.Get(tx, []byte("users"), []byte(userID))
+		json.Unmarshal(plain, &user)
 		return nil
 	})
 	if user.Usage.InodeCount != 1 {

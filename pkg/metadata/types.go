@@ -295,28 +295,28 @@ type AdminChmodRequest struct {
 
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
-	ID            string            `json:"id"`
-	Links         map[string]bool   `json:"links,omitempty"` // Set of "ParentID:NameHMAC"
-	Type          InodeType         `json:"type"`
-	OwnerID       string            `json:"owner_id"` // DistFS User ID
-	GroupID       string            `json:"group_id"` // DistFS Group ID
-	UID           uint32            `json:"uid"`      // POSIX UID
-	GID           uint32            `json:"gid"`      // POSIX GID
-	Mode          uint32            `json:"mode"`
-	Size          uint64            `json:"size"`
-	MTime         int64             `json:"mtime"` // Nanoseconds
-	CTime         int64             `json:"ctime"` // Nanoseconds
-	NLink         uint32            `json:"nlink"`
-	SymlinkTarget string            `json:"symlink_target,omitempty"`
-	EncryptedName []byte            `json:"enc_name"`
-	InlineData    []byte            `json:"inline_data,omitempty"`
-	Children      map[string]string `json:"children,omitempty"`
-	ChunkManifest []ChunkEntry      `json:"manifest,omitempty"`
-	ChunkPages    []string          `json:"chunk_pages,omitempty"`
-	Lockbox       crypto.Lockbox    `json:"lockbox"`
-	Version       uint64            `json:"version"`
-	LeaseOwner    string            `json:"lease_owner,omitempty"`
-	LeaseExpiry   int64             `json:"lease_expiry,omitempty"`
+	ID                     string            `json:"id"`
+	Links                  map[string]bool   `json:"links,omitempty"` // Set of "ParentID:NameHMAC"
+	Type                   InodeType         `json:"type"`
+	OwnerID                string            `json:"owner_id"` // DistFS User ID
+	GroupID                string            `json:"group_id"` // DistFS Group ID
+	UID                    uint32            `json:"uid"`      // POSIX UID
+	GID                    uint32            `json:"gid"`      // POSIX GID
+	Mode                   uint32            `json:"mode"`
+	Size                   uint64            `json:"size"`
+	MTime                  int64             `json:"mtime"` // Nanoseconds
+	CTime                  int64             `json:"ctime"` // Nanoseconds
+	NLink                  uint32            `json:"nlink"`
+	EncryptedSymlinkTarget []byte            `json:"enc_symlink_target,omitempty"`
+	EncryptedName          []byte            `json:"enc_name"`
+	InlineData             []byte            `json:"inline_data,omitempty"`
+	Children               map[string]string `json:"children,omitempty"`
+	ChunkManifest          []ChunkEntry      `json:"manifest,omitempty"`
+	ChunkPages             []string          `json:"chunk_pages,omitempty"`
+	Lockbox                crypto.Lockbox    `json:"lockbox"`
+	Version                uint64            `json:"version"`
+	LeaseOwner             string            `json:"lease_owner,omitempty"`
+	LeaseExpiry            int64             `json:"lease_expiry,omitempty"`
 
 	// Manifest Integrity (Phase 31)
 	SignerID          string   `json:"signer_id,omitempty"` // User ID of the last writer
@@ -356,10 +356,6 @@ func (i *Inode) ManifestHash() []byte {
 
 	h.Write([]byte("gid_str:" + i.GroupID + "|"))
 
-	if i.SymlinkTarget != "" {
-		h.Write([]byte("symlink:" + i.SymlinkTarget + "|"))
-	}
-
 	mt := make([]byte, 8)
 	binary.LittleEndian.PutUint64(mt, uint64(i.MTime))
 	h.Write([]byte("mtime:"))
@@ -377,6 +373,12 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("s:"))
 	h.Write(s)
 	h.Write([]byte("|"))
+
+	if len(i.EncryptedSymlinkTarget) > 0 {
+		h.Write([]byte("symlink:"))
+		h.Write(i.EncryptedSymlinkTarget)
+		h.Write([]byte("|"))
+	}
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
 	h.Write([]byte("signer:" + i.SignerID + "|"))

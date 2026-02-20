@@ -71,10 +71,12 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 	// 5. Verify Inode updated in FSM
 	err := node.FSM.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte("f1"))
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("f1"))
+		if err != nil {
+			return err
+		}
 		var i Inode
-		json.Unmarshal(v, &i)
+		json.Unmarshal(plain, &i)
 		if len(i.ChunkManifest[0].Nodes) < 3 {
 			return fmt.Errorf("nodes not incremented: %v", i.ChunkManifest[0].Nodes)
 		}

@@ -83,19 +83,17 @@ func (rm *ReplicationMonitor) Scan() {
 	activeNodes := make(map[string]Node)
 	var activeNodeIDs []string
 	err := rm.server.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return rm.server.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err != nil {
-				continue
+				return nil // Skip corrupt
 			}
 			if n.Status == NodeStatusActive && time.Since(time.Unix(n.LastHeartbeat, 0)) < 5*time.Minute {
 				activeNodes[n.ID] = n
 				activeNodeIDs = append(activeNodeIDs, n.ID)
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	if err != nil {
 		log.Printf("ReplicationMonitor: failed to list nodes: %v", err)
@@ -108,8 +106,7 @@ func (rm *ReplicationMonitor) Scan() {
 
 	// 2. Scan Inodes
 	err = rm.server.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		return b.ForEach(func(k, v []byte) error {
+		return rm.server.fsm.ForEach(tx, []byte("inodes"), func(k, v []byte) error {
 			// Check for stop
 			select {
 			case <-rm.stopCh:

@@ -47,6 +47,7 @@ type MetadataFSM struct {
 	OnSnapshot func()
 
 	st      *storage.Storage
+	fsmKey  []byte
 	trusted map[string]bool // PubKey(bytes) -> true
 	mu      sync.RWMutex
 
@@ -74,15 +75,95 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 		return nil, err
 	}
 
+	// Derive FSM Key from Storage
+	var keyData KeyData
+	if err := st.ReadDataFile("fsm.key", &keyData); err != nil {
+		k := make([]byte, 32)
+		if _, err := io.ReadFull(rand.Reader, k); err != nil {
+			db.Close()
+			return nil, err
+		}
+		keyData.Bytes = k
+		if err := st.SaveDataFile("fsm.key", keyData); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+
 	fsm := &MetadataFSM{
 		db:      db,
 		path:    path,
 		st:      st,
+		fsmKey:  keyData.Bytes,
 		trusted: make(map[string]bool),
 		metrics: NewMetricsCollector(),
 	}
 	fsm.loadTrustState()
 	return fsm, nil
+}
+
+func (fsm *MetadataFSM) encryptValue(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	return crypto.EncryptDEM(fsm.fsmKey, data)
+}
+
+func (fsm *MetadataFSM) DecryptValue(data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	return crypto.DecryptDEM(fsm.fsmKey, data)
+}
+
+func (fsm *MetadataFSM) FSMKey() []byte {
+	return fsm.fsmKey
+}
+
+func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket []byte, key []byte, value []byte) error {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	enc, err := fsm.encryptValue(value)
+	if err != nil {
+		return err
+	}
+	return b.Put(key, enc)
+}
+
+func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, error) {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return nil, fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	v := b.Get(key)
+	if v == nil {
+		return nil, nil
+	}
+	return fsm.DecryptValue(v)
+}
+
+func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket []byte, key []byte) error {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	return b.Delete(key)
+}
+
+func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte) error) error {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	return b.ForEach(func(k, v []byte) error {
+		plain, err := fsm.DecryptValue(v)
+		if err != nil {
+			return err
+		}
+		return fn(k, plain)
+	})
 }
 
 // Close closes the underlying BoltDB.
@@ -141,12 +222,14 @@ func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
 func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
 	var node Node
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("nodes"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &node)
+		return json.Unmarshal(plain, &node)
 	})
 	if err != nil {
 		return nil, err
@@ -160,8 +243,12 @@ func (fsm *MetadataFSM) GetNodeByRaftAddress(raftAddr string) (*Node, error) {
 		b := tx.Bucket([]byte("nodes"))
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
+			plain, err := fsm.DecryptValue(v)
+			if err != nil {
+				continue
+			}
 			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
+			if err := json.Unmarshal(plain, &n); err == nil {
 				if n.RaftAddress == raftAddr {
 					node = n
 					return nil
@@ -423,24 +510,26 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 		}
 	}
 	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
-
-	b := tx.Bucket([]byte("inodes"))
-	if b.Get([]byte(inode.ID)) != nil {
+	v, err := fsm.Get(tx, []byte("inodes"), []byte(inode.ID))
+	if err != nil {
+		return err
+	}
+	if v != nil {
 		return ErrExists
 	}
 
 	if inode.OwnerID != "" {
-		if err := checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
 
 	inode.Version = 1
-	if err := saveInodeWithPages(tx, &inode); err != nil {
+	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
 	if inode.OwnerID != "" {
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
@@ -453,13 +542,15 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(inode.ID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(inode.ID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 	var existing Inode
-	if err := json.Unmarshal(v, &existing); err != nil {
+	if err := json.Unmarshal(plain, &existing); err != nil {
 		return err
 	}
 
@@ -472,15 +563,15 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 
 	if ownerChanged || groupChanged {
 		// 1. Decrement old owner/group FIRST
-		if err := updateUsage(tx, existing.OwnerID, existing.GroupID, -1, -int64(existing.Size)); err != nil {
+		if err := fsm.updateUsage(tx, existing.OwnerID, existing.GroupID, -1, -int64(existing.Size)); err != nil {
 			return err
 		}
 		// 2. Check Quota for new owner/group
-		if err := checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 		// 3. Increment new owner/group
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
@@ -489,19 +580,19 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 	diffBytes := int64(inode.Size) - int64(existing.Size)
 
 	if !(ownerChanged || groupChanged) && diffBytes > 0 {
-		if err := checkQuota(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
+		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
 
 	inode.Version++
 	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
-	if err := saveInodeWithPages(tx, &inode); err != nil {
+	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
 
 	if !(ownerChanged || groupChanged) && diffBytes != 0 {
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
@@ -525,11 +616,13 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 
 func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{} {
 	id := string(data)
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(id))
-	if v != nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+	if err != nil {
+		return err
+	}
+	if plain != nil {
 		var inode Inode
-		if err := json.Unmarshal(v, &inode); err == nil {
+		if err := json.Unmarshal(plain, &inode); err == nil {
 			if len(inode.ChunkPages) > 0 {
 				pb := tx.Bucket([]byte("chunk_pages"))
 				for _, pid := range inode.ChunkPages {
@@ -537,14 +630,14 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{}
 				}
 			}
 			if inode.OwnerID != "" {
-				if err := updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
+				if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
 					return err
 				}
 			}
-			enqueueGC(tx, &inode)
+			fsm.enqueueGC(tx, &inode)
 		}
 	}
-	return b.Delete([]byte(id))
+	return fsm.Delete(tx, []byte("inodes"), []byte(id))
 }
 
 func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{} {
@@ -566,12 +659,11 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 		fsm.saveTrustState()
 	}
 
-	b := tx.Bucket([]byte("nodes"))
 	encoded, err := json.Marshal(node)
 	if err != nil {
 		return err
 	}
-	return b.Put([]byte(node.ID), encoded)
+	return fsm.Put(tx, []byte("nodes"), []byte(node.ID), encoded)
 }
 
 func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} {
@@ -580,16 +672,17 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 		return err
 	}
 
-	ub := tx.Bucket([]byte("users"))
-	idx := tx.Bucket([]byte("uids"))
-	ab := tx.Bucket([]byte("admins"))
-
-	if ub.Get([]byte(user.ID)) != nil {
+	v, err := fsm.Get(tx, []byte("users"), []byte(user.ID))
+	if err != nil {
+		return err
+	}
+	if v != nil {
 		return ErrExists
 	}
 
 	// Bootstrap: First user is admin
 	isFirst := false
+	ub := tx.Bucket([]byte("users"))
 	if stats := ub.Stats(); stats.KeyN == 0 {
 		isFirst = true
 	}
@@ -601,14 +694,22 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 			if uid < 1000 {
 				continue // Reserve low UIDs
 			}
-			if idx.Get(uint32ToBytes(uid)) == nil {
+			v, err := fsm.Get(tx, []byte("uids"), uint32ToBytes(uid))
+			if err != nil {
+				return err
+			}
+			if v == nil {
 				user.UID = uid
 				break
 			}
 		}
 	} else {
 		// If UID provided, check if already taken
-		if existing := idx.Get(uint32ToBytes(user.UID)); existing != nil {
+		existing, err := fsm.Get(tx, []byte("uids"), uint32ToBytes(user.UID))
+		if err != nil {
+			return err
+		}
+		if existing != nil {
 			return fmt.Errorf("UID %d already assigned to %s", user.UID, string(existing))
 		}
 	}
@@ -618,15 +719,15 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 		return err
 	}
 
-	if err := ub.Put([]byte(user.ID), encoded); err != nil {
+	if err := fsm.Put(tx, []byte("users"), []byte(user.ID), encoded); err != nil {
 		return err
 	}
-	if err := idx.Put(uint32ToBytes(user.UID), []byte(user.ID)); err != nil {
+	if err := fsm.Put(tx, []byte("uids"), uint32ToBytes(user.UID), []byte(user.ID)); err != nil {
 		return err
 	}
 
 	if isFirst {
-		if err := ab.Put([]byte(user.ID), []byte("true")); err != nil {
+		if err := fsm.Put(tx, []byte("admins"), []byte(user.ID), []byte("true")); err != nil {
 			return err
 		}
 	}
@@ -636,19 +737,25 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 
 func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{} {
 	userID := string(data)
-	ub := tx.Bucket([]byte("users"))
-	if ub.Get([]byte(userID)) == nil {
+	v, err := fsm.Get(tx, []byte("users"), []byte(userID))
+	if err != nil {
+		return err
+	}
+	if v == nil {
 		return ErrNotFound
 	}
-	ab := tx.Bucket([]byte("admins"))
-	return ab.Put([]byte(userID), []byte("true"))
+	return fsm.Put(tx, []byte("admins"), []byte(userID), []byte("true"))
 }
 
 func (fsm *MetadataFSM) IsAdmin(userID string) bool {
 	isAdmin := false
 	_ = fsm.db.View(func(tx *bolt.Tx) error {
-		ab := tx.Bucket([]byte("admins"))
-		if ab.Get([]byte(userID)) != nil {
+		v, err := fsm.Get(tx, []byte("admins"), []byte(userID))
+		if err != nil {
+			log.Printf("FSM: IsAdmin error for %s: %v", userID, err)
+			return err
+		}
+		if v != nil {
 			isAdmin = true
 		}
 		return nil
@@ -663,15 +770,20 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
-	gb := tx.Bucket([]byte("groups"))
-	idx := tx.Bucket([]byte("gids"))
-
-	if gb.Get([]byte(group.ID)) != nil {
+	v, err := fsm.Get(tx, []byte("groups"), []byte(group.ID))
+	if err != nil {
+		return err
+	}
+	if v != nil {
 		return ErrExists
 	}
 
 	// Ensure GID is unique
-	if existing := idx.Get(uint32ToBytes(group.GID)); existing != nil {
+	existing, err := fsm.Get(tx, []byte("gids"), uint32ToBytes(group.GID))
+	if err != nil {
+		return err
+	}
+	if existing != nil {
 		return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
 	}
 
@@ -681,10 +793,10 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
-	if err := gb.Put([]byte(group.ID), encoded); err != nil {
+	if err := fsm.Put(tx, []byte("groups"), []byte(group.ID), encoded); err != nil {
 		return err
 	}
-	if err := idx.Put(uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
+	if err := fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
 		return err
 	}
 
@@ -700,8 +812,10 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 	if err := json.Unmarshal(data, &group); err != nil {
 		return err
 	}
-	b := tx.Bucket([]byte("groups"))
-	v := b.Get([]byte(group.ID))
+	v, err := fsm.Get(tx, []byte("groups"), []byte(group.ID))
+	if err != nil {
+		return err
+	}
 	if v == nil {
 		return ErrNotFound
 	}
@@ -715,12 +829,21 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 		return ErrConflict
 	}
 
+	// Handle GID change in index
+	if group.GID != existing.GID {
+		// Verify old mapping exists before deleting to maintain index integrity
+		if oldMapping, _ := fsm.Get(tx, []byte("gids"), uint32ToBytes(existing.GID)); oldMapping != nil && string(oldMapping) == existing.ID {
+			fsm.Delete(tx, []byte("gids"), uint32ToBytes(existing.GID))
+		}
+		fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID))
+	}
+
 	group.Version++
 	encoded, err := json.Marshal(group)
 	if err != nil {
 		return err
 	}
-	if err := b.Put([]byte(group.ID), encoded); err != nil {
+	if err := fsm.Put(tx, []byte("groups"), []byte(group.ID), encoded); err != nil {
 		return err
 	}
 
@@ -735,6 +858,8 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 	mb := tx.Bucket([]byte("user_memberships"))
 	ob := tx.Bucket([]byte("owner_groups"))
 
+	encOne, _ := fsm.encryptValue([]byte("1"))
+
 	// 1. Membership Updates
 	if existing == nil {
 		// New group: Add all members
@@ -743,7 +868,7 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 			if err != nil {
 				return err
 			}
-			sub.Put([]byte(group.ID), []byte("1"))
+			sub.Put([]byte(group.ID), encOne)
 		}
 	} else {
 		// Existing group: Delta update
@@ -763,7 +888,7 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 				if err != nil {
 					return err
 				}
-				sub.Put([]byte(group.ID), []byte("1"))
+				sub.Put([]byte(group.ID), encOne)
 			}
 		}
 	}
@@ -781,7 +906,7 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 		if err != nil {
 			return err
 		}
-		sub.Put([]byte(group.ID), []byte("1"))
+		sub.Put([]byte(group.ID), encOne)
 	}
 
 	return nil
@@ -793,17 +918,19 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(req.InodeID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 	var inode Inode
-	if err := json.Unmarshal(v, &inode); err != nil {
+	if err := json.Unmarshal(plain, &inode); err != nil {
 		return err
 	}
 
-	if err := loadInodeWithPages(tx, &inode); err != nil {
+	if err := fsm.LoadInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
 
@@ -819,17 +946,17 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 	if req.GroupID != nil && *req.GroupID != inode.GroupID {
 		newGroupID := *req.GroupID
 		// 1. Decrement old group/owner FIRST
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
 			return err
 		}
 		// 2. Check Quota for new group
-		if err := checkQuota(tx, inode.OwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.checkQuota(tx, inode.OwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 		// Update GroupID
 		inode.GroupID = newGroupID
 		// 3. Increment new group/owner
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
@@ -839,7 +966,7 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 
 	inode.Version++
 	inode.CTime = time.Now().UnixNano()
-	return saveInodeWithPages(tx, &inode)
+	return fsm.saveInodeWithPages(tx, &inode)
 }
 
 func (fsm *MetadataFSM) executeAddChild(tx *bolt.Tx, data []byte) interface{} {
@@ -849,8 +976,10 @@ func (fsm *MetadataFSM) executeAddChild(tx *bolt.Tx, data []byte) interface{} {
 	}
 
 	var inode Inode
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(update.ParentID))
+	v, err := fsm.Get(tx, []byte("inodes"), []byte(update.ParentID))
+	if err != nil {
+		return err
+	}
 	if v == nil {
 		return ErrNotFound
 	}
@@ -874,22 +1003,25 @@ func (fsm *MetadataFSM) executeAddChild(tx *bolt.Tx, data []byte) interface{} {
 	inode.Version++
 
 	// Update Child Links
-	vChild := b.Get([]byte(update.ChildID))
-	if vChild != nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(update.ChildID))
+	if err != nil {
+		return err
+	}
+	if plain != nil {
 		var child Inode
-		if err := json.Unmarshal(vChild, &child); err == nil {
+		if err := json.Unmarshal(plain, &child); err == nil {
 			if child.Links == nil {
 				child.Links = make(map[string]bool)
 			}
 			child.Links[update.ParentID+":"+update.Name] = true
 			child.Version++
-			if err := saveInodeWithPages(tx, &child); err != nil {
+			if err := fsm.saveInodeWithPages(tx, &child); err != nil {
 				return err
 			}
 		}
 	}
 
-	if err := saveInodeWithPages(tx, &inode); err != nil {
+	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
 	return &inode
@@ -901,19 +1033,21 @@ func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interfa
 		return err
 	}
 
-	var inode Inode
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(req.InodeID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 
-	if err := json.Unmarshal(v, &inode); err != nil {
+	var inode Inode
+	if err := json.Unmarshal(plain, &inode); err != nil {
 		return err
 	}
 
 	// Load manifest to find chunk
-	if err := loadInodeWithPages(tx, &inode); err != nil {
+	if err := fsm.LoadInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
 
@@ -939,7 +1073,7 @@ func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interfa
 
 	if updated {
 		inode.Version++
-		if err := saveInodeWithPages(tx, &inode); err != nil {
+		if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 			return err
 		}
 	}
@@ -953,23 +1087,30 @@ func (fsm *MetadataFSM) executeGCRemove(tx *bolt.Tx, data []byte) interface{} {
 }
 
 func (fsm *MetadataFSM) executeInitSecret(tx *bolt.Tx, data []byte) interface{} {
-	b := tx.Bucket([]byte("system"))
-	if b.Get([]byte("cluster_secret")) != nil {
+	v, err := fsm.Get(tx, []byte("system"), []byte("cluster_secret"))
+	if err != nil {
+		return err
+	}
+	if v != nil {
 		return ErrExists
 	}
-	return b.Put([]byte("cluster_secret"), data)
+	if err := fsm.Put(tx, []byte("system"), []byte("cluster_secret"), data); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
 	var secret []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("system"))
-		v := b.Get([]byte("cluster_secret"))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_secret"))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		secret = make([]byte, len(v))
-		copy(secret, v)
+		secret = plain
 		return nil
 	})
 	return secret, err
@@ -980,7 +1121,7 @@ func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	if fsm.OnSnapshot != nil {
 		fsm.OnSnapshot()
 	}
-	return &MetadataSnapshot{db: fsm.db}, nil
+	return &MetadataSnapshot{db: fsm.db, fsmKey: fsm.fsmKey}, nil
 }
 
 func (fsm *MetadataFSM) ValidateNode(address string) error {
@@ -1009,6 +1150,14 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 		return fmt.Errorf("close db: %w", err)
 	}
 
+	// 1. Read FSM Key
+	newKey := make([]byte, 32)
+	if _, err := io.ReadFull(rc, newKey); err != nil {
+		fsm.reopen()
+		return fmt.Errorf("read fsm key: %w", err)
+	}
+
+	// 2. Restore DB
 	tmpPath := fsm.path + ".restore.tmp"
 	f, err := os.Create(tmpPath)
 	if err != nil {
@@ -1030,8 +1179,19 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 		return err
 	}
 
+	if err := fsm.reopen(); err != nil {
+		return err
+	}
+
+	// 3. Update and Save FSM Key only after successful DB restore
+	if fsm.st != nil {
+		if err := fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: newKey}); err != nil {
+			return fmt.Errorf("save fsm key: %w", err)
+		}
+	}
+	fsm.fsmKey = newKey
+
 	// Rebuild the in-memory trust cache and persist it to trust.bin after restoring from snapshot.
-	fsm.reopen()
 	fsm.rebuildTrustCache()
 	return nil
 }
@@ -1051,15 +1211,13 @@ func (fsm *MetadataFSM) rebuildTrustCache() {
 	fsm.trusted = make(map[string]bool)
 
 	fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
 				fsm.trusted[string(n.PublicKey)] = true
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 
 	// We should also persist it to trust.bin to match
@@ -1073,10 +1231,20 @@ func (fsm *MetadataFSM) rebuildTrustCache() {
 }
 
 type MetadataSnapshot struct {
-	db *bolt.DB
+	db     *bolt.DB
+	fsmKey []byte
 }
 
 func (s *MetadataSnapshot) Persist(sink raft.SnapshotSink) error {
+	// 1. Write FSM Key (32 bytes)
+	if len(s.fsmKey) != 32 {
+		return fmt.Errorf("invalid fsm key length: %d", len(s.fsmKey))
+	}
+	if _, err := sink.Write(s.fsmKey); err != nil {
+		sink.Cancel()
+		return err
+	}
+
 	err := s.db.View(func(tx *bolt.Tx) error {
 		_, err := tx.WriteTo(sink)
 		return err
@@ -1105,7 +1273,7 @@ func uint32ToBytes(v uint32) []byte {
 // ChunkPageSize is the maximum number of chunks stored in a single inode before pagination occurs.
 const ChunkPageSize = 1000
 
-func saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+func (fsm *MetadataFSM) saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 	// If manifest is large, split it
 	if len(inode.ChunkManifest) > ChunkPageSize {
 		var pageIDs []string
@@ -1120,12 +1288,11 @@ func saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 			}
 			pageIDs = append(pageIDs, page.ID)
 
-			b := tx.Bucket([]byte("chunk_pages"))
 			encoded, err := json.Marshal(page)
 			if err != nil {
 				return err
 			}
-			if err := b.Put([]byte(page.ID), encoded); err != nil {
+			if err := fsm.Put(tx, []byte("chunk_pages"), []byte(page.ID), encoded); err != nil {
 				return err
 			}
 		}
@@ -1140,22 +1307,23 @@ func saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 		inode.ChunkPages = nil
 	}
 
-	b := tx.Bucket([]byte("inodes"))
 	encoded, err := json.Marshal(inode)
 	if err != nil {
 		return err
 	}
-	return b.Put([]byte(inode.ID), encoded)
+	return fsm.Put(tx, []byte("inodes"), []byte(inode.ID), encoded)
 }
 
-func loadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+func (fsm *MetadataFSM) LoadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 	if len(inode.ChunkPages) > 0 && len(inode.ChunkManifest) == 0 {
-		pb := tx.Bucket([]byte("chunk_pages"))
 		for _, pid := range inode.ChunkPages {
-			v := pb.Get([]byte(pid))
-			if v != nil {
+			plain, err := fsm.Get(tx, []byte("chunk_pages"), []byte(pid))
+			if err != nil {
+				return err
+			}
+			if plain != nil {
 				var page ChunkPage
-				if err := json.Unmarshal(v, &page); err == nil {
+				if err := json.Unmarshal(plain, &page); err == nil {
 					inode.ChunkManifest = append(inode.ChunkManifest, page.Chunks...)
 				}
 			}
@@ -1164,9 +1332,9 @@ func loadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 	return nil
 }
 
-func enqueueGC(tx *bolt.Tx, inode *Inode) error {
+func (fsm *MetadataFSM) enqueueGC(tx *bolt.Tx, inode *Inode) error {
 	// Ensure we have the manifest loaded
-	if err := loadInodeWithPages(tx, inode); err != nil {
+	if err := fsm.LoadInodeWithPages(tx, inode); err != nil {
 		return err
 	}
 
@@ -1181,20 +1349,25 @@ func enqueueGC(tx *bolt.Tx, inode *Inode) error {
 	b := tx.Bucket([]byte("garbage_collection"))
 	for _, chunk := range inode.ChunkManifest {
 		nodesJSON, _ := json.Marshal(chunk.Nodes)
-		if err := b.Put([]byte(chunk.ID), nodesJSON); err != nil {
+		// GC bucket might not need encryption if chunkIDs are anonymous,
+		// but let's be consistent and encrypt values.
+		enc, _ := fsm.encryptValue(nodesJSON)
+		if err := b.Put([]byte(chunk.ID), enc); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
+func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
 	remainingInodes := deltaInodes
 	remainingBytes := deltaBytes
 
 	if groupID != "" {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(groupID))
+		v, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
+		if err != nil {
+			return err
+		}
 		if v != nil {
 			var group Group
 			if err := json.Unmarshal(v, &group); err != nil {
@@ -1215,15 +1388,17 @@ func updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBy
 			if err != nil {
 				return fmt.Errorf("marshal group: %w", err)
 			}
-			if err := b.Put([]byte(groupID), encoded); err != nil {
+			if err := fsm.Put(tx, []byte("groups"), []byte(groupID), encoded); err != nil {
 				return err
 			}
 		}
 	}
 
 	if userID != "" && (remainingInodes != 0 || remainingBytes != 0) {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(userID))
+		v, err := fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
 		if v != nil {
 			var user User
 			if err := json.Unmarshal(v, &user); err != nil {
@@ -1235,7 +1410,7 @@ func updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBy
 			if err != nil {
 				return fmt.Errorf("marshal user: %w", err)
 			}
-			if err := b.Put([]byte(userID), encoded); err != nil {
+			if err := fsm.Put(tx, []byte("users"), []byte(userID), encoded); err != nil {
 				return err
 			}
 		}
@@ -1243,7 +1418,7 @@ func updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBy
 	return nil
 }
 
-func checkQuota(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
+func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
 	if deltaInodes <= 0 && deltaBytes <= 0 {
 		return nil
 	}
@@ -1252,9 +1427,8 @@ func checkQuota(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaByt
 	remainingBytes := deltaBytes
 
 	if groupID != "" {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(groupID))
-		if v != nil {
+		v, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
+		if err == nil && v != nil {
 			var group Group
 			if err := json.Unmarshal(v, &group); err == nil {
 				// Enforce group limits if they are set (non-zero)
@@ -1276,9 +1450,8 @@ func checkQuota(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaByt
 
 	// Fallback to user quota for any remaining resources not covered by group limits
 	if userID != "" && (remainingInodes > 0 || remainingBytes > 0) {
-		b := tx.Bucket([]byte("users"))
-		v := b.Get([]byte(userID))
-		if v == nil {
+		v, err := fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil || v == nil {
 			return nil
 		}
 		var user User
@@ -1305,13 +1478,15 @@ func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{
 		return err
 	}
 
-	b := tx.Bucket([]byte("users"))
-	v := b.Get([]byte(req.UserID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 	var user User
-	if err := json.Unmarshal(v, &user); err != nil {
+	if err := json.Unmarshal(plain, &user); err != nil {
 		return err
 	}
 
@@ -1326,7 +1501,7 @@ func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{
 	if err != nil {
 		return err
 	}
-	return b.Put([]byte(req.UserID), encoded)
+	return fsm.Put(tx, []byte("users"), []byte(req.UserID), encoded)
 }
 
 func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface{} {
@@ -1335,13 +1510,15 @@ func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface
 		return err
 	}
 
-	b := tx.Bucket([]byte("groups"))
-	v := b.Get([]byte(req.GroupID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("groups"), []byte(req.GroupID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 	var group Group
-	if err := json.Unmarshal(v, &group); err != nil {
+	if err := json.Unmarshal(plain, &group); err != nil {
 		return err
 	}
 
@@ -1356,7 +1533,7 @@ func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface
 	if err != nil {
 		return err
 	}
-	return b.Put([]byte(req.GroupID), encoded)
+	return fsm.Put(tx, []byte("groups"), []byte(req.GroupID), encoded)
 }
 
 func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
@@ -1365,29 +1542,28 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 
-	b := tx.Bucket([]byte("system"))
-
-	encoded, err := json.Marshal(key)
-	if err != nil {
-		return err
-	}
-	if err := b.Put([]byte("epoch_key_"+key.ID), encoded); err != nil {
+	if err := fsm.Put(tx, []byte("system"), []byte("epoch_key_"+key.ID), data); err != nil {
 		return err
 	}
 
-	if err := b.Put([]byte("active_epoch_key"), []byte(key.ID)); err != nil {
+	if err := fsm.Put(tx, []byte("system"), []byte("active_epoch_key"), []byte(key.ID)); err != nil {
 		return err
 	}
 
 	// Prune
 	var keys []ClusterKey
-	c := b.Cursor()
-	prefix := []byte("epoch_key_")
-	for k, v := c.Seek(prefix); k != nil && strings.HasPrefix(string(k), string(prefix)); k, v = c.Next() {
-		var kStruct ClusterKey
-		if err := json.Unmarshal(v, &kStruct); err == nil {
-			keys = append(keys, kStruct)
+	prefix := "epoch_key_"
+	err := fsm.ForEach(tx, []byte("system"), func(k, v []byte) error {
+		if strings.HasPrefix(string(k), prefix) {
+			var kStruct ClusterKey
+			if err := json.Unmarshal(v, &kStruct); err == nil {
+				keys = append(keys, kStruct)
+			}
 		}
+		return nil
+	})
+	if err != nil {
+		return err
 	}
 
 	if len(keys) > 3 {
@@ -1400,7 +1576,7 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 			}
 		}
 		if oldestIdx != -1 {
-			b.Delete([]byte("epoch_key_" + keys[oldestIdx].ID))
+			fsm.Delete(tx, []byte("system"), []byte("epoch_key_"+keys[oldestIdx].ID))
 		}
 	}
 
@@ -1409,13 +1585,12 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	var key ClusterKey
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("system"))
-		id := b.Get([]byte("active_epoch_key"))
-		if id == nil {
+		id, err := fsm.Get(tx, []byte("system"), []byte("active_epoch_key"))
+		if err != nil || id == nil {
 			return ErrNotFound
 		}
-		v := b.Get([]byte("epoch_key_" + string(id)))
-		if v == nil {
+		v, err := fsm.Get(tx, []byte("system"), []byte("epoch_key_"+string(id)))
+		if err != nil || v == nil {
 			return ErrNotFound
 		}
 		return json.Unmarshal(v, &key)
@@ -1431,22 +1606,27 @@ func (fsm *MetadataFSM) executeInitWorld(tx *bolt.Tx, data []byte) interface{} {
 	if err := json.Unmarshal(data, &world); err != nil {
 		return err
 	}
-	b := tx.Bucket([]byte("system"))
-	if b.Get([]byte("world_identity")) != nil {
-		return ErrExists
+	v, err := fsm.Get(tx, []byte("system"), []byte("world_identity"))
+	if err != nil {
+		return err
 	}
-	encoded, _ := json.Marshal(world)
-	return b.Put([]byte("world_identity"), encoded)
+	if v != nil {
+		log.Printf("FSM: executeInitWorld rejected - identity already exists")
+		return fmt.Errorf("world identity already initialized")
+	}
+	return fsm.Put(tx, []byte("system"), []byte("world_identity"), data)
 }
 func (fsm *MetadataFSM) GetWorldIdentity() (*WorldIdentity, error) {
 	var world WorldIdentity
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("system"))
-		v := b.Get([]byte("world_identity"))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("system"), []byte("world_identity"))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &world)
+		return json.Unmarshal(plain, &world)
 	})
 	if err != nil {
 		return nil, err
@@ -1458,12 +1638,14 @@ func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
 	log.Printf("FSM: IsUserInGroup checking groupID=%s for userID=%s", groupID, userID)
 	var group Group
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(groupID))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &group)
+		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
 		return false, err
@@ -1474,12 +1656,14 @@ func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
 func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
 	var group Group
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("groups"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &group)
+		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
 		return nil, err
@@ -1493,24 +1677,25 @@ func (fsm *MetadataFSM) executeStoreKeySync(tx *bolt.Tx, data []byte) interface{
 		return err
 	}
 
-	b := tx.Bucket([]byte("keysync"))
 	encoded, err := json.Marshal(req.Blob)
 	if err != nil {
 		return err
 	}
-	return b.Put([]byte(req.UserID), encoded)
+	return fsm.Put(tx, []byte("keysync"), []byte(req.UserID), encoded)
 }
 
 // GetKeySyncBlob retrieves the encrypted configuration blob for a user.
 func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
 	var blob KeySyncBlob
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("keysync"))
-		v := b.Get([]byte(userID))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("keysync"), []byte(userID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &blob)
+		return json.Unmarshal(plain, &blob)
 	})
 	if err != nil {
 		return nil, err
@@ -1524,7 +1709,6 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		return err
 	}
 
-	b := tx.Bucket([]byte("inodes"))
 	lb := tx.Bucket([]byte("leases"))
 	now := time.Now().UnixNano()
 	expiry := now + req.Duration
@@ -1546,12 +1730,15 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	// 1. Validation Phase: Check if all are available
 	inodes := make([]*Inode, len(req.InodeIDs))
 	for i, id := range req.InodeIDs {
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			continue // Non-existent inodes can be leased for creation
 		}
 		var inode Inode
-		if err := json.Unmarshal(v, &inode); err != nil {
+		if err := json.Unmarshal(plain, &inode); err != nil {
 			return err
 		}
 		inodes[i] = &inode
@@ -1576,7 +1763,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		}
 		inode.LeaseOwner = req.OwnerID
 		inode.LeaseExpiry = expiry
-		if err := saveInodeWithPages(tx, inode); err != nil {
+		if err := fsm.saveInodeWithPages(tx, inode); err != nil {
 			return err
 		}
 
@@ -1586,7 +1773,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 			Expiry:  expiry,
 		}
 		encoded, _ := json.Marshal(info)
-		lb.Put([]byte(id), encoded)
+		fsm.Put(tx, []byte("leases"), []byte(id), encoded)
 	}
 
 	return nil
@@ -1598,15 +1785,17 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 		return err
 	}
 
-	b := tx.Bucket([]byte("inodes"))
 	lb := tx.Bucket([]byte("leases"))
 	for _, id := range req.InodeIDs {
-		v := b.Get([]byte(id))
-		if v == nil {
+		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			continue // Already gone?
 		}
 		var inode Inode
-		if err := json.Unmarshal(v, &inode); err != nil {
+		if err := json.Unmarshal(plain, &inode); err != nil {
 			return err
 		}
 
@@ -1614,7 +1803,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 		if inode.LeaseOwner == req.OwnerID {
 			inode.LeaseOwner = ""
 			inode.LeaseExpiry = 0
-			if err := saveInodeWithPages(tx, &inode); err != nil {
+			if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 				return err
 			}
 			lb.Delete([]byte(id))
@@ -1627,15 +1816,13 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
 	var nodes []Node
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
 				nodes = append(nodes, n)
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	return nodes, err
 }
@@ -1646,13 +1833,15 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 		return err
 	}
 
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(req.InodeID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 	var inode Inode
-	if err := json.Unmarshal(v, &inode); err != nil {
+	if err := json.Unmarshal(plain, &inode); err != nil {
 		return err
 	}
 
@@ -1670,12 +1859,12 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 		}
 
 		// 1. Decrement old owner/group FIRST to free up quota before checking new.
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
 			return err
 		}
 
 		// 2. Check Quota for new owner/group
-		if err := checkQuota(tx, newOwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.checkQuota(tx, newOwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 
@@ -1696,7 +1885,7 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 		}
 
 		// 4. Increment new owner/group
-		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
@@ -1711,7 +1900,7 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 	inode.CTime = time.Now().UnixNano()
 	inode.Version++
 
-	return saveInodeWithPages(tx, &inode)
+	return fsm.saveInodeWithPages(tx, &inode)
 }
 
 func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} {
@@ -1720,13 +1909,15 @@ func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} 
 		return err
 	}
 
-	b := tx.Bucket([]byte("inodes"))
-	v := b.Get([]byte(req.InodeID))
-	if v == nil {
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
 		return ErrNotFound
 	}
 	var inode Inode
-	if err := json.Unmarshal(v, &inode); err != nil {
+	if err := json.Unmarshal(plain, &inode); err != nil {
 		return err
 	}
 
@@ -1734,7 +1925,7 @@ func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} 
 	inode.CTime = time.Now().UnixNano()
 	inode.Version++
 
-	return saveInodeWithPages(tx, &inode)
+	return fsm.saveInodeWithPages(tx, &inode)
 }
 
 func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{} {
@@ -1743,8 +1934,7 @@ func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{
 		return err
 	}
 
-	b := tx.Bucket([]byte("metrics"))
-	return b.Put(int64ToBytes(snap.Timestamp), data)
+	return fsm.Put(tx, []byte("metrics"), int64ToBytes(snap.Timestamp), data)
 }
 
 func int64ToBytes(v int64) []byte {
@@ -1762,7 +1952,11 @@ func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
 		if k == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(v, &snap)
+		plain, err := fsm.DecryptValue(v)
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(plain, &snap)
 	})
 	if err != nil {
 		return nil, err
@@ -1773,7 +1967,6 @@ func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
 func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 	var entries []GroupListEntry
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		gb := tx.Bucket([]byte("groups"))
 		mb := tx.Bucket([]byte("user_memberships"))
 		ob := tx.Bucket([]byte("owner_groups"))
 
@@ -1818,12 +2011,12 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 
 		// 4. Resolve metadata
 		for gid, role := range groupsFound {
-			v := gb.Get([]byte(gid))
-			if v == nil {
+			plain, err := fsm.Get(tx, []byte("groups"), []byte(gid))
+			if err != nil || plain == nil {
 				continue
 			}
 			var g Group
-			if err := json.Unmarshal(v, &g); err == nil {
+			if err := json.Unmarshal(plain, &g); err == nil {
 				// Optimization: Filter lockbox to only relevant entries
 				filteredLockbox := make(crypto.Lockbox)
 				if entry, ok := g.Lockbox[userID]; ok {
@@ -1856,20 +2049,15 @@ func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
 	var leases []LeaseInfo
 	now := time.Now().UnixNano()
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("leases"))
-		if b == nil {
-			return nil
-		}
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		return fsm.ForEach(tx, []byte("leases"), func(k, v []byte) error {
 			var info LeaseInfo
 			if err := json.Unmarshal(v, &info); err == nil {
 				if info.Expiry > now {
 					leases = append(leases, info)
 				}
 			}
-		}
-		return nil
+			return nil
+		})
 	})
 	return leases, err
 }
@@ -1895,8 +2083,12 @@ func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, er
 		}
 
 		for count := 0; k != nil && (limit <= 0 || count < limit); k, v = c.Next() {
+			plain, err := fsm.DecryptValue(v)
+			if err != nil {
+				return err
+			}
 			var g Group
-			if err := json.Unmarshal(v, &g); err == nil {
+			if err := json.Unmarshal(plain, &g); err == nil {
 				groups = append(groups, g)
 			}
 			count++

@@ -235,8 +235,11 @@ func TestAdminOverrides(t *testing.T) {
 	// 5. Verify Metadata
 	var updated metadata.Inode
 	node.FSM.DB().View(func(tx *bolt.Tx) error {
-		v := tx.Bucket([]byte("inodes")).Get([]byte("file1"))
-		return json.Unmarshal(v, &updated)
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("file1"))
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(plain, &updated)
 	})
 	if updated.OwnerID != userID {
 		t.Errorf("Expected owner %s, got %s", userID, updated.OwnerID)
@@ -245,8 +248,11 @@ func TestAdminOverrides(t *testing.T) {
 	// 6. Verify Quota accounting
 	var uBUpdated metadata.User
 	node.FSM.DB().View(func(tx *bolt.Tx) error {
-		v := tx.Bucket([]byte("users")).Get([]byte(userID))
-		return json.Unmarshal(v, &uBUpdated)
+		plain, err := node.FSM.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(plain, &uBUpdated)
 	})
 	if uBUpdated.Usage.TotalBytes != 100 {
 		t.Errorf("Expected User B usage 100, got %d", uBUpdated.Usage.TotalBytes)
@@ -260,8 +266,11 @@ func TestAdminOverrides(t *testing.T) {
 		t.Fatalf("AdminChmod failed: %v", err)
 	}
 	node.FSM.DB().View(func(tx *bolt.Tx) error {
-		v := tx.Bucket([]byte("inodes")).Get([]byte("file1"))
-		return json.Unmarshal(v, &updated)
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("file1"))
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(plain, &updated)
 	})
 	if updated.Mode != 0775 {
 		t.Errorf("Expected mode 0775, got %04o", updated.Mode)

@@ -592,9 +592,11 @@ func TestFSMRestore(t *testing.T) {
 
 	// Verify fsm2 has data
 	err = fsm2.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte("restore-test"))
-		if v == nil {
+		plain, err := fsm2.Get(tx, []byte("inodes"), []byte("restore-test"))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
 			return fmt.Errorf("key not found")
 		}
 		return nil
@@ -718,10 +720,12 @@ func TestChunkPagination(t *testing.T) {
 	// Verify Internal Storage (BoltDB)
 	// We need to access FSM directly
 	err = node.FSM.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte("paginated-file"))
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("paginated-file"))
+		if err != nil {
+			return err
+		}
 		var stored Inode
-		json.Unmarshal(v, &stored)
+		json.Unmarshal(plain, &stored)
 
 		if stored.ChunkManifest != nil {
 			return fmt.Errorf("Stored manifest should be nil")
@@ -731,10 +735,10 @@ func TestChunkPagination(t *testing.T) {
 		}
 
 		// Check pages bucket
-		pb := tx.Bucket([]byte("chunk_pages"))
 		for _, pid := range stored.ChunkPages {
-			if pb.Get([]byte(pid)) == nil {
-				return fmt.Errorf("Page %s not found", pid)
+			plainPage, err := node.FSM.Get(tx, []byte("chunk_pages"), []byte(pid))
+			if err != nil || plainPage == nil {
+				return fmt.Errorf("Page %s not found or decryption failed: %v", pid, err)
 			}
 		}
 		return nil
@@ -768,13 +772,15 @@ func TestAccounting(t *testing.T) {
 	// Helper to check usage
 	checkUsage := func(wantInodes, wantBytes int64) {
 		err := node.FSM.db.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("users"))
-			v := b.Get([]byte(userID))
-			if v == nil {
+			plain, err := node.FSM.Get(tx, []byte("users"), []byte(userID))
+			if err != nil {
+				return err
+			}
+			if plain == nil {
 				return fmt.Errorf("user not found")
 			}
 			var u User
-			json.Unmarshal(v, &u)
+			json.Unmarshal(plain, &u)
 			if u.Usage.InodeCount != wantInodes {
 				return fmt.Errorf("inodes: got %d, want %d", u.Usage.InodeCount, wantInodes)
 			}
