@@ -3,6 +3,7 @@ package metadata
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -86,4 +87,53 @@ func TestChallengeResponseAuth(t *testing.T) {
 		t.Fatalf("authenticated request failed: %d", resp.StatusCode)
 	}
 	resp.Body.Close()
+}
+
+func TestMutualRaftAuth(t *testing.T) {
+	node, ts, _, _, srv := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	secret := "testsecret"
+	nonce := []byte("fixed-nonce-for-test-32-bytes---")
+	nonceHex := hex.EncodeToString(nonce)
+
+	// 1. Valid Handshake
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/node/info", nil)
+	req.Header.Set("X-Raft-Nonce", nonceHex)
+	req.Header.Set("X-Raft-Signature", srv.signNonce(nonce, "LEADER_PROBE"))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200, got %d", resp.StatusCode)
+	}
+
+	nodeSig := resp.Header.Get("X-Raft-Response")
+	if !srv.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
+		t.Error("invalid node response signature")
+	}
+
+	// 2. Invalid Leader Signature
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/node/info", nil)
+	req.Header.Set("X-Raft-Nonce", nonceHex)
+	req.Header.Set("X-Raft-Signature", "wrong-sig")
+
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for invalid leader sig, got %d", resp.StatusCode)
+	}
+
+	// 3. Legacy Secret Support (Optional, depending on policy)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/node/info", nil)
+	req.Header.Set("X-Raft-Secret", secret)
+
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("legacy auth failed: %d", resp.StatusCode)
+	}
 }

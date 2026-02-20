@@ -356,6 +356,27 @@ func (s *Server) SetTLSPublicKey(k []byte) {
 }
 
 func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
+	// Support both legacy (direct secret) and new (HMAC) authentication
+	nonceStr := r.Header.Get(raftNonceHeader)
+	sigStr := r.Header.Get(raftSignatureHeader)
+
+	if nonceStr != "" && sigStr != "" {
+		nonce, err := hex.DecodeString(nonceStr)
+		if err != nil {
+			http.Error(w, "invalid nonce", http.StatusBadRequest)
+			return
+		}
+		if !s.verifySignature(nonce, "LEADER_PROBE", sigStr) {
+			http.Error(w, "invalid leader signature", http.StatusUnauthorized)
+			return
+		}
+		// Prove knowledge of secret back to leader
+		w.Header().Set(raftResponseHeader, s.signNonce(nonce, "NODE_RESPONSE"))
+	} else if !s.checkRaftSecret(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
 	info := map[string]interface{}{
 		"id":           s.nodeID,
 		"api_url":      s.apiURL,
@@ -405,12 +426,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Node registration (Internal Heartbeat / Shared Secret)
+	// Node registration (Internal Heartbeat / Shared Secret / HMAC Handshake)
 	if r.URL.Path == "/v1/node/info" {
-		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
 		if r.Method == http.MethodGet {
 			s.handleNodeInfo(w, r)
 			return
@@ -2203,6 +2220,25 @@ func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, i
 	w.Write(data)
 }
 
+const (
+	raftSecretHeader    = "X-Raft-Secret"
+	raftNonceHeader     = "X-Raft-Nonce"
+	raftSignatureHeader = "X-Raft-Signature"
+	raftResponseHeader  = "X-Raft-Response"
+)
+
+func (s *Server) signNonce(nonce []byte, label string) string {
+	mac := hmac.New(sha256.New, []byte(s.raftSecret))
+	mac.Write(nonce)
+	mac.Write([]byte(label))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func (s *Server) verifySignature(nonce []byte, label, signature string) bool {
+	expected := s.signNonce(nonce, label)
+	return subtle.ConstantTimeCompare([]byte(signature), []byte(expected)) == 1
+}
+
 func (s *Server) checkRaftSecret(r *http.Request) bool {
 	if s.raftSecret == "" {
 		return false // Fail closed
@@ -2394,10 +2430,17 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Discover node metadata via internal API
+	// 1. Discover node metadata via internal API with Mutual HMAC Handshake
+	nonce := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+
 	infoURL := strings.TrimSuffix(req.Address, "/") + "/v1/node/info"
 	discoveryReq, _ := http.NewRequest("GET", infoURL, nil)
-	discoveryReq.Header.Set("X-Raft-Secret", s.raftSecret)
+	discoveryReq.Header.Set(raftNonceHeader, hex.EncodeToString(nonce))
+	discoveryReq.Header.Set(raftSignatureHeader, s.signNonce(nonce, "LEADER_PROBE"))
 
 	resp, err := s.discoveryHTTPClient.Do(discoveryReq)
 	if err != nil {
@@ -2405,6 +2448,18 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		http.Error(w, "node rejected leader signature (secret mismatch?)", http.StatusForbidden)
+		return
+	}
+
+	// Verify node response signature
+	nodeSig := resp.Header.Get(raftResponseHeader)
+	if !s.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
+		http.Error(w, "invalid node response signature (secret mismatch?)", http.StatusForbidden)
+		return
+	}
 
 	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
 		http.Error(w, "discovery requires mTLS connection", http.StatusInternalServerError)
