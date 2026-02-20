@@ -30,12 +30,12 @@ func (m *mockLSClient) ReadDirRecursive(ctx context.Context, path string) (map[s
 	return m.recursive, m.err
 }
 
-func (m *mockLSClient) NewDirEntry(inode *metadata.Inode, name string) *client.DistDirEntry {
-	return client.NewDirEntryForTest(inode, name)
+func (m *mockLSClient) NewDirEntry(inode *metadata.Inode, name string, key []byte) *client.DistDirEntry {
+	return client.NewDirEntryForTest(inode, name, key)
 }
 
-func (m *mockLSClient) DecryptName(inode *metadata.Inode) (string, error) {
-	return "decrypted", m.err
+func (m *mockLSClient) DecryptName(inode *metadata.Inode) (string, []byte, error) {
+	return "decrypted", []byte("key"), m.err
 }
 
 func (m *mockLSClient) UserID() string {
@@ -44,10 +44,11 @@ func (m *mockLSClient) UserID() string {
 
 func TestLS_ProcessAndPrint(t *testing.T) {
 	now := time.Now()
+	// MTime is in nanoseconds in Inode
 	entries := []*client.DistDirEntry{
-		client.NewDirEntryForTest(&metadata.Inode{ID: "1", Size: 100, MTime: now.UnixNano()}, "b.txt"),
-		client.NewDirEntryForTest(&metadata.Inode{ID: "2", Size: 200, MTime: now.Add(time.Hour).UnixNano()}, "a.txt"),
-		client.NewDirEntryForTest(&metadata.Inode{ID: "3", Size: 50, MTime: now.Add(-time.Hour).UnixNano()}, ".hidden"),
+		client.NewDirEntryForTest(&metadata.Inode{ID: "1", Size: 100, MTime: now.UnixNano()}, "b.txt", nil),
+		client.NewDirEntryForTest(&metadata.Inode{ID: "2", Size: 200, MTime: now.Add(time.Hour).UnixNano()}, "a.txt", nil),
+		client.NewDirEntryForTest(&metadata.Inode{ID: "3", Size: 50, MTime: now.Add(-time.Hour).UnixNano()}, ".hidden", nil),
 	}
 
 	tests := []struct {
@@ -104,7 +105,7 @@ func TestLS_LongFormat(t *testing.T) {
 			Size:  1024,
 			Mode:  0644,
 			MTime: now.UnixNano(),
-		}, "file.txt"),
+		}, "file.txt", nil),
 	}
 
 	var buf bytes.Buffer

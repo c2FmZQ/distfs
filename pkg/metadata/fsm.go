@@ -61,7 +61,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -1548,6 +1548,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	}
 
 	// 2. Grant Phase: Apply leases
+	lb := tx.Bucket([]byte("leases"))
 	for i, id := range req.InodeIDs {
 		inode := inodes[i]
 		if inode == nil {
@@ -1564,6 +1565,14 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		if err := saveInodeWithPages(tx, inode); err != nil {
 			return err
 		}
+
+		info := LeaseInfo{
+			InodeID: id,
+			Owner:   req.OwnerID,
+			Expiry:  expiry,
+		}
+		encoded, _ := json.Marshal(info)
+		lb.Put([]byte(id), encoded)
 	}
 
 	return nil
@@ -1576,6 +1585,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 	}
 
 	b := tx.Bucket([]byte("inodes"))
+	lb := tx.Bucket([]byte("leases"))
 	for _, id := range req.InodeIDs {
 		v := b.Get([]byte(id))
 		if v == nil {
@@ -1593,6 +1603,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 			if err := saveInodeWithPages(tx, &inode); err != nil {
 				return err
 			}
+			lb.Delete([]byte(id))
 		}
 	}
 
@@ -1825,4 +1836,57 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 		return nil
 	})
 	return entries, err
+}
+
+func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
+	var leases []LeaseInfo
+	now := time.Now().UnixNano()
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("leases"))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var info LeaseInfo
+			if err := json.Unmarshal(v, &info); err == nil {
+				if info.Expiry > now {
+					leases = append(leases, info)
+				}
+			}
+		}
+		return nil
+	})
+	return leases, err
+}
+
+func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, error) {
+	var groups []Group
+	var nextCursor string
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		var k, v []byte
+		if cursor == "" {
+			k, v = c.First()
+		} else {
+			k, v = c.Seek([]byte(cursor))
+		}
+
+		for count := 0; k != nil && (limit <= 0 || count < limit); k, v = c.Next() {
+			var g Group
+			if err := json.Unmarshal(v, &g); err == nil {
+				groups = append(groups, g)
+			}
+			count++
+		}
+		if k != nil {
+			nextCursor = string(k)
+		}
+		return nil
+	})
+	return groups, nextCursor, err
 }

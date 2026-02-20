@@ -73,63 +73,83 @@ func (c *Client) EnsureRoot() error {
 func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 	path = "/" + strings.Trim(path, "/")
 
-	// 1. Check Path Cache
-	if entry, ok := c.getPathCache(path); ok {
-		inode, err := c.getInode(context.Background(), entry.inodeID)
-		if err == nil {
-			// Validate hint integrity
-			// Root has no linkTag
-			valid := false
-			if path == "/" {
-				valid = inode.ID == metadata.RootID
-			} else if inode.Links != nil {
-				valid = inode.Links[entry.linkTag]
-			}
+	// 1. Check Path Cache for longest prefix
+	var currentInode *metadata.Inode
+	var currentKey []byte
+	var remainingPath string
 
-			if valid {
-				return inode, entry.key, nil
+	parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+	if path == "/" {
+		parts = []string{""}
+	}
+
+	for i := len(parts); i >= 0; i-- {
+		prefix := "/" + strings.Join(parts[:i], "/")
+		if entry, ok := c.getPathCache(prefix); ok {
+			inode, err := c.getInode(context.Background(), entry.inodeID)
+			if err == nil {
+				// Validate hint integrity
+				valid := false
+				if prefix == "/" {
+					valid = inode.ID == metadata.RootID
+				} else if inode.Links != nil {
+					valid = inode.Links[entry.linkTag]
+				}
+
+				if valid {
+					currentInode = inode
+					currentKey = entry.key
+					remainingPath = strings.Join(parts[i:], "/")
+					break
+				}
+				c.invalidatePathCache(prefix)
+			} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+				c.invalidatePathCache(prefix)
 			}
-			// Stale cache
-			c.invalidatePathCache(path)
-		} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-			c.invalidatePathCache(path)
 		}
 	}
-	// 2. Sequential Resolution
-	relPath := strings.TrimPrefix(path, "/")
-	rootInode, err := c.getInode(context.Background(), metadata.RootID)
-	if err != nil {
-		if err := c.EnsureRoot(); err != nil {
-			return nil, nil, fmt.Errorf("failed to ensure root inode: %w", err)
-		}
-		rootInode, err = c.getInode(context.Background(), metadata.RootID)
+
+	// 2. Sequential Resolution from the found prefix or root
+	if currentInode == nil {
+		rootInode, err := c.getInode(context.Background(), metadata.RootID)
 		if err != nil {
-			return nil, nil, fmt.Errorf("failed to get root inode after creation: %w", err)
+			if err := c.EnsureRoot(); err != nil {
+				return nil, nil, fmt.Errorf("failed to ensure root inode: %w", err)
+			}
+			rootInode, err = c.getInode(context.Background(), metadata.RootID)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to get root inode after creation: %w", err)
+			}
 		}
+
+		if c.decKey == nil {
+			return nil, nil, fmt.Errorf("client has no identity to unlock root")
+		}
+
+		rootKey, err := c.UnlockInode(rootInode)
+		if err != nil {
+			return nil, nil, fmt.Errorf("access denied to root: %w", err)
+		}
+
+		// Populate cache for root
+		c.putPathCache("/", pathCacheEntry{inodeID: metadata.RootID, key: rootKey})
+
+		currentInode = rootInode
+		currentKey = rootKey
+		remainingPath = strings.TrimPrefix(path, "/")
 	}
 
-	if c.decKey == nil {
-		return nil, nil, fmt.Errorf("client has no identity to unlock root")
+	if remainingPath == "" || remainingPath == "." {
+		return currentInode, currentKey, nil
 	}
 
-	rootKey, err := c.UnlockInode(rootInode)
-	if err != nil {
-		return nil, nil, fmt.Errorf("access denied to root: %w", err)
+	remParts := strings.Split(remainingPath, "/")
+	currPath := path[:strings.Index(path, remainingPath)]
+	if !strings.HasSuffix(currPath, "/") {
+		currPath += "/"
 	}
 
-	// Populate cache for root
-	c.putPathCache("/", pathCacheEntry{inodeID: metadata.RootID, key: rootKey})
-
-	if relPath == "" {
-		return rootInode, rootKey, nil
-	}
-
-	parts := strings.Split(relPath, "/")
-	currentKey := rootKey
-	var inode *metadata.Inode = rootInode
-	currentPath := ""
-
-	for _, part := range parts {
+	for _, part := range remParts {
 		if part == "" || part == "." {
 			continue
 		}
@@ -138,32 +158,34 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 		mac.Write([]byte(part))
 		encName := hex.EncodeToString(mac.Sum(nil))
 
-		childID, ok := inode.Children[encName]
+		childID, ok := currentInode.Children[encName]
 		if !ok {
 			return nil, nil, fmt.Errorf("entry %s not found", part)
 		}
 
-		parentID := inode.ID
-		inode, err = c.getInode(context.Background(), childID)
+		parentID := currentInode.ID
+		var err error
+		currentInode, err = c.getInode(context.Background(), childID)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		key, err := c.UnlockInode(inode)
+		key, err := c.UnlockInode(currentInode)
 		if err != nil {
 			return nil, nil, fmt.Errorf("access denied to %s: %w", part, err)
 		}
 
-		currentPath += "/" + part
-		c.putPathCache(currentPath, pathCacheEntry{
-			inodeID: inode.ID,
+		currPath += part
+		c.putPathCache(currPath, pathCacheEntry{
+			inodeID: currentInode.ID,
 			key:     key,
 			linkTag: parentID + ":" + encName,
 		})
 		currentKey = key
+		currPath += "/"
 	}
 
-	return inode, currentKey, nil
+	return currentInode, currentKey, nil
 }
 
 // Mkdir creates a new directory.

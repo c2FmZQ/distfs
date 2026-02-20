@@ -35,6 +35,7 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -2245,56 +2246,29 @@ func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
-	var groups []Group
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		if b == nil {
-			return nil
+	cursor := r.URL.Query().Get("cursor")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 1000 // Default limit for admin console
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil {
+			limit = l
 		}
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var g Group
-			if err := json.Unmarshal(v, &g); err == nil {
-				groups = append(groups, g)
-			}
-		}
-		return nil
-	})
+	}
+
+	groups, nextCursor, err := s.fsm.GetGroups(cursor, limit)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	if nextCursor != "" {
+		w.Header().Set("X-DistFS-Next-Cursor", nextCursor)
+	}
 	s.writeJSON(w, r, groups, http.StatusOK)
 }
 
-type LeaseInfo struct {
-	InodeID string `json:"inode_id"`
-	Owner   string `json:"owner"`
-	Expiry  int64  `json:"expiry"`
-}
-
 func (s *Server) handleClusterLeases(w http.ResponseWriter, r *http.Request) {
-	var leases []LeaseInfo
-	now := time.Now().UnixNano()
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var inode Inode
-			if err := json.Unmarshal(v, &inode); err == nil {
-				if inode.LeaseOwner != "" && inode.LeaseExpiry > now {
-					leases = append(leases, LeaseInfo{
-						InodeID: inode.ID,
-						Owner:   inode.LeaseOwner,
-						Expiry:  inode.LeaseExpiry,
-					})
-				}
-			} else {
-				log.Printf("ERROR: Failed to unmarshal inode %s during lease scan: %v", k, err)
-			}
-		}
-		return nil
-	})
+	leases, err := s.fsm.GetLeases()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

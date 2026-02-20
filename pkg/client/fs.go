@@ -190,6 +190,7 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 type DistDirEntry struct {
 	inode *metadata.Inode
 	name  string
+	key   []byte
 }
 
 func (e *DistDirEntry) Name() string { return e.name }
@@ -231,10 +232,14 @@ func (i *DistFileInfo) Sys() any           { return i.inode }
 
 // ReadDirExtended returns a list of directory entries with full metadata.
 func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEntry, error) {
-	inode, _, err := c.ResolvePath(path)
+	inode, key, err := c.ResolvePath(path)
 	if err != nil {
 		return nil, err
 	}
+	return c.readDirExtended(ctx, inode, key)
+}
+
+func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key []byte) ([]*DistDirEntry, error) {
 	if inode.Type != metadata.DirType {
 		return nil, fmt.Errorf("not a directory")
 	}
@@ -271,6 +276,7 @@ func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEn
 		entries = append(entries, &DistDirEntry{
 			inode: childInode,
 			name:  childName,
+			key:   childKey,
 		})
 	}
 
@@ -279,10 +285,15 @@ func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEn
 
 // ReadDirRecursive returns all entries in the directory tree starting at path.
 func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string][]*DistDirEntry, error) {
+	inode, key, err := c.ResolvePath(path)
+	if err != nil {
+		return nil, err
+	}
+
 	results := make(map[string][]*DistDirEntry)
-	var walk func(string) error
-	walk = func(p string) error {
-		entries, err := c.ReadDirExtended(ctx, p)
+	var walk func(string, *metadata.Inode, []byte) error
+	walk = func(p string, currInode *metadata.Inode, currKey []byte) error {
+		entries, err := c.readDirExtended(ctx, currInode, currKey)
 		if err != nil {
 			return err
 		}
@@ -294,7 +305,7 @@ func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string]
 					childPath += "/"
 				}
 				childPath += e.Name()
-				if err := walk(childPath); err != nil {
+				if err := walk(childPath, e.inode, e.key); err != nil {
 					return err
 				}
 			}
@@ -302,31 +313,31 @@ func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string]
 		return nil
 	}
 
-	if err := walk(path); err != nil {
+	if err := walk(path, inode, key); err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
 // NewDirEntry creates a new DistDirEntry from an Inode and name.
-func (c *Client) NewDirEntry(inode *metadata.Inode, name string) *DistDirEntry {
-	return &DistDirEntry{inode: inode, name: name}
+func (c *Client) NewDirEntry(inode *metadata.Inode, name string, key []byte) *DistDirEntry {
+	return &DistDirEntry{inode: inode, name: name, key: key}
 }
 
 // DecryptName decrypts the name of an Inode using the client's identity.
-func (c *Client) DecryptName(inode *metadata.Inode) (string, error) {
+func (c *Client) DecryptName(inode *metadata.Inode) (string, []byte, error) {
 	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	nameBytes, err := crypto.DecryptDEM(key, inode.EncryptedName)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
-	return string(nameBytes), nil
+	return string(nameBytes), key, nil
 }
 
 // NewDirEntryForTest is used for testing purposes to create a DistDirEntry.
-func NewDirEntryForTest(inode *metadata.Inode, name string) *DistDirEntry {
-	return &DistDirEntry{inode: inode, name: name}
+func NewDirEntryForTest(inode *metadata.Inode, name string, key []byte) *DistDirEntry {
+	return &DistDirEntry{inode: inode, name: name, key: key}
 }

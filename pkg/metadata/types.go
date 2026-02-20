@@ -503,6 +503,12 @@ type SessionResponse struct {
 	Token string `json:"token"` // Base64(SignedSessionToken)
 }
 
+type LeaseInfo struct {
+	InodeID string `json:"inode_id"`
+	Owner   string `json:"owner"`
+	Expiry  int64  `json:"expiry"`
+}
+
 // CapabilityToken grants access to specific chunks on Data Nodes.
 type CapabilityToken struct {
 	Chunks []string `json:"chunks"`

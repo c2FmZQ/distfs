@@ -32,6 +32,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"golang.org/x/term"
 )
 
 var (
@@ -232,8 +233,8 @@ type LSClient interface {
 	ResolvePath(path string) (*metadata.Inode, []byte, error)
 	ReadDirExtended(ctx context.Context, path string) ([]*client.DistDirEntry, error)
 	ReadDirRecursive(ctx context.Context, path string) (map[string][]*client.DistDirEntry, error)
-	NewDirEntry(inode *metadata.Inode, name string) *client.DistDirEntry
-	DecryptName(inode *metadata.Inode) (string, error)
+	NewDirEntry(inode *metadata.Inode, name string, key []byte) *client.DistDirEntry
+	DecryptName(inode *metadata.Inode) (string, []byte, error)
 	UserID() string
 }
 
@@ -270,17 +271,19 @@ func runLs(c LSClient, args []string) {
 		}
 
 		name := path
+		var key []byte
 		if path == "/" {
 			name = "/"
 		} else {
-			if decrypted, err := c.DecryptName(inodeInfo); err == nil {
+			if decrypted, decryptedKey, err := c.DecryptName(inodeInfo); err == nil {
 				name = decrypted
+				key = decryptedKey
 			} else {
 				name = filepath.Base(path)
 			}
 		}
 
-		entry := c.NewDirEntry(inodeInfo, name)
+		entry := c.NewDirEntry(inodeInfo, name, key)
 		processAndPrintEntries(os.Stdout, []*client.DistDirEntry{entry}, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
 		return
 	}
@@ -341,6 +344,18 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 	})
 
 	if long {
+		// Calculate max widths for alignment
+		maxSize := 0
+		for _, e := range filtered {
+			s := len(strconv.FormatInt(e.Size(), 10))
+			if human {
+				s = len(client.FormatBytes(e.Size()))
+			}
+			if s > maxSize {
+				maxSize = s
+			}
+		}
+
 		for _, e := range filtered {
 			if inode {
 				fmt.Fprintf(w, "%s ", e.InodeID())
@@ -357,9 +372,32 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 					name += "/"
 				}
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", mode, sizeStr, mtime, name)
+			// Format: mode  size  mtime  name
+			fmt.Fprintf(w, "%s %*s %s %s\n", mode, maxSize, sizeStr, mtime, name)
 		}
 	} else {
+		if oneCol {
+			for _, e := range filtered {
+				name := e.Name()
+				if inode {
+					name = e.InodeID()[:8] + " " + name
+				}
+				if classify && e.IsDir() {
+					name += "/"
+				}
+				fmt.Fprintln(w, name)
+			}
+			return
+		}
+
+		// Multi-column output
+		width, _, err := term.GetSize(int(os.Stdout.Fd()))
+		if err != nil || width <= 0 {
+			width = 80 // Fallback
+		}
+
+		maxNameWidth := 0
+		names := make([]string, len(filtered))
 		for i, e := range filtered {
 			name := e.Name()
 			if inode {
@@ -368,16 +406,26 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 			if classify && e.IsDir() {
 				name += "/"
 			}
-			if oneCol {
-				fmt.Fprintln(w, name)
-			} else {
-				fmt.Fprint(w, name)
-				if i < len(filtered)-1 {
-					fmt.Fprint(w, "\t")
-				} else {
-					fmt.Fprint(w, "\n")
-				}
+			names[i] = name
+			if len(name) > maxNameWidth {
+				maxNameWidth = len(name)
 			}
+		}
+
+		colWidth := maxNameWidth + 2
+		cols := width / colWidth
+		if cols <= 0 {
+			cols = 1
+		}
+
+		for i, name := range names {
+			fmt.Fprintf(w, "%-*s", colWidth, name)
+			if (i+1)%cols == 0 {
+				fmt.Fprintln(w)
+			}
+		}
+		if len(names)%cols != 0 {
+			fmt.Fprintln(w)
 		}
 	}
 }
