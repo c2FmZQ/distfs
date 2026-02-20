@@ -585,3 +585,21 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** [Done] Update `distfs group-add` to accept a contact URI, automatically verifying and extracting the UserID.
 *   **Step 33.4: Testing**
     *   **Action:** [Done] Verify that tampered contact strings (e.g., modified UserID) are rejected during verification.
+
+---
+
+## Phase 34: Admin Console Enhancements
+**Goal:** Expand the interactive management interface with deep cluster visibility and streamlined operations.
+
+*   **Step 34.1: Groups Tab**
+    *   **Action:** Implement a "Groups" tab in the `distfs admin` CUI.
+    *   **Action:** Display group IDs, usage (inodes/bytes), and current quotas.
+*   **Step 34.2: Leases & Lock Monitoring**
+    *   **Action:** Implement a "Leases" tab to monitor active Inode leases and lock durations.
+    *   **Action:** Add server-side API to list all active leases.
+*   **Step 34.3: Action Modals & In-Console Management**
+    *   **Action:** Implement pop-up input modals for administrative actions (Set Quota, Promote User, Join Node).
+    *   **Action:** Eliminate the need to exit the console for common management tasks.
+*   **Step 34.4: Health Indicators & Metrics**
+    *   **Action:** Enhance the Overview tab with visual health indicators (Color-coded Raft status).
+    *   **Action:** Implement a Metrics tab to visualize Raft commit latency and storage node utilization.

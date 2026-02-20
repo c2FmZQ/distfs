@@ -314,12 +314,15 @@ DistFS provides a comprehensive administrative interface for cluster operators. 
 *   **Management Features:**
     *   **Overview:** Real-time visibility into Raft state, leadership, and commit index.
     *   **User Management:** Monitor anonymized usage (`TotalBytes`, `InodeCount`) and adjust quotas.
+    *   **Group Management:** Monitor group usage and manage group resource quotas.
     *   **Node Operations:** Monitor storage node health, join new nodes, or decommission existing ones.
     *   **Metadata Overrides (Namespace Management):**
         *   **admin-chown:** Reassign ownership of a path to a different user (by email). 
             *   **LIMITATION:** This modifies the UID/GID for quota and namespace purposes. It **DOES NOT** grant the new owner access to encrypted file data, as the administrator cannot re-key the Lockbox.
         *   **admin-chmod:** Modify permission bits of any path to resolve lockouts or reclaim names.
             *   **LIMITATION:** This only modifies metadata visibility. It **DOES NOT** grant access to encrypted data if the requester is not already a recipient in the Lockbox.
+    *   **Distributed Lock Visibility:** Real-time monitoring of active Inode leases and lock ownership to diagnose contention.
+    *   **System Metrics:** Visualize cluster performance, including Raft commit latency, I/O throughput, and disk utilization across nodes.
     *   **Blind Lookup:** Resolve a plaintext email to its HMAC Hash to locate specific user records.
 *   **Deployment:** The admin console communicates with the standard API port. Because it relies on Layer 7 E2EE and PQC signatures, it does not require mTLS for client access.
 

@@ -23,6 +23,8 @@ type tab int
 const (
 	tabOverview tab = iota
 	tabUsers
+	tabGroups
+	tabLeases
 	tabNodes
 	tabTools
 )
@@ -45,6 +47,10 @@ var (
 			Bold(true).
 			Foreground(lipgloss.Color("5")).
 			MarginBottom(1)
+
+	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("42"))
+	warningStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	neutralStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
 type model struct {
@@ -54,15 +60,24 @@ type model struct {
 	// Data
 	status map[string]interface{}
 	users  []metadata.User
+	groups []metadata.Group
+	leases []metadata.LeaseInfo
 	nodes  []metadata.Node
 
 	// Tables
-	userTable table.Model
-	nodeTable table.Model
+	userTable  table.Model
+	groupTable table.Model
+	leaseTable table.Model
+	nodeTable  table.Model
 
 	// Tools
 	lookupInput  textinput.Model
 	lookupResult string
+
+	// Modals
+	activeModal  string // "", "user-quota", "group-quota", "promote", "join"
+	inputs       []textinput.Model
+	focusedInput int
 
 	err error
 
@@ -72,6 +87,8 @@ type model struct {
 
 type statusMsg map[string]interface{}
 type usersMsg []metadata.User
+type groupsMsg []metadata.Group
+type leasesMsg []metadata.LeaseInfo
 type nodesMsg []metadata.Node
 type lookupMsg string
 type errMsg error
@@ -80,6 +97,8 @@ func (m model) Init() tea.Cmd {
 	return tea.Batch(
 		m.fetchStatus,
 		m.fetchUsers,
+		m.fetchGroups,
+		m.fetchLeases,
 		m.fetchNodes,
 		tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 			return tickMsg(t)
@@ -105,6 +124,22 @@ func (m model) fetchUsers() tea.Msg {
 	return usersMsg(users)
 }
 
+func (m model) fetchGroups() tea.Msg {
+	groups, err := m.client.AdminListGroups(context.Background())
+	if err != nil {
+		return errMsg(err)
+	}
+	return groupsMsg(groups)
+}
+
+func (m model) fetchLeases() tea.Msg {
+	leases, err := m.client.AdminListLeases(context.Background())
+	if err != nil {
+		return errMsg(err)
+	}
+	return leasesMsg(leases)
+}
+
 func (m model) fetchNodes() tea.Msg {
 	nodes, err := m.client.AdminListNodes(context.Background())
 	if err != nil {
@@ -116,6 +151,55 @@ func (m model) fetchNodes() tea.Msg {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
+	if m.err != nil {
+		if _, ok := msg.(tea.KeyMsg); ok {
+			m.err = nil
+			return m, func() tea.Msg { return tickMsg(time.Now()) }
+		}
+		return m, nil
+	}
+
+	if m.activeModal != "" {
+		switch msg := msg.(type) {
+		case tea.KeyMsg:
+			switch msg.String() {
+			case "esc":
+				m.activeModal = ""
+				return m, nil
+			case "tab", "shift+tab":
+				s := msg.String()
+				if s == "shift+tab" {
+					m.focusedInput--
+				} else {
+					m.focusedInput++
+				}
+				if m.focusedInput < 0 {
+					m.focusedInput = len(m.inputs) - 1
+				} else if m.focusedInput >= len(m.inputs) {
+					m.focusedInput = 0
+				}
+				cmds := make([]tea.Cmd, len(m.inputs))
+				for i := 0; i < len(m.inputs); i++ {
+					if i == m.focusedInput {
+						cmds[i] = m.inputs[i].Focus()
+					} else {
+						m.inputs[i].Blur()
+					}
+				}
+				return m, tea.Batch(cmds...)
+			case "enter":
+				// Handle Submission
+				return m.handleModalSubmit()
+			}
+		}
+
+		cmds := make([]tea.Cmd, len(m.inputs))
+		for i := 0; i < len(m.inputs); i++ {
+			m.inputs[i], cmds[i] = m.inputs[i].Update(msg)
+		}
+		return m, tea.Batch(cmds...)
+	}
+
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -126,15 +210,51 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "2":
 			m.tab = tabUsers
 		case "3":
-			m.tab = tabNodes
+			m.tab = tabGroups
 		case "4":
+			m.tab = tabLeases
+		case "5":
+			m.tab = tabNodes
+		case "6":
 			m.tab = tabTools
 			m.lookupInput.Focus()
 		case "tab":
-			m.tab = (m.tab + 1) % 4
+			m.tab = (m.tab + 1) % 6
 			if m.tab == tabTools {
 				m.lookupInput.Focus()
 			}
+		case "u": // User Quota
+			m.activeModal = "user-quota"
+			m.inputs = []textinput.Model{
+				newInput("Email/UserID"),
+				newInput("Max Bytes (e.g. 1048576)"),
+				newInput("Max Inodes"),
+			}
+			m.focusedInput = 0
+			m.inputs[0].Focus()
+			return m, nil
+		case "g": // Group Quota
+			m.activeModal = "group-quota"
+			m.inputs = []textinput.Model{
+				newInput("Group ID"),
+				newInput("Max Bytes"),
+				newInput("Max Inodes"),
+			}
+			m.focusedInput = 0
+			m.inputs[0].Focus()
+			return m, nil
+		case "p": // Promote
+			m.activeModal = "promote"
+			m.inputs = []textinput.Model{newInput("Email/UserID")}
+			m.focusedInput = 0
+			m.inputs[0].Focus()
+			return m, nil
+		case "j": // Join Node
+			m.activeModal = "join"
+			m.inputs = []textinput.Model{newInput("Node Address (https://node:9090)")}
+			m.focusedInput = 0
+			m.inputs[0].Focus()
+			return m, nil
 		}
 
 	case tea.WindowSizeMsg:
@@ -148,13 +268,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case usersMsg:
 		m.users = msg
 		m.updateUserTable()
+	case groupsMsg:
+		m.groups = msg
+		m.updateGroupTable()
+	case leasesMsg:
+		m.leases = msg
+		m.updateLeaseTable()
 	case nodesMsg:
 		m.nodes = msg
 		m.updateNodeTable()
 	case lookupMsg:
 		m.lookupResult = string(msg)
 	case tickMsg:
-		return m, tea.Batch(m.fetchStatus, m.fetchUsers, m.fetchNodes, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
+		return m, tea.Batch(m.fetchStatus, m.fetchUsers, m.fetchGroups, m.fetchLeases, m.fetchNodes, tea.Tick(2*time.Second, func(t time.Time) tea.Msg {
 			return tickMsg(t)
 		}))
 	case errMsg:
@@ -210,6 +336,81 @@ func (m *model) updateUserTable() {
 	)
 }
 
+func (m *model) updateGroupTable() {
+	columns := []table.Column{
+		{Title: "Group ID", Width: 35},
+		{Title: "Decrypted Name", Width: 20},
+		{Title: "Inodes", Width: 10},
+		{Title: "Storage", Width: 15},
+		{Title: "Quota", Width: 15},
+	}
+
+	var rows []table.Row
+	for _, g := range m.groups {
+		quota := "Unlim"
+		if g.Quota.MaxBytes > 0 {
+			quota = formatBytes(g.Quota.MaxBytes)
+		}
+
+		name := "[HIDDEN]"
+		// Attempt to decrypt if admin has access
+		// We can reuse the group list logic from the client
+		if decrypted, err := m.client.DecryptGroupName(metadata.GroupListEntry{
+			ID:            g.ID,
+			EncryptedName: g.EncryptedName,
+			Lockbox:       g.Lockbox,
+		}); err == nil {
+			name = decrypted
+		}
+
+		rows = append(rows, table.Row{
+			g.ID,
+			name,
+			fmt.Sprintf("%d", g.Usage.InodeCount),
+			formatBytes(g.Usage.TotalBytes),
+			quota,
+		})
+	}
+
+	m.groupTable = table.New(
+		table.WithColumns(columns),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+}
+
+func (m *model) updateLeaseTable() {
+	columns := []table.Column{
+		{Title: "Inode ID", Width: 35},
+		{Title: "Owner ID", Width: 35},
+		{Title: "Expires In", Width: 15},
+	}
+
+	var rows []table.Row
+	now := time.Now()
+	for _, l := range m.leases {
+		expiry := time.Unix(0, l.Expiry)
+		remaining := expiry.Sub(now).Round(time.Second)
+		if remaining < 0 {
+			remaining = 0
+		}
+
+		rows = append(rows, table.Row{
+			l.InodeID,
+			l.Owner,
+			remaining.String(),
+		})
+	}
+
+	m.leaseTable = table.New(
+		table.WithColumns(columns),
+		table.WithRows(rows),
+		table.WithFocused(true),
+		table.WithHeight(10),
+	)
+}
+
 func (m *model) updateNodeTable() {
 	columns := []table.Column{
 		{Title: "Node ID", Width: 15},
@@ -238,14 +439,18 @@ func (m *model) updateNodeTable() {
 
 func (m model) View() string {
 	if m.err != nil {
-		return fmt.Sprintf("\n  Error: %v\n\n  Press q to quit.", m.err)
+		return fmt.Sprintf("\n  Error: %v\n\n  Press any key to continue.", m.err)
+	}
+
+	if m.activeModal != "" {
+		return m.modalView()
 	}
 
 	doc := strings.Builder{}
 
 	// Tabs
 	var tabs []string
-	titles := []string{"1. Overview", "2. Users", "3. Nodes", "4. Tools"}
+	titles := []string{"1. Overview", "2. Users", "3. Groups", "4. Leases", "5. Nodes", "6. Tools"}
 	for i, t := range titles {
 		if tab(i) == m.tab {
 			tabs = append(tabs, activeTabStyle.Render(t))
@@ -264,6 +469,10 @@ func (m model) View() string {
 		content = m.overviewView()
 	case tabUsers:
 		content = m.userTable.View()
+	case tabGroups:
+		content = m.groupTable.View()
+	case tabLeases:
+		content = m.leaseTable.View()
 	case tabNodes:
 		content = m.nodeTable.View()
 	case tabTools:
@@ -271,7 +480,7 @@ func (m model) View() string {
 	}
 
 	doc.WriteString(windowStyle.Render(content))
-	doc.WriteString("\n  (q: quit, 1-4: tabs, tab: next)\n")
+	doc.WriteString("\n  (q: quit, 1-6: tabs, tab: next)\n")
 
 	return doc.String()
 }
@@ -290,11 +499,27 @@ func (m model) overviewView() string {
 		}
 	}
 
+	stateDisplay := state
+	switch state {
+	case "Leader":
+		stateDisplay = successStyle.Render(state)
+	case "Candidate":
+		stateDisplay = warningStyle.Render(state)
+	default:
+		stateDisplay = neutralStyle.Render(state)
+	}
+
 	return lipgloss.JoinVertical(lipgloss.Left,
 		titleStyle.Render("Cluster Status"),
-		fmt.Sprintf("State:  %s", state),
+		fmt.Sprintf("State:  %s", stateDisplay),
 		fmt.Sprintf("Leader: %s", leader),
 		fmt.Sprintf("Commit: %s", commit),
+		"",
+		"Quick Actions:",
+		" (u) Set User Quota",
+		" (g) Set Group Quota",
+		" (p) Promote Admin",
+		" (j) Join Node",
 	)
 }
 
@@ -309,6 +534,95 @@ func (m model) toolsView() string {
 	)
 }
 
+func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
+	ctx := context.Background()
+	modal := m.activeModal
+	m.activeModal = "" // Close modal
+
+	refresh := func() tea.Msg {
+		return tickMsg(time.Now())
+	}
+
+	switch modal {
+	case "user-quota":
+		email, bytesStr, inodesStr := m.inputs[0].Value(), m.inputs[1].Value(), m.inputs[2].Value()
+		return m, func() tea.Msg {
+			userID := email
+			if !isHexID(email) {
+				id, err := m.client.AdminLookup(ctx, email)
+				if err != nil {
+					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
+				}
+				userID = id
+			}
+			maxBytes, errBytes := strconv.ParseInt(bytesStr, 10, 64)
+			maxInodes, errInodes := strconv.ParseInt(inodesStr, 10, 64)
+			if errBytes != nil || errInodes != nil {
+				return errMsg(fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes))
+			}
+			req := metadata.SetUserQuotaRequest{UserID: userID, MaxBytes: &maxBytes, MaxInodes: &maxInodes}
+			if err := m.client.AdminSetUserQuota(ctx, req); err != nil {
+				return errMsg(err)
+			}
+			return refresh()
+		}
+	case "group-quota":
+		groupID, bytesStr, inodesStr := m.inputs[0].Value(), m.inputs[1].Value(), m.inputs[2].Value()
+		return m, func() tea.Msg {
+			maxBytes, errBytes := strconv.ParseInt(bytesStr, 10, 64)
+			maxInodes, errInodes := strconv.ParseInt(inodesStr, 10, 64)
+			if errBytes != nil || errInodes != nil {
+				return errMsg(fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes))
+			}
+			req := metadata.SetGroupQuotaRequest{GroupID: groupID, MaxBytes: &maxBytes, MaxInodes: &maxInodes}
+			if err := m.client.AdminSetGroupQuota(ctx, req); err != nil {
+				return errMsg(err)
+			}
+			return refresh()
+		}
+	case "promote":
+		email := m.inputs[0].Value()
+		return m, func() tea.Msg {
+			userID := email
+			if !isHexID(email) {
+				id, err := m.client.AdminLookup(ctx, email)
+				if err != nil {
+					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
+				}
+				userID = id
+			}
+			if err := m.client.AdminPromote(ctx, userID); err != nil {
+				return errMsg(err)
+			}
+			return refresh()
+		}
+	case "join":
+		addr := m.inputs[0].Value()
+		return m, func() tea.Msg {
+			if err := m.client.AdminJoinNode(ctx, addr); err != nil {
+				return errMsg(err)
+			}
+			return refresh()
+		}
+	}
+	return m, nil
+}
+
+func (m model) modalView() string {
+	var b strings.Builder
+	b.WriteString("\n  " + titleStyle.Render(strings.ToUpper(m.activeModal)) + "\n\n")
+	for i, input := range m.inputs {
+		if i == m.focusedInput {
+			b.WriteString("> ")
+		} else {
+			b.WriteString("  ")
+		}
+		b.WriteString(input.View() + "\n")
+	}
+	b.WriteString("\n  (enter: submit, esc: cancel, tab: next)\n")
+	return windowStyle.Render(b.String())
+}
+
 func formatBytes(bytes int64) string {
 	const unit = 1024
 	if bytes < unit {
@@ -320,6 +634,14 @@ func formatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func newInput(placeholder string) textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = placeholder
+	ti.CharLimit = 156
+	ti.Width = 50
+	return ti
 }
 
 func cmdAdmin(args []string) {

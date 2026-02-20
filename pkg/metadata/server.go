@@ -2172,6 +2172,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case path == "users" && r.Method == http.MethodGet:
 		s.handleClusterUsers(w, r)
+	case path == "groups" && r.Method == http.MethodGet:
+		s.handleClusterGroups(w, r)
+	case path == "leases" && r.Method == http.MethodGet:
+		s.handleClusterLeases(w, r)
 	case path == "nodes" && r.Method == http.MethodGet:
 		s.handleClusterNodes(w, r)
 	case path == "status" && r.Method == http.MethodGet:
@@ -2238,6 +2242,64 @@ func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, r, users, http.StatusOK)
+}
+
+func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
+	var groups []Group
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var g Group
+			if err := json.Unmarshal(v, &g); err == nil {
+				groups = append(groups, g)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, r, groups, http.StatusOK)
+}
+
+type LeaseInfo struct {
+	InodeID string `json:"inode_id"`
+	Owner   string `json:"owner"`
+	Expiry  int64  `json:"expiry"`
+}
+
+func (s *Server) handleClusterLeases(w http.ResponseWriter, r *http.Request) {
+	var leases []LeaseInfo
+	now := time.Now().UnixNano()
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var inode Inode
+			if err := json.Unmarshal(v, &inode); err == nil {
+				if inode.LeaseOwner != "" && inode.LeaseExpiry > now {
+					leases = append(leases, LeaseInfo{
+						InodeID: inode.ID,
+						Owner:   inode.LeaseOwner,
+						Expiry:  inode.LeaseExpiry,
+					})
+				}
+			} else {
+				log.Printf("ERROR: Failed to unmarshal inode %s during lease scan: %v", k, err)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, r, leases, http.StatusOK)
 }
 
 func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {

@@ -3351,6 +3351,76 @@ func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 	return users, err
 }
 
+func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) {
+	var groups []metadata.Group
+	err := c.withRetry(ctx, func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/groups", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-DistFS-Sealed", "true")
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&groups)
+	})
+	return groups, err
+}
+
+func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error) {
+	var leases []metadata.LeaseInfo
+	err := c.withRetry(ctx, func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/leases", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("X-DistFS-Sealed", "true")
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+
+		return json.NewDecoder(body).Decode(&leases)
+	})
+	return leases, err
+}
+
 func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 	var nodes []metadata.Node
 	err := c.withRetry(ctx, func() error {

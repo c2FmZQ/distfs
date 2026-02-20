@@ -171,8 +171,8 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		}
 	}
 
-	// Freshness check: only refetch if older than 1s
-	if time.Since(d.lastUpdate) > 1*time.Second {
+	// Freshness check: only refetch if older than 100ms
+	if time.Since(d.lastUpdate) > 100*time.Millisecond {
 		if updated, err := d.fs.client.GetInode(ctx, d.inode.ID); err == nil {
 			d.inode = updated
 			d.lastUpdate = time.Now()
@@ -300,6 +300,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 	resp.Attr.Mode = os.FileMode(inode.Mode)
 	resp.Attr.Size = inode.Size
+	resp.EntryValid = 100 * time.Millisecond
 	return f, h, nil
 }
 
