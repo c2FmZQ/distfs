@@ -381,6 +381,20 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
 	h.Write([]byte("signer:" + i.SignerID + "|"))
 
+	// Write Links (sorted for canonicality)
+	if len(i.Links) > 0 {
+		h.Write([]byte("links:"))
+		linkTags := make([]string, 0, len(i.Links))
+		for tag := range i.Links {
+			linkTags = append(linkTags, tag)
+		}
+		sort.Strings(linkTags)
+		for _, tag := range linkTags {
+			h.Write([]byte(tag + ","))
+		}
+		h.Write([]byte("|"))
+	}
+
 	// Write Children (sorted keys for canonicality)
 	h.Write([]byte("children:"))
 	keys := make([]string, 0, len(i.Children))

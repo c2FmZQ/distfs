@@ -1525,8 +1525,23 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	}
 
 	b := tx.Bucket([]byte("inodes"))
+	lb := tx.Bucket([]byte("leases"))
 	now := time.Now().UnixNano()
 	expiry := now + req.Duration
+
+	// 0. Proactive Cleanup: Remove a few expired leases to prevent leakage
+	// We do a limited scan to avoid blocking the transaction too long.
+	c := lb.Cursor()
+	purged := 0
+	for k, v := c.First(); k != nil && purged < 10; k, v = c.Next() {
+		var info LeaseInfo
+		if err := json.Unmarshal(v, &info); err == nil {
+			if info.Expiry <= now {
+				lb.Delete(k)
+				purged++
+			}
+		}
+	}
 
 	// 1. Validation Phase: Check if all are available
 	inodes := make([]*Inode, len(req.InodeIDs))
@@ -1548,7 +1563,6 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	}
 
 	// 2. Grant Phase: Apply leases
-	lb := tx.Bucket([]byte("leases"))
 	for i, id := range req.InodeIDs {
 		inode := inodes[i]
 		if inode == nil {
@@ -1860,6 +1874,7 @@ func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
 	return leases, err
 }
 
+// GetGroups returns a paginated list of groups. Sorting is stable based on lexicographical Group IDs.
 func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, error) {
 	var groups []Group
 	var nextCursor string
@@ -1874,6 +1889,9 @@ func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, er
 			k, v = c.First()
 		} else {
 			k, v = c.Seek([]byte(cursor))
+			if k != nil && string(k) == cursor {
+				k, v = c.Next() // Start AFTER the cursor
+			}
 		}
 
 		for count := 0; k != nil && (limit <= 0 || count < limit); k, v = c.Next() {

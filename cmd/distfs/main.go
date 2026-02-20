@@ -331,9 +331,17 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 	sort.Slice(filtered, func(i, j int) bool {
 		var res bool
 		if sortByTime {
-			res = filtered[i].ModTime().After(filtered[j].ModTime())
+			if !filtered[i].ModTime().Equal(filtered[j].ModTime()) {
+				res = filtered[i].ModTime().After(filtered[j].ModTime())
+			} else {
+				res = filtered[i].Name() < filtered[j].Name()
+			}
 		} else if sortBySize {
-			res = filtered[i].Size() > filtered[j].Size()
+			if filtered[i].Size() != filtered[j].Size() {
+				res = filtered[i].Size() > filtered[j].Size()
+			} else {
+				res = filtered[i].Name() < filtered[j].Name()
+			}
 		} else {
 			res = filtered[i].Name() < filtered[j].Name()
 		}
