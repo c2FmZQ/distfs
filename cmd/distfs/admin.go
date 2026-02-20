@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -53,8 +52,25 @@ var (
 	neutralStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
+type AdminClient interface {
+	AdminClusterStatus(ctx context.Context) (map[string]interface{}, error)
+	AdminListUsers(ctx context.Context) ([]metadata.User, error)
+	AdminListGroups(ctx context.Context) ([]metadata.Group, error)
+	AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error)
+	AdminListNodes(ctx context.Context) ([]metadata.Node, error)
+	AdminLookup(ctx context.Context, email string) (string, error)
+	AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error
+	AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error
+	AdminPromote(ctx context.Context, userID string) error
+	AdminJoinNode(ctx context.Context, address string) error
+	DecryptGroupName(entry metadata.GroupListEntry) (string, error)
+	ResolvePath(path string) (*metadata.Inode, []byte, error)
+	AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error
+	AdminChmod(ctx context.Context, inodeID string, mode uint32) error
+}
+
 type model struct {
-	client *client.Client
+	client AdminClient
 	tab    tab
 
 	// Data
