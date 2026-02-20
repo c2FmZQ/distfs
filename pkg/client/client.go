@@ -3531,6 +3531,76 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	})
 }
 
+func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
+	data, _ := json.Marshal(req)
+	return c.withRetry(ctx, func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/quota/user", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(hReq, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
+func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error {
+	data, _ := json.Marshal(req)
+	return c.withRetry(ctx, func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/quota/group", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(hReq, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(hReq)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
 func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
 	inode, err := c.getInode(ctx, inodeID)
 	if err != nil {

@@ -110,6 +110,8 @@ type Group struct {
 	Lockbox           crypto.Lockbox  `json:"lockbox"`
 	RegistryLockbox   crypto.Lockbox  `json:"registry_lockbox"` // Only for authorized managers
 	EncryptedRegistry []byte          `json:"enc_registry"`     // Member list encrypted with Registry Key
+	Usage             UserUsage       `json:"usage"`            // Resource usage
+	Quota             UserQuota       `json:"quota"`            // Resource limits
 	Version           uint64          `json:"version"`
 	SignerID          string          `json:"signer_id,omitempty"`
 	Signature         []byte          `json:"signature,omitempty"`
@@ -130,6 +132,8 @@ type GroupListEntry struct {
 	Role          GroupRole      `json:"role"`
 	EncKey        []byte         `json:"enc_key"` // Group Public Key
 	Lockbox       crypto.Lockbox `json:"lockbox"` // For name decryption
+	Usage         UserUsage      `json:"usage"`
+	Quota         UserQuota      `json:"quota"`
 }
 
 type GroupListResponse struct {

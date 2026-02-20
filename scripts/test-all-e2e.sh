@@ -59,10 +59,12 @@ run_test "Stress Test" "/bin/test-stress.sh" || FAILED=1
 run_test "Data Integrity" "/bin/test-integrity.sh" || FAILED=1
 run_test "Public Sharing" "/bin/test-public.sh" || FAILED=1
 run_test "Group Sharing" "/bin/test-group.sh" || FAILED=1
+run_test "Group Quota" "/bin/test-group-quota.sh" || FAILED=1
 run_test "KeySync Cloud Backup" "/bin/test-keysync-e2e.sh" || FAILED=1
 run_test "Hedged Reads Performance" "/bin/test-hedged-reads.sh" || FAILED=1
 run_test "Contact Exchange" "/bin/test-contact-exchange.sh" || FAILED=1
 run_test "Dump Inodes Debugging" "/bin/test-dump-inodes.sh" || FAILED=1
+run_test "Quota Command" "/bin/test-quota-cmd.sh" || FAILED=1
 
 echo "" | tee -a $REPORT_FILE
 echo "--- PERFORMANCE BENCHMARKS ---" | tee -a $REPORT_FILE

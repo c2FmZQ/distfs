@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"strconv"
@@ -354,10 +355,16 @@ func cmdAdminJoin(args []string) {
 }
 
 func cmdAdminChown(args []string) {
-	if len(args) < 2 {
-		log.Fatal("usage: admin-chown <email>[:<group_id>] <path>")
+	fs := flag.NewFlagSet("admin-chown", flag.ExitOnError)
+	force := fs.Bool("f", false, "Force operation without confirmation")
+	if err := fs.Parse(args); err != nil {
+		return
 	}
-	ownerSpec, path := args[0], args[1]
+	remaining := fs.Args()
+	if len(remaining) < 2 {
+		log.Fatal("usage: admin-chown [-f] <owner_email|owner_id>[:<new_group_id>] <path>")
+	}
+	ownerSpec, path := remaining[0], remaining[1]
 	c := loadClient()
 
 	var req metadata.AdminChownRequest
@@ -388,14 +395,16 @@ func cmdAdminChown(args []string) {
 	}
 
 	// 4. Warning
-	fmt.Printf("WARNING: Changing ownership of %s to %s.\n", path, email)
-	fmt.Println("Existing encrypted data will NOT be readable by the new owner.")
-	fmt.Print("Proceed? [y/N]: ")
-	var confirm string
-	fmt.Scanln(&confirm)
-	if strings.ToLower(confirm) != "y" {
-		fmt.Println("Aborted.")
-		return
+	if !*force {
+		fmt.Printf("WARNING: Changing ownership of %s to %s.\n", path, email)
+		fmt.Println("Existing encrypted data will NOT be readable by the new owner.")
+		fmt.Print("Proceed? [y/N]: ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if strings.ToLower(confirm) != "y" {
+			fmt.Println("Aborted.")
+			return
+		}
 	}
 
 	if err := c.AdminChown(context.Background(), inode.ID, req); err != nil {
@@ -405,10 +414,16 @@ func cmdAdminChown(args []string) {
 }
 
 func cmdAdminChmod(args []string) {
-	if len(args) < 2 {
-		log.Fatal("usage: admin-chmod <mode> <path>")
+	fs := flag.NewFlagSet("admin-chmod", flag.ExitOnError)
+	force := fs.Bool("f", false, "Force operation without confirmation")
+	if err := fs.Parse(args); err != nil {
+		return
 	}
-	modeStr, path := args[0], args[1]
+	remaining := fs.Args()
+	if len(remaining) < 2 {
+		log.Fatal("usage: admin-chmod [-f] <mode> <path>")
+	}
+	modeStr, path := remaining[0], remaining[1]
 	mode, err := strconv.ParseUint(modeStr, 8, 32)
 	if err != nil {
 		log.Fatalf("invalid mode: %v", err)
@@ -420,14 +435,16 @@ func cmdAdminChmod(args []string) {
 		log.Fatalf("failed to resolve path %s: %v", path, err)
 	}
 
-	fmt.Printf("WARNING: Overriding permissions of %s to %s.\n", path, modeStr)
-	fmt.Println("This only affects metadata visibility.")
-	fmt.Print("Proceed? [y/N]: ")
-	var confirm string
-	fmt.Scanln(&confirm)
-	if strings.ToLower(confirm) != "y" {
-		fmt.Println("Aborted.")
-		return
+	if !*force {
+		fmt.Printf("WARNING: Overriding permissions of %s to %s.\n", path, modeStr)
+		fmt.Println("This only affects metadata visibility.")
+		fmt.Print("Proceed? [y/N]: ")
+		var confirm string
+		fmt.Scanln(&confirm)
+		if strings.ToLower(confirm) != "y" {
+			fmt.Println("Aborted.")
+			return
+		}
 	}
 
 	if err := c.AdminChmod(context.Background(), inode.ID, uint32(mode)); err != nil {
@@ -469,4 +486,57 @@ func cmdAdminPromote(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s promoted to Admin successfully.\n", email)
+}
+
+func cmdAdminUserQuota(args []string) {
+	if len(args) < 3 {
+		log.Fatal("usage: admin-user-quota <email> <max_bytes> <max_inodes>")
+	}
+	email, bytesStr, inodesStr := args[0], args[1], args[2]
+	c := loadClient()
+
+	userID := email
+	if !isHexID(email) {
+		id, err := c.AdminLookup(context.Background(), email)
+		if err != nil {
+			log.Fatalf("failed to resolve email %s: %v", email, err)
+		}
+		userID = id
+	}
+
+	maxBytes, _ := strconv.ParseInt(bytesStr, 10, 64)
+	maxInodes, _ := strconv.ParseInt(inodesStr, 10, 64)
+
+	req := metadata.SetUserQuotaRequest{
+		UserID:    userID,
+		MaxBytes:  &maxBytes,
+		MaxInodes: &maxInodes,
+	}
+
+	if err := c.AdminSetUserQuota(context.Background(), req); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("User %s quota updated: %d bytes, %d inodes\n", email, maxBytes, maxInodes)
+}
+
+func cmdAdminGroupQuota(args []string) {
+	if len(args) < 3 {
+		log.Fatal("usage: admin-group-quota <group_id> <max_bytes> <max_inodes>")
+	}
+	groupID, bytesStr, inodesStr := args[0], args[1], args[2]
+	c := loadClient()
+
+	maxBytes, _ := strconv.ParseInt(bytesStr, 10, 64)
+	maxInodes, _ := strconv.ParseInt(inodesStr, 10, 64)
+
+	req := metadata.SetGroupQuotaRequest{
+		GroupID:   groupID,
+		MaxBytes:  &maxBytes,
+		MaxInodes: &maxInodes,
+	}
+
+	if err := c.AdminSetGroupQuota(context.Background(), req); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Group %s quota updated: %d bytes, %d inodes\n", groupID, maxBytes, maxInodes)
 }

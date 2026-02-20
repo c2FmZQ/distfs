@@ -90,10 +90,16 @@ func main() {
 		cmdAdminChown(args)
 	case "admin-chmod":
 		cmdAdminChmod(args)
+	case "admin-user-quota":
+		cmdAdminUserQuota(args)
+	case "admin-group-quota":
+		cmdAdminGroupQuota(args)
 	case "admin-promote":
 		cmdAdminPromote(args)
 	case "whoami":
 		cmdWhoami(args)
+	case "quota":
+		cmdQuota(args)
 	case "dump-inodes":
 		cmdDumpInodes(args)
 	default:
@@ -122,12 +128,16 @@ func usage() {
 	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
 	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
 	fmt.Println("  contact-info                    Display your signed contact string for sharing")
+	fmt.Println("  quota                           Display your resource usage and limits")
 	fmt.Println("  put <local> <remote>            Upload file")
 	fmt.Println("  get <remote> <local>            Download file")
 	fmt.Println("  admin                           Open interactive cluster management console")
 	fmt.Println("  admin-join <addr>               Add a node to the cluster (discovered via address)")
 	fmt.Println("  admin-chown <email>[:<group>] <path> Override ownership (Admin only)")
 	fmt.Println("  admin-chmod <mode> <path>       Override permissions (Admin only)")
+	fmt.Println("  admin-user-quota <email> <max_bytes> <max_inodes> Set user quota (Admin only)")
+	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
+	fmt.Println("  whoami                          Display your user ID")
 	fmt.Println("  dump-inodes [path|id]           Recursively dump inode metadata for debugging")
 	os.Exit(1)
 }
@@ -467,4 +477,54 @@ func cmdGroupChown(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Owner of group %s changed to %s\n", groupID, ownerID)
+}
+
+func cmdQuota(args []string) {
+	c := loadClient()
+	user, err := c.GetUser(c.UserID())
+	if err != nil {
+		log.Fatalf("Failed to fetch user info: %v", err)
+	}
+
+	fmt.Printf("Personal Usage for %s:\n", c.UserID())
+	displayUsage(user.Usage, user.Quota)
+
+	groups, err := c.ListGroups()
+	if err != nil {
+		fmt.Printf("\nFailed to fetch group info: %v\n", err)
+		return
+	}
+
+	managedGroups := 0
+	for _, g := range groups {
+		if g.Role == metadata.RoleOwner || g.Role == metadata.RoleManager {
+			if managedGroups == 0 {
+				fmt.Println("Managed Group Quotas:")
+			}
+			managedGroups++
+			fmt.Println()
+			name := "[HIDDEN]"
+			if decrypted, err := c.DecryptGroupName(g); err == nil {
+				name = decrypted
+			}
+			fmt.Printf("Group: %s (%s)\n", name, g.ID)
+			displayUsage(g.Usage, g.Quota)
+		}
+	}
+}
+
+func displayUsage(usage metadata.UserUsage, quota metadata.UserQuota) {
+	fmt.Printf("  Inodes: %d / ", usage.InodeCount)
+	if quota.MaxInodes > 0 {
+		fmt.Printf("%d\n", quota.MaxInodes)
+	} else {
+		fmt.Println("Unlimited")
+	}
+
+	fmt.Printf("  Storage: %s / ", formatBytes(usage.TotalBytes))
+	if quota.MaxBytes > 0 {
+		fmt.Printf("%s\n", formatBytes(quota.MaxBytes))
+	} else {
+		fmt.Println("Unlimited")
+	}
 }

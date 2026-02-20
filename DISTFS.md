@@ -100,11 +100,13 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
     *   `HMAC(email) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
-    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Version, SignerID, Signature}`.
+    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature}`.
         *   **OwnerID:** Can be a `UserID` or another `GroupID`.
         *   **Lockbox:** Shares Group Private Keys among all members.
         *   **RegistryLockbox:** Shares a symmetric **Registry Key** only among authorized managers (`OwnerID`).
         *   **EncryptedRegistry:** An opaque blob containing member emails and UserIDs, encrypted with the Registry Key.
+        *   **Usage:** Tracks inodes and bytes used by files assigned to this group.
+        *   **Quota:** Optional resource limits for the group.
         *   **Version:** Incremental counter for optimistic concurrency control.
         *   **Signature:** ML-DSA signature over the group metadata, signed by the `SignerID`.
 *   **Membership Indices:**
@@ -162,6 +164,18 @@ To support collaboration without a central directory, the metadata layer provide
     *   **Manager:** The user is a member of a group that is the `OwnerID`.
     *   **Member:** The user is a direct member of the group.
 3.  **Privacy Preservation:** The server returns only the `GroupID`, `EncryptedName`, and the resolved `Role`. The MetaNode does not know the plaintext names; the client must use its local keys to decrypt and display the group names to the user.
+
+### 4.8 Resource Quotas
+DistFS enforces multi-tenant resource limits at both the User and Group levels to ensure fair resource allocation and prevent accidental or malicious exhaustion of cluster storage.
+
+1.  **Quota Metrics:** The system tracks two primary metrics:
+    *   **Inodes:** The total number of files and directories owned by the entity.
+    *   **Bytes:** The total logical size of all data chunks referenced by the entity's inodes.
+2.  **Enforcement Hierarchy:** When an operation (e.g., file creation, write, or ownership transfer) occurs, the server identifies the target entity (Group or User) and enforces limits as follows:
+    *   **Group Level:** If the target inode is assigned to a group, the server first checks for a **Group Quota**. If a group-level quota is defined (non-zero), it is enforced exclusively.
+    *   **User Fallback:** If the group has no defined quota (all limits set to zero), the server falls back to enforcing the personal quota of the inode's `OwnerID`.
+3.  **Atomic Accounting:** Usage counters are updated atomically within the same Raft transaction as the metadata mutation. Ownership transfers (chown/chgrp) automatically decrement usage from the source entity and increment it for the target, maintaining global consistency.
+4.  **Admin Management:** Resource limits are managed by cluster administrators via the Admin CLI. Limits can be updated dynamically without affecting existing data availability.
 
 ---
 

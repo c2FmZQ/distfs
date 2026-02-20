@@ -289,6 +289,9 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	if err != nil {
 		return nil, nil, mapError(err)
 	}
+	d.mu.Lock()
+	d.lastUpdate = time.Time{} // Invalidate cache
+	d.mu.Unlock()
 	f := &File{fs: d.fs, inode: inode, key: key}
 	h, err := f.Open(ctx, nil, nil)
 	if err != nil {
@@ -325,6 +328,9 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	if err != nil {
 		return nil, mapError(err)
 	}
+	d.mu.Lock()
+	d.lastUpdate = time.Time{} // Invalidate cache
+	d.mu.Unlock()
 	return &Dir{fs: d.fs, inode: inode, key: key}, nil
 }
 
@@ -373,6 +379,12 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	if err != nil {
 		return mapError(err)
 	}
+	d.mu.Lock()
+	d.lastUpdate = time.Time{}
+	d.mu.Unlock()
+	targetDir.mu.Lock()
+	targetDir.lastUpdate = time.Time{}
+	targetDir.mu.Unlock()
 	return nil
 }
 
@@ -400,6 +412,9 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	if err != nil {
 		return mapError(err)
 	}
+	d.mu.Lock()
+	d.lastUpdate = time.Time{}
+	d.mu.Unlock()
 	return nil
 }
 
@@ -428,6 +443,9 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	if err != nil {
 		return nil, mapError(err)
 	}
+	d.mu.Lock()
+	d.lastUpdate = time.Time{}
+	d.mu.Unlock()
 	return &File{fs: d.fs, inode: inode, key: key}, nil
 }
 
@@ -480,6 +498,9 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	if err != nil {
 		return nil, mapError(err)
 	}
+	d.mu.Lock()
+	d.lastUpdate = time.Time{}
+	d.mu.Unlock()
 	// Update target node's metadata to reflect new nlink
 	if updated, err := d.fs.client.GetInode(ctx, oldFile.inode.ID); err == nil {
 		oldFile.mu.Lock()

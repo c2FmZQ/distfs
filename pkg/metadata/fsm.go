@@ -203,6 +203,7 @@ const (
 	CmdAdminChown      CommandType = 25
 	CmdAdminChmod      CommandType = 26
 	CmdStoreMetrics    CommandType = 27
+	CmdSetGroupQuota   CommandType = 28
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -261,6 +262,12 @@ type LinkRequest struct {
 
 type SetUserQuotaRequest struct {
 	UserID    string `json:"user_id"`
+	MaxBytes  *int64 `json:"max_bytes,omitempty"`
+	MaxInodes *int64 `json:"max_inodes,omitempty"`
+}
+
+type SetGroupQuotaRequest struct {
+	GroupID   string `json:"group_id"`
 	MaxBytes  *int64 `json:"max_bytes,omitempty"`
 	MaxInodes *int64 `json:"max_inodes,omitempty"`
 }
@@ -384,6 +391,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeAdminChmod(tx, data)
 	case CmdStoreMetrics:
 		return fsm.executeStoreMetrics(tx, data)
+	case CmdSetGroupQuota:
+		return fsm.executeSetGroupQuota(tx, data)
 	case CmdBatch:
 		return fsm.applyBatchTx(tx, data, depth+1)
 	}
@@ -421,7 +430,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 	}
 
 	if inode.OwnerID != "" {
-		if err := checkQuota(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+		if err := checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
@@ -431,7 +440,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 	if inode.OwnerID != "" {
-		if err := updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
@@ -459,32 +468,28 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 	}
 
 	ownerChanged := inode.OwnerID != existing.OwnerID
-	if ownerChanged {
-		// 1. Check Quota for new owner
-		if inode.OwnerID != "" {
-			if err := checkQuota(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
-				return err
-			}
+	groupChanged := inode.GroupID != existing.GroupID
+
+	if ownerChanged || groupChanged {
+		// 1. Decrement old owner/group FIRST
+		if err := updateUsage(tx, existing.OwnerID, existing.GroupID, -1, -int64(existing.Size)); err != nil {
+			return err
 		}
-		// 2. Decrement old owner
-		if existing.OwnerID != "" {
-			if err := updateUserUsage(tx, existing.OwnerID, -1, -int64(existing.Size)); err != nil {
-				return err
-			}
+		// 2. Check Quota for new owner/group
+		if err := checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+			return err
 		}
-		// 3. Increment new owner
-		if inode.OwnerID != "" {
-			if err := updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
-				return err
-			}
+		// 3. Increment new owner/group
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+			return err
 		}
 	}
 
 	oldPages := existing.ChunkPages
 	diffBytes := int64(inode.Size) - int64(existing.Size)
 
-	if !ownerChanged && inode.OwnerID != "" && diffBytes > 0 {
-		if err := checkQuota(tx, inode.OwnerID, 0, diffBytes); err != nil {
+	if !(ownerChanged || groupChanged) && diffBytes > 0 {
+		if err := checkQuota(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
@@ -495,8 +500,8 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
-	if !ownerChanged && inode.OwnerID != "" && diffBytes != 0 {
-		if err := updateUserUsage(tx, inode.OwnerID, 0, diffBytes); err != nil {
+	if !(ownerChanged || groupChanged) && diffBytes != 0 {
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
@@ -532,7 +537,7 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{}
 				}
 			}
 			if inode.OwnerID != "" {
-				if err := updateUserUsage(tx, inode.OwnerID, -1, -int64(inode.Size)); err != nil {
+				if err := updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
 					return err
 				}
 			}
@@ -811,8 +816,22 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 	if req.GID != nil {
 		inode.GID = *req.GID
 	}
-	if req.GroupID != nil {
-		inode.GroupID = *req.GroupID
+	if req.GroupID != nil && *req.GroupID != inode.GroupID {
+		newGroupID := *req.GroupID
+		// 1. Decrement old group/owner FIRST
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
+			return err
+		}
+		// 2. Check Quota for new group
+		if err := checkQuota(tx, inode.OwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
+			return err
+		}
+		// Update GroupID
+		inode.GroupID = newGroupID
+		// 3. Increment new group/owner
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
+			return err
+		}
 	}
 	if req.MTime != nil {
 		inode.MTime = *req.MTime
@@ -1169,48 +1188,112 @@ func enqueueGC(tx *bolt.Tx, inode *Inode) error {
 	return nil
 }
 
-func updateUserUsage(tx *bolt.Tx, userID string, deltaInodes int64, deltaBytes int64) error {
-	b := tx.Bucket([]byte("users"))
-	v := b.Get([]byte(userID))
-	if v == nil {
-		return nil
-	}
+func updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
+	remainingInodes := deltaInodes
+	remainingBytes := deltaBytes
 
-	var user User
-	if err := json.Unmarshal(v, &user); err != nil {
-		return err
-	}
+	if groupID != "" {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(groupID))
+		if v != nil {
+			var group Group
+			if err := json.Unmarshal(v, &group); err != nil {
+				return fmt.Errorf("unmarshal group usage %s: %w", groupID, err)
+			}
+			group.Usage.InodeCount += deltaInodes
+			group.Usage.TotalBytes += deltaBytes
 
-	user.Usage.InodeCount += deltaInodes
-	user.Usage.TotalBytes += deltaBytes
+			// Determine if this group is the authoritative budget for these resources
+			if group.Quota.MaxInodes > 0 {
+				remainingInodes = 0
+			}
+			if group.Quota.MaxBytes > 0 {
+				remainingBytes = 0
+			}
 
-	encoded, err := json.Marshal(user)
-	if err != nil {
-		return err
-	}
-	return b.Put([]byte(userID), encoded)
-}
-
-func checkQuota(tx *bolt.Tx, userID string, deltaInodes int64, deltaBytes int64) error {
-	b := tx.Bucket([]byte("users"))
-	v := b.Get([]byte(userID))
-	if v == nil {
-		return nil
-	}
-	var user User
-	if err := json.Unmarshal(v, &user); err != nil {
-		return err
-	}
-
-	if deltaInodes > 0 && user.Quota.MaxInodes > 0 {
-		if user.Usage.InodeCount+deltaInodes > user.Quota.MaxInodes {
-			return fmt.Errorf("inode quota exceeded")
+			encoded, err := json.Marshal(group)
+			if err != nil {
+				return fmt.Errorf("marshal group: %w", err)
+			}
+			if err := b.Put([]byte(groupID), encoded); err != nil {
+				return err
+			}
 		}
 	}
 
-	if deltaBytes > 0 && user.Quota.MaxBytes > 0 {
-		if user.Usage.TotalBytes+deltaBytes > user.Quota.MaxBytes {
-			return fmt.Errorf("storage quota exceeded")
+	if userID != "" && (remainingInodes != 0 || remainingBytes != 0) {
+		b := tx.Bucket([]byte("users"))
+		v := b.Get([]byte(userID))
+		if v != nil {
+			var user User
+			if err := json.Unmarshal(v, &user); err != nil {
+				return fmt.Errorf("unmarshal user usage %s: %w", userID, err)
+			}
+			user.Usage.InodeCount += remainingInodes
+			user.Usage.TotalBytes += remainingBytes
+			encoded, err := json.Marshal(user)
+			if err != nil {
+				return fmt.Errorf("marshal user: %w", err)
+			}
+			if err := b.Put([]byte(userID), encoded); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func checkQuota(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
+	if deltaInodes <= 0 && deltaBytes <= 0 {
+		return nil
+	}
+
+	remainingInodes := deltaInodes
+	remainingBytes := deltaBytes
+
+	if groupID != "" {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(groupID))
+		if v != nil {
+			var group Group
+			if err := json.Unmarshal(v, &group); err == nil {
+				// Enforce group limits if they are set (non-zero)
+				if group.Quota.MaxInodes > 0 {
+					if deltaInodes > 0 && group.Usage.InodeCount+deltaInodes > group.Quota.MaxInodes {
+						return fmt.Errorf("group inode quota exceeded")
+					}
+					remainingInodes = 0 // Group quota is authoritative for this resource
+				}
+				if group.Quota.MaxBytes > 0 {
+					if deltaBytes > 0 && group.Usage.TotalBytes+deltaBytes > group.Quota.MaxBytes {
+						return fmt.Errorf("group storage quota exceeded")
+					}
+					remainingBytes = 0 // Group quota is authoritative for this resource
+				}
+			}
+		}
+	}
+
+	// Fallback to user quota for any remaining resources not covered by group limits
+	if userID != "" && (remainingInodes > 0 || remainingBytes > 0) {
+		b := tx.Bucket([]byte("users"))
+		v := b.Get([]byte(userID))
+		if v == nil {
+			return nil
+		}
+		var user User
+		if err := json.Unmarshal(v, &user); err != nil {
+			return err
+		}
+		if remainingInodes > 0 && user.Quota.MaxInodes > 0 {
+			if user.Usage.InodeCount+remainingInodes > user.Quota.MaxInodes {
+				return fmt.Errorf("user inode quota exceeded")
+			}
+		}
+		if remainingBytes > 0 && user.Quota.MaxBytes > 0 {
+			if user.Usage.TotalBytes+remainingBytes > user.Quota.MaxBytes {
+				return fmt.Errorf("user storage quota exceeded")
+			}
 		}
 	}
 	return nil
@@ -1244,6 +1327,36 @@ func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{
 		return err
 	}
 	return b.Put([]byte(req.UserID), encoded)
+}
+
+func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface{} {
+	var req SetGroupQuotaRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	b := tx.Bucket([]byte("groups"))
+	v := b.Get([]byte(req.GroupID))
+	if v == nil {
+		return ErrNotFound
+	}
+	var group Group
+	if err := json.Unmarshal(v, &group); err != nil {
+		return err
+	}
+
+	if req.MaxBytes != nil {
+		group.Quota.MaxBytes = *req.MaxBytes
+	}
+	if req.MaxInodes != nil {
+		group.Quota.MaxInodes = *req.MaxInodes
+	}
+
+	encoded, err := json.Marshal(group)
+	if err != nil {
+		return err
+	}
+	return b.Put([]byte(req.GroupID), encoded)
 }
 
 func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
@@ -1519,19 +1632,32 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 	}
 
 	ownerChanged := req.OwnerID != nil && *req.OwnerID != inode.OwnerID
-	if ownerChanged {
-		// 1. Check Quota for new owner
-		if err := checkQuota(tx, *req.OwnerID, 1, int64(inode.Size)); err != nil {
+	groupChanged := req.GroupID != nil && *req.GroupID != inode.GroupID
+
+	if ownerChanged || groupChanged {
+		newOwnerID := inode.OwnerID
+		if req.OwnerID != nil {
+			newOwnerID = *req.OwnerID
+		}
+		newGroupID := inode.GroupID
+		if req.GroupID != nil {
+			newGroupID = *req.GroupID
+		}
+
+		// 1. Decrement old owner/group FIRST to free up quota before checking new.
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
 			return err
 		}
-		// 2. Decrement old owner
-		if inode.OwnerID != "" {
-			if err := updateUserUsage(tx, inode.OwnerID, -1, -int64(inode.Size)); err != nil {
-				return err
-			}
+
+		// 2. Check Quota for new owner/group
+		if err := checkQuota(tx, newOwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
+			return err
 		}
+
 		// 3. Update Inode
-		inode.OwnerID = *req.OwnerID
+		inode.OwnerID = newOwnerID
+		inode.GroupID = newGroupID
+
 		// Update AuthorizedSigners to include new owner
 		found := false
 		for _, s := range inode.AuthorizedSigners {
@@ -1540,19 +1666,16 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 				break
 			}
 		}
-		if !found {
+		if !found && inode.OwnerID != "" {
 			inode.AuthorizedSigners = append(inode.AuthorizedSigners, inode.OwnerID)
 		}
 
-		// 4. Increment new owner
-		if err := updateUserUsage(tx, inode.OwnerID, 1, int64(inode.Size)); err != nil {
+		// 4. Increment new owner/group
+		if err := updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
 
-	if req.GroupID != nil {
-		inode.GroupID = *req.GroupID
-	}
 	if req.UID != nil {
 		inode.UID = *req.UID
 	}
@@ -1694,6 +1817,8 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 					Role:          role,
 					EncKey:        g.EncKey,
 					Lockbox:       filteredLockbox,
+					Usage:         g.Usage,
+					Quota:         g.Quota,
 				})
 			}
 		}

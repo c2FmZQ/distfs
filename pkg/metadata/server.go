@@ -2186,6 +2186,10 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 	case path == "promote" && r.Method == http.MethodPost:
 		s.handleAdminPromote(w, r)
+	case path == "quota/user" && r.Method == http.MethodPost:
+		s.handleSetUserQuota(w, r)
+	case path == "quota/group" && r.Method == http.MethodPost:
+		s.handleSetGroupQuota(w, r)
 	default:
 		http.NotFound(w, r)
 	}
@@ -2401,6 +2405,34 @@ func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.ApplyRaftCommandRaw(w, r, CmdPromoteAdmin, []byte(req.UserID), http.StatusOK)
+}
+
+func (s *Server) handleSetUserQuota(w http.ResponseWriter, r *http.Request) {
+	var req SetUserQuotaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.UserID == "" {
+		http.Error(w, "userID required", http.StatusBadRequest)
+		return
+	}
+	data, _ := json.Marshal(req) // Re-marshal to sanitize
+	s.ApplyRaftCommandRaw(w, r, CmdSetUserQuota, data, http.StatusOK)
+}
+
+func (s *Server) handleSetGroupQuota(w http.ResponseWriter, r *http.Request) {
+	var req SetGroupQuotaRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.GroupID == "" {
+		http.Error(w, "groupID required", http.StatusBadRequest)
+		return
+	}
+	data, _ := json.Marshal(req) // Re-marshal to sanitize
+	s.ApplyRaftCommandRaw(w, r, CmdSetGroupQuota, data, http.StatusOK)
 }
 
 func (s *Server) handleGetServerSignKey(w http.ResponseWriter, r *http.Request) {

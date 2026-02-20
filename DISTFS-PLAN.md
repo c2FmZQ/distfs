@@ -209,39 +209,47 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 13: Group-Based Sharing & Management
+## Phase 13: Group-Based Sharing & Management [COMPLETED]
 **Goal:** Implement cryptographic group sharing and secure, owner-delegated management.
 
 *   **Step 13.1: Group Authorization & Signatures**
-    *   **Action:** Update `Group` struct with `Version`, `SignerID`, and `Signature` in `pkg/metadata/types.go`.
-    *   **Action:** Implement `Group.Hash()` for metadata integrity verification.
-    *   **Action:** Update `handleUpdateGroup` in `MetadataServer` to enforce **Signature Verification** and **Version Matching**.
+    *   **Action:** [Done] Update `Group` struct with `Version`, `SignerID`, and `Signature` in `pkg/metadata/types.go`.
+    *   **Action:** [Done] Implement `Group.Hash()` for metadata integrity verification.
+    *   **Action:** [Done] Update `handleUpdateGroup` in `MetadataServer` to enforce **Signature Verification** and **Version Matching**.
 *   **Step 13.2: Delegated & Self-Managed Groups**
-    *   **Action:** Update `checkGroupWritePermission` in `MetadataServer` to support `OwnerID` being a User or Group ID.
-    *   **Action:** Implement non-recursive group-membership check for group-owned groups.
+    *   **Action:** [Done] Update `checkGroupWritePermission` in `MetadataServer` to support `OwnerID` being a User or Group ID.
+    *   **Action:** [Done] Implement non-recursive group-membership check for group-owned groups.
 *   **Step 13.3: Client Group Management Signing**
-    *   **Action:** Update `Client.AddUserToGroup` to sign the updated group metadata using the user's ML-DSA identity key.
-    *   **Action:** Implement `Client.UpdateGroup` to handle optimistic concurrency retries (fetch-modify-retry).
+    *   **Action:** [Done] Update `Client.AddUserToGroup` to sign the updated group metadata using the user's ML-DSA identity key.
+    *   **Action:** [Done] Implement `Client.UpdateGroup` to handle optimistic concurrency retries (fetch-modify-retry).
 *   **Step 13.4: Group Management CLI (Advanced)**
-    *   **Action:** Implement `group-chown` to transfer group ownership to another User or Group.
-    *   **Action:** Implement `group-list-members` and `group-info` to display ownership and management status.
+    *   **Action:** [Done] Implement `group-chown` to transfer group ownership to another User or Group.
+    *   **Action:** [Done] Implement `group-list-members` and `group-info` to display ownership and management status.
 *   **Step 13.5: Testing & Verification**
-    *   **Action:** **Unit Test:** FSM `executeUpdateGroup` correctly verifies signatures and increments versions.
-    *   **Action:** **Security Test:** Verify that a non-member is rejected when attempting to update a group.
-    *   **Action:** **Security Test:** Verify that a member can update a self-managed group but a non-member cannot.
-    *   **Action:** **Integration Test:** Demonstrate "Group A owned by Group B" where a member of B successfully adds a user to A.
+    *   **Action:** [Done] **Unit Test:** FSM `executeUpdateGroup` correctly verifies signatures and increments versions.
+    *   **Action:** [Done] **Security Test:** Verify that a non-member is rejected when attempting to update a group.
+    *   **Action:** [Done] **Security Test:** Verify that a member can update a self-managed group but a non-member cannot.
+    *   **Action:** [Done] **Integration Test:** Demonstrate "Group A owned by Group B" where a member of B successfully adds a user to A.
 *   **Step 13.6: PII Isolation (Encrypted Member Registry)**
-    *   **Action:** Add `RegistryLockbox` and `EncryptedRegistry` fields to `Group` struct.
-    *   **Action:** Implement client-side logic to generate a symmetric **Registry Key** during group creation.
-    *   **Action:** Implement `RegistryLockbox.AddRecipient` to share the Registry Key with authorized managers (`OwnerID`).
-    *   **Action:** Update `group-add` to update the `EncryptedRegistry` blob (containing member emails) whenever a user is added.
-    *   **Action:** Update `group-info` to attempt Registry Key decryption and display member emails only if authorized.
+    *   **Action:** [Done] Add `RegistryLockbox` and `EncryptedRegistry` fields to `Group` struct.
+    *   **Action:** [Done] Implement client-side logic to generate a symmetric **Registry Key** during group creation.
+    *   **Action:** [Done] Implement `RegistryLockbox.AddRecipient` to share the Registry Key with authorized managers (`OwnerID`).
+    *   **Action:** [Done] Update `group-add` to update the `EncryptedRegistry` blob (containing member emails) whenever a user is added.
+    *   **Action:** [Done] Update `group-info` to attempt Registry Key decryption and display member emails only if authorized.
 *   **Step 13.7: Group Discovery (Membership Indexing)**
-    *   **Action:** Add `user_memberships` and `owner_groups` buckets to BoltDB FSM.
-    *   **Action:** Implement indexing logic in `executeCreateGroup` and `executeUpdateGroup` to maintain consistency between group state and membership indices.
-    *   **Action:** Implement `GET /v1/user/groups` endpoint in `MetadataServer` to return groups associated with the authenticated user.
-    *   **Action:** Implement role resolution logic (Owner, Manager, Member) on the server.
-    *   **Action:** Add `distfs group-list` command to CLI with local decryption of group names.
+    *   **Action:** [Done] Add `user_memberships` and `owner_groups` buckets to BoltDB FSM.
+    *   **Action:** [Done] Implement indexing logic in `executeCreateGroup` and `executeUpdateGroup` to maintain consistency between group state and membership indices.
+    *   **Action:** [Done] Implement `GET /v1/user/groups` endpoint in `MetadataServer` to return groups associated with the authenticated user.
+    *   **Action:** [Done] Implement role resolution logic (Owner, Manager, Member) on the server.
+    *   **Action:** [Done] Add `distfs group-list` command to CLI with local decryption of group names.
+*   **Step 13.8: Group Resource Quotas [COMPLETED]**
+    *   **Action:** [Done] Add `Usage` and `Quota` fields to `Group` struct in `pkg/metadata/types.go`.
+    *   **Action:** [Done] Refactor `checkQuota` and `updateUsage` in `pkg/metadata/fsm.go` to support the group-first enforcement hierarchy.
+    *   **Action:** [Done] Address Critical Review findings: Fix partial quota bypass, `updateUsage` double-attribution, and `executeAdminChown` double-counting.
+    *   **Action:** [Done] Implement `CmdSetGroupQuota` Raft command and corresponding server handler.
+    *   **Action:** [Done] Add `admin-group-quota` command to Admin CLI for managing group limits.
+    *   **Action:** [Done] Add `distfs quota` command to CLI.
+    *   **Action:** [Done] Add E2E test verifying group quota enforcement and user fallback behavior.
 
 ---
 
@@ -562,18 +570,18 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 33: Secure Contact Exchange
+## Phase 33: Secure Contact Exchange [COMPLETED]
 **Goal:** Enable users to securely share their identity for group membership and collaboration via out-of-band communication.
 
 *   **Step 33.1: Contact String Specification**
-    *   **Action:** Define the `distfs-contact` URI scheme.
-    *   **Action:** Include UserID, Public Encryption Key (ML-KEM), and Public Signing Key (ML-DSA) in the payload.
-    *   **Action:** Implement signing logic where the user signs their contact data to prevent tampering during OOB transit.
+    *   **Action:** [Done] Define the `distfs-contact` URI scheme.
+    *   **Action:** [Done] Include UserID, Public Encryption Key (ML-KEM), and Public Signing Key (ML-DSA) in the payload.
+    *   **Action:** [Done] Implement signing logic where the user signs their contact data to prevent tampering during OOB transit.
 *   **Step 33.2: Contact Generation & Verification**
-    *   **Action:** Implement `GenerateContactString()` in `pkg/client`.
-    *   **Action:** Implement `VerifyContactString(uri)` in `pkg/client` to parse and validate signatures.
+    *   **Action:** [Done] Implement `GenerateContactString()` in `pkg/client`.
+    *   **Action:** [Done] Implement `VerifyContactString(uri)` in `pkg/client` to parse and validate signatures.
 *   **Step 33.3: CLI Integration**
-    *   **Action:** Add `distfs contact-info` command to display the user's signed URI.
-    *   **Action:** Update `distfs group-add` to accept a contact URI, automatically verifying and extracting the UserID.
+    *   **Action:** [Done] Add `distfs contact-info` command to display the user's signed URI.
+    *   **Action:** [Done] Update `distfs group-add` to accept a contact URI, automatically verifying and extracting the UserID.
 *   **Step 33.4: Testing**
-    *   **Action:** Verify that tampered contact strings (e.g., modified UserID) are rejected during verification.
+    *   **Action:** [Done] Verify that tampered contact strings (e.g., modified UserID) are rejected during verification.

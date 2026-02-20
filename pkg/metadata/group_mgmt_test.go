@@ -216,3 +216,183 @@ func TestGroupManagementSecurity(t *testing.T) {
 		t.Errorf("Expected 403 for Mallory updating delegated group C, got %d", resp.StatusCode)
 	}
 }
+
+func TestGroupQuotaEnforcement(t *testing.T) {
+	node, ts, _, _, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	userID := "alice"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: userID, SignKey: sk.Public()})
+
+	// 1. Create Group G1
+	groupID := "g1"
+	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1}
+	g1Bytes, _ := json.Marshal(g1)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Create group failed: %v", err)
+	}
+
+	// 2. Set Group Quota (1 Inode, 500 Bytes)
+	maxInodes := int64(1)
+	maxBytes := int64(500)
+	qReq := SetGroupQuotaRequest{
+		GroupID:   groupID,
+		MaxBytes:  &maxBytes,
+		MaxInodes: &maxInodes,
+	}
+	qBytes, _ := json.Marshal(qReq)
+	if err := node.Raft.Apply(LogCommand{Type: CmdSetGroupQuota, Data: qBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Set group quota failed: %v", err)
+	}
+
+	// 3. Create Inode 1 in Group G1 (OK)
+	inode1 := Inode{ID: "f1", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode1.SignInodeForTest(userID, sk)
+	i1Bytes, _ := json.Marshal(inode1)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Create file 1 failed: %v", err)
+	}
+
+	// 4. Create Inode 2 in Group G1 (Fail: Group Inode Quota)
+	inode2 := Inode{ID: "f2", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode2.SignInodeForTest(userID, sk)
+	i2Bytes, _ := json.Marshal(inode2)
+	f := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i2Bytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Raft apply failed: %v", err)
+	}
+	if err, ok := f.Response().(error); !ok || err.Error() != "group inode quota exceeded" {
+		t.Errorf("Expected group inode quota exceeded, got %v", f.Response())
+	}
+
+	// 5. Increase Quota, but fail storage (2 Inodes, 150 Bytes)
+	maxInodes = 2
+	maxBytes = 150
+	qReq.MaxInodes = &maxInodes
+	qReq.MaxBytes = &maxBytes
+	qBytes, _ = json.Marshal(qReq)
+	if err := node.Raft.Apply(LogCommand{Type: CmdSetGroupQuota, Data: qBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatal(err)
+	}
+
+	inode2.SignInodeForTest(userID, sk)
+	i2Bytes = marshalInode(t, inode2)
+	f = node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i2Bytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Raft apply failed: %v", err)
+	}
+	if err, ok := f.Response().(error); !ok || err.Error() != "group storage quota exceeded" {
+		t.Errorf("Expected group storage quota exceeded, got %v", f.Response())
+	}
+}
+
+func TestGroupQuotaFallback(t *testing.T) {
+	node, ts, _, _, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	userID := "alice"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: userID, SignKey: sk.Public()})
+
+	// 1. Create Group G1 with NO quota
+	groupID := "g1"
+	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1}
+	g1Bytes, _ := json.Marshal(g1)
+	node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second)
+
+	// 2. Set Alice Quota to 1 Inode
+	maxInodes := int64(1)
+	uReq := SetUserQuotaRequest{UserID: userID, MaxInodes: &maxInodes}
+	uReqBytes, _ := json.Marshal(uReq)
+	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: uReqBytes}.Marshal(), 5*time.Second)
+
+	// 3. Create Inode 1 in Group G1 (OK - falls back to Alice quota 0->1)
+	inode1 := Inode{ID: "f1", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode1.SignInodeForTest(userID, sk)
+	i1Bytes := marshalInode(t, inode1)
+	f1 := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i1Bytes}.Marshal(), 5*time.Second)
+	if err := f1.Error(); err != nil {
+		t.Fatalf("Raft apply file 1 failed: %v", err)
+	}
+	if err, ok := f1.Response().(error); ok && err != nil {
+		t.Fatalf("Create file 1 fallback failed: %v", err)
+	}
+
+	// Verify Alice usage is now 1
+	var user User
+	node.FSM.db.View(func(tx *bolt.Tx) error {
+		v := tx.Bucket([]byte("users")).Get([]byte(userID))
+		json.Unmarshal(v, &user)
+		return nil
+	})
+	if user.Usage.InodeCount != 1 {
+		t.Errorf("Expected Alice usage 1, got %d", user.Usage.InodeCount)
+	}
+
+	// 4. Create Inode 2 in Group G1 (Fail - Alice quota 1->2 > 1)
+	inode2 := Inode{ID: "f2", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode2.SignInodeForTest(userID, sk)
+	i2Bytes := marshalInode(t, inode2)
+	f := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i2Bytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Raft apply file 2 failed: %v", err)
+	}
+	if err, ok := f.Response().(error); !ok || err.Error() != "user inode quota exceeded" {
+		t.Errorf("Expected user inode quota exceeded, got %v", f.Response())
+	}
+}
+
+func marshalInode(t *testing.T, i Inode) []byte {
+	b, err := json.Marshal(i)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
+func TestGroupQuotaBypassReproduction(t *testing.T) {
+	node, ts, _, _, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	userID := "alice"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: userID, SignKey: sk.Public()})
+
+	// 1. Set User Byte Quota (500 Bytes)
+	maxBytes := int64(500)
+	uReq := SetUserQuotaRequest{UserID: userID, MaxBytes: &maxBytes}
+	uReqBytes, _ := json.Marshal(uReq)
+	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: uReqBytes}.Marshal(), 5*time.Second)
+
+	// 2. Create Group G1 with Inode Quota (10) but NO Byte Quota (0)
+	groupID := "g1"
+	maxInodes := int64(10)
+	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1}
+	g1Bytes, _ := json.Marshal(g1)
+	node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second)
+
+	qReq := SetGroupQuotaRequest{
+		GroupID:   groupID,
+		MaxInodes: &maxInodes,
+	}
+	qReqBytes, _ := json.Marshal(qReq)
+	node.Raft.Apply(LogCommand{Type: CmdSetGroupQuota, Data: qReqBytes}.Marshal(), 5*time.Second)
+
+	// 3. Alice uploads 600 Byte file to Group G1.
+	// Current BUG: Because Group has a quota (Inodes), checkQuota returns nil early.
+	// Expected: Should fail because 600 > User's 500 Byte quota.
+	inode := Inode{ID: "f1", OwnerID: userID, GroupID: groupID, Size: 600}
+	inode.SignInodeForTest(userID, sk)
+	inodeBytes, _ := json.Marshal(inode)
+	f := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: inodeBytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if err, ok := f.Response().(error); !ok || err.Error() != "user storage quota exceeded" {
+		t.Errorf("Expected user storage quota exceeded (bypass attempt), got %v", f.Response())
+	}
+}
