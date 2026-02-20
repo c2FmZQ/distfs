@@ -832,11 +832,10 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 
 	// Handle GID change in index
 	if group.GID != existing.GID {
-		// Verify old mapping exists before deleting to maintain index integrity
-		if oldMapping, _ := fsm.Get(tx, []byte("gids"), uint32ToBytes(existing.GID)); oldMapping != nil && string(oldMapping) == existing.ID {
-			fsm.Delete(tx, []byte("gids"), uint32ToBytes(existing.GID))
+		fsm.Delete(tx, []byte("gids"), uint32ToBytes(existing.GID))
+		if err := fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
+			return err
 		}
-		fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID))
 	}
 
 	group.Version++

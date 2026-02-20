@@ -70,6 +70,10 @@ func (e *EncryptedLogStore) StoreLogs(logs []*raft.Log) error {
 
 	for i, l := range logs {
 		cp := *l // shallow copy
+		if len(l.Extensions) > 0 {
+			cp.Extensions = make([]byte, len(l.Extensions))
+			copy(cp.Extensions, l.Extensions)
+		}
 		if len(cp.Data) > 0 {
 			ct, err := crypto.EncryptDEM(key, cp.Data)
 			if err != nil {

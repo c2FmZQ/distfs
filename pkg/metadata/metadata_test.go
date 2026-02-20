@@ -990,3 +990,86 @@ func TestAdminChownQuota(t *testing.T) {
 		t.Errorf("Identity chown failed: %v", err)
 	}
 }
+
+func TestSecurity_IDOR_User(t *testing.T) {
+	node, ts, _, _, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create two users
+	u1ID := "user1"
+	sk1, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{
+		ID:      u1ID,
+		SignKey: sk1.Public(),
+		Quota:   UserQuota{MaxInodes: 100},
+		Usage:   UserUsage{InodeCount: 10},
+	})
+
+	u2ID := "user2"
+	sk2, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{
+		ID:      u2ID,
+		SignKey: sk2.Public(),
+		Quota:   UserQuota{MaxInodes: 200},
+		Usage:   UserUsage{InodeCount: 20},
+	})
+
+	// Login as User 1
+	token1 := loginSession(t, ts, u1ID, sk1)
+
+	// 2. User 1 requests self (Should be FULL)
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/user/"+u1ID, nil)
+	req.Header.Set("Session-Token", token1)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Failed to get self: %d", resp.StatusCode)
+	}
+	var res1 User
+	json.NewDecoder(resp.Body).Decode(&res1)
+	resp.Body.Close()
+
+	if res1.Quota.MaxInodes != 100 || res1.Usage.InodeCount != 10 {
+		t.Errorf("Self metadata redacted: %+v", res1)
+	}
+
+	// 3. User 2 requests User 1 (Should be REDACTED)
+	token2 := loginSession(t, ts, u2ID, sk2)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/"+u1ID, nil)
+	req.Header.Set("Session-Token", token2)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Failed to get other user: %d", resp.StatusCode)
+	}
+	var res2 User
+	json.NewDecoder(resp.Body).Decode(&res2)
+	resp.Body.Close()
+
+	if res2.Quota.MaxInodes != 0 || res2.Usage.InodeCount != 0 {
+		t.Errorf("Other user metadata NOT redacted: %+v", res2)
+	}
+	if len(res2.SignKey) == 0 {
+		t.Error("Other user SignKey redacted (should be public)")
+	}
+	if res2.ID != u1ID {
+		t.Errorf("ID mismatch: got %s, want %s", res2.ID, u1ID)
+	}
+
+	// 4. Admin requests User 2 (Should be FULL)
+	// Promote user1 to admin
+	node.Raft.Apply(LogCommand{Type: CmdPromoteAdmin, Data: []byte(u1ID)}.Marshal(), 5*time.Second)
+
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/"+u2ID, nil)
+	req.Header.Set("Session-Token", token1)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Admin failed to get user: %d", resp.StatusCode)
+	}
+	var resAdmin User
+	json.NewDecoder(resp.Body).Decode(&resAdmin)
+	resp.Body.Close()
+
+	if resAdmin.Quota.MaxInodes != 200 || resAdmin.Usage.InodeCount != 20 {
+		t.Errorf("Admin saw redacted metadata: %+v", resAdmin)
+	}
+}

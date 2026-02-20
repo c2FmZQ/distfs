@@ -1248,11 +1248,30 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 		return
 	}
 
+	// Redact sensitive info if not self/admin
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser == nil {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Map to public view to prevent accidental leaks
+	resp := User{
+		ID:      user.ID,
+		UID:     user.UID,
+		SignKey: user.SignKey,
+		EncKey:  user.EncKey,
+	}
+	if ctxUser.ID == id || s.fsm.IsAdmin(ctxUser.ID) {
+		resp.Usage = user.Usage
+		resp.Quota = user.Quota
+	}
+	user = resp
+
 	data, _ := json.Marshal(user)
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
 		sealed, err := s.sealResponse(ctxUser, data)
 		if err == nil {
@@ -1603,7 +1622,7 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	// 1. Generate unique GID (POSIX)
 	var gid uint32
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		for {
+		for i := 0; i < 1000; i++ {
 			gid = generateID32()
 			if gid < 1000 {
 				continue
@@ -1617,6 +1636,7 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 				return nil
 			}
 		}
+		return fmt.Errorf("exhausted GID allocation attempts (possible collision or full range)")
 	})
 	if err != nil {
 		log.Printf("GROUP: handleCreateGroup GID allocation failed: %v", err)

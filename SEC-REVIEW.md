@@ -27,12 +27,12 @@ This document outlines the security vulnerabilities identified during the manual
 ## 2. High-Severity Vulnerabilities
 
 ### 2.1. Insecure Direct Object Reference (IDOR) in User Retrieval
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Broken Access Control (IDOR)
 *   **Location:** `pkg/metadata/server.go` (`handleGetUser`)
 *   **Severity:** **HIGH**
 *   **Description:** `GET /v1/user/{id}` returns user metadata without checking if the requester is the owner or an admin.
-*   **Impact:** Authenticated users can harvest metadata (usage, quota, keys) for all other users.
-*   **Recommendation:** Restrict access to self or admin.
+*   **Resolution:** Implemented ownership and administrator checks in `handleGetUser`. If the requester is neither the owner of the user account nor a cluster administrator, the sensitive `Usage` and `Quota` fields are redacted (zeroed out) before returning the user metadata. Public keys (`SignKey`, `EncKey`) remain accessible to all authenticated users to support distributed signature verification and encrypted sharing.
 
 ### 2.2. Shared Secret Leakage in Node Discovery
 *   **Vulnerability Type:** Broken Access Control / Info Leak
