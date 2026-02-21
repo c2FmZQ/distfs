@@ -387,6 +387,10 @@ func (m *model) updateGroupTable() {
 			name = decrypted
 		}
 
+		if g.IsSystem {
+			name = "[SYSTEM] " + name
+		}
+
 		rows = append(rows, table.Row{
 			g.ID,
 			name,

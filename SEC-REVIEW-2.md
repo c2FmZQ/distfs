@@ -42,17 +42,19 @@ This document outlines security weaknesses identified during the manual audit fo
 ## 3. Medium & Low Severity Vulnerabilities
 
 ### 3.1. Group Name Phishing
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** User Deception / Social Engineering
-*   **Location:** `cmd/distfs/admin.go` (`updateGroupTable`)
+*   **Location:** `cmd/distfs/admin.go`, `cmd/distfs/main.go`, and `pkg/metadata/server.go`
 *   **Severity:** **MEDIUM**
-*   **Description:** Group names are user-provided and not unique.
+*   **Description:** Group names are user-provided and not unique. A malicious user can name a group "SYSTEM" or "ADMIN" to trick an administrator or other users into performing unauthorized actions or assuming higher trust.
+*   **Resolution:** Implemented a `IsSystem` bit in group metadata that can only be set or modified by cluster administrators. The Metadata Server enforces this restriction during group creation and updates. Both the CLI group list and the interactive Admin Console now display a prominent `[SYSTEM]` label for groups with this bit set, allowing users and administrators to clearly distinguish between user-provided names and verified system groups.
 *   **Impact:** A malicious user can name a group "SYSTEM" or "ADMIN" to trick an administrator or other users into performing unauthorized actions or assuming higher trust.
-*   **Recommendation:** Distinguish user-provided names from system-generated metadata in the UI and consider adding "trusted" labels for system groups.
 
 ### 3.2. Signer Identity Leakage in Inodes
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Information Disclosure
 *   **Location:** `pkg/metadata/types.go` (`Inode` struct)
 *   **Severity:** **LOW**
 *   **Description:** `SignerID` and `AuthorizedSigners` are stored in plaintext within the `Inode` metadata.
+*   **Resolution:** Replaced plaintext signer fields with `EncryptedSignerID` and `EncryptedAuthorizedSigners` within the `Inode` metadata. The Metadata Server now verifies the authenticated submitter's signature during updates without needing access to the plaintext identity history. Interaction patterns are now hidden from the server, while clients retain the ability to perform fine-grained integrity and ACL audits using their shared keys.
 *   **Impact:** Exposes the identity of users interacting with specific files to the Metadata Server, leaking usage patterns.
-*   **Recommendation:** Consider encrypting these fields within the metadata layer if privacy of interaction patterns is a priority.

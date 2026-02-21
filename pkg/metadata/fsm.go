@@ -1958,18 +1958,6 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 		inode.OwnerID = newOwnerID
 		inode.GroupID = newGroupID
 
-		// Update AuthorizedSigners to include new owner
-		found := false
-		for _, s := range inode.AuthorizedSigners {
-			if s == inode.OwnerID {
-				found = true
-				break
-			}
-		}
-		if !found && inode.OwnerID != "" {
-			inode.AuthorizedSigners = append(inode.AuthorizedSigners, inode.OwnerID)
-		}
-
 		// 4. Increment new owner/group
 		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
@@ -2121,6 +2109,7 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 					Role:          role,
 					EncKey:        g.EncKey,
 					Lockbox:       filteredLockbox,
+					IsSystem:      g.IsSystem,
 					Usage:         g.Usage,
 					Quota:         g.Quota,
 				})

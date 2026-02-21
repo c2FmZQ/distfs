@@ -49,14 +49,14 @@ func (c *Client) EnsureRoot() error {
 
 	lb := c.createLockbox(rootKey, 0755, "")
 	inode := metadata.Inode{
-		ID:                metadata.RootID,
-		Type:              metadata.DirType,
-		Mode:              0755,
-		Children:          make(map[string]string),
-		Lockbox:           lb,
-		OwnerID:           c.userID,
-		AuthorizedSigners: []string{c.userID},
+		ID:       metadata.RootID,
+		Type:     metadata.DirType,
+		Mode:     0755,
+		Children: make(map[string]string),
+		Lockbox:  lb,
+		OwnerID:  c.userID,
 	}
+	inode.SetAuthorizedSigners([]string{c.userID})
 	_, err = c.createInode(context.Background(), inode)
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {

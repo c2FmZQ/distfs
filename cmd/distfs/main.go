@@ -609,6 +609,9 @@ func cmdGroupList(args []string) {
 		if decrypted, err := c.DecryptGroupName(e); err == nil {
 			name = decrypted
 		}
+		if e.IsSystem {
+			name = "[SYSTEM] " + name
+		}
 		fmt.Printf("%-32s %-20s %s\n", e.ID, name, e.Role)
 	}
 }

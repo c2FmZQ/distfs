@@ -1646,6 +1646,13 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Verify that the submitter signed this manifest
+	hash := inode.ManifestHash()
+	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
+		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
+		return
+	}
+
 	s.ApplyRaftCommandRaw(w, r, CmdCreateInode, body, http.StatusCreated)
 }
 
@@ -1663,7 +1670,27 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 		}
 		return
 	}
-	s.ApplyRaftCommand(w, r, CmdUpdateInode, 1024*1024, http.StatusOK)
+
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
+	if err != nil {
+		http.Error(w, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	var inode Inode
+	if err := json.Unmarshal(body, &inode); err != nil {
+		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	// Verify that the submitter signed this manifest
+	hash := inode.ManifestHash()
+	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
+		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
+		return
+	}
+
+	s.ApplyRaftCommandRaw(w, r, CmdUpdateInode, body, http.StatusOK)
 }
 
 func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
@@ -1802,7 +1829,13 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Generate unique GID (POSIX) if not provided
+	// 1. Enforce IsSystem only for admins
+	if group.IsSystem && !s.fsm.IsAdmin(user.ID) {
+		http.Error(w, "forbidden: only admins can create system groups", http.StatusForbidden)
+		return
+	}
+
+	// 2. Generate unique GID (POSIX) if not provided
 	if group.GID == 0 {
 		var gid uint32
 		err = s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -2007,6 +2040,11 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
 
 	if !authorized {
 		return fmt.Errorf("user %s not authorized to manage group %s", user.ID, updatedGroup.ID)
+	}
+
+	// 2.1 Enforce IsSystem modification only for admins
+	if updatedGroup.IsSystem != existing.IsSystem && !s.fsm.IsAdmin(user.ID) {
+		return fmt.Errorf("only admins can modify system status")
 	}
 
 	// 3. Verify Signature

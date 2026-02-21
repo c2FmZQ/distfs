@@ -115,6 +115,7 @@ type Group struct {
 	Usage             UserUsage       `json:"usage"`            // Resource usage
 	Quota             UserQuota       `json:"quota"`            // Resource limits
 	Version           uint64          `json:"version"`
+	IsSystem          bool            `json:"is_system"` // Only settable by Admin
 	SignerID          string          `json:"signer_id,omitempty"`
 	Signature         []byte          `json:"signature,omitempty"`
 }
@@ -134,6 +135,7 @@ type GroupListEntry struct {
 	Role          GroupRole      `json:"role"`
 	EncKey        []byte         `json:"enc_key"` // Group Public Key
 	Lockbox       crypto.Lockbox `json:"lockbox"` // For name decryption
+	IsSystem      bool           `json:"is_system"`
 	Usage         UserUsage      `json:"usage"`
 	Quota         UserQuota      `json:"quota"`
 }
@@ -159,6 +161,12 @@ func (g *Group) Hash() []byte {
 	h.Write([]byte("gid:"))
 	h.Write(gid)
 	h.Write([]byte("|"))
+
+	if g.IsSystem {
+		h.Write([]byte("sys:1|"))
+	} else {
+		h.Write([]byte("sys:0|"))
+	}
 
 	h.Write([]byte("owner:" + g.OwnerID + "|"))
 	h.Write([]byte("signer:" + g.SignerID + "|"))
@@ -317,16 +325,25 @@ type Inode struct {
 	ChunkPages             []string          `json:"chunk_pages,omitempty"`
 	Lockbox                crypto.Lockbox    `json:"lockbox"`
 	Version                uint64            `json:"version"`
+	IsSystem               bool              `json:"is_system"`
 	LeaseOwner             string            `json:"lease_owner,omitempty"`
 	LeaseExpiry            int64             `json:"lease_expiry,omitempty"`
 
-	// Manifest Integrity (Phase 31)
-	SignerID          string   `json:"signer_id,omitempty"` // User ID of the last writer
-	UserSig           []byte   `json:"user_sig,omitempty"`  // Signature by user's ML-DSA identity key
-	GroupSig          []byte   `json:"group_sig,omitempty"` // Signature by group's ML-DSA key
-	AuthorizedSigners []string `json:"auth_signers,omitempty"`
-}
-
+		// Manifest Integrity (Phase 31)
+		EncryptedSignerID          []byte `json:"enc_signer_id,omitempty"`
+		UserSig                    []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
+		GroupSig                   []byte `json:"group_sig,omitempty"`
+		EncryptedAuthorizedSigners []byte `json:"enc_auth_signers,omitempty"`
+	
+			// Client-side transient state (unexported, not in JSON)
+			signerID          string
+			authorizedSigners []string
+		}
+		
+		func (i *Inode) GetSignerID() string { return i.signerID }
+		func (i *Inode) SetSignerID(s string) { i.signerID = s }
+		func (i *Inode) GetAuthorizedSigners() []string { return i.authorizedSigners }
+		func (i *Inode) SetAuthorizedSigners(s []string) { i.authorizedSigners = s }
 // UnmarshalJSON implements custom unmarshaling to handle legacy symlink metadata.
 func (i *Inode) UnmarshalJSON(data []byte) error {
 	type Alias Inode
@@ -377,6 +394,12 @@ func (i *Inode) ManifestHash() []byte {
 
 	h.Write([]byte("gid_str:" + i.GroupID + "|"))
 
+	if i.IsSystem {
+		h.Write([]byte("sys:1|"))
+	} else {
+		h.Write([]byte("sys:0|"))
+	}
+
 	mt := make([]byte, 8)
 	binary.LittleEndian.PutUint64(mt, uint64(i.MTime))
 	h.Write([]byte("mtime:"))
@@ -402,7 +425,9 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("|"))
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
-	h.Write([]byte("signer:" + i.SignerID + "|"))
+	h.Write([]byte("signer_enc:"))
+	h.Write(i.EncryptedSignerID)
+	h.Write([]byte("|"))
 
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
@@ -474,15 +499,10 @@ func (i *Inode) ManifestHash() []byte {
 		h.Write([]byte("|"))
 	}
 
-	// Write AuthorizedSigners (sorted for canonicality)
-	if len(i.AuthorizedSigners) > 0 {
-		signers := make([]string, len(i.AuthorizedSigners))
-		copy(signers, i.AuthorizedSigners)
-		sort.Strings(signers)
-		h.Write([]byte("auth:"))
-		for _, signer := range signers {
-			h.Write([]byte(signer + ","))
-		}
+	// Write EncryptedAuthorizedSigners
+	if len(i.EncryptedAuthorizedSigners) > 0 {
+		h.Write([]byte("auth_enc:"))
+		h.Write(i.EncryptedAuthorizedSigners)
 		h.Write([]byte("|"))
 	}
 
@@ -492,9 +512,9 @@ func (i *Inode) ManifestHash() []byte {
 // SignInodeForTest signs an inode using a provided identity key.
 // Only used for low-level metadata tests that bypass the client.
 func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
-	i.SignerID = userID
-	if len(i.AuthorizedSigners) == 0 && i.OwnerID != "" {
-		i.AuthorizedSigners = []string{i.OwnerID}
+	i.EncryptedSignerID = []byte(userID)
+	if len(i.EncryptedAuthorizedSigners) == 0 && i.OwnerID != "" {
+		i.EncryptedAuthorizedSigners = []byte(i.OwnerID)
 	}
 	// Note: We use Version+1 because FSM increments version during apply
 	orig := i.Version

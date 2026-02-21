@@ -89,8 +89,8 @@ func TestManifestIntegrity(t *testing.T) {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
 
-	if inode.SignerID != userID {
-		t.Errorf("Expected SignerID %s, got %s", userID, inode.SignerID)
+	if inode.GetSignerID() != userID {
+		t.Errorf("Expected SignerID %s, got %s", userID, inode.GetSignerID())
 	}
 	if len(inode.UserSig) == 0 {
 		t.Error("Missing UserSig on inode")
@@ -119,8 +119,8 @@ func TestManifestIntegrity(t *testing.T) {
 	if inode2.OwnerID != userID {
 		t.Errorf("Expected owner %s, got %s", userID, inode2.OwnerID)
 	}
-	if inode2.SignerID != adminID {
-		t.Errorf("Expected Admin to be the signer after chown, got %s", inode2.SignerID)
+	if inode2.GetSignerID() != adminID {
+		t.Errorf("Expected Admin to be the signer after chown, got %s", inode2.GetSignerID())
 	}
 
 	if err := clientA.VerifyInode(inode2); err != nil {
@@ -197,8 +197,8 @@ func TestManifestIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Resolve group file failed: %v", err)
 	}
-	if inodeG.SignerID != userID {
-		t.Errorf("Expected member %s to be signer, got %s", userID, inodeG.SignerID)
+	if inodeG.GetSignerID() != userID {
+		t.Errorf("Expected member %s to be signer, got %s", userID, inodeG.GetSignerID())
 	}
 	if len(inodeG.GroupSig) == 0 {
 		t.Error("Missing GroupSig on shared file")

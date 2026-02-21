@@ -900,25 +900,55 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 }
 
 func (c *Client) signInode(inode *metadata.Inode) {
-	if len(inode.AuthorizedSigners) == 0 && inode.OwnerID != "" {
-		inode.AuthorizedSigners = []string{inode.OwnerID}
+	// 1. Resolve encryption key for metadata fields
+	// If it's a group file, use Group Encryption Key.
+	// Otherwise, use Owner's Public Key.
+	var encKey *mlkem.EncapsulationKey768
+
+	if inode.GroupID != "" {
+		gdk, err := c.GetGroupPrivateKey(inode.GroupID)
+		if err == nil {
+			encKey = gdk.EncapsulationKey()
+		}
+	} else if inode.OwnerID != "" {
+		owner, err := c.GetUser(inode.OwnerID)
+		if err == nil {
+			encKey, _ = crypto.UnmarshalEncapsulationKey(owner.EncKey)
+		}
 	}
 
-	// Phase 31: Ensure signer is authorized in the manifest
+	// Default to self if no other key found (e.g. creating personal file)
+	if encKey == nil {
+		encKey = c.decKey.EncapsulationKey()
+	}
+
+	// 2. Prepare and Encrypt metadata fields
+	authSigners := inode.GetAuthorizedSigners()
+	if len(authSigners) == 0 && inode.OwnerID != "" {
+		authSigners = []string{inode.OwnerID}
+	}
+
 	found := false
-	for _, s := range inode.AuthorizedSigners {
+	for _, s := range authSigners {
 		if s == c.userID {
 			found = true
 			break
 		}
 	}
 	if !found {
-		inode.AuthorizedSigners = append(inode.AuthorizedSigners, c.userID)
+		authSigners = append(authSigners, c.userID)
 	}
+	inode.SetAuthorizedSigners(authSigners)
+
+	// Encrypt SignerID
+	inode.EncryptedSignerID, _ = crypto.Seal([]byte(c.userID), encKey, 0)
+
+	// Encrypt AuthorizedSigners
+	authBytes, _ := json.Marshal(authSigners)
+	inode.EncryptedAuthorizedSigners, _ = crypto.Seal(authBytes, encKey, 0)
 
 	inode.Mode = metadata.SanitizeMode(inode.Mode, inode.Type)
 	inode.Version++ // Sign the version that will be stored on the server
-	inode.SignerID = c.userID
 	hash := inode.ManifestHash()
 	inode.UserSig = c.signKey.Sign(hash)
 
@@ -1031,13 +1061,15 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	})
 
 	if err != nil {
-
 		return nil, err
+	}
 
+	// Phase 31: Verification (Decrypts transient fields)
+	if err := c.VerifyInode(&created); err != nil {
+		return nil, err
 	}
 
 	return &created, nil
-
 }
 
 func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
@@ -1067,7 +1099,7 @@ func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metada
 			latest.ChunkPages = inode.ChunkPages
 			latest.Children = inode.Children
 			latest.Lockbox = inode.Lockbox
-			latest.AuthorizedSigners = inode.AuthorizedSigners
+			latest.SetAuthorizedSigners(inode.GetAuthorizedSigners())
 			inode = *latest
 		}
 
@@ -1112,6 +1144,11 @@ func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metada
 			}
 
 			if err := json.NewDecoder(body).Decode(&updated); err != nil {
+				return err
+			}
+
+			// Phase 31: Verification (Decrypts transient fields)
+			if err := c.VerifyInode(&updated); err != nil {
 				return err
 			}
 
@@ -2286,22 +2323,53 @@ func (c *Client) GetInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 
 // VerifyInode verifies the manifest signatures and authorized signers.
 func (c *Client) VerifyInode(inode *metadata.Inode) error {
-	if inode.SignerID == "" {
+	// 1. Decrypt Signer fields first
+	var decKey *mlkem.DecapsulationKey768
+	if inode.GroupID != "" {
+		decKey, _ = c.GetGroupPrivateKey(inode.GroupID)
+	} else if inode.OwnerID == c.userID {
+		decKey = c.decKey
+	}
+
+	if decKey == nil && len(inode.EncryptedSignerID) > 0 {
+		return fmt.Errorf("no decryption key for inode %s signer metadata", inode.ID)
+	}
+
+	if len(inode.EncryptedSignerID) > 0 {
+		signerBytes, err := crypto.Unseal(inode.EncryptedSignerID, decKey)
+		if err == nil {
+			inode.SetSignerID(string(signerBytes))
+		}
+	}
+	if len(inode.EncryptedAuthorizedSigners) > 0 {
+		authBytes, err := crypto.Unseal(inode.EncryptedAuthorizedSigners, decKey)
+		if err == nil {
+			var auth []string
+			if err := json.Unmarshal(authBytes, &auth); err == nil {
+				inode.SetAuthorizedSigners(auth)
+			}
+		}
+	}
+
+	signerID := inode.GetSignerID()
+	authSigners := inode.GetAuthorizedSigners()
+
+	if signerID == "" {
 		// If there are authorized signers, we expect a signature.
-		if len(inode.AuthorizedSigners) > 0 {
+		if len(authSigners) > 0 {
 			return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
 		}
 		return nil
 	}
 
-	// 1. Verify Signatures First
+	// 2. Verify Signatures
 	hash := inode.ManifestHash()
-	user, err := c.GetUser(inode.SignerID)
+	user, err := c.GetUser(signerID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch signer %s: %w", inode.SignerID, err)
+		return fmt.Errorf("failed to fetch signer %s: %w", signerID, err)
 	}
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
-		return fmt.Errorf("invalid manifest signature by %s", inode.SignerID)
+		return fmt.Errorf("invalid manifest signature by %s", signerID)
 	}
 
 	groupValid := false
@@ -2314,25 +2382,25 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 		}
 	}
 
-	// 2. Check Authorization
+	// 3. Check Authorization
 	// Either the Signer must be in AuthorizedSigners OR we have a valid Group Signature from the owning group
 	authorized := groupValid
 
 	if !authorized {
-		for _, s := range inode.AuthorizedSigners {
-			if s == inode.SignerID {
+		for _, s := range authSigners {
+			if s == signerID {
 				authorized = true
 				break
 			}
 		}
 		// Owner is implicitly authorized if no AuthorizedSigners listed
-		if !authorized && len(inode.AuthorizedSigners) == 0 && inode.SignerID == inode.OwnerID {
+		if !authorized && len(authSigners) == 0 && signerID == inode.OwnerID {
 			authorized = true
 		}
 	}
 
 	if !authorized {
-		return fmt.Errorf("signer %s is not authorized for inode %s (no valid group sig or ACL match)", inode.SignerID, inode.ID)
+		return fmt.Errorf("signer %s is not authorized for inode %s (no valid group sig or ACL match)", signerID, inode.ID)
 	}
 
 	return nil
@@ -2755,8 +2823,17 @@ func (c *Client) decryptRegistry(key []byte, encrypted []byte) ([]metadata.Membe
 	return members, nil
 }
 
-// CreateGroup creates a new cryptographic group.
+// CreateGroup creates a new user group.
 func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
+	return c.createGroupInternal(name, false)
+}
+
+// CreateSystemGroup creates a new system group (Admin only).
+func (c *Client) CreateSystemGroup(name string) (*metadata.Group, error) {
+	return c.createGroupInternal(name, true)
+}
+
+func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Group, error) {
 	// 1. Generate Encryption Key (ML-KEM)
 	dk, _ := crypto.GenerateEncryptionKey()
 	pk := dk.EncapsulationKey().Bytes()
@@ -2852,6 +2929,7 @@ func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
 		Lockbox:           lb,
 		RegistryLockbox:   rlb,
 		EncryptedRegistry: encRegistry,
+		IsSystem:          isSystem,
 		Version:           1,
 	}
 
@@ -3779,7 +3857,7 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 	if req.OwnerID != nil {
 		inode.OwnerID = *req.OwnerID
 		// Reset authorized signers to just the new owner to ensure clean hand-off
-		inode.AuthorizedSigners = []string{inode.OwnerID}
+		inode.SetAuthorizedSigners([]string{inode.OwnerID})
 
 		// If we have the key, add the new owner to the lockbox
 		if unlockErr == nil {

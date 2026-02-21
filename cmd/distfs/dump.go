@@ -66,8 +66,8 @@ func dumpInode(i *metadata.Inode) {
 	fmt.Printf("  Owner: %s\n", i.OwnerID)
 	fmt.Printf("  Group: %s\n", i.GroupID)
 	fmt.Printf("  Version: %d\n", i.Version)
-	fmt.Printf("  SignerID: %s\n", i.SignerID)
-	fmt.Printf("  AuthorizedSigners: %v\n", i.AuthorizedSigners)
+	fmt.Printf("  SignerID: %s\n", i.GetSignerID())
+	fmt.Printf("  AuthorizedSigners: %v\n", i.GetAuthorizedSigners())
 
 	if l := len(i.EncryptedSymlinkTarget); l > 0 {
 		prefixLen := 8
