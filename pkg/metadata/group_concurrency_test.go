@@ -1,7 +1,6 @@
 package metadata_test
 
 import (
-	"context"
 	"crypto/rand"
 	"sync"
 	"testing"
@@ -30,7 +29,7 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 
 	serverPK, _ := crypto.UnmarshalEncapsulationKey(serverEK)
 	clientAlice := client.NewClient(ts.URL).WithIdentity("alice", uAliceDK).WithSignKey(uAliceSign).WithServerKey(serverPK)
-	if err := clientAlice.Login(); err != nil {
+	if err := clientAlice.Login(t.Context()); err != nil {
 		t.Fatalf("Alice login failed: %v", err)
 	}
 
@@ -43,7 +42,7 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 	}
 
 	// 2. Alice creates a group
-	group, err := clientAlice.CreateGroup("race-test")
+	group, err := clientAlice.CreateGroup(t.Context(), "race-test")
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -57,12 +56,12 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		err1Ch <- clientAlice.AddUserToGroup(context.Background(), group.ID, "user1", "User 1 Info", nil)
+		err1Ch <- clientAlice.AddUserToGroup(t.Context(), group.ID, "user1", "User 1 Info", nil)
 	}()
 
 	go func() {
 		defer wg.Done()
-		err2Ch <- clientAlice.AddUserToGroup(context.Background(), group.ID, "user2", "User 2 Info", nil)
+		err2Ch <- clientAlice.AddUserToGroup(t.Context(), group.ID, "user2", "User 2 Info", nil)
 	}()
 
 	wg.Wait()
@@ -75,7 +74,7 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 	}
 
 	// 4. Verify BOTH users are present
-	finalGroup, err := clientAlice.GetGroup(group.ID)
+	finalGroup, err := clientAlice.GetGroup(t.Context(), group.ID)
 	if err != nil {
 		t.Fatalf("GetGroup failed: %v", err)
 	}
@@ -88,7 +87,7 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 	}
 
 	// Verify Registry (Fix #2 ensures merge)
-	members, err := clientAlice.GetGroupMembers(group.ID)
+	members, err := clientAlice.GetGroupMembers(t.Context(), group.ID)
 	if err != nil {
 		t.Fatalf("GetGroupMembers failed: %v", err)
 	}

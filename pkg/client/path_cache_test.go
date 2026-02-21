@@ -88,22 +88,22 @@ func TestPathCache(t *testing.T) {
 	// But EnsureRoot uses createInode which signs it.
 	// The problem is that TestPathCache might be seeing an UNSIGNED root if it was pre-created.
 	// Actually EnsureRoot is called below.
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	// 2. Create deep hierarchy
-	if err := c.Mkdir("/a"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Mkdir("/a/b"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a/b"); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Mkdir("/a/b/c"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a/b/c"); err != nil {
 		t.Fatal(err)
 	}
 	content := []byte("cached-data")
-	if err := c.CreateFile("/a/b/c/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := c.CreateFile(t.Context(), "/a/b/c/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -115,7 +115,7 @@ func TestPathCache(t *testing.T) {
 
 	atomic.StoreUint64(&getInodeCount, 0)
 	t.Log("Starting first resolution (sequential)...")
-	_, _, err := c.ResolvePath("/a/b/c/f.txt")
+	_, _, err := c.ResolvePath(t.Context(), "/a/b/c/f.txt")
 	if err != nil {
 		t.Fatalf("First resolve failed: %v", err)
 	}
@@ -123,7 +123,7 @@ func TestPathCache(t *testing.T) {
 	t.Logf("First resolution took %d Inode fetches", count1)
 
 	// Expect root + a + b + c + f.txt = 5 fetches?
-	// ResolvePath("/") caches root.
+	// ResolvePath(t.Context(), "/") caches root.
 	// a caches /a, etc.
 	if count1 < 4 {
 		t.Errorf("Expected multiple Inode fetches for sequential resolution, got %d", count1)
@@ -133,7 +133,7 @@ func TestPathCache(t *testing.T) {
 	// Expect exactly 1 Inode fetch (f.txt) because of the cache hit + validation.
 	atomic.StoreUint64(&getInodeCount, 0)
 	t.Log("Starting second resolution (cached)...")
-	_, _, err = c.ResolvePath("/a/b/c/f.txt")
+	_, _, err = c.ResolvePath(t.Context(), "/a/b/c/f.txt")
 	if err != nil {
 		t.Fatalf("Second resolve failed: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestPathCache(t *testing.T) {
 	}
 
 	// 5. Invalidation on Remove
-	if err := c.Remove("/a/b/c/f.txt"); err != nil {
+	if err := c.Remove(t.Context(), "/a/b/c/f.txt"); err != nil {
 		t.Fatal(err)
 	}
 	_, ok := c.getPathCache("/a/b/c/f.txt")
@@ -154,10 +154,10 @@ func TestPathCache(t *testing.T) {
 	}
 
 	// 6. Invalidation on Rename
-	if err := c.CreateFile("/a/b/c/f2.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := c.CreateFile(t.Context(), "/a/b/c/f2.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := c.ResolvePath("/a/b/c/f2.txt"); err != nil {
+	if _, _, err := c.ResolvePath(t.Context(), "/a/b/c/f2.txt"); err != nil {
 		t.Fatal(err)
 	}
 	_, ok = c.getPathCache("/a/b/c/f2.txt")
@@ -165,7 +165,7 @@ func TestPathCache(t *testing.T) {
 		t.Fatal("Cache not populated")
 	}
 
-	if err := c.Rename("/a/b/c/f2.txt", "/a/b/c/f3.txt"); err != nil {
+	if err := c.Rename(t.Context(), "/a/b/c/f2.txt", "/a/b/c/f3.txt"); err != nil {
 		t.Fatal(err)
 	}
 	_, ok = c.getPathCache("/a/b/c/f2.txt")
@@ -182,7 +182,7 @@ func TestPathCache(t *testing.T) {
 	})
 
 	// Resolving /stale should fall back to sequential (which fails with 404)
-	_, _, err = c.ResolvePath("/stale")
+	_, _, err = c.ResolvePath(t.Context(), "/stale")
 	if err == nil {
 		t.Error("Expected error for non-existent path")
 	}

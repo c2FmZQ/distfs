@@ -1,7 +1,6 @@
 package metadata_test
 
 import (
-	"context"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -37,24 +36,24 @@ func TestGroupMemberRegistry(t *testing.T) {
 	serverPK, _ := crypto.UnmarshalEncapsulationKey(serverEK)
 	clientAlice = clientAlice.WithIdentity("alice", uAliceDK).WithSignKey(uAliceSign).WithServerKey(serverPK)
 
-	if err := clientAlice.Login(); err != nil {
+	if err := clientAlice.Login(t.Context()); err != nil {
 		t.Fatalf("Alice login failed: %v", err)
 	}
 
-	group, err := clientAlice.CreateGroup("test-registry")
+	group, err := clientAlice.CreateGroup(t.Context(), "test-registry")
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
 	groupID := group.ID
 
 	// 3. Alice adds Bob with info
-	err = clientAlice.AddUserToGroup(context.Background(), groupID, "bob", "bob@example.com (Staff)", nil)
+	err = clientAlice.AddUserToGroup(t.Context(), groupID, "bob", "bob@example.com (Staff)", nil)
 	if err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
 
 	// 4. Alice (Owner) views members - should see Bob's info
-	members, err := clientAlice.GetGroupMembers(groupID)
+	members, err := clientAlice.GetGroupMembers(t.Context(), groupID)
 	if err != nil {
 		t.Fatalf("GetGroupMembers Alice failed: %v", err)
 	}
@@ -76,11 +75,11 @@ func TestGroupMemberRegistry(t *testing.T) {
 	clientBob := client.NewClient(ts.URL)
 	clientBob = clientBob.WithIdentity("bob", uBobDK).WithSignKey(uBobSign).WithServerKey(serverPK)
 
-	if err := clientBob.Login(); err != nil {
+	if err := clientBob.Login(t.Context()); err != nil {
 		t.Fatalf("Bob login failed: %v", err)
 	}
 
-	membersBob, err := clientBob.GetGroupMembers(groupID)
+	membersBob, err := clientBob.GetGroupMembers(t.Context(), groupID)
 	if err != nil {
 		t.Fatalf("GetGroupMembers Bob failed: %v", err)
 	}

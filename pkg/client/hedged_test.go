@@ -46,7 +46,7 @@ func TestDownloadChunk_HedgedRequests(t *testing.T) {
 	defer ts2.Close()
 
 	urls := []string{ts1.URL, ts2.URL}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 
 	start := time.Now()
@@ -95,7 +95,7 @@ func TestDownloadChunk_Cancellation(t *testing.T) {
 	// TS1 is first, TS2 is replica. We'll wait for TS2 to succeed via hedge.
 	urls := []string{ts1.URL, ts2.URL}
 
-	_, err := c.downloadChunk(context.Background(), "chunk-1", urls, "token")
+	_, err := c.downloadChunk(t.Context(), "chunk-1", urls, "token")
 	if err != nil {
 		t.Fatalf("downloadChunk failed: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestDownloadChunk_AllFail(t *testing.T) {
 	defer ts1.Close()
 
 	urls := []string{ts1.URL}
-	_, err := c.downloadChunk(context.Background(), "chunk-1", urls, "token")
+	_, err := c.downloadChunk(t.Context(), "chunk-1", urls, "token")
 	if err == nil {
 		t.Fatal("expected error when all nodes fail")
 	}

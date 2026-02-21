@@ -65,14 +65,15 @@ type AdminClient interface {
 	AdminPromote(ctx context.Context, userID string) error
 	AdminJoinNode(ctx context.Context, address string) error
 	AdminRemoveNode(ctx context.Context, id string) error
-	DecryptGroupName(entry metadata.GroupListEntry) (string, error)
-	ResolvePath(path string) (*metadata.Inode, []byte, error)
+	DecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error)
+	ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)
 	AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error
 	AdminChmod(ctx context.Context, inodeID string, mode uint32) error
 }
 
 type model struct {
 	client AdminClient
+	ctx    context.Context
 	tab    tab
 
 	// Data
@@ -127,7 +128,7 @@ func (m model) Init() tea.Cmd {
 type tickMsg time.Time
 
 func (m model) fetchStatus() tea.Msg {
-	status, err := m.client.AdminClusterStatus(context.Background())
+	status, err := m.client.AdminClusterStatus(m.ctx)
 	if err != nil {
 		return errMsg(err)
 	}
@@ -135,7 +136,7 @@ func (m model) fetchStatus() tea.Msg {
 }
 
 func (m model) fetchUsers() tea.Msg {
-	users, err := m.client.AdminListUsers(context.Background())
+	users, err := m.client.AdminListUsers(m.ctx)
 	if err != nil {
 		return errMsg(err)
 	}
@@ -143,7 +144,7 @@ func (m model) fetchUsers() tea.Msg {
 }
 
 func (m model) fetchGroups() tea.Msg {
-	groups, err := m.client.AdminListGroups(context.Background())
+	groups, err := m.client.AdminListGroups(m.ctx)
 	if err != nil {
 		return errMsg(err)
 	}
@@ -151,7 +152,7 @@ func (m model) fetchGroups() tea.Msg {
 }
 
 func (m model) fetchLeases() tea.Msg {
-	leases, err := m.client.AdminListLeases(context.Background())
+	leases, err := m.client.AdminListLeases(m.ctx)
 	if err != nil {
 		return errMsg(err)
 	}
@@ -159,7 +160,7 @@ func (m model) fetchLeases() tea.Msg {
 }
 
 func (m model) fetchNodes() tea.Msg {
-	nodes, err := m.client.AdminListNodes(context.Background())
+	nodes, err := m.client.AdminListNodes(m.ctx)
 	if err != nil {
 		return errMsg(err)
 	}
@@ -317,7 +318,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			email := m.lookupInput.Value()
 			if email != "" {
 				return m, func() tea.Msg {
-					id, err := m.client.AdminLookup(context.Background(), email, "Blind Lookup Tool")
+					id, err := m.client.AdminLookup(m.ctx, email, "Blind Lookup Tool")
 					if err != nil {
 						return lookupMsg(fmt.Sprintf("Error: %v", err))
 					}
@@ -379,7 +380,7 @@ func (m *model) updateGroupTable() {
 		name := "[HIDDEN]"
 		// Attempt to decrypt if admin has access
 		// We can reuse the group list logic from the client
-		if decrypted, err := m.client.DecryptGroupName(metadata.GroupListEntry{
+		if decrypted, err := m.client.DecryptGroupName(m.ctx, metadata.GroupListEntry{
 			ID:         g.ID,
 			ClientBlob: g.ClientBlob,
 			Lockbox:    g.Lockbox,
@@ -564,7 +565,6 @@ func (m model) toolsView() string {
 }
 
 func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
-	ctx := context.Background()
 	modal := m.activeModal
 	m.activeModal = "" // Close modal
 
@@ -578,7 +578,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.AdminLookup(ctx, email, "Quota Management")
+				id, err := m.client.AdminLookup(m.ctx, email, "Quota Management")
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -590,7 +590,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 				return errMsg(fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes))
 			}
 			req := metadata.SetUserQuotaRequest{UserID: userID, MaxBytes: &maxBytes, MaxInodes: &maxInodes}
-			if err := m.client.AdminSetUserQuota(ctx, req); err != nil {
+			if err := m.client.AdminSetUserQuota(m.ctx, req); err != nil {
 				return errMsg(err)
 			}
 			return refresh()
@@ -604,7 +604,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 				return errMsg(fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes))
 			}
 			req := metadata.SetGroupQuotaRequest{GroupID: groupID, MaxBytes: &maxBytes, MaxInodes: &maxInodes}
-			if err := m.client.AdminSetGroupQuota(ctx, req); err != nil {
+			if err := m.client.AdminSetGroupQuota(m.ctx, req); err != nil {
 				return errMsg(err)
 			}
 			return refresh()
@@ -614,13 +614,13 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.AdminLookup(ctx, email, "Quota Management")
+				id, err := m.client.AdminLookup(m.ctx, email, "Quota Management")
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
 				userID = id
 			}
-			if err := m.client.AdminPromote(ctx, userID); err != nil {
+			if err := m.client.AdminPromote(m.ctx, userID); err != nil {
 				return errMsg(err)
 			}
 			return refresh()
@@ -628,7 +628,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 	case "join":
 		addr := m.inputs[0].Value()
 		return m, func() tea.Msg {
-			if err := m.client.AdminJoinNode(ctx, addr); err != nil {
+			if err := m.client.AdminJoinNode(m.ctx, addr); err != nil {
 				return errMsg(err)
 			}
 			return refresh()
@@ -636,7 +636,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 	case "remove":
 		id := m.inputs[0].Value()
 		return m, func() tea.Msg {
-			if err := m.client.AdminRemoveNode(ctx, id); err != nil {
+			if err := m.client.AdminRemoveNode(m.ctx, id); err != nil {
 				return errMsg(err)
 			}
 			return refresh()
@@ -668,7 +668,7 @@ func newInput(placeholder string) textinput.Model {
 	return ti
 }
 
-func cmdAdmin(args []string) {
+func cmdAdmin(ctx context.Context, args []string) {
 	c := loadClient()
 
 	ti := textinput.New()
@@ -678,6 +678,7 @@ func cmdAdmin(args []string) {
 
 	m := model{
 		client:      c,
+		ctx:         ctx,
 		tab:         tabOverview,
 		lookupInput: ti,
 	}
@@ -688,31 +689,31 @@ func cmdAdmin(args []string) {
 	}
 }
 
-func cmdAdminJoin(args []string) {
+func cmdAdminJoin(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("node address required (e.g. http://node-2:8080)")
 	}
 	address := args[0]
 	c := loadClient()
-	if err := c.AdminJoinNode(context.Background(), address); err != nil {
+	if err := c.AdminJoinNode(ctx, address); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Join request for %s submitted to cluster.\n", address)
 }
 
-func cmdAdminRemove(args []string) {
+func cmdAdminRemove(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("node ID required")
 	}
 	id := args[0]
 	c := loadClient()
-	if err := c.AdminRemoveNode(context.Background(), id); err != nil {
+	if err := c.AdminRemoveNode(ctx, id); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Node %s removed from cluster.\n", id)
 }
 
-func cmdAdminChown(args []string) {
+func cmdAdminChown(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("admin-chown", flag.ExitOnError)
 	force := fs.Bool("f", false, "Force operation without confirmation")
 	if err := fs.Parse(args); err != nil {
@@ -732,7 +733,7 @@ func cmdAdminChown(args []string) {
 	// 1. Resolve email to UserID
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(context.Background(), email, "CLI chown")
+		id, err := c.AdminLookup(ctx, email, "CLI chown")
 		if err != nil {
 			log.Fatalf("failed to resolve email %s: %v", email, err)
 		}
@@ -747,7 +748,7 @@ func cmdAdminChown(args []string) {
 	}
 
 	// 3. Resolve Path to InodeID
-	inode, _, err := c.ResolvePath(path)
+	inode, _, err := c.ResolvePath(ctx, path)
 	if err != nil {
 		log.Fatalf("failed to resolve path %s: %v", path, err)
 	}
@@ -765,13 +766,13 @@ func cmdAdminChown(args []string) {
 		}
 	}
 
-	if err := c.AdminChown(context.Background(), inode.ID, req); err != nil {
+	if err := c.AdminChown(ctx, inode.ID, req); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Ownership updated successfully.")
 }
 
-func cmdAdminChmod(args []string) {
+func cmdAdminChmod(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("admin-chmod", flag.ExitOnError)
 	force := fs.Bool("f", false, "Force operation without confirmation")
 	if err := fs.Parse(args); err != nil {
@@ -788,7 +789,7 @@ func cmdAdminChmod(args []string) {
 	}
 
 	c := loadClient()
-	inode, _, err := c.ResolvePath(path)
+	inode, _, err := c.ResolvePath(ctx, path)
 	if err != nil {
 		log.Fatalf("failed to resolve path %s: %v", path, err)
 	}
@@ -805,7 +806,7 @@ func cmdAdminChmod(args []string) {
 		}
 	}
 
-	if err := c.AdminChmod(context.Background(), inode.ID, uint32(mode)); err != nil {
+	if err := c.AdminChmod(ctx, inode.ID, uint32(mode)); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Println("Permissions updated successfully.")
@@ -823,7 +824,7 @@ func isHexID(s string) bool {
 	return true
 }
 
-func cmdAdminPromote(args []string) {
+func cmdAdminPromote(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("usage: admin-promote <email>")
 	}
@@ -833,20 +834,20 @@ func cmdAdminPromote(args []string) {
 	// Resolve email to UserID
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(context.Background(), email, "CLI promote")
+		id, err := c.AdminLookup(ctx, email, "CLI promote")
 		if err != nil {
 			log.Fatalf("failed to resolve email %s: %v", email, err)
 		}
 		userID = id
 	}
 
-	if err := c.AdminPromote(context.Background(), userID); err != nil {
+	if err := c.AdminPromote(ctx, userID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s promoted to Admin successfully.\n", email)
 }
 
-func cmdAdminUserQuota(args []string) {
+func cmdAdminUserQuota(ctx context.Context, args []string) {
 	if len(args) < 3 {
 		log.Fatal("usage: admin-user-quota <email> <max_bytes> <max_inodes>")
 	}
@@ -855,7 +856,7 @@ func cmdAdminUserQuota(args []string) {
 
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(context.Background(), email, "CLI user quota")
+		id, err := c.AdminLookup(ctx, email, "CLI user quota")
 		if err != nil {
 			log.Fatalf("failed to resolve email %s: %v", email, err)
 		}
@@ -871,13 +872,13 @@ func cmdAdminUserQuota(args []string) {
 		MaxInodes: &maxInodes,
 	}
 
-	if err := c.AdminSetUserQuota(context.Background(), req); err != nil {
+	if err := c.AdminSetUserQuota(ctx, req); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s quota updated: %d bytes, %d inodes\n", email, maxBytes, maxInodes)
 }
 
-func cmdAdminGroupQuota(args []string) {
+func cmdAdminGroupQuota(ctx context.Context, args []string) {
 	if len(args) < 3 {
 		log.Fatal("usage: admin-group-quota <group_id> <max_bytes> <max_inodes>")
 	}
@@ -893,7 +894,7 @@ func cmdAdminGroupQuota(args []string) {
 		MaxInodes: &maxInodes,
 	}
 
-	if err := c.AdminSetGroupQuota(context.Background(), req); err != nil {
+	if err := c.AdminSetGroupQuota(ctx, req); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Group %s quota updated: %d bytes, %d inodes\n", groupID, maxBytes, maxInodes)

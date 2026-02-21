@@ -37,15 +37,15 @@ func TestSystemGroups(t *testing.T) {
 	// 2. Alice tries to create a system group (should fail)
 	cAlice := client.NewClient(ts.URL).WithIdentity(userID, uUDK).WithSignKey(uUSign)
 	// We need server key for sealing/authentication
-	ekBytes, _ := cAlice.GetServerSignKey()
+	ekBytes, _ := cAlice.GetServerSignKey(t.Context())
 	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
 	cAlice = cAlice.WithServerKey(ek)
 
-	if err := cAlice.Login(); err != nil {
+	if err := cAlice.Login(t.Context()); err != nil {
 		t.Fatalf("Alice login failed: %v", err)
 	}
 
-	_, err := cAlice.CreateSystemGroup("alice-sys-group")
+	_, err := cAlice.CreateSystemGroup(t.Context(), "alice-sys-group")
 	if err == nil {
 		t.Error("Alice (non-admin) should NOT be able to create a system group")
 	} else {
@@ -54,11 +54,11 @@ func TestSystemGroups(t *testing.T) {
 
 	// 3. Admin creates a system group (should succeed)
 	cAdmin := client.NewClient(ts.URL).WithIdentity(adminID, uADK).WithSignKey(uASign).WithServerKey(ek)
-	if err := cAdmin.Login(); err != nil {
+	if err := cAdmin.Login(t.Context()); err != nil {
 		t.Fatalf("Admin login failed: %v", err)
 	}
 
-	sysGroup, err := cAdmin.CreateSystemGroup("cluster-admin-group")
+	sysGroup, err := cAdmin.CreateSystemGroup(t.Context(), "cluster-admin-group")
 	if err != nil {
 		t.Fatalf("Admin failed to create system group: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestSystemGroups(t *testing.T) {
 	}
 
 	// 4. Verify labeling in list
-	groups, err := cAdmin.ListGroups()
+	groups, err := cAdmin.ListGroups(t.Context())
 	if err != nil {
 		t.Fatalf("ListGroups failed: %v", err)
 	}

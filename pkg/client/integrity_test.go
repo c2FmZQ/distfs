@@ -3,7 +3,6 @@ package client
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http/httptest"
 	"testing"
@@ -68,23 +67,22 @@ func TestManifestIntegrity(t *testing.T) {
 	// 3. Client Operations
 	// 3.1 User B creates a file
 	clientB := NewClient(ts.URL).WithIdentity(userID, dkB).WithSignKey(skB).WithServerKey(ek)
-	if err := clientB.Login(); err != nil {
+	if err := clientB.Login(t.Context()); err != nil {
 		t.Fatalf("User B login failed: %v", err)
 	}
 
-	ctx := context.Background()
-	if err := clientB.EnsureRoot(); err != nil {
+	if err := clientB.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
 	filePath := "/secret.txt"
 	content := []byte("top secret data")
-	if err := clientB.CreateFile(filePath, bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := clientB.CreateFile(t.Context(), filePath, bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
 	// 4. Verify Signing
-	inode, _, err := clientB.ResolvePath(filePath)
+	inode, _, err := clientB.ResolvePath(t.Context(), filePath)
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
@@ -102,18 +100,18 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// 5. Admin Operations (Client-side Signing)
 	clientA := NewClient(ts.URL).WithIdentity(adminID, dkA).WithSignKey(skA).WithServerKey(ek).WithAdmin(true)
-	if err := clientA.Login(); err != nil {
+	if err := clientA.Login(t.Context()); err != nil {
 		t.Fatalf("Admin login failed: %v", err)
 	}
 
 	// Admin changes ownership to User B (re-signing by Admin)
 	chownReq := metadata.AdminChownRequest{OwnerID: &userID}
-	if err := clientA.AdminChown(ctx, inode.ID, chownReq); err != nil {
+	if err := clientA.AdminChown(t.Context(), inode.ID, chownReq); err != nil {
 		t.Fatalf("AdminChown failed: %v", err)
 	}
 
 	var inode2 *metadata.Inode
-	inode2, err = clientA.GetInodeUnverified(ctx, inode.ID)
+	inode2, err = clientA.GetInodeUnverified(t.Context(), inode.ID)
 	if err != nil {
 		t.Fatalf("GetInode failed: %v", err)
 	}
@@ -123,7 +121,7 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// Note: Admin cannot verify signerID or AuthorizedSigners after chown
 	// because they are now encrypted for User B.
-	// clientA.VerifyInode(inode2) would fail here.
+	// clientA.VerifyInode(t.Context(), inode2) would fail here.
 
 	// 6. ADVERSARIAL: Evil Server Tampering
 	// Manually modify the size in the DB without updating signature
@@ -146,7 +144,7 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// Verify we can still get it verified-but-not-decrypted (metadata only)
 	// Admin can see the inode now because VerifyInode returns nil if key missing.
-	it, err := clientA.GetInode(ctx, inode2.ID)
+	it, err := clientA.GetInode(t.Context(), inode2.ID)
 	if err != nil {
 		t.Fatalf("GetInode failed after chown (expected success via partial verify): %v", err)
 	}
@@ -156,49 +154,49 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// 7. Group Signing & Member Mutation
 	// 7.1 Create Group
-	group, err := clientA.CreateGroup("test-group")
+	group, err := clientA.CreateGroup(t.Context(), "test-group")
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
-	if err := clientA.AddUserToGroup(context.Background(), group.ID, userID, "User B (Test)", nil); err != nil {
+	if err := clientA.AddUserToGroup(t.Context(), group.ID, userID, "User B (Test)", nil); err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
 
 	// Phase 31: User B must re-login to pick up new group membership in session
-	if err := clientB.Login(); err != nil {
+	if err := clientB.Login(t.Context()); err != nil {
 		t.Fatalf("User B re-login failed: %v", err)
 	}
 
 	// 7.2 Admin creates a file in the group
 	groupPath := "/group-shared"
-	if err := clientA.Mkdir(groupPath); err != nil {
+	if err := clientA.Mkdir(t.Context(), groupPath); err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
-	if err := clientA.SetAttr(groupPath, metadata.SetAttrRequest{GroupID: &group.ID}); err != nil {
+	if err := clientA.SetAttr(t.Context(), groupPath, metadata.SetAttrRequest{GroupID: &group.ID}); err != nil {
 		t.Fatalf("Chgrp failed: %v", err)
 	}
 	mode := uint32(0770)
-	if err := clientA.SetAttr(groupPath, metadata.SetAttrRequest{Mode: &mode}); err != nil {
+	if err := clientA.SetAttr(t.Context(), groupPath, metadata.SetAttrRequest{Mode: &mode}); err != nil {
 		t.Fatalf("Chmod failed: %v", err)
 	}
 
 	groupFile := groupPath + "/shared.txt"
-	if err := clientA.CreateFile(groupFile, bytes.NewReader([]byte("initial")), 7); err != nil {
+	if err := clientA.CreateFile(t.Context(), groupFile, bytes.NewReader([]byte("initial")), 7); err != nil {
 		t.Fatalf("Create group file failed: %v", err)
 	}
 	// Default CreateFile is 0600, member needs 0660
 	modeShared := uint32(0660)
-	if err := clientA.SetAttr(groupFile, metadata.SetAttrRequest{Mode: &modeShared}); err != nil {
+	if err := clientA.SetAttr(t.Context(), groupFile, metadata.SetAttrRequest{Mode: &modeShared}); err != nil {
 		t.Fatalf("Chmod shared file failed: %v", err)
 	}
 
 	// 7.3 User B (Member) modifies the group file
-	if err := clientB.CreateFile(groupFile, bytes.NewReader([]byte("member updated")), 14); err != nil {
+	if err := clientB.CreateFile(t.Context(), groupFile, bytes.NewReader([]byte("member updated")), 14); err != nil {
 		t.Fatalf("Member update failed: %v", err)
 	}
 
 	// 7.4 Verify Member's signature and Group signature
-	inodeG, _, err := clientA.ResolvePath(groupFile)
+	inodeG, _, err := clientA.ResolvePath(t.Context(), groupFile)
 	if err != nil {
 		t.Fatalf("Resolve group file failed: %v", err)
 	}
@@ -208,7 +206,7 @@ func TestManifestIntegrity(t *testing.T) {
 	if len(inodeG.GroupSig) == 0 {
 		t.Error("Missing GroupSig on shared file")
 	}
-	if err := clientA.VerifyInode(inodeG); err != nil {
+	if err := clientA.VerifyInode(t.Context(), inodeG); err != nil {
 		t.Errorf("Group file verification failed: %v", err)
 	}
 
@@ -228,7 +226,7 @@ func TestManifestIntegrity(t *testing.T) {
 		t.Fatalf("DB rollback failed: %v", err)
 	}
 
-	_, err = clientA.GetInode(ctx, inodeG.ID)
+	_, err = clientA.GetInode(t.Context(), inodeG.ID)
 	if err == nil {
 		t.Error("Expected error when fetching rolled-back inode, but got nil")
 	} else {
@@ -273,12 +271,12 @@ func TestGroupIntegrity(t *testing.T) {
 	createUser(t, raftNode, u)
 
 	client := NewClient(ts.URL).WithIdentity(userID, dk).WithSignKey(sk).WithServerKey(ek)
-	if err := client.Login(); err != nil {
+	if err := client.Login(t.Context()); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
 
 	// 3. Create Group (Verified initial signature)
-	group, err := client.CreateGroup("integrity-group")
+	group, err := client.CreateGroup(t.Context(), "integrity-group")
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -291,7 +289,7 @@ func TestGroupIntegrity(t *testing.T) {
 	}
 
 	// 4. Verify Fetching
-	fetched, err := client.GetGroup(group.ID)
+	fetched, err := client.GetGroup(t.Context(), group.ID)
 	if err != nil {
 		t.Fatalf("GetGroup failed: %v", err)
 	}
@@ -320,7 +318,7 @@ func TestGroupIntegrity(t *testing.T) {
 		t.Fatalf("DB tamper failed: %v", err)
 	}
 
-	_, err = client.GetGroup(group.ID)
+	_, err = client.GetGroup(t.Context(), group.ID)
 	if err == nil {
 		t.Error("Expected error when fetching tampered group, but got nil")
 	} else {

@@ -51,68 +51,69 @@ func main() {
 
 	config.UsePinentry = *usePinentry
 
+	ctx := context.Background()
 	command := flag.Arg(0)
 	args := flag.Args()[1:]
 
 	switch command {
 	case "init":
-		cmdInit(args)
+		cmdInit(ctx, args)
 	case "ls":
-		cmdLs(args)
+		cmdLs(ctx, args)
 	case "mkdir":
-		cmdMkdir(args)
+		cmdMkdir(ctx, args)
 	case "put":
-		cmdPut(args)
+		cmdPut(ctx, args)
 	case "get":
-		cmdGet(args)
+		cmdGet(ctx, args)
 	case "rm":
-		cmdRm(args)
+		cmdRm(ctx, args)
 	case "chmod":
-		cmdChmod(args)
+		cmdChmod(ctx, args)
 	case "chgrp":
-		cmdChgrp(args)
+		cmdChgrp(ctx, args)
 	case "group-create":
-		cmdGroupCreate(args)
+		cmdGroupCreate(ctx, args)
 	case "group-list":
-		cmdGroupList(args)
+		cmdGroupList(ctx, args)
 	case "group-add":
-		cmdGroupAdd(args)
+		cmdGroupAdd(ctx, args)
 	case "group-remove":
-		cmdGroupRemove(args)
+		cmdGroupRemove(ctx, args)
 	case "group-chown":
-		cmdGroupChown(args)
+		cmdGroupChown(ctx, args)
 	case "group-members":
-		cmdGroupMembers(args)
+		cmdGroupMembers(ctx, args)
 	case "contact-info":
-		cmdContactInfo(args)
+		cmdContactInfo(ctx, args)
 	case "admin":
-		cmdAdmin(args)
+		cmdAdmin(ctx, args)
 	case "admin-join":
-		cmdAdminJoin(args)
+		cmdAdminJoin(ctx, args)
 	case "admin-remove":
-		cmdAdminRemove(args)
+		cmdAdminRemove(ctx, args)
 	case "admin-chown":
-		cmdAdminChown(args)
+		cmdAdminChown(ctx, args)
 	case "admin-chmod":
-		cmdAdminChmod(args)
+		cmdAdminChmod(ctx, args)
 	case "admin-user-quota":
-		cmdAdminUserQuota(args)
+		cmdAdminUserQuota(ctx, args)
 	case "admin-group-quota":
-		cmdAdminGroupQuota(args)
+		cmdAdminGroupQuota(ctx, args)
 	case "admin-promote":
-		cmdAdminPromote(args)
+		cmdAdminPromote(ctx, args)
 	case "whoami":
-		cmdWhoami(args)
+		cmdWhoami(ctx, args)
 	case "quota":
-		cmdQuota(args)
+		cmdQuota(ctx, args)
 	case "dump-inodes":
-		cmdDumpInodes(args)
+		cmdDumpInodes(ctx, args)
 	default:
 		usage()
 	}
 }
 
-func cmdWhoami(args []string) {
+func cmdWhoami(ctx context.Context, args []string) {
 	c := loadClient()
 	fmt.Println(c.UserID())
 }
@@ -148,7 +149,7 @@ func usage() {
 	os.Exit(1)
 }
 
-func cmdInit(args []string) {
+func cmdInit(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	serverURL := fs.String("server", "http://localhost:8080", "Metadata Server URL")
 	isNew := fs.Bool("new", false, "Initialize a new account")
@@ -177,7 +178,7 @@ func cmdInit(args []string) {
 		Browser:       *browser,
 	}
 
-	if err := client.PerformUnifiedOnboarding(context.Background(), opts); err != nil {
+	if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
 		log.Fatal(err)
 	}
 }
@@ -233,20 +234,20 @@ func saveClient(c *client.Client) {
 }
 
 type LSClient interface {
-	ResolvePath(path string) (*metadata.Inode, []byte, error)
+	ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)
 	ReadDirExtended(ctx context.Context, path string) ([]*client.DistDirEntry, error)
 	ReadDirRecursive(ctx context.Context, path string) (map[string][]*client.DistDirEntry, error)
 	NewDirEntry(inode *metadata.Inode, name string, key []byte) *client.DistDirEntry
-	DecryptName(inode *metadata.Inode) (string, []byte, error)
+	DecryptName(ctx context.Context, inode *metadata.Inode) (string, []byte, error)
 	UserID() string
 }
 
-func cmdLs(args []string) {
+func cmdLs(ctx context.Context, args []string) {
 	c := loadClient()
-	runLs(c, args)
+	runLs(ctx, c, args)
 }
 
-func runLs(c LSClient, args []string) {
+func runLs(ctx context.Context, c LSClient, args []string) {
 	fs := flag.NewFlagSet("ls", flag.ExitOnError)
 	long := fs.Bool("l", false, "Long format")
 	all := fs.Bool("a", false, "Show hidden files")
@@ -268,7 +269,7 @@ func runLs(c LSClient, args []string) {
 
 	if *directory {
 		// Resolve path to get its inode
-		inodeInfo, _, err := c.ResolvePath(path)
+		inodeInfo, _, err := c.ResolvePath(ctx, path)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -278,7 +279,7 @@ func runLs(c LSClient, args []string) {
 		if path == "/" {
 			name = "/"
 		} else {
-			if decrypted, decryptedKey, err := c.DecryptName(inodeInfo); err == nil {
+			if decrypted, decryptedKey, err := c.DecryptName(ctx, inodeInfo); err == nil {
 				name = decrypted
 				key = decryptedKey
 			} else {
@@ -292,7 +293,7 @@ func runLs(c LSClient, args []string) {
 	}
 
 	if *recursive {
-		results, err := c.ReadDirRecursive(context.Background(), path)
+		results, err := c.ReadDirRecursive(ctx, path)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -314,7 +315,7 @@ func runLs(c LSClient, args []string) {
 			}
 		}
 	} else {
-		entries, err := c.ReadDirExtended(context.Background(), path)
+		entries, err := c.ReadDirExtended(ctx, path)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -441,31 +442,31 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 	}
 }
 
-func cmdMkdir(args []string) {
+func cmdMkdir(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("path required")
 	}
 	path := args[0]
 	c := loadClient()
-	if err := c.Mkdir(path); err != nil {
+	if err := c.Mkdir(ctx, path); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Directory %s created.\n", path)
 }
 
-func cmdRm(args []string) {
+func cmdRm(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("path required")
 	}
 	path := args[0]
 	c := loadClient()
-	if err := c.Remove(path); err != nil {
+	if err := c.Remove(ctx, path); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Removed %s\n", path)
 }
 
-func cmdChmod(args []string) {
+func cmdChmod(ctx context.Context, args []string) {
 	if len(args) < 2 {
 		log.Fatal("mode and path required")
 	}
@@ -477,39 +478,39 @@ func cmdChmod(args []string) {
 
 	c := loadClient()
 	m32 := uint32(mode)
-	if err := c.SetAttr(path, metadata.SetAttrRequest{Mode: &m32}); err != nil {
+	if err := c.SetAttr(ctx, path, metadata.SetAttrRequest{Mode: &m32}); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Mode of %s changed to %s\n", path, modeStr)
 }
 
-func cmdChgrp(args []string) {
+func cmdChgrp(ctx context.Context, args []string) {
 	if len(args) < 2 {
 		log.Fatal("group_id and path required")
 	}
 	groupID, path := args[0], args[1]
 
 	c := loadClient()
-	if err := c.SetAttr(path, metadata.SetAttrRequest{GroupID: &groupID}); err != nil {
+	if err := c.SetAttr(ctx, path, metadata.SetAttrRequest{GroupID: &groupID}); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Group of %s changed to %s\n", path, groupID)
 }
 
-func cmdGroupCreate(args []string) {
+func cmdGroupCreate(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("group name required")
 	}
 	name := args[0]
 	c := loadClient()
-	group, err := c.CreateGroup(name)
+	group, err := c.CreateGroup(ctx, name)
 	if err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Group %s created. ID: %s\n", name, group.ID)
 }
 
-func cmdGroupAdd(args []string) {
+func cmdGroupAdd(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("group-add", flag.ExitOnError)
 	force := fs.Bool("f", false, "Force add without confirmation")
 	fs.Parse(args)
@@ -548,13 +549,13 @@ func cmdGroupAdd(args []string) {
 		}
 	}
 
-	if err := c.AddUserToGroup(context.Background(), groupID, userID, info, ci); err != nil {
+	if err := c.AddUserToGroup(ctx, groupID, userID, info, ci); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s added to group %s\n", userID, groupID)
 }
 
-func cmdContactInfo(args []string) {
+func cmdContactInfo(ctx context.Context, args []string) {
 	c := loadClient()
 	s, err := c.GenerateContactString()
 	if err != nil {
@@ -564,13 +565,13 @@ func cmdContactInfo(args []string) {
 	fmt.Println(s)
 }
 
-func cmdGroupMembers(args []string) {
+func cmdGroupMembers(ctx context.Context, args []string) {
 	if len(args) < 1 {
 		log.Fatal("group_id required")
 	}
 	groupID := args[0]
 	c := loadClient()
-	members, err := c.GetGroupMembers(groupID)
+	members, err := c.GetGroupMembers(ctx, groupID)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -583,21 +584,21 @@ func cmdGroupMembers(args []string) {
 	}
 }
 
-func cmdGroupRemove(args []string) {
+func cmdGroupRemove(ctx context.Context, args []string) {
 	if len(args) < 2 {
 		log.Fatal("group_id and user_id required")
 	}
 	groupID, userID := args[0], args[1]
 	c := loadClient()
-	if err := c.RemoveUserFromGroup(context.Background(), groupID, userID); err != nil {
+	if err := c.RemoveUserFromGroup(ctx, groupID, userID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s removed from group %s\n", userID, groupID)
 }
 
-func cmdGroupList(args []string) {
+func cmdGroupList(ctx context.Context, args []string) {
 	c := loadClient()
-	entries, err := c.ListGroups()
+	entries, err := c.ListGroups(ctx)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -606,7 +607,7 @@ func cmdGroupList(args []string) {
 	fmt.Println(strings.Repeat("-", 80))
 	for _, e := range entries {
 		name := "[HIDDEN]"
-		if decrypted, err := c.DecryptGroupName(e); err == nil {
+		if decrypted, err := c.DecryptGroupName(ctx, e); err == nil {
 			name = decrypted
 		}
 		if e.IsSystem {
@@ -616,7 +617,7 @@ func cmdGroupList(args []string) {
 	}
 }
 
-func cmdPut(args []string) {
+func cmdPut(ctx context.Context, args []string) {
 	if len(args) < 2 {
 		log.Fatal("local and remote paths required")
 	}
@@ -633,24 +634,24 @@ func cmdPut(args []string) {
 	}
 
 	c := loadClient()
-	if err := c.CreateFile(remote, f, info.Size()); err != nil {
+	if err := c.CreateFile(ctx, remote, f, info.Size()); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s uploaded to %s.\n", local, remote)
 }
 
-func cmdGet(args []string) {
+func cmdGet(ctx context.Context, args []string) {
 	if len(args) < 2 {
 		log.Fatal("remote and local paths required")
 	}
 	remote, local := args[0], args[1]
 	c := loadClient()
-	inode, key, err := c.ResolvePath(remote)
+	inode, key, err := c.ResolvePath(ctx, remote)
 	if err != nil {
 		log.Fatal(err)
 	}
 
-	rc, err := c.ReadFile(inode.ID, key)
+	rc, err := c.ReadFile(ctx, inode.ID, key)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -668,21 +669,21 @@ func cmdGet(args []string) {
 	fmt.Printf("File %s downloaded to %s.\n", remote, local)
 }
 
-func cmdGroupChown(args []string) {
+func cmdGroupChown(ctx context.Context, args []string) {
 	if len(args) < 2 {
 		log.Fatal("group_id and owner required")
 	}
 	groupID, ownerID := args[0], args[1]
 	c := loadClient()
-	if err := c.GroupChown(context.Background(), groupID, ownerID); err != nil {
+	if err := c.GroupChown(ctx, groupID, ownerID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Owner of group %s changed to %s\n", groupID, ownerID)
 }
 
-func cmdQuota(args []string) {
+func cmdQuota(ctx context.Context, args []string) {
 	c := loadClient()
-	user, err := c.GetUser(c.UserID())
+	user, err := c.GetUser(ctx, c.UserID())
 	if err != nil {
 		log.Fatalf("Failed to fetch user info: %v", err)
 	}
@@ -690,7 +691,7 @@ func cmdQuota(args []string) {
 	fmt.Printf("Personal Usage for %s:\n", c.UserID())
 	displayUsage(user.Usage, user.Quota)
 
-	groups, err := c.ListGroups()
+	groups, err := c.ListGroups(ctx)
 	if err != nil {
 		fmt.Printf("\nFailed to fetch group info: %v\n", err)
 		return
@@ -705,7 +706,7 @@ func cmdQuota(args []string) {
 			managedGroups++
 			fmt.Println()
 			name := "[HIDDEN]"
-			if decrypted, err := c.DecryptGroupName(g); err == nil {
+			if decrypted, err := c.DecryptGroupName(ctx, g); err == nil {
 				name = decrypted
 			}
 			fmt.Printf("Group: %s (%s)\n", name, g.ID)

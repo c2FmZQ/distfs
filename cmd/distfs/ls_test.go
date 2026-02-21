@@ -18,7 +18,7 @@ type mockLSClient struct {
 	err       error
 }
 
-func (m *mockLSClient) ResolvePath(path string) (*metadata.Inode, []byte, error) {
+func (m *mockLSClient) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	return m.inode, []byte("key"), m.err
 }
 
@@ -34,7 +34,7 @@ func (m *mockLSClient) NewDirEntry(inode *metadata.Inode, name string, key []byt
 	return client.NewDirEntryForTest(inode, name, key)
 }
 
-func (m *mockLSClient) DecryptName(inode *metadata.Inode) (string, []byte, error) {
+func (m *mockLSClient) DecryptName(ctx context.Context, inode *metadata.Inode) (string, []byte, error) {
 	return "decrypted", []byte("key"), m.err
 }
 

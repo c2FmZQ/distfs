@@ -169,7 +169,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	// 3. Setup Client and Mount Point
 	mount := func(mountpoint string) (func(), *client.Client) {
 		c := newClient()
-		if err := c.EnsureRoot(); err != nil {
+		if err := c.EnsureRoot(t.Context()); err != nil {
 			t.Fatalf("EnsureRoot failed: %v", err)
 		}
 
@@ -330,7 +330,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	unmount1()
 
 	fsClient := newClient()
-	rb2, err := iofs.ReadFile(fsClient.FS(), "/testfile.bin")
+	rb2, err := iofs.ReadFile(fsClient.FS(t.Context()), "/testfile.bin")
 	if err != nil {
 		t.Fatalf("fs.ReadFile: %v", err)
 	}

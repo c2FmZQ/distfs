@@ -51,7 +51,7 @@ func TestClientSessionManagement(t *testing.T) {
 	c = c.WithServerKey(serverEK)
 
 	// 4. Trigger first request (should trigger Login)
-	_, err = c.GetUser(user.ID)
+	_, err = c.GetUser(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("First request failed: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestClientSessionManagement(t *testing.T) {
 	}
 
 	// 5. Trigger second request (should reuse token)
-	_, err = c.GetUser(user.ID)
+	_, err = c.GetUser(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("Second request failed: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestClientSessionManagement(t *testing.T) {
 	c.sessionExpiry = time.Now().Add(-1 * time.Minute)
 	c.sessionMu.Unlock()
 
-	_, err = c.GetUser(user.ID)
+	_, err = c.GetUser(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("Third request failed: %v", err)
 	}

@@ -15,7 +15,6 @@
 package client
 
 import (
-	"context"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -61,32 +60,31 @@ func TestStorageAPI_Leases(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	if err := c.Login(); err != nil {
+	if err := c.Login(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	ctx := context.Background()
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	// 2. Create files
-	if err := c.Mkdir("/dir"); err != nil {
+	if err := c.Mkdir(t.Context(), "/dir"); err != nil {
 		t.Fatal(err)
 	}
 	f1 := "/dir/f1"
 	f2 := "/dir/f2"
 	data := testData{Name: "Initial", Value: 100}
-	if err := c.SaveDataFile(f1, data); err != nil {
+	if err := c.SaveDataFile(t.Context(), f1, data); err != nil {
 		t.Fatalf("Save f1 failed: %v", err)
 	}
-	if err := c.SaveDataFile(f2, data); err != nil {
+	if err := c.SaveDataFile(t.Context(), f2, data); err != nil {
 		t.Fatalf("Save f2 failed: %v", err)
 	}
 
 	// 3. Test Atomic Acquire
 	ids := []string{f1, f2}
-	if err := c.AcquireLeases(ctx, ids, 10*time.Second, nil); err != nil {
+	if err := c.AcquireLeases(t.Context(), ids, 10*time.Second, nil); err != nil {
 		t.Fatalf("AcquireLeases failed: %v", err)
 	}
 
@@ -98,21 +96,21 @@ func TestStorageAPI_Leases(t *testing.T) {
 		ID: "user-2", SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes(),
 	})
 	c2 = c2.WithIdentity("user-2", dk2).WithSignKey(sk2).WithServerKey(serverEK)
-	if err := c2.Login(); err != nil {
+	if err := c2.Login(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	err := c2.AcquireLeases(ctx, []string{f1}, 5*time.Second, nil)
+	err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil)
 	if err == nil {
 		t.Error("Expected conflict error for leased file, got nil")
 	}
 
 	// 5. Test Release and Re-acquire
-	if err := c.ReleaseLeases(ctx, ids); err != nil {
+	if err := c.ReleaseLeases(t.Context(), ids); err != nil {
 		t.Fatalf("ReleaseLeases failed: %v", err)
 	}
 
-	if err := c2.AcquireLeases(ctx, []string{f1}, 5*time.Second, nil); err != nil {
+	if err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil); err != nil {
 		t.Fatalf("c2 failed to acquire released lease: %v", err)
 	}
 }
@@ -142,18 +140,18 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	})
 
 	c := NewClient(tsMeta.URL).WithIdentity("u1", dk).WithSignKey(sk).WithServerKey(serverEK)
-	c.Login()
-	c.EnsureRoot()
+	c.Login(t.Context())
+	c.EnsureRoot(t.Context())
 
 	// 2. Prepare file
 	path := "/tx-test.json"
 	data := testData{Name: "v1", Value: 1}
-	if err := c.SaveDataFile(path, data); err != nil {
+	if err := c.SaveDataFile(t.Context(), path, data); err != nil {
 		t.Fatalf("SaveDataFile failed: %v", err)
 	}
 
 	// 3. Perform Transactional Update
-	commit, err := c.OpenForUpdate(path, &data)
+	commit, err := c.OpenForUpdate(t.Context(), path, &data)
 	if err != nil {
 		t.Fatalf("OpenForUpdate failed: %v", err)
 	}
@@ -164,7 +162,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 
 	// 4. Verify result
 	var final testData
-	if err := c.ReadDataFile(path, &final); err != nil {
+	if err := c.ReadDataFile(t.Context(), path, &final); err != nil {
 		t.Fatal(err)
 	}
 	if final.Value != 2 || final.Name != "v2" {
@@ -172,11 +170,11 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	}
 
 	// 5. Test Abort
-	commit2, _ := c.OpenForUpdate(path, &data)
+	commit2, _ := c.OpenForUpdate(t.Context(), path, &data)
 	data.Value = 999
 	commit2(false) // Abort
 
-	c.ReadDataFile(path, &final)
+	c.ReadDataFile(t.Context(), path, &final)
 	if final.Value != 2 {
 		t.Errorf("Abort failed, data was updated to %d", final.Value)
 	}

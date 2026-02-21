@@ -37,7 +37,7 @@ func (f *FS) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollRes
 }
 
 func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
-	stats, err := f.client.GetClusterStats()
+	stats, err := f.client.GetClusterStats(ctx)
 	if err != nil {
 		return mapError(err)
 	}
@@ -57,7 +57,7 @@ func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.Sta
 	resp.Bavail = resp.Bfree
 
 	// Check User Quota
-	user, err := f.client.GetUser(f.client.UserID())
+	user, err := f.client.GetUser(ctx, f.client.UserID())
 	if err == nil && user.Quota.MaxBytes > 0 {
 		quotaFree := user.Quota.MaxBytes - user.Usage.TotalBytes
 		if quotaFree < 0 {
@@ -129,8 +129,8 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 		if !d.isRoot {
 			return syscall.EIO
 		}
-		if err := d.fs.client.EnsureRoot(); err == nil {
-			if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+		if err := d.fs.client.EnsureRoot(ctx); err == nil {
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 				d.inode = inode
 				d.key = key
 			}
@@ -154,8 +154,8 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -191,7 +191,7 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		return nil, mapError(err)
 	}
 
-	key, err := d.fs.client.UnlockInode(inode)
+	key, err := d.fs.client.UnlockInode(ctx, inode)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -207,8 +207,8 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -259,8 +259,8 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -276,7 +276,7 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	groupID := d.inode.GroupID
 	d.mu.Unlock()
 
-	inode, key, err := d.fs.client.AddEntry(id, key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), groupID, req.Uid, req.Gid)
+	inode, key, err := d.fs.client.AddEntry(ctx, id, key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), groupID, req.Uid, req.Gid)
 	if err != nil {
 		return nil, nil, mapError(err)
 	}
@@ -299,8 +299,8 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -316,7 +316,7 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	groupID := d.inode.GroupID
 	d.mu.Unlock()
 
-	inode, key, err := d.fs.client.AddEntry(id, key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), groupID, req.Uid, req.Gid)
+	inode, key, err := d.fs.client.AddEntry(ctx, id, key, req.Name, metadata.DirType, nil, 0, "", uint32(req.Mode), groupID, req.Uid, req.Gid)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -332,8 +332,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -351,8 +351,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	targetDir.mu.Lock()
 	if targetDir.inode == nil {
 		if targetDir.isRoot {
-			if err := targetDir.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := targetDir.fs.client.ResolvePath("/"); err == nil {
+			if err := targetDir.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := targetDir.fs.client.ResolvePath(ctx, "/"); err == nil {
 					targetDir.inode = inode
 					targetDir.key = key
 				}
@@ -367,7 +367,7 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	newKey := targetDir.key
 	targetDir.mu.Unlock()
 
-	err := d.fs.client.RenameRaw(oldID, oldKey, req.OldName, newID, newKey, req.NewName)
+	err := d.fs.client.RenameRaw(ctx, oldID, oldKey, req.OldName, newID, newKey, req.NewName)
 	if err != nil {
 		return mapError(err)
 	}
@@ -384,8 +384,8 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -400,7 +400,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	key := d.key
 	d.mu.Unlock()
 
-	err := d.fs.client.RemoveEntryRaw(id, key, req.Name)
+	err := d.fs.client.RemoveEntryRaw(ctx, id, key, req.Name)
 	if err != nil {
 		return mapError(err)
 	}
@@ -414,8 +414,8 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -431,7 +431,7 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	groupID := d.inode.GroupID
 	d.mu.Unlock()
 
-	inode, key, err := d.fs.client.AddEntry(id, key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, groupID, req.Uid, req.Gid)
+	inode, key, err := d.fs.client.AddEntry(ctx, id, key, req.NewName, metadata.SymlinkType, nil, 0, req.Target, 0777, groupID, req.Uid, req.Gid)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -445,8 +445,8 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -461,7 +461,7 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 	key := d.key
 	d.mu.Unlock()
 
-	return setAttr(d.fs.client, inode, key, req, &resp.Attr)
+	return setAttr(ctx, d.fs.client, inode, key, req, &resp.Attr)
 }
 
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
@@ -470,8 +470,8 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath("/"); err == nil {
+			if err := d.fs.client.EnsureRoot(ctx); err == nil {
+				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
 					d.inode = inode
 					d.key = key
 				}
@@ -486,7 +486,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	key := d.key
 	d.mu.Unlock()
 
-	err := d.fs.client.LinkRaw(id, key, req.NewName, oldFile.inode.ID)
+	err := d.fs.client.LinkRaw(ctx, id, key, req.NewName, oldFile.inode.ID)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -550,14 +550,14 @@ func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	return setAttr(f.fs.client, f.inode, f.key, req, &resp.Attr)
+	return setAttr(ctx, f.fs.client, f.inode, f.key, req, &resp.Attr)
 }
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
 	if f.inode.Type == metadata.SymlinkType {
 		return nil, syscall.ELOOP
 	}
-	reader, err := f.fs.client.NewReader(f.inode.ID, f.key)
+	reader, err := f.fs.client.NewReader(ctx, f.inode.ID, f.key)
 	if err != nil {
 		return nil, mapError(err)
 	}
@@ -752,7 +752,7 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 		// Use FileHandle as ReaderAt
 		// SyncFile uses this to read the modified chunks
-		updated, err := h.file.fs.client.SyncFile(h.file.inode.ID, h, int64(h.size), dirtyMap)
+		updated, err := h.file.fs.client.SyncFile(ctx, h.file.inode.ID, h, int64(h.size), dirtyMap)
 		if err != nil {
 			log.Printf("FUSE Flush sync failed: %v", err)
 			return mapError(err)
@@ -825,7 +825,7 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	return nil
 }
 
-func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse.SetattrRequest, respAttr *fuse.Attr) error {
+func setAttr(ctx context.Context, c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse.SetattrRequest, respAttr *fuse.Attr) error {
 	var mode *uint32
 	if req.Valid.Mode() {
 		m := uint32(req.Mode)
@@ -841,7 +841,7 @@ func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse
 		mtime = &mt
 	}
 
-	err := c.SetAttrByID(inode, inodeKey, metadata.SetAttrRequest{
+	err := c.SetAttrByID(ctx, inode, inodeKey, metadata.SetAttrRequest{
 		InodeID: inode.ID,
 		Mode:    mode,
 		Size:    size,

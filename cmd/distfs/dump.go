@@ -8,7 +8,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
-func cmdDumpInodes(args []string) {
+func cmdDumpInodes(ctx context.Context, args []string) {
 	c := loadClient()
 
 	// Start from root
@@ -16,7 +16,7 @@ func cmdDumpInodes(args []string) {
 	if len(args) > 0 {
 		// Try to resolve path to ID if arg provided
 		path := args[0]
-		inode, _, err := c.ResolvePath(path)
+		inode, _, err := c.ResolvePath(ctx, path)
 		if err != nil {
 			fmt.Printf("Error resolving path %s: %v. Assuming it's an ID.\n", path, err)
 			rootID = path
@@ -39,7 +39,7 @@ func cmdDumpInodes(args []string) {
 		}
 		visited[id] = true
 
-		inode, err := c.GetInode(context.Background(), id)
+		inode, err := c.GetInode(ctx, id)
 		if err != nil {
 			fmt.Printf("ERROR fetching inode %s: %v\n", id, err)
 			continue

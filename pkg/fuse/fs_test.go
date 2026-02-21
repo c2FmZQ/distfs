@@ -2,7 +2,6 @@
 package fuse
 
 import (
-	"context"
 	"testing"
 
 	"bazil.org/fuse"
@@ -18,7 +17,7 @@ func TestFS_Statfs(t *testing.T) {
 	// Since we are not running a real server, this will fail but we want to check mapError integration
 	req := &fuse.StatfsRequest{}
 	resp := &fuse.StatfsResponse{}
-	err := f.Statfs(context.Background(), req, resp)
+	err := f.Statfs(t.Context(), req, resp)
 	if err == nil {
 		t.Errorf("expected error from unstarted client")
 	}
@@ -39,7 +38,7 @@ func TestFile_Fsync(t *testing.T) {
 	f := &File{
 		inode: &metadata.Inode{ID: "test"},
 	}
-	err := f.Fsync(context.Background(), &fuse.FsyncRequest{})
+	err := f.Fsync(t.Context(), &fuse.FsyncRequest{})
 	if err != nil {
 		t.Errorf("Fsync failed: %v", err)
 	}

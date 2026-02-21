@@ -41,6 +41,8 @@ func main() {
 	flag.Parse()
 	config.UsePinentry = *usePinentry
 
+	ctx := context.Background()
+
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
 		fmt.Println("Configuration missing. Starting unified onboarding...")
 		opts := client.OnboardingOptions{
@@ -55,7 +57,7 @@ func main() {
 			ShowQR:        *qrCode,
 			Browser:       *browser,
 		}
-		if err := client.PerformUnifiedOnboarding(context.Background(), opts); err != nil {
+		if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
 			log.Fatal(err)
 		}
 		// Small delay for Raft propagation

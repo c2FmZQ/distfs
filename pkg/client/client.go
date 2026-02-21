@@ -45,7 +45,7 @@ type contextKey string
 
 const adminBypassContextKey contextKey = "admin-bypass"
 
-func (c *Client) GetServerSignKey() ([]byte, error) {
+func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	c.keyMu.RLock()
 	sk := c.serverSignPK
 	c.keyMu.RUnlock()
@@ -53,7 +53,11 @@ func (c *Client) GetServerSignKey() ([]byte, error) {
 		return sk, nil
 	}
 
-	resp, err := c.httpClient.Get(c.serverURL + "/v1/meta/key/sign")
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/key/sign", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -69,7 +73,7 @@ func (c *Client) GetServerSignKey() ([]byte, error) {
 	return b, nil
 }
 
-func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
+func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, error) {
 	c.keyMu.RLock()
 	sk := c.serverKey
 	c.keyMu.RUnlock()
@@ -77,7 +81,11 @@ func (c *Client) GetServerKey() (*mlkem.EncapsulationKey768, error) {
 		return sk, nil
 	}
 
-	resp, err := c.httpClient.Get(c.serverURL + "/v1/meta/key")
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/key", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -303,18 +311,23 @@ func (c *Client) UserID() string {
 }
 
 // Login performs the challenge-response handshake to obtain a session token.
-func (c *Client) Login() error {
+func (c *Client) Login(ctx context.Context) error {
 	// 1. Get Challenge
 	reqData := metadata.AuthChallengeRequest{UserID: c.userID}
 	b, _ := json.Marshal(reqData)
-	resp, err := c.httpClient.Post(c.serverURL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/auth/challenge", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("challenge request failed: %d %s", resp.StatusCode, string(b))
+		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 
 	var challengeRes metadata.AuthChallengeResponse
@@ -323,7 +336,7 @@ func (c *Client) Login() error {
 	}
 
 	// 2. Verify server signature over challenge
-	serverSignPK, err := c.GetServerSignKey()
+	serverSignPK, err := c.GetServerSignKey(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get server sign key: %w", err)
 	}
@@ -341,7 +354,12 @@ func (c *Client) Login() error {
 	}
 	b, _ = json.Marshal(solve)
 
-	resp, err = c.httpClient.Post(c.serverURL+"/v1/login", "application/json", bytes.NewReader(b))
+	req, err = http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/login", bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
@@ -349,7 +367,7 @@ func (c *Client) Login() error {
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("login failed: %d %s", resp.StatusCode, string(b))
+		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 
 	var res metadata.SessionResponse
@@ -384,7 +402,7 @@ func (c *Client) invalidatePathCache(path string) {
 	delete(c.pathCache, path)
 }
 
-func (c *Client) authenticateRequest(req *http.Request) error {
+func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) error {
 	// 1. Special cases: registration, login, and keys don't need session auth.
 	if strings.HasSuffix(req.URL.Path, "/v1/user/register") ||
 		strings.HasSuffix(req.URL.Path, "/v1/auth/challenge") ||
@@ -417,7 +435,7 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 		c.sessionMu.RUnlock()
 
 		if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
-			if err := c.Login(); err != nil {
+			if err := c.Login(ctx); err != nil {
 				return fmt.Errorf("session login failed: %w", err)
 			}
 			c.sessionMu.RLock()
@@ -435,7 +453,7 @@ func (c *Client) authenticateRequest(req *http.Request) error {
 	return nil
 }
 
-func (c *Client) sealBody(req *http.Request, payload []byte) error {
+func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte) error {
 	if payload == nil {
 		return nil
 	}
@@ -481,7 +499,7 @@ func (c *Client) sealBody(req *http.Request, payload []byte) error {
 
 	} else {
 		// 2. Standard Path: Full KEM
-		sk, err := c.GetServerKey()
+		sk, err := c.GetServerKey(ctx)
 		if err != nil {
 			return err
 		}
@@ -539,7 +557,7 @@ func (c *Client) sealBody(req *http.Request, payload []byte) error {
 	}
 	return nil
 }
-func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
+func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.ReadCloser, error) {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
 		return resp.Body, nil
 	}
@@ -550,7 +568,7 @@ func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 		return nil, fmt.Errorf("failed to decode sealed response: %w", err)
 	}
 
-	serverSignPK, err := c.GetServerSignKey()
+	serverSignPK, err := c.GetServerSignKey(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -582,10 +600,10 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, []byte("{}")); err != nil {
+		if err := c.sealBody(ctx, req, []byte("{}")); err != nil {
 			return err
 		}
 
@@ -599,7 +617,7 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 			return &APIError{StatusCode: resp.StatusCode, Message: "metadata server busy"}
 		}
 
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -617,7 +635,7 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 	return nodes, nil
 }
 
-func (c *Client) issueToken(inodeID string, chunks []string, mode string) (string, error) {
+func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string, mode string) (string, error) {
 	reqData := map[string]interface{}{
 		"inode_id": inodeID,
 		"chunks":   chunks,
@@ -626,20 +644,20 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 	data, _ := json.Marshal(reqData)
 
 	var token string
-	err := c.withRetry(context.Background(), func() error {
-		if err := c.acquireControl(context.Background()); err != nil {
+	err := c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
 			return err
 		}
 		defer c.releaseControl()
 
-		req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/token", nil)
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/token", nil)
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, data); err != nil {
+		if err := c.sealBody(ctx, req, data); err != nil {
 			return err
 		}
 
@@ -647,7 +665,7 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -669,7 +687,7 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 	return token, err
 }
 
-func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, token string) error {
+func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes []metadata.Node, token string) error {
 	if len(nodes) == 0 {
 		return fmt.Errorf("no nodes allocated")
 	}
@@ -688,13 +706,13 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 		}
 	}
 
-	return c.withRetry(context.Background(), func() error {
-		if err := c.acquireData(context.Background()); err != nil {
+	return c.withRetry(ctx, func() error {
+		if err := c.acquireData(ctx); err != nil {
 			return err
 		}
 		defer c.releaseData()
 
-		req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
+		req, err := http.NewRequestWithContext(ctx, "PUT", url, bytes.NewReader(data))
 		if err != nil {
 			return err
 		}
@@ -831,19 +849,19 @@ func (e *APIError) ToPOSIX() error {
 }
 
 // ListGroups retrieves all groups associated with the current user.
-func (c *Client) ListGroups() ([]metadata.GroupListEntry, error) {
+func (c *Client) ListGroups(ctx context.Context) ([]metadata.GroupListEntry, error) {
 	var resp metadata.GroupListResponse
-	err := c.withRetry(context.Background(), func() error {
-		if err := c.acquireControl(context.Background()); err != nil {
+	err := c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
 			return err
 		}
 		defer c.releaseControl()
 
-		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/groups", nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/user/groups", nil)
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -851,7 +869,7 @@ func (c *Client) ListGroups() ([]metadata.GroupListEntry, error) {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(res)
+		body, err := c.unsealResponse(ctx, res)
 		if err != nil {
 			return err
 		}
@@ -871,19 +889,19 @@ func (c *Client) ListGroups() ([]metadata.GroupListEntry, error) {
 	return resp.Groups, nil
 }
 
-func (c *Client) GetUser(id string) (*metadata.User, error) {
+func (c *Client) GetUser(ctx context.Context, id string) (*metadata.User, error) {
 	var user metadata.User
-	err := c.withRetry(context.Background(), func() error {
-		if err := c.acquireControl(context.Background()); err != nil {
+	err := c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
 			return err
 		}
 		defer c.releaseControl()
 
-		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/"+id, nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/user/"+id, nil)
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -892,7 +910,7 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 			return err
 		}
 
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -912,7 +930,7 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 	return &user, nil
 }
 
-func (c *Client) signInode(inode *metadata.Inode) error {
+func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	// 1. Resolve File Key for encryption
 	fileKey := inode.GetFileKey()
 
@@ -958,7 +976,7 @@ func (c *Client) signInode(inode *metadata.Inode) error {
 
 	// Group Signing (if applicable)
 	if inode.GroupID != "" {
-		gsk, err := c.GetGroupSignKey(inode.GroupID)
+		gsk, err := c.GetGroupSignKey(ctx, inode.GroupID)
 		if err == nil {
 			inode.GroupSig = gsk.Sign(hash)
 		}
@@ -980,7 +998,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	}
 
 	// Phase 31: Manifest Signing
-	if err := c.signInode(&inode); err != nil {
+	if err := c.signInode(ctx, &inode); err != nil {
 		return nil, err
 	}
 
@@ -1010,13 +1028,13 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 
 		}
 
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 
 			return err
 
 		}
 
-		if err := c.sealBody(req, data); err != nil {
+		if err := c.sealBody(ctx, req, data); err != nil {
 
 			return err
 
@@ -1030,7 +1048,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 
 		}
 
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 
 		if err != nil {
 
@@ -1056,7 +1074,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 		if key := inode.GetFileKey(); len(key) > 0 {
 			created.SetFileKey(key)
 		}
-		if err := c.VerifyInode(&created); err != nil {
+		if err := c.VerifyInode(ctx, &created); err != nil {
 			return err
 		}
 
@@ -1079,7 +1097,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	}
 
 	// Phase 31: Verification (Decrypts transient fields)
-	if err := c.VerifyInode(&created); err != nil {
+	if err := c.VerifyInode(ctx, &created); err != nil {
 		return nil, err
 	}
 
@@ -1117,7 +1135,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			inode = *latest
 		}
 
-		if err := c.signInode(&inode); err != nil {
+		if err := c.signInode(ctx, &inode); err != nil {
 			return nil, err
 		}
 		data, err := json.Marshal(inode)
@@ -1135,10 +1153,10 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			if err != nil {
 				return err
 			}
-			if err := c.authenticateRequest(req); err != nil {
+			if err := c.authenticateRequest(ctx, req); err != nil {
 				return err
 			}
-			if err := c.sealBody(req, data); err != nil {
+			if err := c.sealBody(ctx, req, data); err != nil {
 				return err
 			}
 
@@ -1146,7 +1164,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			if err != nil {
 				return err
 			}
-			body, err := c.unsealResponse(resp)
+			body, err := c.unsealResponse(ctx, resp)
 			if err != nil {
 				return err
 			}
@@ -1172,7 +1190,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			}
 
 			if verify {
-				if err := c.VerifyInode(&updated); err != nil {
+				if err := c.VerifyInode(ctx, &updated); err != nil {
 					return err
 				}
 			}
@@ -1214,10 +1232,10 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, data); err != nil {
+		if err := c.sealBody(ctx, req, data); err != nil {
 			return err
 		}
 
@@ -1225,7 +1243,7 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -1239,8 +1257,8 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 	})
 }
 
-func (c *Client) PrepareUpdate(inode metadata.Inode) (metadata.LogCommand, error) {
-	if err := c.signInode(&inode); err != nil {
+func (c *Client) PrepareUpdate(ctx context.Context, inode metadata.Inode) (metadata.LogCommand, error) {
+	if err := c.signInode(ctx, &inode); err != nil {
 		return metadata.LogCommand{}, err
 	}
 	data, err := json.Marshal(inode)
@@ -1265,7 +1283,7 @@ func (c *Client) DeleteInode(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -1299,7 +1317,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -1308,7 +1326,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 			return err
 		}
 
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -1345,7 +1363,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 
 	// Phase 31: Verification
 	if verify {
-		if err := c.VerifyInode(&inode); err != nil {
+		if err := c.VerifyInode(ctx, &inode); err != nil {
 			return nil, err
 		}
 	}
@@ -1373,10 +1391,10 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, data); err != nil {
+		if err := c.sealBody(ctx, req, data); err != nil {
 			return err
 		}
 
@@ -1384,7 +1402,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -1403,7 +1421,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 
 	// Phase 31: Verification
 	for _, inode := range inodes {
-		if err := c.VerifyInode(inode); err != nil {
+		if err := c.VerifyInode(ctx, inode); err != nil {
 			return nil, err
 		}
 	}
@@ -1431,13 +1449,13 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 			}
 		}
 		if (mode & 0004) != 0 {
-			wpk, err := c.GetWorldPublicKey()
+			wpk, err := c.GetWorldPublicKey(ctx)
 			if err == nil {
 				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, fileKey)
 			}
 		}
 		if groupID != "" && (mode&0060) != 0 {
-			group, err := c.GetGroup(groupID)
+			group, err := c.GetGroup(ctx, groupID)
 			if err == nil {
 				gpk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
 				inode.Lockbox.AddRecipient(groupID, gpk, fileKey)
@@ -1449,7 +1467,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-		lb := c.createLockbox(fileKey, mode, groupID)
+		lb := c.createLockbox(ctx, fileKey, mode, groupID)
 
 		// Assume not found, create new
 		inode = metadata.Inode{
@@ -1508,7 +1526,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 					return err
 				}
 
-				token, err := c.issueToken(id, []string{cid}, "W")
+				token, err := c.issueToken(ctx, id, []string{cid}, "W")
 				if err != nil {
 					return fmt.Errorf("token issue failed: %w", err)
 				}
@@ -1516,7 +1534,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 				if err != nil {
 					return fmt.Errorf("allocation failed: %w", err)
 				}
-				if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
+				if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
 					return err
 				}
 
@@ -1553,7 +1571,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 }
 
 // WriteFile writes a file. Returns the FileKey used.
-func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]byte, error) {
+func (c *Client) WriteFile(ctx context.Context, id string, r io.Reader, size int64, mode uint32) ([]byte, error) {
 	c.keyMu.RLock()
 	meta, ok := c.keyCache[id]
 	c.keyMu.RUnlock()
@@ -1572,8 +1590,8 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 			nameHMAC = parts[1]
 		}
 	} else {
-		if inode, err := c.GetInode(context.Background(), id); err == nil {
-			if key, err := c.UnlockInode(inode); err == nil {
+		if inode, err := c.getInode(ctx, id); err == nil {
+			if key, err := c.UnlockInode(ctx, inode); err == nil {
 				fileKey = key
 				groupID = inode.GroupID
 				// Try to pick a link tag for the cache
@@ -1599,7 +1617,7 @@ func (c *Client) WriteFile(id string, r io.Reader, size int64, mode uint32) ([]b
 		}
 	}
 
-	if err := c.writeInodeContent(context.Background(), id, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC); err != nil {
+	if err := c.writeInodeContent(ctx, id, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -1630,8 +1648,8 @@ type FileReader struct {
 
 // NewReader creates a new FileReader for the given inode.
 // The caller MUST call Close() on the returned reader to release resources and cancel background prefetching.
-func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
-	inode, err := c.getInode(context.Background(), id)
+func (c *Client) NewReader(ctx context.Context, id string, fileKey []byte) (*FileReader, error) {
+	inode, err := c.getInode(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -1671,9 +1689,9 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		c.keyMu.Unlock()
 	}
 
-	token, _ := c.issueToken(id, nil, "R")
+	token, _ := c.issueToken(ctx, id, nil, "R")
 
-	ctx, cancel := context.WithCancel(context.Background())
+	lctx, cancel := context.WithCancel(context.Background())
 	return &FileReader{
 		client:          c,
 		inode:           inode,
@@ -1682,7 +1700,7 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 		currentChunkIdx: -1,
 		token:           token,
 		readAhead:       make(map[int64]*readAheadResult),
-		ctx:             ctx,
+		ctx:             lctx,
 		cancel:          cancel,
 	}, nil
 }
@@ -1789,7 +1807,7 @@ func (r *FileReader) read(p []byte) (int, error) {
 
 				// Unlock during network I/O
 				r.mu.Unlock()
-				ct, err := r.client.downloadChunk(context.Background(), chunkEntry.ID, chunkEntry.URLs, r.token)
+				ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, r.token)
 				r.mu.Lock()
 
 				if err != nil {
@@ -1844,17 +1862,17 @@ func (r *FileReader) Stat() *metadata.Inode {
 
 // ReadFile returns a reader for the specified file ID.
 // If fileKey is nil, it attempts to unlock it using the client's identity.
-func (c *Client) ReadFile(id string, fileKey []byte) (io.ReadCloser, error) {
-	r, err := c.NewReader(id, fileKey)
+func (c *Client) ReadFile(ctx context.Context, id string, fileKey []byte) (io.ReadCloser, error) {
+	r, err := c.NewReader(ctx, id, fileKey)
 	if err != nil {
 		return nil, err
 	}
 	return io.NopCloser(r), nil
 }
 
-func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
+func (c *Client) OpenBlobRead(ctx context.Context, id string) (io.ReadCloser, error) {
 	// 1. Try treating id as a direct Inode ID (fast path)
-	rc, err := c.ReadFile(id, nil)
+	rc, err := c.ReadFile(ctx, id, nil)
 	if err == nil {
 		return rc, nil
 	}
@@ -1866,11 +1884,11 @@ func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
 	resolveErr := errors.New("resolution skipped")
 
 	if strings.Contains(id, "/") {
-		inode, key, resolveErr = c.ResolvePath(id)
+		inode, key, resolveErr = c.ResolvePath(ctx, id)
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
-		rc, err = c.ReadFile(inode.ID, key)
+		rc, err = c.ReadFile(ctx, inode.ID, key)
 		if err == nil {
 			return rc, nil
 		}
@@ -1881,7 +1899,7 @@ func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
 	if errors.Is(err, crypto.ErrRecipientNotFound) {
 		// Use the inode we resolved, or fetch if we didn't resolve yet
 		if inode == nil {
-			inode, _ = c.getInode(context.Background(), id)
+			inode, _ = c.getInode(ctx, id)
 		}
 
 		if inode != nil {
@@ -1898,8 +1916,7 @@ func (c *Client) OpenBlobRead(id string) (io.ReadCloser, error) {
 	return nil, err
 }
 
-func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
-	ctx := context.Background()
+func (c *Client) OpenBlobWrite(ctx context.Context, id string) (io.WriteCloser, error) {
 	// Acquire lease first to prevent concurrent writers.
 	// Note: We lease the input `id` (which might be a path) to lock the name.
 	if err := c.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil); err != nil {
@@ -1931,14 +1948,14 @@ func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 		// 1. Try getInode directly (Treating id as InodeID)
 		inode, _ = c.getInode(ctx, id)
 		if inode != nil {
-			fileKey, _ = c.UnlockInode(inode)
+			fileKey, _ = c.UnlockInode(ctx, inode)
 		}
 
 		if fileKey == nil {
 			// 2. Try to resolve as Path
 			dir, fileName := filepath.Split(id)
 			name = fileName
-			pInode, pKey, err := c.ResolvePath(dir)
+			pInode, pKey, err := c.ResolvePath(ctx, dir)
 			if err != nil {
 				return nil, err
 			}
@@ -1953,7 +1970,7 @@ func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 			if childID, exists := pInode.Children[nameHMAC]; exists {
 				inode, _ = c.getInode(ctx, childID)
 				if inode != nil {
-					fileKey, _ = c.UnlockInode(inode)
+					fileKey, _ = c.UnlockInode(ctx, inode)
 				}
 			}
 		}
@@ -1982,7 +1999,7 @@ func (c *Client) OpenBlobWrite(id string) (io.WriteCloser, error) {
 			GroupID: groupID,
 			// We set links here, but we MUST also update the parent later.
 			Links:   map[string]bool{parentID + ":" + nameHMAC: true},
-			Lockbox: c.createLockbox(fileKey, 0600, groupID),
+			Lockbox: c.createLockbox(ctx, fileKey, 0600, groupID),
 		}
 		inode.SetFileKey(fileKey)
 		isNew = true
@@ -2049,7 +2066,7 @@ func (w *FileWriter) flushChunk() error {
 	if err != nil {
 		return err
 	}
-	token, err := w.client.issueToken(w.inode.ID, []string{cid}, "W")
+	token, err := w.client.issueToken(w.ctx, w.inode.ID, []string{cid}, "W")
 	if err != nil {
 		return err
 	}
@@ -2057,7 +2074,7 @@ func (w *FileWriter) flushChunk() error {
 	if err != nil {
 		return err
 	}
-	if err := w.client.uploadChunk(cid, ct, nodes, token); err != nil {
+	if err := w.client.uploadChunk(w.ctx, cid, ct, nodes, token); err != nil {
 		return err
 	}
 	var nodeIDs []string
@@ -2158,7 +2175,7 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 		return nil, io.EOF
 	}
 	entry := inode.ChunkManifest[chunkIdx]
-	token, err := c.issueToken(id, nil, "R")
+	token, err := c.issueToken(ctx, id, nil, "R")
 	if err != nil {
 		return nil, err
 	}
@@ -2169,16 +2186,14 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 	return crypto.DecryptChunk(key, ct)
 }
 
-func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) (*metadata.Inode, error) {
-	ctx := context.Background()
-
+func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) (*metadata.Inode, error) {
 	// 1. Get current inode state
-	inode, err := c.GetInode(ctx, id)
+	inode, err := c.getInode(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	key, err := c.UnlockInode(inode)
+	key, err := c.UnlockInode(ctx, inode)
 	if err != nil {
 		return nil, err
 	}
@@ -2241,7 +2256,7 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 			}
 
 			// Upload
-			token, err := c.issueToken(id, []string{cid}, "W")
+			token, err := c.issueToken(ctx, id, []string{cid}, "W")
 			if err != nil {
 				return nil, err
 			}
@@ -2249,7 +2264,7 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 			if err != nil {
 				return nil, err
 			}
-			if err := c.uploadChunk(cid, ct, nodes, token); err != nil {
+			if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
 				return nil, err
 			}
 
@@ -2266,9 +2281,9 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 	return c.updateInode(ctx, *inode)
 }
 
-func (c *Client) ReadDataFile(name string, data any) error {
+func (c *Client) ReadDataFile(ctx context.Context, name string, data any) error {
 	// Map name to a full path if necessary, here we assume names are IDs or paths
-	rc, err := c.OpenBlobRead(name)
+	rc, err := c.OpenBlobRead(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -2280,12 +2295,12 @@ func (c *Client) ReadDataFile(name string, data any) error {
 	return err
 }
 
-func (c *Client) SaveDataFile(name string, data any) error {
+func (c *Client) SaveDataFile(ctx context.Context, name string, data any) error {
 	b, err := json.Marshal(data)
 	if err != nil {
 		return err
 	}
-	wc, err := c.OpenBlobWrite(name)
+	wc, err := c.OpenBlobWrite(ctx, name)
 	if err != nil {
 		return err
 	}
@@ -2296,21 +2311,19 @@ func (c *Client) SaveDataFile(name string, data any) error {
 	return wc.Close()
 }
 
-func (c *Client) OpenForUpdate(name string, data any) (func(bool), error) {
-	return c.OpenManyForUpdate([]string{name}, []any{data})
+func (c *Client) OpenForUpdate(ctx context.Context, name string, data any) (func(bool), error) {
+	return c.OpenManyForUpdate(ctx, []string{name}, []any{data})
 }
 
-func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), error) {
+func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []any) (func(bool), error) {
 	if len(names) != len(data) {
 		return nil, fmt.Errorf("names and data length mismatch")
 	}
 
-	ctx := context.Background()
-
 	// 1. Resolve all paths to InodeIDs
 	ids := make([]string, len(names))
 	for i, name := range names {
-		inode, _, err := c.ResolvePath(name)
+		inode, _, err := c.ResolvePath(ctx, name)
 		if err != nil {
 			ids[i] = name // Fallback to path if not found (e.g. for creation)
 		} else {
@@ -2321,7 +2334,7 @@ func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), erro
 	// Pre-create lockbox for potential new files
 	fileKey := make([]byte, 32)
 	rand.Read(fileKey)
-	lb := c.createLockbox(fileKey, 0600, "")
+	lb := c.createLockbox(ctx, fileKey, 0600, "")
 
 	// 2. Acquire leases for all files
 	if err := c.AcquireLeases(ctx, ids, 2*time.Minute, lb); err != nil {
@@ -2330,7 +2343,7 @@ func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), erro
 
 	// 3. Read all files
 	for i, name := range names {
-		if err := c.ReadDataFile(name, data[i]); err != nil {
+		if err := c.ReadDataFile(ctx, name, data[i]); err != nil {
 			c.ReleaseLeases(ctx, ids)
 			return nil, err
 		}
@@ -2340,7 +2353,7 @@ func (c *Client) OpenManyForUpdate(names []string, data []any) (func(bool), erro
 	return func(commit bool) {
 		if commit {
 			for i, name := range names {
-				if err := c.SaveDataFile(name, data[i]); err != nil {
+				if err := c.SaveDataFile(ctx, name, data[i]); err != nil {
 					log.Printf("Failed to save %s during transactional update: %v", name, err)
 				}
 			}
@@ -2366,7 +2379,7 @@ func (c *Client) GetInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 }
 
 // VerifyInode verifies the manifest signatures and authorized signers.
-func (c *Client) VerifyInode(inode *metadata.Inode) error {
+func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	// 1. Decrypt ClientBlob if present
 	if len(inode.ClientBlob) > 0 {
 		fileKey := inode.GetFileKey()
@@ -2391,7 +2404,7 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 				}
 			}
 			if len(fileKey) == 0 && inode.GroupID != "" {
-				gk, err := c.GetGroupPrivateKey(inode.GroupID)
+				gk, err := c.GetGroupPrivateKey(ctx, inode.GroupID)
 				if err == nil {
 					key, err := inode.Lockbox.GetFileKey(inode.GroupID, gk)
 					if err == nil {
@@ -2403,7 +2416,7 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 			// Try World Access
 			if len(fileKey) == 0 {
 				if _, exists := inode.Lockbox[metadata.WorldID]; exists {
-					gk, gerr := c.GetWorldPrivateKey()
+					gk, gerr := c.GetWorldPrivateKey(ctx)
 					if gerr == nil {
 						key, err := inode.Lockbox.GetFileKey(metadata.WorldID, gk)
 						if err == nil {
@@ -2447,7 +2460,7 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 
 	// 2. Verify Signatures
 	hash := inode.ManifestHash()
-	user, err := c.GetUser(signerID)
+	user, err := c.GetUser(ctx, signerID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch signer %s: %w", signerID, err)
 	}
@@ -2457,7 +2470,7 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 
 	groupValid := false
 	if inode.GroupID != "" && len(inode.GroupSig) > 0 {
-		group, err := c.GetGroup(inode.GroupID)
+		group, err := c.GetGroup(ctx, inode.GroupID)
 		if err == nil {
 			if crypto.VerifySignature(group.SignKey, hash, inode.GroupSig) {
 				groupValid = true
@@ -2490,10 +2503,10 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 }
 
 // UnlockInode attempts to decrypt the file key for the inode using the client's identity.
-func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
+func (c *Client) UnlockInode(ctx context.Context, inode *metadata.Inode) ([]byte, error) {
 	// Phase 31: Verification
 	// This also decrypts ClientBlob and populates transient fields (including fileKey if unlocked)
-	if err := c.VerifyInode(inode); err != nil {
+	if err := c.VerifyInode(ctx, inode); err != nil {
 		return nil, fmt.Errorf("integrity check failed: %w", err)
 	}
 
@@ -2545,7 +2558,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 	// 2. Try group access if personal failed
 	if inode.GroupID != "" {
 		if _, exists := inode.Lockbox[inode.GroupID]; exists {
-			gk, gerr := c.GetGroupPrivateKey(inode.GroupID)
+			gk, gerr := c.GetGroupPrivateKey(ctx, inode.GroupID)
 			if gerr == nil {
 				key, err = inode.Lockbox.GetFileKey(inode.GroupID, gk)
 				if err == nil {
@@ -2560,7 +2573,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 
 	// 3. Try world access if group failed
 	if _, exists := inode.Lockbox[metadata.WorldID]; exists {
-		wk, err := c.GetWorldPrivateKey()
+		wk, err := c.GetWorldPrivateKey(ctx)
 		if err == nil {
 			key, err = inode.Lockbox.GetFileKey(metadata.WorldID, wk)
 			if err == nil {
@@ -2579,7 +2592,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 }
 
 // GetGroupPrivateKey retrieves and decrypts the group private key.
-func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768, error) {
+func (c *Client) GetGroupPrivateKey(ctx context.Context, groupID string) (*mlkem.DecapsulationKey768, error) {
 	c.keyMu.RLock()
 	gk, ok := c.groupKeys[groupID]
 	c.keyMu.RUnlock()
@@ -2587,11 +2600,11 @@ func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768,
 		return gk, nil
 	}
 
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/group/"+groupID+"/private", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/group/"+groupID+"/private", nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.authenticateRequest(req); err != nil {
+	if err := c.authenticateRequest(ctx, req); err != nil {
 		return nil, err
 	}
 
@@ -2600,7 +2613,7 @@ func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768,
 		return nil, err
 	}
 
-	body, err := c.unsealResponse(resp)
+	body, err := c.unsealResponse(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -2638,7 +2651,7 @@ func (c *Client) GetGroupPrivateKey(groupID string) (*mlkem.DecapsulationKey768,
 }
 
 // GetGroupSignKey retrieves and decrypts the group signing key.
-func (c *Client) GetGroupSignKey(groupID string) (*crypto.IdentityKey, error) {
+func (c *Client) GetGroupSignKey(ctx context.Context, groupID string) (*crypto.IdentityKey, error) {
 	c.keyMu.RLock()
 	gk, ok := c.groupSignKeys[groupID]
 	c.keyMu.RUnlock()
@@ -2646,11 +2659,11 @@ func (c *Client) GetGroupSignKey(groupID string) (*crypto.IdentityKey, error) {
 		return gk, nil
 	}
 
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/group/"+groupID+"/sign/private", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/group/"+groupID+"/sign/private", nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.authenticateRequest(req); err != nil {
+	if err := c.authenticateRequest(ctx, req); err != nil {
 		return nil, err
 	}
 
@@ -2659,7 +2672,7 @@ func (c *Client) GetGroupSignKey(groupID string) (*crypto.IdentityKey, error) {
 		return nil, err
 	}
 
-	body, err := c.unsealResponse(resp)
+	body, err := c.unsealResponse(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -2694,7 +2707,7 @@ func (c *Client) GetGroupSignKey(groupID string) (*crypto.IdentityKey, error) {
 }
 
 // GetWorldPublicKey fetches the cluster's world public key.
-func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
+func (c *Client) GetWorldPublicKey(ctx context.Context) (*mlkem.EncapsulationKey768, error) {
 	c.keyMu.RLock()
 	wp := c.worldPublic
 	c.keyMu.RUnlock()
@@ -2702,12 +2715,17 @@ func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
 		return wp, nil
 	}
 
-	resp, err := c.httpClient.Get(c.serverURL + "/v1/meta/key/world")
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/key/world", nil)
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := c.unsealResponse(resp)
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+
+	body, err := c.unsealResponse(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -2730,7 +2748,7 @@ func (c *Client) GetWorldPublicKey() (*mlkem.EncapsulationKey768, error) {
 }
 
 // GetWorldPrivateKey retrieves and decrypts the cluster's world private key.
-func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
+func (c *Client) GetWorldPrivateKey(ctx context.Context) (*mlkem.DecapsulationKey768, error) {
 	c.keyMu.RLock()
 	wp := c.worldPrivate
 	c.keyMu.RUnlock()
@@ -2738,11 +2756,11 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 		return wp, nil
 	}
 
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/meta/key/world/private", nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/key/world/private", nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.authenticateRequest(req); err != nil {
+	if err := c.authenticateRequest(ctx, req); err != nil {
 		return nil, err
 	}
 
@@ -2751,7 +2769,7 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 		return nil, err
 	}
 
-	body, err := c.unsealResponse(resp)
+	body, err := c.unsealResponse(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -2801,19 +2819,19 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 }
 
 // GetGroup fetches the group metadata.
-func (c *Client) GetGroup(id string) (*metadata.Group, error) {
-	group, err := c.getGroupRaw(id)
+func (c *Client) GetGroup(ctx context.Context, id string) (*metadata.Group, error) {
+	group, err := c.getGroupRaw(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := c.VerifyGroup(group); err != nil {
+	if err := c.VerifyGroup(ctx, group); err != nil {
 		return nil, fmt.Errorf("group integrity check failed: %w", err)
 	}
 
 	// 1. Decrypt ClientBlob if present
 	if len(group.ClientBlob) > 0 {
-		gk, err := c.GetGroupPrivateKey(group.ID)
+		gk, err := c.GetGroupPrivateKey(ctx, group.ID)
 		if err == nil {
 			var blob metadata.GroupClientBlob
 			if err := c.decryptClientBlob(group.ClientBlob, gk, &blob); err == nil {
@@ -2825,12 +2843,12 @@ func (c *Client) GetGroup(id string) (*metadata.Group, error) {
 	return group, nil
 }
 
-func (c *Client) getGroupRaw(id string) (*metadata.Group, error) {
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/group/"+id, nil)
+func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/group/"+id, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.authenticateRequest(req); err != nil {
+	if err := c.authenticateRequest(ctx, req); err != nil {
 		return nil, err
 	}
 
@@ -2839,7 +2857,7 @@ func (c *Client) getGroupRaw(id string) (*metadata.Group, error) {
 		return nil, err
 	}
 
-	body, err := c.unsealResponse(resp)
+	body, err := c.unsealResponse(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -2858,7 +2876,7 @@ func (c *Client) getGroupRaw(id string) (*metadata.Group, error) {
 }
 
 // VerifyGroup verifies the group metadata signature and authorized signer.
-func (c *Client) VerifyGroup(group *metadata.Group) error {
+func (c *Client) VerifyGroup(ctx context.Context, group *metadata.Group) error {
 	if group.Signature == nil {
 		return fmt.Errorf("missing group signature")
 	}
@@ -2869,7 +2887,7 @@ func (c *Client) VerifyGroup(group *metadata.Group) error {
 	}
 
 	// User-signed
-	user, err := c.GetUser(group.SignerID)
+	user, err := c.GetUser(ctx, group.SignerID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch group signer %s: %w", group.SignerID, err)
 	}
@@ -2881,8 +2899,8 @@ func (c *Client) VerifyGroup(group *metadata.Group) error {
 }
 
 // GetGroupName retrieves and decrypts the human-readable name of a group.
-func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
-	gk, err := c.GetGroupPrivateKey(group.ID)
+func (c *Client) GetGroupName(ctx context.Context, group *metadata.Group) (string, error) {
+	gk, err := c.GetGroupPrivateKey(ctx, group.ID)
 	if err != nil {
 		return "", err
 	}
@@ -2898,7 +2916,7 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 }
 
 // DecryptGroupName decrypts a group name from a list entry using cached or provided keys.
-func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error) {
+func (c *Client) DecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error) {
 	// 1. Try Cache
 	c.keyMu.RLock()
 	gdk, ok := c.groupKeys[entry.ID]
@@ -2922,7 +2940,7 @@ func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error)
 				gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, ogdk)
 			} else {
 				// Fallback to network if not cached
-				if ogdk, gerr := c.GetGroupPrivateKey(entry.OwnerID); gerr == nil {
+				if ogdk, gerr := c.GetGroupPrivateKey(ctx, entry.OwnerID); gerr == nil {
 					gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, ogdk)
 				}
 			}
@@ -2953,7 +2971,7 @@ func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error)
 }
 
 // GetGroupRegistryKey retrieves and decrypts the group registry key.
-func (c *Client) getGroupRegistryKey(group *metadata.Group) ([]byte, error) {
+func (c *Client) getGroupRegistryKey(ctx context.Context, group *metadata.Group) ([]byte, error) {
 	if c.decKey == nil {
 		return nil, fmt.Errorf("client has no identity to unlock registry")
 	}
@@ -2966,7 +2984,7 @@ func (c *Client) getGroupRegistryKey(group *metadata.Group) ([]byte, error) {
 	// 2. Try group-based management access
 	if group.OwnerID != "" && group.OwnerID != c.userID {
 		if _, exists := group.RegistryLockbox[group.OwnerID]; exists {
-			gk, gerr := c.GetGroupPrivateKey(group.OwnerID)
+			gk, gerr := c.GetGroupPrivateKey(ctx, group.OwnerID)
 			if gerr == nil {
 				return group.RegistryLockbox.GetFileKey(group.OwnerID, gk)
 			}
@@ -2996,16 +3014,16 @@ func (c *Client) decryptRegistry(key []byte, encrypted []byte) ([]metadata.Membe
 }
 
 // CreateGroup creates a new user group.
-func (c *Client) CreateGroup(name string) (*metadata.Group, error) {
-	return c.createGroupInternal(name, false)
+func (c *Client) CreateGroup(ctx context.Context, name string) (*metadata.Group, error) {
+	return c.createGroupInternal(ctx, name, false)
 }
 
 // CreateSystemGroup creates a new system group (Admin only).
-func (c *Client) CreateSystemGroup(name string) (*metadata.Group, error) {
-	return c.createGroupInternal(name, true)
+func (c *Client) CreateSystemGroup(ctx context.Context, name string) (*metadata.Group, error) {
+	return c.createGroupInternal(ctx, name, true)
 }
 
-func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Group, error) {
+func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem bool) (*metadata.Group, error) {
 	// 1. Generate Encryption Key (ML-KEM)
 	dk, _ := crypto.GenerateEncryptionKey()
 	pk := dk.EncapsulationKey().Bytes()
@@ -3094,7 +3112,7 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 	c.keyMu.Unlock()
 
 	// Client-side Signing
-	if err := c.signGroup(group, false); err != nil {
+	if err := c.signGroup(ctx, group, false); err != nil {
 		return nil, err
 	}
 
@@ -3104,10 +3122,10 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 	if err != nil {
 		return nil, err
 	}
-	if err := c.authenticateRequest(req); err != nil {
+	if err := c.authenticateRequest(ctx, req); err != nil {
 		return nil, err
 	}
-	if err := c.sealBody(req, data); err != nil {
+	if err := c.sealBody(ctx, req, data); err != nil {
 		return nil, err
 	}
 
@@ -3115,7 +3133,7 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 	if err != nil {
 		return nil, err
 	}
-	body, err := c.unsealResponse(resp)
+	body, err := c.unsealResponse(ctx, resp)
 	if err != nil {
 		return nil, err
 	}
@@ -3132,7 +3150,7 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 	}
 
 	// Verify the response integrity
-	if err := c.VerifyGroup(&created); err != nil {
+	if err := c.VerifyGroup(ctx, &created); err != nil {
 		return nil, fmt.Errorf("integrity check failed on created group: %w", err)
 	}
 
@@ -3154,7 +3172,7 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 		}
 	} else {
 		// We need the user's public key from the server
-		user, err := c.GetUser(userID)
+		user, err := c.GetUser(ctx, userID)
 		if err != nil {
 			return err
 		}
@@ -3166,13 +3184,13 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 
 	_, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
 		// 1. Update Group Private Keys (Lockbox)
-		gk, err := c.GetGroupPrivateKey(groupID)
+		gk, err := c.GetGroupPrivateKey(ctx, groupID)
 		if err != nil {
 			return err
 		}
 		priv := crypto.MarshalDecapsulationKey(gk)
 
-		gsk, err := c.GetGroupSignKey(groupID)
+		gsk, err := c.GetGroupSignKey(ctx, groupID)
 		if err != nil {
 			return err
 		}
@@ -3192,7 +3210,7 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 		group.Members[userID] = true
 
 		// 2. Update Member Registry (if we are a manager)
-		rk, err := c.getGroupRegistryKey(group)
+		rk, err := c.getGroupRegistryKey(ctx, group)
 		if err == nil {
 			// We are a manager, update the registry
 			members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
@@ -3237,7 +3255,7 @@ func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string
 		}
 
 		// 3. Remove from Registry (if we are a manager)
-		rk, err := c.getGroupRegistryKey(group)
+		rk, err := c.getGroupRegistryKey(ctx, group)
 		if err == nil {
 			// We are a manager, update the registry
 			members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
@@ -3266,17 +3284,17 @@ func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string
 }
 
 // SetAttr updates the attributes of an inode at the given path.
-func (c *Client) SetAttr(path string, attr metadata.SetAttrRequest) error {
-	inode, key, err := c.ResolvePath(path)
+func (c *Client) SetAttr(ctx context.Context, path string, attr metadata.SetAttrRequest) error {
+	inode, key, err := c.ResolvePath(ctx, path)
 	if err != nil {
 		return err
 	}
-	return c.SetAttrByID(inode, key, attr)
+	return c.SetAttrByID(ctx, inode, key, attr)
 }
 
 // SetAttrByID updates the attributes of an inode by ID.
 // SetAttrByID updates the attributes of an inode by ID.
-func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
+func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
 	// 1. Update local fields
 	if attr.Mode != nil {
 		inode.Mode = *attr.Mode
@@ -3298,7 +3316,8 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	// 2.1 World Access
 	_, worldInLockbox := inode.Lockbox[metadata.WorldID]
 	if worldRead && !worldInLockbox {
-		wpk, err := c.GetWorldPublicKey()
+		wpk, err := c.GetWorldPublicKey(ctx)
+
 		if err == nil {
 			inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
 		}
@@ -3310,7 +3329,7 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	if inode.GroupID != "" {
 		_, groupInLockbox := inode.Lockbox[inode.GroupID]
 		if groupRW && !groupInLockbox {
-			group, err := c.GetGroup(inode.GroupID)
+			group, err := c.GetGroup(ctx, inode.GroupID)
 			if err == nil {
 				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 				if err == nil {
@@ -3323,7 +3342,7 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	}
 
 	// 3. Final Metadata Update (Signs everything)
-	updated, err := c.updateInode(context.Background(), *inode)
+	updated, err := c.updateInode(ctx, *inode)
 	if err == nil {
 		*inode = *updated
 	}
@@ -3331,24 +3350,24 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 }
 
 // Remove deletes an inode at the given path.
-func (c *Client) Remove(path string) error {
-	return c.RemoveEntry(path)
+func (c *Client) Remove(ctx context.Context, path string) error {
+	return c.RemoveEntry(ctx, path)
 }
 
 // PushKeySync uploads an encrypted configuration blob to the server.
 // Requires a valid session and mandatory Layer 7 E2EE (Sealing).
-func (c *Client) PushKeySync(blob *metadata.KeySyncBlob) error {
+func (c *Client) PushKeySync(ctx context.Context, blob *metadata.KeySyncBlob) error {
 	data, _ := json.Marshal(blob)
-	req, err := http.NewRequest("POST", c.serverURL+"/v1/user/keysync", nil)
+	req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/user/keysync", nil)
 	if err != nil {
 		return err
 	}
 
-	if err := c.authenticateRequest(req); err != nil {
+	if err := c.authenticateRequest(ctx, req); err != nil {
 		return err
 	}
 
-	if err := c.sealBody(req, data); err != nil {
+	if err := c.sealBody(ctx, req, data); err != nil {
 		return err
 	}
 
@@ -3367,8 +3386,8 @@ func (c *Client) PushKeySync(blob *metadata.KeySyncBlob) error {
 
 // PullKeySync retrieves the encrypted configuration blob from the server.
 // Authenticates using an OIDC JWT.
-func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
-	req, err := http.NewRequest("GET", c.serverURL+"/v1/user/keysync", nil)
+func (c *Client) PullKeySync(ctx context.Context, jwt string) (*metadata.KeySyncBlob, error) {
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/user/keysync", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -3504,19 +3523,19 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 	return metadata.ErrConflict
 }
 
-func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {
+func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, error) {
 	var stats metadata.ClusterStats
-	err := c.withRetry(context.Background(), func() error {
-		if err := c.acquireControl(context.Background()); err != nil {
+	err := c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
 			return err
 		}
 		defer c.releaseControl()
 
-		req, err := http.NewRequest("GET", c.serverURL+"/v1/cluster/stats", nil)
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/cluster/stats", nil)
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -3558,10 +3577,10 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(hReq); err != nil {
+		if err := c.authenticateRequest(ctx, hReq); err != nil {
 			return err
 		}
-		if err := c.sealBody(hReq, data); err != nil {
+		if err := c.sealBody(ctx, hReq, data); err != nil {
 			return err
 		}
 
@@ -3569,7 +3588,7 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3599,10 +3618,10 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(hReq); err != nil {
+		if err := c.authenticateRequest(ctx, hReq); err != nil {
 			return err
 		}
-		if err := c.sealBody(hReq, data); err != nil {
+		if err := c.sealBody(ctx, hReq, data); err != nil {
 			return err
 		}
 
@@ -3610,7 +3629,7 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3637,7 +3656,7 @@ func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 			return err
 		}
 		req.Header.Set("X-DistFS-Sealed", "true") // Required
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -3645,7 +3664,7 @@ func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3674,7 +3693,7 @@ func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) 
 			return err
 		}
 		req.Header.Set("X-DistFS-Sealed", "true")
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -3682,7 +3701,7 @@ func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) 
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3711,7 +3730,7 @@ func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, err
 			return err
 		}
 		req.Header.Set("X-DistFS-Sealed", "true")
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -3719,7 +3738,7 @@ func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, err
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3748,7 +3767,7 @@ func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 			return err
 		}
 		req.Header.Set("X-DistFS-Sealed", "true") // Required
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -3756,7 +3775,7 @@ func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3785,7 +3804,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 			return err
 		}
 		req.Header.Set("X-DistFS-Sealed", "true") // Required
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
 
@@ -3793,7 +3812,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3827,10 +3846,10 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, payload); err != nil {
+		if err := c.sealBody(ctx, req, payload); err != nil {
 			return err
 		}
 
@@ -3838,7 +3857,7 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3866,10 +3885,10 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, payload); err != nil {
+		if err := c.sealBody(ctx, req, payload); err != nil {
 			return err
 		}
 
@@ -3877,7 +3896,7 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3903,10 +3922,10 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, payload); err != nil {
+		if err := c.sealBody(ctx, req, payload); err != nil {
 			return err
 		}
 
@@ -3914,7 +3933,7 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3940,10 +3959,10 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, payload); err != nil {
+		if err := c.sealBody(ctx, req, payload); err != nil {
 			return err
 		}
 
@@ -3951,7 +3970,7 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -3977,10 +3996,10 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(hReq); err != nil {
+		if err := c.authenticateRequest(ctx, hReq); err != nil {
 			return err
 		}
-		if err := c.sealBody(hReq, data); err != nil {
+		if err := c.sealBody(ctx, hReq, data); err != nil {
 			return err
 		}
 
@@ -3988,7 +4007,7 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -4014,10 +4033,10 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(hReq); err != nil {
+		if err := c.authenticateRequest(ctx, hReq); err != nil {
 			return err
 		}
-		if err := c.sealBody(hReq, data); err != nil {
+		if err := c.sealBody(ctx, hReq, data); err != nil {
 			return err
 		}
 
@@ -4025,7 +4044,7 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -4046,7 +4065,7 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 	}
 
 	// Try to unlock so we can re-key for the new owner/group
-	key, unlockErr := c.UnlockInode(inode)
+	key, unlockErr := c.UnlockInode(ctx, inode)
 
 	if req.OwnerID != nil {
 		inode.OwnerID = *req.OwnerID
@@ -4055,7 +4074,7 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 
 		// If we have the key, add the new owner to the lockbox
 		if unlockErr == nil {
-			newUser, err := c.GetUser(inode.OwnerID)
+			newUser, err := c.GetUser(ctx, inode.OwnerID)
 			if err == nil {
 				pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
 				if err == nil {
@@ -4068,7 +4087,7 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 		inode.GroupID = *req.GroupID
 		// If we have the key, add the new group to the lockbox
 		if unlockErr == nil && inode.GroupID != "" {
-			group, err := c.GetGroup(inode.GroupID)
+			group, err := c.GetGroup(ctx, inode.GroupID)
 			if err == nil {
 				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 				if err == nil {
@@ -4089,7 +4108,7 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 	}
 
 	// 1. Try to unlock so we can re-key for group/world if bits changed
-	key, unlockErr := c.UnlockInode(inode)
+	key, unlockErr := c.UnlockInode(ctx, inode)
 
 	inode.Mode = mode
 
@@ -4101,7 +4120,7 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 		// 2.1 World Access
 		_, worldInLockbox := inode.Lockbox[metadata.WorldID]
 		if worldRead && !worldInLockbox {
-			wpk, err := c.GetWorldPublicKey()
+			wpk, err := c.GetWorldPublicKey(ctx)
 			if err == nil {
 				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
 			}
@@ -4113,7 +4132,7 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 		if inode.GroupID != "" {
 			_, groupInLockbox := inode.Lockbox[inode.GroupID]
 			if groupRW && !groupInLockbox {
-				group, err := c.GetGroup(inode.GroupID)
+				group, err := c.GetGroup(ctx, inode.GroupID)
 				if err == nil {
 					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 					if err == nil {
@@ -4130,7 +4149,7 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 	return err
 }
 
-func (c *Client) signGroup(group *metadata.Group, isUpdate bool) error {
+func (c *Client) signGroup(ctx context.Context, group *metadata.Group, isUpdate bool) error {
 	// Re-encrypt ClientBlob if transient fields are set
 	if name := group.GetName(); name != "" {
 		c.keyMu.RLock()
@@ -4139,7 +4158,7 @@ func (c *Client) signGroup(group *metadata.Group, isUpdate bool) error {
 
 		if !ok {
 			var err error
-			gdk, err = c.GetGroupPrivateKey(group.ID)
+			gdk, err = c.GetGroupPrivateKey(ctx, group.ID)
 			if err != nil {
 				return fmt.Errorf("failed to fetch group key for signing: %w", err)
 			}
@@ -4167,7 +4186,7 @@ func (c *Client) signGroup(group *metadata.Group, isUpdate bool) error {
 
 func (c *Client) updateGroupInternal(ctx context.Context, group *metadata.Group) (*metadata.Group, error) {
 	var updated metadata.Group
-	if err := c.signGroup(group, true); err != nil {
+	if err := c.signGroup(ctx, group, true); err != nil {
 		return nil, err
 	}
 	data, err := json.Marshal(group)
@@ -4185,10 +4204,10 @@ func (c *Client) updateGroupInternal(ctx context.Context, group *metadata.Group)
 		if err != nil {
 			return err
 		}
-		if err := c.authenticateRequest(req); err != nil {
+		if err := c.authenticateRequest(ctx, req); err != nil {
 			return err
 		}
-		if err := c.sealBody(req, data); err != nil {
+		if err := c.sealBody(ctx, req, data); err != nil {
 			return err
 		}
 
@@ -4196,7 +4215,7 @@ func (c *Client) updateGroupInternal(ctx context.Context, group *metadata.Group)
 		if err != nil {
 			return err
 		}
-		body, err := c.unsealResponse(resp)
+		body, err := c.unsealResponse(ctx, resp)
 		if err != nil {
 			return err
 		}
@@ -4227,7 +4246,7 @@ func (c *Client) updateGroup(ctx context.Context, id string, modifier func(*meta
 
 	var updated *metadata.Group
 	err := c.withConflictRetry(ctx, func() error {
-		latest, err := c.GetGroup(id)
+		latest, err := c.GetGroup(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -4244,14 +4263,14 @@ func (c *Client) updateGroup(ctx context.Context, id string, modifier func(*meta
 
 // GetGroupMembers retrieves the list of members for a group.
 // If the requester is an authorized manager, it returns emails. Otherwise, only UserIDs.
-func (c *Client) GetGroupMembers(groupID string) ([]metadata.MemberEntry, error) {
-	group, err := c.GetGroup(groupID)
+func (c *Client) GetGroupMembers(ctx context.Context, groupID string) ([]metadata.MemberEntry, error) {
+	group, err := c.GetGroup(ctx, groupID)
 	if err != nil {
 		return nil, err
 	}
 
 	// Try to decrypt registry
-	rk, err := c.getGroupRegistryKey(group)
+	rk, err := c.getGroupRegistryKey(ctx, group)
 	if err == nil {
 		return c.decryptRegistry(rk, group.EncryptedRegistry)
 	}
@@ -4268,12 +4287,12 @@ func (c *Client) GetGroupMembers(groupID string) ([]metadata.MemberEntry, error)
 func (c *Client) GroupChown(ctx context.Context, groupID, newOwnerID string) error {
 	// Pre-fetch new owner's public key once outside the retry loop
 	var newOwnerEK *mlkem.EncapsulationKey768
-	newOwner, err := c.GetUser(newOwnerID)
+	newOwner, err := c.GetUser(ctx, newOwnerID)
 	if err == nil {
 		newOwnerEK, _ = crypto.UnmarshalEncapsulationKey(newOwner.EncKey)
 	} else {
 		// Try as group?
-		targetGroup, err := c.GetGroup(newOwnerID)
+		targetGroup, err := c.GetGroup(ctx, newOwnerID)
 		if err == nil {
 			newOwnerEK, _ = crypto.UnmarshalEncapsulationKey(targetGroup.EncKey)
 		}
@@ -4281,7 +4300,7 @@ func (c *Client) GroupChown(ctx context.Context, groupID, newOwnerID string) err
 
 	_, err = c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
 		// 1. Update RegistryLockbox (if we are a manager)
-		rk, err := c.getGroupRegistryKey(group)
+		rk, err := c.getGroupRegistryKey(ctx, group)
 		if err == nil && newOwnerEK != nil {
 			// Re-key Registry for new owner
 			if group.RegistryLockbox == nil {
@@ -4293,11 +4312,11 @@ func (c *Client) GroupChown(ctx context.Context, groupID, newOwnerID string) err
 		// 2. Update Primary Lockbox (Encryption & Signing Keys)
 		if newOwnerEK != nil {
 			// Fetch group keys to re-key
-			gk, err := c.GetGroupPrivateKey(groupID)
+			gk, err := c.GetGroupPrivateKey(ctx, groupID)
 			if err == nil {
 				group.Lockbox.AddRecipient(newOwnerID, newOwnerEK, crypto.MarshalDecapsulationKey(gk))
 			}
-			gsk, err := c.GetGroupSignKey(groupID)
+			gsk, err := c.GetGroupSignKey(ctx, groupID)
 			if err == nil {
 				group.Lockbox.AddRecipient(newOwnerID+":sign", newOwnerEK, gsk.MarshalPrivate())
 			}

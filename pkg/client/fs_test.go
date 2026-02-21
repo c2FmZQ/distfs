@@ -122,7 +122,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
@@ -130,12 +130,12 @@ func TestDistFS_ReadDir(t *testing.T) {
 	// /dir1
 	// /dir1/file1
 	// /dir1/file2
-	c.Mkdir("/dir1")
-	c.CreateFile("/dir1/file1", bytes.NewReader([]byte("content")), 7)
-	c.CreateFile("/dir1/file2", bytes.NewReader([]byte("content")), 7)
+	c.Mkdir(t.Context(), "/dir1")
+	c.CreateFile(t.Context(), "/dir1/file1", bytes.NewReader([]byte("content")), 7)
+	c.CreateFile(t.Context(), "/dir1/file2", bytes.NewReader([]byte("content")), 7)
 
 	// 4. ReadDir
-	dfs := c.FS()
+	dfs := c.FS(t.Context())
 	entries, err := fs.ReadDir(dfs, "dir1")
 	if err != nil {
 		t.Fatalf("ReadDir failed: %v", err)

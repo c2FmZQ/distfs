@@ -26,14 +26,18 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
+var _ fs.FS = (*DistFS)(nil)
+var _ fs.File = (*DistFile)(nil)
+
 // DistFS implements fs.FS and fs.ReadDirFS.
 type DistFS struct {
 	client *Client
+	ctx    context.Context
 }
 
 // FS returns an fs.FS compatible wrapper around the client.
-func (c *Client) FS() *DistFS {
-	return &DistFS{client: c}
+func (c *Client) FS(ctx context.Context) *DistFS {
+	return &DistFS{client: c, ctx: ctx}
 }
 
 // ReadDir implements fs.ReadDirFS.
@@ -54,7 +58,7 @@ func (d *DistFS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 // Open implements fs.FS.
 func (d *DistFS) Open(name string) (fs.File, error) {
-	inode, key, err := d.client.ResolvePath(name)
+	inode, key, err := d.client.ResolvePath(d.ctx, name)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
@@ -62,13 +66,14 @@ func (d *DistFS) Open(name string) (fs.File, error) {
 	if inode.Type == metadata.DirType {
 		return &DistDir{
 			client: d.client,
+			ctx:    d.ctx,
 			inode:  inode,
 			key:    key,
 		}, nil
 	}
 
 	// It's a file
-	reader, err := d.client.NewReader(inode.ID, key)
+	reader, err := d.client.NewReader(d.ctx, inode.ID, key)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
@@ -96,6 +101,7 @@ func (f *DistFile) Close() error {
 // DistDir implements fs.ReadDirFile
 type DistDir struct {
 	client     *Client
+	ctx        context.Context
 	inode      *metadata.Inode
 	key        []byte // The symmetric key for this directory.
 	offset     int
@@ -151,7 +157,7 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 		ids = append(ids, id)
 	}
 
-	inodes, err := d.client.getInodes(context.Background(), ids)
+	inodes, err := d.client.getInodes(d.ctx, ids)
 	if err != nil {
 		return nil, err
 	}
@@ -224,7 +230,7 @@ func (i *DistFileInfo) Sys() any           { return i.inode }
 
 // ReadDirExtended returns a list of directory entries with full metadata.
 func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEntry, error) {
-	inode, key, err := c.ResolvePath(path)
+	inode, key, err := c.ResolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -280,7 +286,7 @@ func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key
 
 // ReadDirRecursive returns all entries in the directory tree starting at path.
 func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string][]*DistDirEntry, error) {
-	inode, key, err := c.ResolvePath(path)
+	inode, key, err := c.ResolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -320,8 +326,8 @@ func (c *Client) NewDirEntry(inode *metadata.Inode, name string, key []byte) *Di
 }
 
 // DecryptName decrypts the name of an Inode using the client's identity.
-func (c *Client) DecryptName(inode *metadata.Inode) (string, []byte, error) {
-	if err := c.VerifyInode(inode); err != nil {
+func (c *Client) DecryptName(ctx context.Context, inode *metadata.Inode) (string, []byte, error) {
+	if err := c.VerifyInode(ctx, inode); err != nil {
 		return "", nil, err
 	}
 	return inode.GetName(), inode.GetFileKey(), nil

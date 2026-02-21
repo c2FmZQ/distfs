@@ -3,7 +3,6 @@ package metadata_test
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -35,10 +34,10 @@ func TestAdminRedaction(t *testing.T) {
 	// 2. Setup Admin Client
 	c := client.NewClient(ts.URL)
 	c = c.WithIdentity(adminID, dkA).WithSignKey(skA)
-	ekBytes, _ := c.GetServerSignKey()
+	ekBytes, _ := c.GetServerSignKey(t.Context())
 	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
 	c = c.WithServerKey(ek)
-	if err := c.Login(); err != nil {
+	if err := c.Login(t.Context()); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
 
@@ -57,13 +56,13 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 4. Create Group
-	group, err := c.CreateGroup("test-group")
+	group, err := c.CreateGroup(t.Context(), "test-group")
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
 
 	// 5. Verify Redaction in ListUsers
-	users, err := c.AdminListUsers(context.Background())
+	users, err := c.AdminListUsers(t.Context())
 	if err != nil {
 		t.Fatalf("AdminListUsers failed: %v", err)
 	}
@@ -77,7 +76,7 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 6. Verify Redaction in ListNodes
-	nodes, err := c.AdminListNodes(context.Background())
+	nodes, err := c.AdminListNodes(t.Context())
 	if err != nil {
 		t.Fatalf("AdminListNodes failed: %v", err)
 	}
@@ -91,7 +90,7 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 7. Verify Redaction in ListGroups
-	groups, err := c.AdminListGroups(context.Background())
+	groups, err := c.AdminListGroups(t.Context())
 	if err != nil {
 		t.Fatalf("AdminListGroups failed: %v", err)
 	}
@@ -105,7 +104,7 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 8. Verify FULL metadata is still available via handleGetGroup (for authorized users/admins)
-	fetched, err := c.GetGroup(group.ID)
+	fetched, err := c.GetGroup(t.Context(), group.ID)
 	if err != nil {
 		t.Fatalf("GetGroup failed: %v", err)
 	}

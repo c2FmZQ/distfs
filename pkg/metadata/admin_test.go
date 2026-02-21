@@ -3,7 +3,6 @@ package metadata_test
 
 import (
 	"bytes"
-	"context"
 	"crypto/mlkem"
 	"encoding/json"
 	"net/http"
@@ -54,18 +53,17 @@ func TestAdminCUI(t *testing.T) {
 		c := client.NewClient(ts.URL)
 		c = c.WithIdentity(userID, dk).WithSignKey(sk)
 		// We need server key for sealing
-		ekBytes, _ := c.GetServerSignKey()
+		ekBytes, _ := c.GetServerSignKey(t.Context())
 		ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
 		c = c.WithServerKey(ek)
 
-		if err := c.Login(); err != nil {
+		if err := c.Login(t.Context()); err != nil {
 			t.Logf("login failed: %v", err)
 			return 500
 		}
 
-		ctx := context.Background()
 		if path == "users" {
-			_, err := c.AdminListUsers(ctx)
+			_, err := c.AdminListUsers(t.Context())
 			if err != nil {
 				if apiErr, ok := err.(*client.APIError); ok {
 					return apiErr.StatusCode
@@ -91,14 +89,14 @@ func TestAdminCUI(t *testing.T) {
 	// 5. Promote User 2
 	c1 := client.NewClient(ts.URL)
 	c1 = c1.WithIdentity(user1ID, dk1).WithSignKey(sk1)
-	ekBytes, _ := c1.GetServerSignKey()
+	ekBytes, _ := c1.GetServerSignKey(t.Context())
 	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
 	c1 = c1.WithServerKey(ek)
-	if err := c1.Login(); err != nil {
+	if err := c1.Login(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	if err := c1.AdminPromote(context.Background(), user2ID); err != nil {
+	if err := c1.AdminPromote(t.Context(), user2ID); err != nil {
 		t.Fatalf("Promotion failed: %v", err)
 	}
 
@@ -130,15 +128,15 @@ func TestAdminAPI(t *testing.T) {
 	// 2. Setup Admin Client
 	c := client.NewClient(ts.URL)
 	c = c.WithIdentity(userID, dk).WithSignKey(sk)
-	ekBytes, _ := c.GetServerSignKey()
+	ekBytes, _ := c.GetServerSignKey(t.Context())
 	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
 	c = c.WithServerKey(ek)
-	if err := c.Login(); err != nil {
+	if err := c.Login(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
 	// 3. Fetch Users
-	users, err := c.AdminListUsers(context.Background())
+	users, err := c.AdminListUsers(t.Context())
 	if err != nil {
 		t.Fatalf("AdminListUsers failed: %v", err)
 	}
@@ -161,7 +159,7 @@ func TestAdminAPI(t *testing.T) {
 	}
 
 	// 5. Fetch Nodes via Admin API
-	nodes, err := c.AdminListNodes(context.Background())
+	nodes, err := c.AdminListNodes(t.Context())
 	if err != nil {
 		t.Fatalf("AdminListNodes failed: %v", err)
 	}
@@ -175,7 +173,7 @@ func TestAdminAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, err := c.AdminLookup(context.Background(), "alice@example.com", "Test Lookup")
+	id, err := c.AdminLookup(t.Context(), "alice@example.com", "Test Lookup")
 	if err != nil {
 		t.Fatalf("AdminLookup failed: %v", err)
 	}
@@ -219,16 +217,16 @@ func TestAdminOverrides(t *testing.T) {
 	// Setup Client
 	c := client.NewClient(ts.URL)
 	c = c.WithIdentity(adminID, dkA).WithSignKey(skA)
-	ekBytes, _ := c.GetServerSignKey()
+	ekBytes, _ := c.GetServerSignKey(t.Context())
 	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
 	c = c.WithServerKey(ek).WithAdmin(true)
-	if err := c.Login(); err != nil {
+	if err := c.Login(t.Context()); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
 
 	// 4. Admin Chown to User B
 	req := metadata.AdminChownRequest{OwnerID: &userID}
-	if err := c.AdminChown(context.Background(), "file1", req); err != nil {
+	if err := c.AdminChown(t.Context(), "file1", req); err != nil {
 		t.Fatalf("AdminChown failed: %v", err)
 	}
 
@@ -262,7 +260,7 @@ func TestAdminOverrides(t *testing.T) {
 	}
 
 	// 7. Admin Chmod (World-write 0002 should be stripped to 0775)
-	if err := c.AdminChmod(context.Background(), "file1", 0777); err != nil {
+	if err := c.AdminChmod(t.Context(), "file1", 0777); err != nil {
 		t.Fatalf("AdminChmod failed: %v", err)
 	}
 	node.FSM.DB().View(func(tx *bolt.Tx) error {

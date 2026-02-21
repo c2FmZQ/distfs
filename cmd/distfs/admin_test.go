@@ -56,10 +56,10 @@ func (m *mockAdminClient) AdminJoinNode(ctx context.Context, address string) err
 func (m *mockAdminClient) AdminRemoveNode(ctx context.Context, id string) error {
 	return m.err
 }
-func (m *mockAdminClient) DecryptGroupName(entry metadata.GroupListEntry) (string, error) {
+func (m *mockAdminClient) DecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error) {
 	return "decrypted-group", m.err
 }
-func (m *mockAdminClient) ResolvePath(path string) (*metadata.Inode, []byte, error) {
+func (m *mockAdminClient) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	return &metadata.Inode{ID: "inode-123"}, []byte("key"), m.err
 }
 func (m *mockAdminClient) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {

@@ -32,8 +32,8 @@ import (
 )
 
 // EnsureRoot makes sure the root directory inode exists.
-func (c *Client) EnsureRoot() error {
-	_, err := c.getInode(context.Background(), metadata.RootID)
+func (c *Client) EnsureRoot(ctx context.Context) error {
+	_, err := c.getInode(ctx, metadata.RootID)
 	if err == nil {
 		return nil
 	}
@@ -47,7 +47,7 @@ func (c *Client) EnsureRoot() error {
 		return err
 	}
 
-	lb := c.createLockbox(rootKey, 0755, "")
+	lb := c.createLockbox(ctx, rootKey, 0755, "")
 	inode := metadata.Inode{
 		ID:       metadata.RootID,
 		Type:     metadata.DirType,
@@ -58,11 +58,11 @@ func (c *Client) EnsureRoot() error {
 	}
 	inode.SetFileKey(rootKey)
 	inode.SetAuthorizedSigners([]string{c.userID})
-	_, err = c.createInode(context.Background(), inode)
+	_, err = c.createInode(ctx, inode)
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
 			// Already exists, but we MUST fetch it to capture the anchor (owner/version)
-			_, err = c.getInode(context.Background(), metadata.RootID)
+			_, err = c.getInode(ctx, metadata.RootID)
 			return err
 		}
 		return err
@@ -71,7 +71,7 @@ func (c *Client) EnsureRoot() error {
 }
 
 // ResolvePath traverses the directory tree to find the inode and key for a path.
-func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
+func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	path = "/" + strings.Trim(path, "/")
 
 	// 1. Check Path Cache for longest prefix
@@ -87,7 +87,7 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 	for i := len(parts); i >= 0; i-- {
 		prefix := "/" + strings.Join(parts[:i], "/")
 		if entry, ok := c.getPathCache(prefix); ok {
-			inode, err := c.getInode(context.Background(), entry.inodeID)
+			inode, err := c.getInode(ctx, entry.inodeID)
 			if err == nil {
 				// Validate hint integrity
 				valid := false
@@ -112,12 +112,12 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 	// 2. Sequential Resolution from the found prefix or root
 	if currentInode == nil {
-		rootInode, err := c.getInode(context.Background(), metadata.RootID)
+		rootInode, err := c.getInode(ctx, metadata.RootID)
 		if err != nil {
-			if err := c.EnsureRoot(); err != nil {
+			if err := c.EnsureRoot(ctx); err != nil {
 				return nil, nil, fmt.Errorf("failed to ensure root inode: %w", err)
 			}
-			rootInode, err = c.getInode(context.Background(), metadata.RootID)
+			rootInode, err = c.getInode(ctx, metadata.RootID)
 			if err != nil {
 				return nil, nil, fmt.Errorf("failed to get root inode after creation: %w", err)
 			}
@@ -127,7 +127,7 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 			return nil, nil, fmt.Errorf("client has no identity to unlock root")
 		}
 
-		rootKey, err := c.UnlockInode(rootInode)
+		rootKey, err := c.UnlockInode(ctx, rootInode)
 		if err != nil {
 			return nil, nil, fmt.Errorf("access denied to root: %w", err)
 		}
@@ -166,12 +166,12 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 
 		parentID := currentInode.ID
 		var err error
-		currentInode, err = c.getInode(context.Background(), childID)
+		currentInode, err = c.getInode(ctx, childID)
 		if err != nil {
 			return nil, nil, err
 		}
 
-		key, err := c.UnlockInode(currentInode)
+		key, err := c.UnlockInode(ctx, currentInode)
 		if err != nil {
 			return nil, nil, fmt.Errorf("access denied to %s: %w", part, err)
 		}
@@ -190,23 +190,23 @@ func (c *Client) ResolvePath(path string) (*metadata.Inode, []byte, error) {
 }
 
 // Mkdir creates a new directory.
-func (c *Client) Mkdir(path string) error {
-	return c.addEntry(path, metadata.DirType, nil, 0, "", 0700)
+func (c *Client) Mkdir(ctx context.Context, path string) error {
+	return c.addEntry(ctx, path, metadata.DirType, nil, 0, "", 0700)
 }
 
 // CreateFile creates a new file with the given content.
-func (c *Client) CreateFile(path string, r io.Reader, size int64) error {
-	return c.addEntry(path, metadata.FileType, r, size, "", 0600)
+func (c *Client) CreateFile(ctx context.Context, path string, r io.Reader, size int64) error {
+	return c.addEntry(ctx, path, metadata.FileType, r, size, "", 0600)
 }
 
 // Symlink creates a new symbolic link.
-func (c *Client) Symlink(target, path string) error {
-	return c.addEntry(path, metadata.SymlinkType, nil, 0, target, 0777)
+func (c *Client) Symlink(ctx context.Context, target, path string) error {
+	return c.addEntry(ctx, path, metadata.SymlinkType, nil, 0, target, 0777)
 }
 
 // AddEntry adds a new directory entry to the given parent.
 
-func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string, uid, gid uint32) (*metadata.Inode, []byte, error) {
+func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string, uid, gid uint32) (*metadata.Inode, []byte, error) {
 
 	mac := hmac.New(sha256.New, parentKey)
 
@@ -235,15 +235,15 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	var newInode *metadata.Inode
 
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(context.Background(), newID, iType, newKey, r, size, name, encNameBlob, mode, groupID, parentID, encName); err != nil {
+		if err := c.writeInodeContent(ctx, newID, iType, newKey, r, size, name, encNameBlob, mode, groupID, parentID, encName); err != nil {
 			return nil, nil, err
 		}
-		newInode, err = c.GetInode(context.Background(), newID)
+		newInode, err = c.getInode(ctx, newID)
 		if err != nil {
 			return nil, nil, err
 		}
 	} else {
-		lb := c.createLockbox(newKey, mode, groupID)
+		lb := c.createLockbox(ctx, newKey, mode, groupID)
 
 		inode := metadata.Inode{
 			ID: newID,
@@ -261,7 +261,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 		inode.SetSymlinkTarget(symlinkTarget)
 		inode.SetFileKey(newKey)
 
-		newInode, err = c.createInode(context.Background(), inode)
+		newInode, err = c.createInode(ctx, inode)
 
 		if err != nil {
 
@@ -272,7 +272,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	}
 
 	// UPDATE PARENT (Phase 31: Manifest Signing)
-	parent, err := c.getInode(context.Background(), parentID)
+	parent, err := c.getInode(ctx, parentID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get parent for update: %w", err)
 	}
@@ -281,7 +281,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 		parent.Children = make(map[string]string)
 	}
 	parent.Children[encName] = newID
-	_, err = c.updateInode(context.Background(), *parent)
+	_, err = c.updateInode(ctx, *parent)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to update parent: %w", err)
 	}
@@ -290,20 +290,20 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 }
 
 // Rename moves or renames a directory entry.
-func (c *Client) Rename(oldPath, newPath string) error {
+func (c *Client) Rename(ctx context.Context, oldPath, newPath string) error {
 	oldDir, oldName := filepath.Split(strings.TrimRight(oldPath, "/"))
 	newDir, newName := filepath.Split(strings.TrimRight(newPath, "/"))
 
-	oldParent, oldParentKey, err := c.ResolvePath(oldDir)
+	oldParent, oldParentKey, err := c.ResolvePath(ctx, oldDir)
 	if err != nil {
 		return fmt.Errorf("resolve old parent: %w", err)
 	}
-	newParent, newParentKey, err := c.ResolvePath(newDir)
+	newParent, newParentKey, err := c.ResolvePath(ctx, newDir)
 	if err != nil {
 		return fmt.Errorf("resolve new parent: %w", err)
 	}
 
-	if err := c.RenameRaw(oldParent.ID, oldParentKey, oldName, newParent.ID, newParentKey, newName); err != nil {
+	if err := c.RenameRaw(ctx, oldParent.ID, oldParentKey, oldName, newParent.ID, newParentKey, newName); err != nil {
 		return err
 	}
 	c.invalidatePathCache(oldPath)
@@ -311,7 +311,7 @@ func (c *Client) Rename(oldPath, newPath string) error {
 }
 
 // RenameRaw performs a rename operation using raw IDs and names.
-func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName string, newParentID string, newParentKey []byte, newName string) error {
+func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey []byte, oldName string, newParentID string, newParentKey []byte, newName string) error {
 	macOld := hmac.New(sha256.New, oldParentKey)
 	macOld.Write([]byte(oldName))
 	encOldName := hex.EncodeToString(macOld.Sum(nil))
@@ -320,9 +320,9 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 	macNew.Write([]byte(newName))
 	encNewName := hex.EncodeToString(macNew.Sum(nil))
 
-	return c.withConflictRetry(context.Background(), func() error {
+	return c.withConflictRetry(ctx, func() error {
 		// 1. Get Inode to move
-		oldParent, err := c.getInode(context.Background(), oldParentID)
+		oldParent, err := c.getInode(ctx, oldParentID)
 		if err != nil {
 			return fmt.Errorf("failed to get old parent: %w", err)
 		}
@@ -331,7 +331,7 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 			return syscall.ENOENT
 		}
 
-		child, err := c.getInode(context.Background(), childID)
+		child, err := c.getInode(ctx, childID)
 		if err != nil {
 			return fmt.Errorf("failed to get child: %w", err)
 		}
@@ -340,7 +340,7 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 		if oldParentID == newParentID {
 			newParent = oldParent
 		} else {
-			newParent, err = c.getInode(context.Background(), newParentID)
+			newParent, err = c.getInode(ctx, newParentID)
 			if err != nil {
 				return fmt.Errorf("failed to get new parent: %w", err)
 			}
@@ -355,7 +355,7 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 
 		// Handle Overwrite: If target exists, unlink it
 		if existingID, exists := newParent.Children[encNewName]; exists {
-			existing, err := c.getInode(context.Background(), existingID)
+			existing, err := c.getInode(ctx, existingID)
 			if err == nil {
 				if existing.NLink > 0 {
 					existing.NLink--
@@ -369,7 +369,7 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 					}
 					cmds = append(cmds, cmd)
 				} else {
-					cmd, err := c.PrepareUpdate(*existing)
+					cmd, err := c.PrepareUpdate(ctx, *existing)
 					if err != nil {
 						return err
 					}
@@ -394,19 +394,19 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 
 		// If parents are different, we add both. If same, we add "oldParent" (which is modified twice).
 		if oldParentID != newParentID {
-			cmd, err := c.PrepareUpdate(*oldParent)
+			cmd, err := c.PrepareUpdate(ctx, *oldParent)
 			if err != nil {
 				return err
 			}
 			cmds = append(cmds, cmd)
 
-			cmd2, err := c.PrepareUpdate(*newParent)
+			cmd2, err := c.PrepareUpdate(ctx, *newParent)
 			if err != nil {
 				return err
 			}
 			cmds = append(cmds, cmd2)
 		} else {
-			cmd, err := c.PrepareUpdate(*oldParent)
+			cmd, err := c.PrepareUpdate(ctx, *oldParent)
 			if err != nil {
 				return err
 			}
@@ -419,14 +419,14 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 		}
 		delete(child.Links, oldParentID+":"+encOldName)
 		child.Links[newParentID+":"+encNewName] = true
-		cmdChild, err := c.PrepareUpdate(*child)
+		cmdChild, err := c.PrepareUpdate(ctx, *child)
 		if err != nil {
 			return err
 		}
 		cmds = append(cmds, cmdChild)
 
 		// 3. Apply Batch
-		if err := c.ApplyBatch(context.Background(), cmds); err != nil {
+		if err := c.ApplyBatch(ctx, cmds); err != nil {
 			// Don't wrap error here, return raw error so withConflictRetry detects it
 			return err
 		}
@@ -436,13 +436,13 @@ func (c *Client) RenameRaw(oldParentID string, oldParentKey []byte, oldName stri
 }
 
 // RemoveEntry deletes a directory entry.
-func (c *Client) RemoveEntry(path string) error {
+func (c *Client) RemoveEntry(ctx context.Context, path string) error {
 	dir, name := filepath.Split(strings.TrimRight(path, "/"))
-	parent, parentKey, err := c.ResolvePath(dir)
+	parent, parentKey, err := c.ResolvePath(ctx, dir)
 	if err != nil {
 		return err
 	}
-	if err := c.RemoveEntryRaw(parent.ID, parentKey, name); err != nil {
+	if err := c.RemoveEntryRaw(ctx, parent.ID, parentKey, name); err != nil {
 		return err
 	}
 	c.invalidatePathCache("/" + strings.Trim(path, "/"))
@@ -450,14 +450,14 @@ func (c *Client) RemoveEntry(path string) error {
 }
 
 // RemoveEntryRaw performs a removal operation using raw IDs and names.
-func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) error {
+func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey []byte, name string) error {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	return c.withConflictRetry(context.Background(), func() error {
+	return c.withConflictRetry(ctx, func() error {
 		// 1. Get Parent and find ChildID
-		parent, err := c.getInode(context.Background(), parentID)
+		parent, err := c.getInode(ctx, parentID)
 		if err != nil {
 			return fmt.Errorf("failed to get parent for removal: %w", err)
 		}
@@ -467,7 +467,7 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 		}
 
 		// 2. Load Child
-		child, err := c.getInode(context.Background(), childID)
+		child, err := c.getInode(ctx, childID)
 		if err != nil {
 			return fmt.Errorf("failed to get child for removal: %w", err)
 		}
@@ -481,7 +481,7 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 
 		// 4. Update Parent
 		delete(parent.Children, encName)
-		cmdParent, err := c.PrepareUpdate(*parent)
+		cmdParent, err := c.PrepareUpdate(ctx, *parent)
 		if err != nil {
 			return err
 		}
@@ -504,20 +504,20 @@ func (c *Client) RemoveEntryRaw(parentID string, parentKey []byte, name string) 
 			cmds = append(cmds, cmdChild)
 		} else {
 			// Update child inode
-			cmdChild, err := c.PrepareUpdate(*child)
+			cmdChild, err := c.PrepareUpdate(ctx, *child)
 			if err != nil {
 				return err
 			}
 			cmds = append(cmds, cmdChild)
 		}
 
-		return c.ApplyBatch(context.Background(), cmds)
+		return c.ApplyBatch(ctx, cmds)
 	})
 }
 
 // Link creates a hard link.
-func (c *Client) Link(targetPath, linkPath string) error {
-	target, _, err := c.ResolvePath(targetPath)
+func (c *Client) Link(ctx context.Context, targetPath, linkPath string) error {
+	target, _, err := c.ResolvePath(ctx, targetPath)
 	if err != nil {
 		return fmt.Errorf("resolve target: %w", err)
 	}
@@ -527,12 +527,12 @@ func (c *Client) Link(targetPath, linkPath string) error {
 	}
 
 	dir, name := filepath.Split(strings.TrimRight(linkPath, "/"))
-	parent, parentKey, err := c.ResolvePath(dir)
+	parent, parentKey, err := c.ResolvePath(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("resolve parent: %w", err)
 	}
 
-	if err := c.LinkRaw(parent.ID, parentKey, name, target.ID); err != nil {
+	if err := c.LinkRaw(ctx, parent.ID, parentKey, name, target.ID); err != nil {
 		return err
 	}
 
@@ -540,7 +540,7 @@ func (c *Client) Link(targetPath, linkPath string) error {
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	targetKey, _ := c.UnlockInode(target)
+	targetKey, _ := c.UnlockInode(ctx, target)
 
 	c.putPathCache("/"+strings.Trim(linkPath, "/"), pathCacheEntry{
 		inodeID: target.ID,
@@ -551,14 +551,14 @@ func (c *Client) Link(targetPath, linkPath string) error {
 }
 
 // LinkRaw performs a linking operation using raw IDs and names.
-func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetID string) error {
+func (c *Client) LinkRaw(ctx context.Context, parentID string, parentKey []byte, name string, targetID string) error {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	return c.withConflictRetry(context.Background(), func() error {
+	return c.withConflictRetry(ctx, func() error {
 		// 1. Update Target (Link Count)
-		target, err := c.getInode(context.Background(), targetID)
+		target, err := c.getInode(ctx, targetID)
 		if err != nil {
 			return fmt.Errorf("failed to get target for link: %w", err)
 		}
@@ -567,13 +567,13 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 			target.Links = make(map[string]bool)
 		}
 		target.Links[parentID+":"+encName] = true
-		cmdTarget, err := c.PrepareUpdate(*target)
+		cmdTarget, err := c.PrepareUpdate(ctx, *target)
 		if err != nil {
 			return err
 		}
 
 		// 2. Update Parent
-		parent, err := c.getInode(context.Background(), parentID)
+		parent, err := c.getInode(ctx, parentID)
 		if err != nil {
 			return fmt.Errorf("failed to get parent for link: %w", err)
 		}
@@ -581,15 +581,15 @@ func (c *Client) LinkRaw(parentID string, parentKey []byte, name string, targetI
 			parent.Children = make(map[string]string)
 		}
 		parent.Children[encName] = targetID
-		cmdParent, err := c.PrepareUpdate(*parent)
+		cmdParent, err := c.PrepareUpdate(ctx, *parent)
 		if err != nil {
 			return err
 		}
 
-		return c.ApplyBatch(context.Background(), []metadata.LogCommand{cmdTarget, cmdParent})
+		return c.ApplyBatch(ctx, []metadata.LogCommand{cmdTarget, cmdParent})
 	})
 }
-func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
+func (c *Client) addEntry(ctx context.Context, path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		return fmt.Errorf("cannot create root")
@@ -597,7 +597,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 
 	dir, name := filepath.Split(path)
 
-	parentInode, parentKey, err := c.ResolvePath(dir)
+	parentInode, parentKey, err := c.ResolvePath(ctx, dir)
 	if err != nil {
 		return err
 	}
@@ -614,11 +614,11 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 	if existingID, ok := parentInode.Children[encName]; ok {
 		if iType == metadata.FileType {
 			// Update existing file content
-			inode, err := c.GetInode(context.Background(), existingID)
+			inode, err := c.getInode(ctx, existingID)
 			if err != nil {
 				return err
 			}
-			key, err := c.UnlockInode(inode)
+			key, err := c.UnlockInode(ctx, inode)
 			if err != nil {
 				return err
 			}
@@ -632,12 +632,12 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 			if len(parts) == 2 {
 				pID, nHMAC = parts[0], parts[1]
 			}
-			return c.writeInodeContent(context.Background(), existingID, metadata.FileType, key, r, size, name, nil, inode.Mode, inode.GroupID, pID, nHMAC)
+			return c.writeInodeContent(ctx, existingID, metadata.FileType, key, r, size, name, nil, inode.Mode, inode.GroupID, pID, nHMAC)
 		}
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}
 
-	inode, key, err := c.AddEntry(parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID, 0, 0)
+	inode, key, err := c.AddEntry(ctx, parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID, 0, 0)
 	if err == nil {
 		c.putPathCache("/"+path, pathCacheEntry{
 			inodeID: inode.ID,
@@ -648,19 +648,19 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 	return err
 }
 
-func (c *Client) createLockbox(key []byte, mode uint32, groupID string) crypto.Lockbox {
+func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, groupID string) crypto.Lockbox {
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
 	}
 	if (mode & 0004) != 0 {
-		wpk, err := c.GetWorldPublicKey()
+		wpk, err := c.GetWorldPublicKey(ctx)
 		if err == nil {
 			lb.AddRecipient(metadata.WorldID, wpk, key)
 		}
 	}
 	if groupID != "" && (mode&0060) != 0 {
-		group, err := c.GetGroup(groupID)
+		group, err := c.GetGroup(ctx, groupID)
 		if err == nil {
 			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 			if err == nil {

@@ -184,13 +184,13 @@ func TestClientIntegration(t *testing.T) {
 	// 4. Write File (Raw)
 	content := []byte("hello distributed filesystem world")
 	fileID := "file-1"
-	key, err := c.WriteFile(fileID, bytes.NewReader(content), int64(len(content)), 0644)
+	key, err := c.WriteFile(t.Context(), fileID, bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
 	// 5. Read File (Raw)
-	rc, err := c.ReadFile(fileID, key)
+	rc, err := c.ReadFile(t.Context(), fileID, key)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
@@ -205,16 +205,16 @@ func TestClientIntegration(t *testing.T) {
 	}
 
 	// 6. FS Integration
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
 	fileName := "/file-2.txt"
-	if err := c.CreateFile(fileName, bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := c.CreateFile(t.Context(), fileName, bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
-	dfs := c.FS()
+	dfs := c.FS(t.Context())
 	f, err := dfs.Open(fileName)
 	if err != nil {
 		t.Fatalf("FS Open failed: %v", err)
@@ -312,7 +312,7 @@ func TestReplication(t *testing.T) {
 
 	// 4. Write
 	content := bytes.Repeat([]byte("replicated data "), 500) // ~8KB
-	_, err = c.WriteFile("repl-file", bytes.NewReader(content), int64(len(content)), 0644)
+	_, err = c.WriteFile(t.Context(), "repl-file", bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -393,34 +393,34 @@ func TestDirectories(t *testing.T) {
 	c = c.WithServerKey(serverEK)
 
 	// Ensure Root
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
 	// Mkdir /a
-	if err := c.Mkdir("/a"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a"); err != nil {
 		t.Fatalf("Mkdir /a failed: %v", err)
 	}
 
 	// Mkdir /a/b
-	if err := c.Mkdir("/a/b"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a/b"); err != nil {
 		t.Fatalf("Mkdir /a/b failed: %v", err)
 	}
 
 	// Create File
 	content := []byte("file content")
-	if err := c.CreateFile("/a/b/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := c.CreateFile(t.Context(), "/a/b/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
 	// Resolve
-	inode, key, err := c.ResolvePath("/a/b/f.txt")
+	inode, key, err := c.ResolvePath(t.Context(), "/a/b/f.txt")
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
 
 	// Read
-	rc, err := c.ReadFile(inode.ID, key)
+	rc, err := c.ReadFile(t.Context(), inode.ID, key)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
@@ -486,8 +486,8 @@ func TestReplicationRepair(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	content := bytes.Repeat([]byte("repair me "), 1000)                                      // ~10KB
-	_, err = c.WriteFile("repair-file", bytes.NewReader(content), int64(len(content)), 0644) // Raw write
+	content := bytes.Repeat([]byte("repair me "), 1000)                                                   // ~10KB
+	_, err = c.WriteFile(t.Context(), "repair-file", bytes.NewReader(content), int64(len(content)), 0644) // Raw write
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -614,7 +614,7 @@ func TestReadAhead(t *testing.T) {
 	content[0] = 'A'
 	content[dataSize-1] = 'Z'
 
-	key, err := c.WriteFile("readahead-file", bytes.NewReader(content), int64(dataSize), 0644)
+	key, err := c.WriteFile(t.Context(), "readahead-file", bytes.NewReader(content), int64(dataSize), 0644)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -625,7 +625,7 @@ func TestReadAhead(t *testing.T) {
 	logMu.Unlock()
 
 	// 4. Read File (Linearly)
-	reader, err := c.NewReader("readahead-file", key)
+	reader, err := c.NewReader(t.Context(), "readahead-file", key)
 	if err != nil {
 		t.Fatalf("NewReader failed: %v", err)
 	}
@@ -717,11 +717,11 @@ func TestGarbageCollection(t *testing.T) {
 	c = c.WithServerKey(serverEK)
 
 	// 3. Create File
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	content := bytes.Repeat([]byte("garbage "), 1000) // ~8KB
-	if err := c.CreateFile("/gc-test", bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := c.CreateFile(t.Context(), "/gc-test", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
 
@@ -742,7 +742,7 @@ func TestGarbageCollection(t *testing.T) {
 	}
 
 	// 5. Delete File
-	if err := c.RemoveEntry("/gc-test"); err != nil {
+	if err := c.RemoveEntry(t.Context(), "/gc-test"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -804,17 +804,17 @@ func TestResolvePathComplex(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	if err := c.EnsureRoot(); err != nil {
+	if err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	c.Mkdir("/a")
-	c.Mkdir("/a/b")
-	c.Mkdir("/a/b/c")
+	c.Mkdir(t.Context(), "/a")
+	c.Mkdir(t.Context(), "/a/b")
+	c.Mkdir(t.Context(), "/a/b/c")
 	content := []byte("data")
-	c.CreateFile("/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
+	c.CreateFile(t.Context(), "/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
 
-	inode, _, err := c.ResolvePath("/a/b/c/file.txt")
+	inode, _, err := c.ResolvePath(t.Context(), "/a/b/c/file.txt")
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -822,7 +822,7 @@ func TestResolvePathComplex(t *testing.T) {
 		t.Error("Empty ID")
 	}
 
-	_, _, err = c.ResolvePath("/missing")
+	_, _, err = c.ResolvePath(t.Context(), "/missing")
 	if err == nil {
 		t.Error("Expected error")
 	}

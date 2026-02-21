@@ -1,7 +1,6 @@
 package metadata_test
 
 import (
-	"context"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -35,40 +34,40 @@ func TestGroupDiscovery(t *testing.T) {
 	clientAlice := client.NewClient(ts.URL)
 	serverPK, _ := crypto.UnmarshalEncapsulationKey(serverEK)
 	clientAlice = clientAlice.WithIdentity("alice", uAliceDK).WithSignKey(uAliceSign).WithServerKey(serverPK)
-	if err := clientAlice.Login(); err != nil {
+	if err := clientAlice.Login(t.Context()); err != nil {
 		t.Fatalf("Alice login failed: %v", err)
 	}
 
 	clientBob := client.NewClient(ts.URL)
 	clientBob = clientBob.WithIdentity("bob", uBobDK).WithSignKey(uBobSign).WithServerKey(serverPK)
-	if err := clientBob.Login(); err != nil {
+	if err := clientBob.Login(t.Context()); err != nil {
 		t.Fatalf("Bob login failed: %v", err)
 	}
 
 	// 2. Alice creates Group A (Direct Owner)
-	groupA, err := clientAlice.CreateGroup("group-a")
+	groupA, err := clientAlice.CreateGroup(t.Context(), "group-a")
 	if err != nil {
 		t.Fatalf("CreateGroup A failed: %v", err)
 	}
 
 	// 3. Alice adds Bob to Group A (Bob is Member)
-	err = clientAlice.AddUserToGroup(context.Background(), groupA.ID, "bob", "Bob info", nil)
+	err = clientAlice.AddUserToGroup(t.Context(), groupA.ID, "bob", "Bob info", nil)
 	if err != nil {
 		t.Fatalf("AddUserToGroup Bob failed: %v", err)
 	}
 
 	// 4. Alice creates Group B owned by Group A (Alice is Manager)
-	groupB, err := clientAlice.CreateGroup("group-b")
+	groupB, err := clientAlice.CreateGroup(t.Context(), "group-b")
 	if err != nil {
 		t.Fatalf("CreateGroup B failed: %v", err)
 	}
-	err = clientAlice.GroupChown(context.Background(), groupB.ID, groupA.ID)
+	err = clientAlice.GroupChown(t.Context(), groupB.ID, groupA.ID)
 	if err != nil {
 		t.Fatalf("GroupChown B failed: %v", err)
 	}
 
 	// 5. Verify Alice's Discovery
-	groupsA, err := clientAlice.ListGroups()
+	groupsA, err := clientAlice.ListGroups(t.Context())
 	if err != nil {
 		t.Fatalf("ListGroups Alice failed: %v", err)
 	}
@@ -90,7 +89,7 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 6. Verify Bob's Discovery
-	groupsB, err := clientBob.ListGroups()
+	groupsB, err := clientBob.ListGroups(t.Context())
 	if err != nil {
 		t.Fatalf("ListGroups Bob failed: %v", err)
 	}
@@ -113,7 +112,7 @@ func TestGroupDiscovery(t *testing.T) {
 
 	// 7. Verify Delegated Registry Access (Fix #1)
 	// Bob is a member of A, and A owns B. Bob should be able to see B's members (PII).
-	membersB, err := clientBob.GetGroupMembers(groupB.ID)
+	membersB, err := clientBob.GetGroupMembers(t.Context(), groupB.ID)
 	if err != nil {
 		t.Fatalf("Bob GetGroupMembers B failed: %v", err)
 	}
@@ -129,19 +128,19 @@ func TestGroupDiscovery(t *testing.T) {
 
 	// 8. Verify Cryptographic Authorization Transfer (Fix #3)
 	// Bob: Create Group C.
-	groupC, err := clientBob.CreateGroup("group-c")
+	groupC, err := clientBob.CreateGroup(t.Context(), "group-c")
 	if err != nil {
 		t.Fatalf("Bob CreateGroup C failed: %v", err)
 	}
 
 	// Bob: Transfer Group C to Alice.
-	err = clientBob.GroupChown(context.Background(), groupC.ID, "alice")
+	err = clientBob.GroupChown(t.Context(), groupC.ID, "alice")
 	if err != nil {
 		t.Fatalf("Bob GroupChown C to Alice failed: %v", err)
 	}
 
 	// Alice: Should now be able to manage C (e.g., fetch its private signing key)
-	_, err = clientAlice.GetGroupSignKey(groupC.ID)
+	_, err = clientAlice.GetGroupSignKey(t.Context(), groupC.ID)
 	if err != nil {
 		t.Errorf("Alice failed to fetch sign key for group C after transfer: %v", err)
 	}

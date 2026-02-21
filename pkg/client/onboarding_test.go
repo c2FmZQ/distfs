@@ -15,7 +15,6 @@
 package client
 
 import (
-	"context"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -90,7 +89,7 @@ func TestPerformUnifiedOnboarding_NewAccount(t *testing.T) {
 		JWT:        "mock-jwt",
 	}
 
-	err := PerformUnifiedOnboarding(context.Background(), opts)
+	err := PerformUnifiedOnboarding(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("Onboarding failed: %v", err)
 	}
@@ -171,7 +170,7 @@ func TestPerformUnifiedOnboarding_Restore(t *testing.T) {
 		JWT:        "mock-jwt",
 	}
 
-	err := PerformUnifiedOnboarding(context.Background(), opts)
+	err := PerformUnifiedOnboarding(t.Context(), opts)
 	if err != nil {
 		t.Fatalf("Restore onboarding failed: %v", err)
 	}

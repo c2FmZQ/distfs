@@ -157,7 +157,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 
 		// Ensure root exists and capture anchor
-		if err := c.EnsureRoot(); err != nil {
+		if err := c.EnsureRoot(ctx); err != nil {
 			return fmt.Errorf("failed to ensure root: %w", err)
 		}
 		rid, rowner, rver := c.GetRootAnchor()
@@ -182,7 +182,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 			return err
 		}
 
-		if err := c.PushKeySync(blob); err != nil {
+		if err := c.PushKeySync(ctx, blob); err != nil {
 			fmt.Printf("Warning: cloud backup failed: %v\n", err)
 		} else {
 			fmt.Println("Cloud backup (KeySync) successful.")
@@ -192,7 +192,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 	} else {
 		// Existing account flow (Pull)
 		c := NewClient(opts.ServerURL)
-		blob, err := c.PullKeySync(token)
+		blob, err := c.PullKeySync(ctx, token)
 		if err != nil {
 			return fmt.Errorf("failed to pull keys: %w (did you mean --new?)", err)
 		}

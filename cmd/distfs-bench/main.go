@@ -156,17 +156,17 @@ func main() {
 	c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey).WithAdmin(*adminFlag)
 
 	// Ensure we are logged in
-	if err := c.Login(); err != nil {
+	if err := c.Login(ctx); err != nil {
 		log.Fatalf("initial login failed: %v", err)
 	}
 
 	// Create bench root
 	benchDir := fmt.Sprintf("/bench-%d", time.Now().UnixNano())
-	if err := c.Mkdir(benchDir); err != nil {
+	if err := c.Mkdir(ctx, benchDir); err != nil {
 		log.Fatalf("failed to create bench dir: %v", err)
 	}
 	defer func() {
-		if err := c.Remove(benchDir); err != nil {
+		if err := c.Remove(ctx, benchDir); err != nil {
 			log.Printf("failed to cleanup bench dir: %v", err)
 		}
 	}()
@@ -174,7 +174,7 @@ func main() {
 	// Pre-create file for GET mode
 	if *mode == "get" {
 		fmt.Printf("Pre-creating %s/bench-target for READ test...", benchDir)
-		if err := c.CreateFile(benchDir+"/bench-target", io.LimitReader(rand.Reader, *size), *size); err != nil {
+		if err := c.CreateFile(ctx, benchDir+"/bench-target", io.LimitReader(rand.Reader, *size), *size); err != nil {
 			log.Fatalf("failed to pre-create target: %v", err)
 		}
 		fmt.Println(" OK")
@@ -198,7 +198,7 @@ func main() {
 
 			// Create worker sub-directory to avoid parent contention
 			workerDir := fmt.Sprintf("%s/worker-%d", benchDir, workerID)
-			if err := c.Mkdir(workerDir); err != nil {
+			if err := c.Mkdir(ctx, workerDir); err != nil {
 				log.Printf("Worker %d failed to create subdir: %v", workerID, err)
 				return
 			}
@@ -211,15 +211,15 @@ func main() {
 				switch *mode {
 				case "mkdir":
 					path := fmt.Sprintf("%s/dir-%d-%d", workerDir, workerID, time.Now().UnixNano())
-					err = c.Mkdir(path)
+					err = c.Mkdir(ctx, path)
 				case "put":
 					path := fmt.Sprintf("%s/file-%d-%d", workerDir, workerID, time.Now().UnixNano())
 					// Stream data to avoid OOM
-					err = c.CreateFile(path, io.LimitReader(rand.Reader, *size), *size)
+					err = c.CreateFile(ctx, path, io.LimitReader(rand.Reader, *size), *size)
 					bytesTransferred = uint64(*size)
 				case "get":
 					// High level Open uses io.fs interface
-					f, ferr := c.FS().Open(benchDir + "/bench-target")
+					f, ferr := c.FS(ctx).Open(benchDir + "/bench-target")
 					if ferr != nil {
 						err = ferr
 					} else {

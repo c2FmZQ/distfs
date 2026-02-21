@@ -102,11 +102,11 @@ func TestSessionKeyMemoization(t *testing.T) {
 	c = c.WithIdentity(userID, dk)
 	c = c.WithSignKey(userSignKey)
 
-	if err := c.Login(); err != nil {
+	if err := c.Login(t.Context()); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	if err := c.Mkdir("/m1"); err != nil {
+	if err := c.Mkdir(t.Context(), "/m1"); err != nil {
 		t.Fatalf("First Mkdir failed: %v", err)
 	}
 
@@ -114,7 +114,7 @@ func TestSessionKeyMemoization(t *testing.T) {
 		t.Errorf("Expected 1 session key in cache, got %d", server.SessionKeyCacheSize())
 	}
 
-	if err := c.Mkdir("/m2"); err != nil {
+	if err := c.Mkdir(t.Context(), "/m2"); err != nil {
 		t.Fatalf("Second Mkdir failed: %v", err)
 	}
 }
