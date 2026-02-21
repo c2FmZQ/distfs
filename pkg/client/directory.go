@@ -56,6 +56,7 @@ func (c *Client) EnsureRoot() error {
 		Lockbox:  lb,
 		OwnerID:  c.userID,
 	}
+	inode.SetFileKey(rootKey)
 	inode.SetAuthorizedSigners([]string{c.userID})
 	_, err = c.createInode(context.Background(), inode)
 	if err != nil {
@@ -234,7 +235,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	var newInode *metadata.Inode
 
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(context.Background(), newID, iType, newKey, r, size, encNameBlob, mode, groupID, parentID, encName); err != nil {
+		if err := c.writeInodeContent(context.Background(), newID, iType, newKey, r, size, name, encNameBlob, mode, groupID, parentID, encName); err != nil {
 			return nil, nil, err
 		}
 		newInode, err = c.GetInode(context.Background(), newID)
@@ -268,6 +269,8 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 			GroupID:                groupID,
 			EncryptedSymlinkTarget: encTarget,
 		}
+		inode.SetName(name)
+		inode.SetFileKey(newKey)
 
 		newInode, err = c.createInode(context.Background(), inode)
 
@@ -284,6 +287,7 @@ func (c *Client) AddEntry(parentID string, parentKey []byte, name string, iType 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get parent for update: %w", err)
 	}
+	parent.SetFileKey(parentKey)
 	if parent.Children == nil {
 		parent.Children = make(map[string]string)
 	}
@@ -639,7 +643,7 @@ func (c *Client) addEntry(path string, iType metadata.InodeType, r io.Reader, si
 			if len(parts) == 2 {
 				pID, nHMAC = parts[0], parts[1]
 			}
-			return c.writeInodeContent(context.Background(), existingID, metadata.FileType, key, r, size, nil, inode.Mode, inode.GroupID, pID, nHMAC)
+			return c.writeInodeContent(context.Background(), existingID, metadata.FileType, key, r, size, name, nil, inode.Mode, inode.GroupID, pID, nHMAC)
 		}
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}

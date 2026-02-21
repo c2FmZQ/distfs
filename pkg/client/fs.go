@@ -23,7 +23,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
@@ -162,19 +161,10 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 	var entries []fs.DirEntry
 	for _, childInode := range inodes {
-		// Unlock child
-		var childName string
-		childKey, err := childInode.Lockbox.GetFileKey(d.client.userID, d.client.decKey)
-		if err == nil {
-			// Decrypt name
-			nameBytes, err := crypto.DecryptDEM(childKey, childInode.EncryptedName)
-			if err == nil {
-				childName = string(nameBytes)
-			} else {
-				childName = "decryption-failed-" + childInode.ID[:8]
-			}
-		} else {
-			childName = "locked-" + childInode.ID[:8]
+		// Name is already decrypted and verified by getInodes -> VerifyInode
+		childName := childInode.GetName()
+		if childName == "" {
+			childName = "unnamed-" + childInode.ID[:8]
 		}
 
 		entries = append(entries, &DistDirEntry{
@@ -260,34 +250,20 @@ func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key
 
 	var entries []*DistDirEntry
 	for _, childInode := range inodes {
-		var childName string
+		childName := childInode.GetName()
+		if childName == "" {
+			childName = "unnamed-" + childInode.ID[:8]
+		}
 
 		c.keyMu.RLock()
 		meta, ok := c.keyCache[childInode.ID]
 		c.keyMu.RUnlock()
 
 		var childKey []byte
-		var err error
 		if ok {
 			childKey = meta.key
 		} else {
-			childKey, err = childInode.Lockbox.GetFileKey(c.userID, c.decKey)
-			if err == nil {
-				c.keyMu.Lock()
-				c.keyCache[childInode.ID] = fileMetadata{key: childKey}
-				c.keyMu.Unlock()
-			}
-		}
-
-		if err == nil {
-			nameBytes, err := crypto.DecryptDEM(childKey, childInode.EncryptedName)
-			if err == nil {
-				childName = string(nameBytes)
-			} else {
-				childName = "decryption-failed-" + childInode.ID[:8]
-			}
-		} else {
-			childName = "locked-" + childInode.ID[:8]
+			childKey = childInode.GetFileKey()
 		}
 
 		entries = append(entries, &DistDirEntry{
@@ -343,31 +319,10 @@ func (c *Client) NewDirEntry(inode *metadata.Inode, name string, key []byte) *Di
 
 // DecryptName decrypts the name of an Inode using the client's identity.
 func (c *Client) DecryptName(inode *metadata.Inode) (string, []byte, error) {
-	c.keyMu.RLock()
-	meta, ok := c.keyCache[inode.ID]
-	c.keyMu.RUnlock()
-
-	var key []byte
-	var err error
-	if ok {
-		key = meta.key
-	} else {
-		key, err = inode.Lockbox.GetFileKey(c.userID, c.decKey)
-		if err == nil {
-			c.keyMu.Lock()
-			c.keyCache[inode.ID] = fileMetadata{key: key}
-			c.keyMu.Unlock()
-		}
-	}
-
-	if err != nil {
+	if err := c.VerifyInode(inode); err != nil {
 		return "", nil, err
 	}
-	nameBytes, err := crypto.DecryptDEM(key, inode.EncryptedName)
-	if err != nil {
-		return "", nil, err
-	}
-	return string(nameBytes), key, nil
+	return inode.GetName(), inode.GetFileKey(), nil
 }
 
 // NewDirEntryForTest is used for testing purposes to create a DistDirEntry.

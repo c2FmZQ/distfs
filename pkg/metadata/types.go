@@ -99,10 +99,15 @@ type MemberEntry struct {
 	Info   string `json:"info"`
 }
 
+// GroupClientBlob contains non-enforcement metadata for a group.
+type GroupClientBlob struct {
+	Name string `json:"name"`
+}
+
 // Group represents a user group for sharing access.
 type Group struct {
 	ID                string          `json:"id"`
-	EncryptedName     []byte          `json:"enc_name"`
+	EncryptedName     []byte          `json:"-"` // Moved to ClientBlob
 	GID               uint32          `json:"gid"`
 	OwnerID           string          `json:"owner_id"` // User ID or Group ID
 	Members           map[string]bool `json:"members"`
@@ -112,13 +117,20 @@ type Group struct {
 	Lockbox           crypto.Lockbox  `json:"lockbox"`
 	RegistryLockbox   crypto.Lockbox  `json:"registry_lockbox"` // Only for authorized managers
 	EncryptedRegistry []byte          `json:"enc_registry"`     // Member list encrypted with Registry Key
-	Usage             UserUsage       `json:"usage"`            // Resource usage
-	Quota             UserQuota       `json:"quota"`            // Resource limits
+	ClientBlob        []byte          `json:"client_blob,omitempty"`
+	Usage             UserUsage       `json:"usage"` // Resource usage
+	Quota             UserQuota       `json:"quota"` // Resource limits
 	Version           uint64          `json:"version"`
 	IsSystem          bool            `json:"is_system"` // Only settable by Admin
 	SignerID          string          `json:"signer_id,omitempty"`
 	Signature         []byte          `json:"signature,omitempty"`
+
+	// Client-side transient state
+	name string
 }
+
+func (g *Group) GetName() string { return g.name }
+func (g *Group) SetName(s string) { g.name = s }
 
 type GroupRole string
 
@@ -131,11 +143,12 @@ const (
 type GroupListEntry struct {
 	ID            string         `json:"id"`
 	OwnerID       string         `json:"owner_id"`
-	EncryptedName []byte         `json:"enc_name"`
+	EncryptedName []byte         `json:"-"` // Moved to ClientBlob
 	Role          GroupRole      `json:"role"`
 	EncKey        []byte         `json:"enc_key"` // Group Public Key
 	Lockbox       crypto.Lockbox `json:"lockbox"` // For name decryption
 	IsSystem      bool           `json:"is_system"`
+	ClientBlob    []byte         `json:"client_blob,omitempty"`
 	Usage         UserUsage      `json:"usage"`
 	Quota         UserQuota      `json:"quota"`
 }
@@ -168,6 +181,10 @@ func (g *Group) Hash() []byte {
 		h.Write([]byte("sys:0|"))
 	}
 
+	h.Write([]byte("client_blob:"))
+	h.Write(g.ClientBlob)
+	h.Write([]byte("|"))
+
 	h.Write([]byte("owner:" + g.OwnerID + "|"))
 	h.Write([]byte("signer:" + g.SignerID + "|"))
 
@@ -181,10 +198,6 @@ func (g *Group) Hash() []byte {
 	for _, k := range keys {
 		fmt.Fprintf(h, "%s:%t,", k, g.Members[k])
 	}
-	h.Write([]byte("|"))
-
-	h.Write([]byte("enc_name:"))
-	h.Write(g.EncryptedName)
 	h.Write([]byte("|"))
 
 	h.Write([]byte("enc_key:"))
@@ -303,6 +316,18 @@ type AdminChmodRequest struct {
 	Mode    uint32 `json:"mode"`
 }
 
+// InodeClientBlob contains non-enforcement metadata for an inode.
+type InodeClientBlob struct {
+	Name              string   `json:"name"`
+	SymlinkTarget     string   `json:"symlink_target,omitempty"`
+	InlineData        []byte   `json:"inline_data,omitempty"`
+	MTime             int64    `json:"mtime"`
+	UID               uint32   `json:"uid"`
+	GID               uint32   `json:"gid"`
+	SignerID          string   `json:"signer_id,omitempty"`
+	AuthorizedSigners []string `json:"authorized_signers,omitempty"`
+}
+
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID                     string            `json:"id"`
@@ -310,16 +335,17 @@ type Inode struct {
 	Type                   InodeType         `json:"type"`
 	OwnerID                string            `json:"owner_id"` // DistFS User ID
 	GroupID                string            `json:"group_id"` // DistFS Group ID
-	UID                    uint32            `json:"uid"`      // POSIX UID
-	GID                    uint32            `json:"gid"`      // POSIX GID
+	UID                    uint32            `json:"-"`        // Moved to ClientBlob
+	GID                    uint32            `json:"-"`        // Moved to ClientBlob
 	Mode                   uint32            `json:"mode"`
 	Size                   uint64            `json:"size"`
-	MTime                  int64             `json:"mtime"` // Nanoseconds
-	CTime                  int64             `json:"ctime"` // Nanoseconds
+	MTime                  int64             `json:"-"` // Moved to ClientBlob
+	CTime                  int64             `json:"ctime"`
 	NLink                  uint32            `json:"nlink"`
-	EncryptedSymlinkTarget []byte            `json:"enc_symlink_target,omitempty"`
-	EncryptedName          []byte            `json:"enc_name"`
-	InlineData             []byte            `json:"inline_data,omitempty"`
+	EncryptedSymlinkTarget []byte            `json:"-"` // Moved to ClientBlob
+	EncryptedName          []byte            `json:"-"` // Legacy
+	InlineData             []byte            `json:"-"` // Moved to ClientBlob
+	ClientBlob             []byte            `json:"client_blob,omitempty"`
 	Children               map[string]string `json:"children,omitempty"`
 	ChunkManifest          []ChunkEntry      `json:"manifest,omitempty"`
 	ChunkPages             []string          `json:"chunk_pages,omitempty"`
@@ -329,22 +355,27 @@ type Inode struct {
 	LeaseOwner             string            `json:"lease_owner,omitempty"`
 	LeaseExpiry            int64             `json:"lease_expiry,omitempty"`
 
-		// Manifest Integrity (Phase 31)
-		EncryptedSignerID          []byte `json:"enc_signer_id,omitempty"`
-		UserSig                    []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
-		GroupSig                   []byte `json:"group_sig,omitempty"`
-		EncryptedAuthorizedSigners []byte `json:"enc_auth_signers,omitempty"`
-	
-			// Client-side transient state (unexported, not in JSON)
-			signerID          string
-			authorizedSigners []string
-		}
-		
-		func (i *Inode) GetSignerID() string { return i.signerID }
-		func (i *Inode) SetSignerID(s string) { i.signerID = s }
-		func (i *Inode) GetAuthorizedSigners() []string { return i.authorizedSigners }
-		func (i *Inode) SetAuthorizedSigners(s []string) { i.authorizedSigners = s }
-// UnmarshalJSON implements custom unmarshaling to handle legacy symlink metadata.
+	// Manifest Integrity (Phase 31)
+	EncryptedSignerID          []byte `json:"-"` // Moved to ClientBlob
+	UserSig                    []byte `json:"user_sig,omitempty"`      // Signature by user's ML-DSA identity key
+	GroupSig                   []byte `json:"group_sig,omitempty"`
+	EncryptedAuthorizedSigners []byte `json:"-"` // Moved to ClientBlob
+
+		// Client-side transient state (unexported, not in JSON)
+		name              string
+		signerID          string
+		authorizedSigners []string
+		fileKey           []byte
+	}
+
+	func (i *Inode) GetName() string { return i.name }
+	func (i *Inode) SetName(s string) { i.name = s }
+	func (i *Inode) GetSignerID() string { return i.signerID }
+	func (i *Inode) SetSignerID(s string) { i.signerID = s }
+	func (i *Inode) GetAuthorizedSigners() []string { return i.authorizedSigners }
+	func (i *Inode) SetAuthorizedSigners(s []string) { i.authorizedSigners = s }
+	func (i *Inode) GetFileKey() []byte { return i.fileKey }
+	func (i *Inode) SetFileKey(k []byte) { i.fileKey = k }// UnmarshalJSON implements custom unmarshaling to handle legacy symlink metadata.
 func (i *Inode) UnmarshalJSON(data []byte) error {
 	type Alias Inode
 	aux := &struct {
@@ -380,18 +411,6 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(m)
 	h.Write([]byte("|"))
 
-	uid := make([]byte, 4)
-	binary.LittleEndian.PutUint32(uid, i.UID)
-	h.Write([]byte("uid:"))
-	h.Write(uid)
-	h.Write([]byte("|"))
-
-	gid := make([]byte, 4)
-	binary.LittleEndian.PutUint32(gid, i.GID)
-	h.Write([]byte("gid:"))
-	h.Write(gid)
-	h.Write([]byte("|"))
-
 	h.Write([]byte("gid_str:" + i.GroupID + "|"))
 
 	if i.IsSystem {
@@ -400,10 +419,8 @@ func (i *Inode) ManifestHash() []byte {
 		h.Write([]byte("sys:0|"))
 	}
 
-	mt := make([]byte, 8)
-	binary.LittleEndian.PutUint64(mt, uint64(i.MTime))
-	h.Write([]byte("mtime:"))
-	h.Write(mt)
+	h.Write([]byte("client_blob:"))
+	h.Write(i.ClientBlob)
 	h.Write([]byte("|"))
 
 	nl := make([]byte, 4)
@@ -412,12 +429,6 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(nl)
 	h.Write([]byte("|"))
 
-	if len(i.EncryptedSymlinkTarget) > 0 {
-		h.Write([]byte("symlink:"))
-		h.Write(i.EncryptedSymlinkTarget)
-		h.Write([]byte("|"))
-	}
-
 	s := make([]byte, 8)
 	binary.LittleEndian.PutUint64(s, i.Size)
 	h.Write([]byte("s:"))
@@ -425,9 +436,6 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("|"))
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
-	h.Write([]byte("signer_enc:"))
-	h.Write(i.EncryptedSignerID)
-	h.Write([]byte("|"))
 
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
@@ -453,11 +461,6 @@ func (i *Inode) ManifestHash() []byte {
 	for _, k := range keys {
 		h.Write([]byte(k + ":" + i.Children[k] + ","))
 	}
-	h.Write([]byte("|"))
-
-	// Write InlineData
-	h.Write([]byte("inline:"))
-	h.Write(i.InlineData)
 	h.Write([]byte("|"))
 
 	// Write ChunkManifest
@@ -492,30 +495,17 @@ func (i *Inode) ManifestHash() []byte {
 		h.Write([]byte("|"))
 	}
 
-	// Write EncryptedName
-	if len(i.EncryptedName) > 0 {
-		h.Write([]byte("encname:"))
-		h.Write(i.EncryptedName)
-		h.Write([]byte("|"))
-	}
-
-	// Write EncryptedAuthorizedSigners
-	if len(i.EncryptedAuthorizedSigners) > 0 {
-		h.Write([]byte("auth_enc:"))
-		h.Write(i.EncryptedAuthorizedSigners)
-		h.Write([]byte("|"))
-	}
-
 	return h.Sum(nil)
 }
 
 // SignInodeForTest signs an inode using a provided identity key.
 // Only used for low-level metadata tests that bypass the client.
 func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
-	i.EncryptedSignerID = []byte(userID)
-	if len(i.EncryptedAuthorizedSigners) == 0 && i.OwnerID != "" {
-		i.EncryptedAuthorizedSigners = []byte(i.OwnerID)
+	i.signerID = userID
+	if len(i.authorizedSigners) == 0 && i.OwnerID != "" {
+		i.authorizedSigners = []string{i.OwnerID}
 	}
+
 	// Note: We use Version+1 because FSM increments version during apply
 	orig := i.Version
 	i.Version++
