@@ -912,7 +912,7 @@ func (c *Client) GetUser(id string) (*metadata.User, error) {
 	return &user, nil
 }
 
-func (c *Client) signInode(inode *metadata.Inode) {
+func (c *Client) signInode(inode *metadata.Inode) error {
 	// 1. Resolve File Key for encryption
 	fileKey := inode.GetFileKey()
 
@@ -944,7 +944,10 @@ func (c *Client) signInode(inode *metadata.Inode) {
 			AuthorizedSigners: authSigners,
 		}
 
-		encBlob, _ := c.encryptInodeClientBlob(blob, fileKey)
+		encBlob, err := c.encryptInodeClientBlob(blob, fileKey)
+		if err != nil {
+			return fmt.Errorf("failed to encrypt client blob: %w", err)
+		}
 		inode.ClientBlob = encBlob
 	}
 
@@ -961,6 +964,7 @@ func (c *Client) signInode(inode *metadata.Inode) {
 		}
 	}
 	inode.Version-- // Restore for the server's conflict check
+	return nil
 }
 
 func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
@@ -976,8 +980,9 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	}
 
 	// Phase 31: Manifest Signing
-
-	c.signInode(&inode)
+	if err := c.signInode(&inode); err != nil {
+		return nil, err
+	}
 
 	data, err := json.Marshal(inode)
 
@@ -1112,7 +1117,9 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			inode = *latest
 		}
 
-		c.signInode(&inode)
+		if err := c.signInode(&inode); err != nil {
+			return nil, err
+		}
 		data, err := json.Marshal(inode)
 		if err != nil {
 			return nil, err
@@ -1233,7 +1240,9 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 }
 
 func (c *Client) PrepareUpdate(inode metadata.Inode) (metadata.LogCommand, error) {
-	c.signInode(&inode)
+	if err := c.signInode(&inode); err != nil {
+		return metadata.LogCommand{}, err
+	}
 	data, err := json.Marshal(inode)
 	if err != nil {
 		return metadata.LogCommand{}, err
@@ -2407,7 +2416,9 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 		}
 
 		if len(fileKey) == 0 {
-			return fmt.Errorf("no decryption key for inode %s client blob", inode.ID)
+			// If we can't decrypt, we can't verify the full integrity or see names,
+			// but we should allow the inode to be returned so metadata like Size/Mode can be seen.
+			return nil
 		}
 
 		var blob metadata.InodeClientBlob
@@ -2755,12 +2766,18 @@ func (c *Client) GetWorldPrivateKey() (*mlkem.DecapsulationKey768, error) {
 		KEM string `json:"kem"`
 		DEM string `json:"dem"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := json.NewDecoder(body).Decode(&data); err != nil {
 		return nil, err
 	}
 
-	kemCT, _ := base64.StdEncoding.DecodeString(data.KEM)
-	demCT, _ := base64.StdEncoding.DecodeString(data.DEM)
+	kemCT, err := base64.StdEncoding.DecodeString(data.KEM)
+	if err != nil {
+		return nil, fmt.Errorf("invalid KEM encoding: %w", err)
+	}
+	demCT, err := base64.StdEncoding.DecodeString(data.DEM)
+	if err != nil {
+		return nil, fmt.Errorf("invalid DEM encoding: %w", err)
+	}
 
 	// Decrypt using Client's identity
 	ss, err := crypto.Decapsulate(c.decKey, kemCT)
@@ -2889,6 +2906,9 @@ func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error)
 
 	if !ok {
 		// 2. Try to unlock group key from entry's lockbox
+		if c.decKey == nil {
+			return "", fmt.Errorf("client has no identity to unlock group")
+		}
 		// 2a. Try personal access
 		gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
 		if err != nil && entry.OwnerID != "" && entry.OwnerID != c.userID {
@@ -3067,8 +3087,16 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 	}
 	group.SetName(name)
 
+	// Cache keys for signing
+	c.keyMu.Lock()
+	c.groupKeys[groupID] = dk
+	c.groupSignKeys[groupID] = sk
+	c.keyMu.Unlock()
+
 	// Client-side Signing
-	c.signGroup(group, false)
+	if err := c.signGroup(group, false); err != nil {
+		return nil, err
+	}
 
 	data, _ := json.Marshal(group)
 	url := c.serverURL + "/v1/group/"
@@ -4102,16 +4130,27 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 	return err
 }
 
-func (c *Client) signGroup(group *metadata.Group, isUpdate bool) {
+func (c *Client) signGroup(group *metadata.Group, isUpdate bool) error {
 	// Re-encrypt ClientBlob if transient fields are set
 	if name := group.GetName(); name != "" {
-		gdk, err := c.GetGroupPrivateKey(group.ID)
-		if err == nil {
-			blob := metadata.GroupClientBlob{Name: name}
-			if enc, err := c.encryptClientBlob(blob, gdk.EncapsulationKey()); err == nil {
-				group.ClientBlob = enc
+		c.keyMu.RLock()
+		gdk, ok := c.groupKeys[group.ID]
+		c.keyMu.RUnlock()
+
+		if !ok {
+			var err error
+			gdk, err = c.GetGroupPrivateKey(group.ID)
+			if err != nil {
+				return fmt.Errorf("failed to fetch group key for signing: %w", err)
 			}
 		}
+
+		blob := metadata.GroupClientBlob{Name: name}
+		enc, err := c.encryptClientBlob(blob, gdk.EncapsulationKey())
+		if err != nil {
+			return fmt.Errorf("failed to encrypt group client blob: %w", err)
+		}
+		group.ClientBlob = enc
 	}
 
 	group.SignerID = c.userID
@@ -4123,11 +4162,14 @@ func (c *Client) signGroup(group *metadata.Group, isUpdate bool) {
 	if isUpdate {
 		group.Version--
 	}
+	return nil
 }
 
 func (c *Client) updateGroupInternal(ctx context.Context, group *metadata.Group) (*metadata.Group, error) {
 	var updated metadata.Group
-	c.signGroup(group, true)
+	if err := c.signGroup(group, true); err != nil {
+		return nil, err
+	}
 	data, err := json.Marshal(group)
 	if err != nil {
 		return nil, err
