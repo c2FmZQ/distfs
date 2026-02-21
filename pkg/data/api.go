@@ -24,6 +24,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -57,6 +58,9 @@ type Server struct {
 	fsm        *metadata.MetadataFSM
 	validator  Validator
 	client     *http.Client
+
+	cachedMetaPubKey []byte
+	cacheMu          sync.RWMutex
 }
 
 // NewServer creates a new Data Node API server.
@@ -120,9 +124,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	http.NotFound(w, r)
 }
 
-func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) error {
-	if s.metaPubKey == nil {
-		return nil
+func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode string) error {
+	s.cacheMu.RLock()
+	pubKey := s.cachedMetaPubKey
+	s.cacheMu.RUnlock()
+
+	if pubKey == nil {
+		pubKey = s.metaPubKey
+		if s.fsm != nil {
+			if pub, err := s.fsm.GetClusterSignPublicKey(); err == nil {
+				pubKey = pub
+				s.cacheMu.Lock()
+				s.cachedMetaPubKey = pub
+				s.cacheMu.Unlock()
+			}
+		}
+	}
+
+	if pubKey == nil {
+		return fmt.Errorf("authentication failed: cluster signing key not available")
 	}
 
 	auth := r.Header.Get("Authorization")
@@ -141,19 +161,7 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) err
 		return fmt.Errorf("invalid token structure")
 	}
 
-	valid := false
-	if s.metaPubKey != nil && crypto.VerifySignature(s.metaPubKey, signed.Payload, signed.Signature) {
-		valid = true
-	} else if s.fsm != nil && signed.SignerID != "" {
-		// Use SignerID for O(1) lookup
-		if node, err := s.fsm.GetNode(signed.SignerID); err == nil && len(node.SignKey) > 0 {
-			if crypto.VerifySignature(node.SignKey, signed.Payload, signed.Signature) {
-				valid = true
-			}
-		}
-	}
-
-	if !valid {
+	if !crypto.VerifySignature(pubKey, signed.Payload, signed.Signature) {
 		return fmt.Errorf("invalid signature")
 	}
 
@@ -192,7 +200,7 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) err
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.authenticate(r, id, "D"); err != nil {
+	if err := s.Internal_Authenticate(r, id, "D"); err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -209,7 +217,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, id string)
 }
 
 func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.authenticate(r, id, "R"); err != nil {
+	if err := s.Internal_Authenticate(r, id, "R"); err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -253,7 +261,7 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.authenticate(r, id, "W"); err != nil {
+	if err := s.Internal_Authenticate(r, id, "W"); err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
@@ -331,7 +339,7 @@ func (s *Server) replicate(id, target, remaining, token string) error {
 }
 
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.authenticate(r, id, "R"); err != nil {
+	if err := s.Internal_Authenticate(r, id, "R"); err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}

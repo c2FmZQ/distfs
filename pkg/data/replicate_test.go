@@ -17,12 +17,14 @@ func TestReplicateChain(t *testing.T) {
 	servers := make([]*httptest.Server, 3)
 	stores := make([]*DiskStore, 3)
 
+	pub, sk := setupTestAuth(t)
+
 	for i := 0; i < 3; i++ {
 		tmpDir := t.TempDir()
 		st, _ := createTestStorage(t, tmpDir)
 		store, _ := NewDiskStore(st)
 		stores[i] = store
-		server := NewServer(store, nil, nil, NoopValidator{}) // No auth for simplicity
+		server := NewServer(store, pub, nil, NoopValidator{})
 		ts := httptest.NewServer(server)
 		servers[i] = ts
 		defer ts.Close()
@@ -37,6 +39,7 @@ func TestReplicateChain(t *testing.T) {
 	url := fmt.Sprintf("%s/v1/data/%s?replicas=%s", servers[0].URL, chunkID, replicas)
 
 	req, _ := http.NewRequest("PUT", url, bytes.NewReader(content))
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "RW"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
@@ -72,11 +75,13 @@ func TestReplicateEndpoint(t *testing.T) {
 	st1, _ := createTestStorage(t, tmpDir1)
 	store1, _ := NewDiskStore(st1)
 
-	server0 := NewServer(store0, nil, nil, NoopValidator{})
+	pub, sk := setupTestAuth(t)
+
+	server0 := NewServer(store0, pub, nil, NoopValidator{})
 	ts0 := httptest.NewServer(server0)
 	defer ts0.Close()
 
-	server1 := NewServer(store1, nil, nil, NoopValidator{})
+	server1 := NewServer(store1, pub, nil, NoopValidator{})
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
 
@@ -88,6 +93,7 @@ func TestReplicateEndpoint(t *testing.T) {
 	// POST /v1/data/{id}/replicate
 	reqBody := []byte(fmt.Sprintf(`{"targets":["%s"]}`, ts1.URL))
 	req, _ := http.NewRequest("POST", ts0.URL+"/v1/data/"+id+"/replicate", bytes.NewReader(reqBody))
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{id}, "RW"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST replicate failed: %v", err)
@@ -107,12 +113,14 @@ func TestParallelReplication(t *testing.T) {
 	servers := make([]*httptest.Server, 4)
 	stores := make([]*DiskStore, 4)
 
+	pub, sk := setupTestAuth(t)
+
 	for i := 0; i < 4; i++ {
 		tmpDir := t.TempDir()
 		st, _ := createTestStorage(t, tmpDir)
 		store, _ := NewDiskStore(st)
 		stores[i] = store
-		server := NewServer(store, nil, nil, NoopValidator{})
+		server := NewServer(store, pub, nil, NoopValidator{})
 		ts := httptest.NewServer(server)
 		servers[i] = ts
 		defer ts.Close()
@@ -126,6 +134,7 @@ func TestParallelReplication(t *testing.T) {
 	url := fmt.Sprintf("%s/v1/data/%s?replicas=%s", servers[0].URL, chunkID, replicas)
 
 	req, _ := http.NewRequest("PUT", url, bytes.NewReader(content))
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "RW"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
@@ -147,12 +156,14 @@ func TestParallelReplicationFailure(t *testing.T) {
 	servers := make([]*httptest.Server, 3)
 	stores := make([]*DiskStore, 3)
 
+	pub, sk := setupTestAuth(t)
+
 	for i := 0; i < 3; i++ {
 		tmpDir := t.TempDir()
 		st, _ := createTestStorage(t, tmpDir)
 		store, _ := NewDiskStore(st)
 		stores[i] = store
-		server := NewServer(store, nil, nil, NoopValidator{})
+		server := NewServer(store, pub, nil, NoopValidator{})
 		ts := httptest.NewServer(server)
 		servers[i] = ts
 		defer ts.Close()
@@ -168,6 +179,7 @@ func TestParallelReplicationFailure(t *testing.T) {
 	url := fmt.Sprintf("%s/v1/data/%s?replicas=%s", servers[0].URL, chunkID, replicas)
 
 	req, _ := http.NewRequest("PUT", url, bytes.NewReader(content))
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "RW"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PUT request itself failed: %v", err)

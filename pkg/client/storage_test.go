@@ -42,7 +42,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -128,7 +128,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
 	waitLeader(t, metaNode.Raft)
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)

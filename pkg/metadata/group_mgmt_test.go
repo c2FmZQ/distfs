@@ -43,7 +43,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	CreateUser(t, node, uMallory)
 
 	// 2. Alice creates Group A
-	tokenAlice := loginSession(t, ts, "alice", uAliceSign)
+	tokenAlice := LoginSessionForTest(t, ts, "alice", uAliceSign)
 	groupA := Group{
 		ID:      "group-a",
 		OwnerID: "alice",
@@ -68,7 +68,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	groupID := createdA.ID
 
 	// 3. Mallory attempts to hijack Group A (Should fail)
-	tokenMallory := loginSession(t, ts, "mallory", uMallorySign)
+	tokenMallory := LoginSessionForTest(t, ts, "mallory", uMallorySign)
 	hijackA := createdA
 	hijackA.OwnerID = "mallory"
 	hijackA.SignGroupForTest("mallory", uMallorySign)
@@ -119,7 +119,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	}
 
 	// 5. Bob (Member) attempts to update self-managed Group A (Should succeed)
-	tokenBob := loginSession(t, ts, "bob", uBobSign)
+	tokenBob := LoginSessionForTest(t, ts, "bob", uBobSign)
 
 	// Refresh gA
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/group/"+groupID, nil)

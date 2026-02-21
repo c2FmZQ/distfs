@@ -26,6 +26,7 @@ echo "## Unit Tests" >> $REPORT
 echo '```' >> $REPORT
 echo "Running Unit Tests..."
 go fmt ./...
+go vet ./...
 if ! go test ./... > /tmp/unit-tests.log 2>&1; then
     cat /tmp/unit-tests.log >> $REPORT
     echo '```' >> $REPORT

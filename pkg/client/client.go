@@ -222,7 +222,7 @@ type Client struct {
 
 	admin bool
 
-	mutationMu    sync.Mutex
+	mutationMu    *sync.Mutex
 	mutationLocks map[string]*sync.Mutex
 }
 
@@ -248,6 +248,7 @@ func NewClient(serverAddr string) *Client {
 		loginMu:       &sync.Mutex{},
 		controlSem:    make(chan struct{}, 128), // High throughput for metadata
 		dataSem:       make(chan struct{}, 64),  // Limit chunk I/O
+		mutationMu:    &sync.Mutex{},
 		mutationLocks: make(map[string]*sync.Mutex),
 	}
 }

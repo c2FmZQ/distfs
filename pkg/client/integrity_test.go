@@ -33,7 +33,7 @@ func TestManifestIntegrity(t *testing.T) {
 	}
 	raftNode.Raft.BootstrapCluster(cfg)
 	waitLeader(t, raftNode.Raft)
-	ek := bootstrapCluster(t, raftNode)
+	ek, _ := bootstrapCluster(t, raftNode)
 
 	// Phase 31: Initialize Cluster Secret (required for Group creation)
 	clusterSecret := make([]byte, 32)

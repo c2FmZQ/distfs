@@ -190,6 +190,24 @@ func main() {
 						}
 					}
 
+					// 1.1. Initialize Cluster Signing Key if needed
+					if _, err := rn.FSM.GetClusterSignPublicKey(); err != nil {
+						log.Println("Initializing Cluster Signing Key...")
+						csk, err := crypto.GenerateIdentityKey()
+						if err != nil {
+							log.Fatalf("failed to generate cluster sign key: %v", err)
+						}
+						keyData := metadata.ClusterSignKey{
+							Public:           csk.Public(),
+							EncryptedPrivate: csk.MarshalPrivate(),
+						}
+						data, _ := json.Marshal(keyData)
+						cmd := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: data}
+						if err := rn.Raft.Apply(cmd.Marshal(), 5*time.Second).Error(); err != nil {
+							log.Fatalf("failed to apply cluster sign key: %v", err)
+						}
+					}
+
 					// 2. Register self in FSM (seeds discovery for heartbeats)
 					log.Println("Registering bootstrap node in FSM...")
 					node := metadata.Node{
@@ -230,7 +248,11 @@ func main() {
 		log.Fatalf("failed to init disk store: %v", err)
 	}
 
-	dataServer := data.NewServer(store, signKey.Public(), rn.FSM, rn.FSM)
+	metaPubKey := signKey.Public()
+	if pub, err := rn.FSM.GetClusterSignPublicKey(); err == nil {
+		metaPubKey = pub
+	}
+	dataServer := data.NewServer(store, metaPubKey, rn.FSM, rn.FSM)
 
 	// 5. Combined Router (Public)
 	publicMux := http.NewServeMux()

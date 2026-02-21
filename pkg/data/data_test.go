@@ -17,7 +17,9 @@ package data
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -25,7 +27,123 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
+
+func TestSecurity_ClusterSignKey(t *testing.T) {
+	node, ts, serverSignKey, serverEKBytes, _ := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Setup User
+	u1Dec, _ := crypto.GenerateEncryptionKey()
+	u1Sign, _ := crypto.GenerateIdentityKey()
+	u1 := metadata.User{
+		ID:      "u1",
+		SignKey: u1Sign.Public(),
+		EncKey:  u1Dec.EncapsulationKey().Bytes(),
+	}
+	u1Bytes, _ := json.Marshal(u1)
+	f := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("CreateUser apply failed: %v", err)
+	}
+
+	token1 := metadata.LoginSessionForTest(t, ts, "u1", u1Sign)
+
+	// Create Inode so token issuance succeeds (exists=true check)
+	inode := metadata.Inode{
+		ID:      "file1",
+		OwnerID: "u1",
+		Mode:    0644,
+	}
+	inodeBytes, _ := json.Marshal(inode)
+	f = node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: inodeBytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("CreateInode failed: %v", err)
+	}
+
+	// 2. Request a valid token from Leader (Cluster-signed)
+	reqBody := struct {
+		InodeID string   `json:"inode_id"`
+		Chunks  []string `json:"chunks"`
+		Mode    string   `json:"mode"`
+	}{
+		InodeID: "file1",
+		Chunks:  []string{"chunk1"},
+		Mode:    "W",
+	}
+	payload, _ := json.Marshal(reqBody)
+	// Must seal POST requests to /v1/meta/token
+	body := metadata.SealTestRequest(t, "u1", u1Sign, serverEKBytes, payload)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(body))
+	req.Header.Set("Session-Token", token1)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Failed to request token: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Fatalf("Failed to get token: %d %s", resp.StatusCode, string(b))
+	}
+
+	opened := metadata.UnsealTestResponse(t, u1Dec, serverSignKey.Public(), resp)
+
+	var signedToken metadata.SignedAuthToken
+	if err := json.Unmarshal(opened, &signedToken); err != nil {
+		t.Fatalf("Failed to unmarshal token: %v", err)
+	}
+	resp.Body.Close()
+
+	if signedToken.SignerID != "" {
+		t.Errorf("Expected empty SignerID for cluster-signed token, got %s", signedToken.SignerID)
+	}
+
+	// 3. Verify with Data Node Logic (Strict metaPubKey check)
+	clusterPub, _ := node.FSM.GetClusterSignPublicKey()
+
+	tmpDir := t.TempDir()
+	stChunks, _ := createTestStorage(t, tmpDir)
+	store, _ := NewDiskStore(stChunks)
+	dataSrv := NewServer(store, clusterPub, nil, NoopValidator{})
+
+	// Validate valid token
+	authReq, _ := http.NewRequest("GET", "/v1/data/chunk1", nil)
+	tokenStr := base64.StdEncoding.EncodeToString(signedToken.Marshal())
+	authReq.Header.Set("Authorization", "Bearer "+tokenStr)
+
+	err = dataSrv.Internal_Authenticate(authReq, "chunk1", "W")
+	if err != nil {
+		t.Errorf("Data server rejected valid cluster-signed token: %v", err)
+	}
+
+	// 4. FORGERY: Sign a token using a Node's individual key (legacy/malicious behavior)
+	capToken := metadata.CapabilityToken{
+		Chunks: []string{"chunk1"},
+		Mode:   "W",
+		Exp:    time.Now().Add(time.Hour).Unix(),
+	}
+	payload, _ = json.Marshal(capToken)
+	badSig := serverSignKey.Sign(payload)
+	forgedToken := metadata.SignedAuthToken{
+		SignerID:  "node-1",
+		Payload:   payload,
+		Signature: badSig,
+	}
+
+	forgedReq, _ := http.NewRequest("GET", "/v1/data/chunk1", nil)
+	forgedTokenStr := base64.StdEncoding.EncodeToString(forgedToken.Marshal())
+	forgedReq.Header.Set("Authorization", "Bearer "+forgedTokenStr)
+
+	err = dataSrv.Internal_Authenticate(forgedReq, "chunk1", "W")
+	if err == nil {
+		t.Error("Data server ACCEPTED forged node-signed token (expected rejection)")
+	}
+}
 
 func TestDiskStore(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -163,7 +281,8 @@ func TestAPI(t *testing.T) {
 	st, _ := createTestStorage(t, tmpDir)
 	store, _ := NewDiskStore(st)
 
-	server := NewServer(store, nil, nil, NoopValidator{})
+	pub, sk := setupTestAuth(t)
+	server := NewServer(store, pub, nil, NoopValidator{})
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -173,6 +292,7 @@ func TestAPI(t *testing.T) {
 
 	// PUT
 	req, _ := http.NewRequest("PUT", ts.URL+"/v1/data/"+chunkID, bytes.NewReader(content))
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "W"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("PUT failed: %v", err)
@@ -189,7 +309,9 @@ func TestAPI(t *testing.T) {
 	}
 
 	// GET
-	resp, err = http.Get(ts.URL + "/v1/data/" + chunkID)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/data/"+chunkID, nil)
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "R"))
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
 	}
@@ -218,6 +340,7 @@ func TestAPI(t *testing.T) {
 	// Test PUT Too Large (3MB) - Should SUCCEED with storage lib
 	large := make([]byte, 3*1024*1024)
 	reqLarge, _ := http.NewRequest("PUT", ts.URL+"/v1/data/"+chunkID, bytes.NewReader(large))
+	reqLarge.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "W"))
 	respLarge, _ := http.DefaultClient.Do(reqLarge)
 	if respLarge.StatusCode != http.StatusCreated { // Changed expectation
 		t.Errorf("Expected 201 for large body, got %d", respLarge.StatusCode)
@@ -282,7 +405,8 @@ func TestAPI_Delete(t *testing.T) {
 	st, _ := createTestStorage(t, tmpDir)
 	store, _ := NewDiskStore(st)
 
-	server := NewServer(store, nil, nil, NoopValidator{})
+	pub, sk := setupTestAuth(t)
+	server := NewServer(store, pub, nil, NoopValidator{})
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -291,6 +415,7 @@ func TestAPI_Delete(t *testing.T) {
 
 	// DELETE
 	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/data/"+id, nil)
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{id}, "D"))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -307,6 +432,7 @@ func TestAPI_Delete(t *testing.T) {
 
 	// DELETE missing
 	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/data/"+id, nil)
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{id}, "D"))
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("Expected 404 for missing DELETE, got %d", resp.StatusCode)

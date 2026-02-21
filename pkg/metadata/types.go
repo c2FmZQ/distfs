@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"sort"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -325,6 +326,25 @@ type Inode struct {
 	AuthorizedSigners []string `json:"auth_signers,omitempty"`
 }
 
+// UnmarshalJSON implements custom unmarshaling to handle legacy symlink metadata.
+func (i *Inode) UnmarshalJSON(data []byte) error {
+	type Alias Inode
+	aux := &struct {
+		SymlinkTarget string `json:"symlink_target,omitempty"`
+		*Alias
+	}{
+		Alias: (*Alias)(i),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	// Migrate legacy symlink target if new field is empty
+	if aux.SymlinkTarget != "" && len(i.EncryptedSymlinkTarget) == 0 {
+		i.EncryptedSymlinkTarget = []byte(aux.SymlinkTarget)
+	}
+	return nil
+}
+
 // ManifestHash calculates a cryptographic hash of the inode's manifest and critical metadata.
 func (i *Inode) ManifestHash() []byte {
 	h := crypto.NewHash()
@@ -532,11 +552,26 @@ type CapabilityToken struct {
 	Exp    int64    `json:"exp"`
 }
 
+// ClusterSignKey stores the cluster-wide token signing key information.
+type ClusterSignKey struct {
+	Public           []byte `json:"public"`
+	EncryptedPrivate []byte `json:"enc_private"`
+}
+
 // SignedAuthToken is a CapabilityToken signed by the Metadata Server.
 type SignedAuthToken struct {
 	SignerID  string `json:"signer_id,omitempty"`
 	Payload   []byte `json:"payload"`
 	Signature []byte `json:"sig"`
+}
+
+func (s *SignedAuthToken) Marshal() []byte {
+	b, _ := json.Marshal(s)
+	return b
+}
+
+func (s *SignedAuthToken) Unmarshal(b []byte) error {
+	return json.Unmarshal(b, s)
 }
 
 // WorldIdentity represents the public/private key pair for the 'world' user.

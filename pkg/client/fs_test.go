@@ -30,7 +30,7 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-func bootstrapClusterFS(t *testing.T, raftNode *metadata.RaftNode) *mlkem.EncapsulationKey768 {
+func bootstrapClusterFS(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, []byte) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
 	key := metadata.ClusterKey{
@@ -46,7 +46,20 @@ func bootstrapClusterFS(t *testing.T, raftNode *metadata.RaftNode) *mlkem.Encaps
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
 	}
-	return dk.EncapsulationKey()
+
+	// Bootstrap cluster sign key
+	csk, _ := crypto.GenerateIdentityKey()
+	cskData := metadata.ClusterSignKey{
+		Public:           csk.Public(),
+		EncryptedPrivate: csk.MarshalPrivate(),
+	}
+	cskBytes, _ := json.Marshal(cskData)
+	future = raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Bootstrap sign key apply failed: %v", err)
+	}
+
+	return dk.EncapsulationKey(), csk.Public()
 }
 
 func TestDistFS_ReadDir(t *testing.T) {
@@ -65,7 +78,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	})
 	time.Sleep(2 * time.Second)
 
-	serverEK := bootstrapClusterFS(t, metaNode)
+	serverEK, metaSignPK := bootstrapClusterFS(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -91,7 +104,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 

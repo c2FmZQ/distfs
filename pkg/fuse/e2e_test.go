@@ -59,7 +59,7 @@ func waitLeaderLocal(t *testing.T, r *raft.Raft) {
 	}
 }
 
-func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) *mlkem.EncapsulationKey768 {
+func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, []byte) {
 	waitLeaderLocal(t, raftNode.Raft)
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
@@ -76,7 +76,20 @@ func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) *mlkem.Enc
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
 	}
-	return dk.EncapsulationKey()
+
+	// Bootstrap cluster sign key
+	csk, _ := crypto.GenerateIdentityKey()
+	cskData := metadata.ClusterSignKey{
+		Public:           csk.Public(),
+		EncryptedPrivate: csk.MarshalPrivate(),
+	}
+	cskBytes, _ := json.Marshal(cskData)
+	future = raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Bootstrap sign key apply failed: %v", err)
+	}
+
+	return dk.EncapsulationKey(), csk.Public()
 }
 
 func registerNodeLocal(t *testing.T, serverURL, secret string, node metadata.Node) {
@@ -114,7 +127,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	})
 	waitLeaderLocal(t, metaNode.Raft)
 
-	serverEK := bootstrapClusterLocal(t, metaNode)
+	serverEK, metaSignPK := bootstrapClusterLocal(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -134,7 +147,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorageLocal(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), metaNode.FSM, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 

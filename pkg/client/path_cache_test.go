@@ -39,7 +39,7 @@ func TestPathCache(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 
 	// Create a custom handler to count Inode GET requests
@@ -72,7 +72,7 @@ func TestPathCache(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{

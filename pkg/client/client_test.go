@@ -72,7 +72,7 @@ func waitLeader(t *testing.T, r *raft.Raft) {
 	}
 }
 
-func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) *mlkem.EncapsulationKey768 {
+func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, []byte) {
 	waitLeader(t, raftNode.Raft)
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
@@ -89,7 +89,20 @@ func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) *mlkem.Encapsul
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
 	}
-	return dk.EncapsulationKey()
+
+	// Bootstrap cluster sign key
+	csk, _ := crypto.GenerateIdentityKey()
+	cskData := metadata.ClusterSignKey{
+		Public:           csk.Public(),
+		EncryptedPrivate: csk.MarshalPrivate(),
+	}
+	cskBytes, _ := json.Marshal(cskData)
+	future = raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	if err := future.Error(); err != nil {
+		t.Fatalf("Bootstrap sign key apply failed: %v", err)
+	}
+
+	return dk.EncapsulationKey(), csk.Public()
 }
 
 func registerNode(t *testing.T, serverURL, secret string, node metadata.Node) {
@@ -126,7 +139,7 @@ func TestClientIntegration(t *testing.T) {
 	// Wait for leader
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -150,7 +163,7 @@ func TestClientIntegration(t *testing.T) {
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
 
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -250,7 +263,7 @@ func TestReplication(t *testing.T) {
 		t.Fatal("Node did not become leader")
 	}
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -277,7 +290,7 @@ func TestReplication(t *testing.T) {
 		st, _ := createTestStorage(t, dir)
 		store, _ := data.NewDiskStore(st)
 		stores[i] = store
-		server := data.NewServer(store, signKey.Public(), nil, data.NoopValidator{})
+		server := data.NewServer(store, metaSignPK, nil, data.NoopValidator{})
 		ts := httptest.NewServer(server)
 		nodes[i] = ts
 		defer ts.Close()
@@ -340,7 +353,7 @@ func TestDirectories(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -362,7 +375,7 @@ func TestDirectories(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -437,7 +450,7 @@ func TestReplicationRepair(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -460,7 +473,7 @@ func TestReplicationRepair(t *testing.T) {
 	dataDir1 := t.TempDir()
 	st1, _ := createTestStorage(t, dataDir1)
 	store1, _ := data.NewDiskStore(st1)
-	server1 := data.NewServer(store1, signKey.Public(), nil, data.NoopValidator{})
+	server1 := data.NewServer(store1, metaSignPK, nil, data.NoopValidator{})
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
 
@@ -494,14 +507,14 @@ func TestReplicationRepair(t *testing.T) {
 	dataDir2 := t.TempDir()
 	st2, _ := createTestStorage(t, dataDir2)
 	store2, _ := data.NewDiskStore(st2)
-	server2 := data.NewServer(store2, signKey.Public(), nil, data.NoopValidator{})
+	server2 := data.NewServer(store2, metaSignPK, nil, data.NoopValidator{})
 	ts2 := httptest.NewServer(server2)
 	defer ts2.Close()
 
 	dataDir3 := t.TempDir()
 	st3, _ := createTestStorage(t, dataDir3)
 	store3, _ := data.NewDiskStore(st3)
-	server3 := data.NewServer(store3, signKey.Public(), nil, data.NoopValidator{})
+	server3 := data.NewServer(store3, metaSignPK, nil, data.NoopValidator{})
 	ts3 := httptest.NewServer(server3)
 	defer ts3.Close()
 
@@ -548,7 +561,7 @@ func TestReadAhead(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -569,7 +582,7 @@ func TestReadAhead(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	realHandler := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	realHandler := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 
 	requestLog := make([]string, 0)
 	var logMu sync.Mutex
@@ -665,7 +678,7 @@ func TestGarbageCollection(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -686,7 +699,7 @@ func TestGarbageCollection(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -763,7 +776,7 @@ func TestResolvePathComplex(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	metaServer.StopKeyRotation()
@@ -779,7 +792,7 @@ func TestResolvePathComplex(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{

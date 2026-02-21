@@ -61,6 +61,9 @@ type Server struct {
 	// nodeKey removed - used for mTLS but not passed to Server for auth anymore
 	signKey *crypto.IdentityKey
 
+	clusterSignKey *crypto.IdentityKey
+	clusterSignMu  sync.RWMutex
+
 	raftSecret string
 
 	httpClient          *http.Client
@@ -177,7 +180,67 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	s.gcWorker.Start()
 	s.keyWorker = NewKeyRotationWorker(s)
 	s.keyWorker.Start()
+
+	go s.clusterKeyLoader()
+
 	return s
+}
+
+func (s *Server) getClusterSignKey() *crypto.IdentityKey {
+	s.clusterSignMu.RLock()
+	csk := s.clusterSignKey
+	s.clusterSignMu.RUnlock()
+
+	if csk == nil && s.raft.State() == raft.Leader {
+		s.loadClusterSignKey()
+		s.clusterSignMu.RLock()
+		csk = s.clusterSignKey
+		s.clusterSignMu.RUnlock()
+	}
+	return csk
+}
+
+func (s *Server) clusterKeyLoader() {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-s.stopCh:
+			return
+		case <-ticker.C:
+			if s.raft.State() == raft.Leader {
+				s.loadClusterSignKey()
+			}
+		}
+	}
+}
+
+func (s *Server) loadClusterSignKey() {
+	s.clusterSignMu.RLock()
+	hasKey := s.clusterSignKey != nil
+	s.clusterSignMu.RUnlock()
+
+	if hasKey {
+		return
+	}
+
+	encPriv, err := s.fsm.GetClusterSignPrivateKey()
+	if err != nil {
+		if err != ErrNotFound {
+			log.Printf("ERROR: Failed to fetch cluster sign key from FSM: %v", err)
+		}
+		return
+	}
+
+	priv := crypto.UnmarshalIdentityKey(encPriv)
+	// UnmarshalIdentityKey for Ed25519 always succeeds if bytes are provided
+	// as it just wraps the slice.
+
+	s.clusterSignMu.Lock()
+	s.clusterSignKey = priv
+	s.clusterSignMu.Unlock()
+	log.Printf("SUCCESS: Loaded cluster signing key (Leader)")
 }
 
 func (s *Server) discoverOIDC(discoveryURL string) {
@@ -291,7 +354,8 @@ func (s *Server) Shutdown() {
 }
 
 func (s *Server) generateSelfToken(chunks []string, mode string) (string, error) {
-	if s.signKey == nil {
+	csk := s.getClusterSignKey()
+	if csk == nil && s.signKey == nil {
 		return "", fmt.Errorf("no signing key")
 	}
 
@@ -302,10 +366,18 @@ func (s *Server) generateSelfToken(chunks []string, mode string) (string, error)
 	}
 
 	payload, _ := json.Marshal(capToken)
-	sig := s.signKey.Sign(payload)
+
+	var sig []byte
+	signerID := s.nodeID
+	if csk != nil {
+		sig = csk.Sign(payload)
+		signerID = ""
+	} else {
+		sig = s.signKey.Sign(payload)
+	}
 
 	signed := SignedAuthToken{
-		SignerID:  s.nodeID,
+		SignerID:  signerID,
 		Payload:   payload,
 		Signature: sig,
 	}
@@ -737,7 +809,15 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 
 	// Verify server's signature over the token
 	payload, _ := json.Marshal(st.Token)
-	if !crypto.VerifySignature(s.signKey.Public(), payload, st.Signature) {
+	valid := false
+	clusterPub, err := s.fsm.GetClusterSignPublicKey()
+	if err == nil && crypto.VerifySignature(clusterPub, payload, st.Signature) {
+		valid = true
+	} else if crypto.VerifySignature(s.signKey.Public(), payload, st.Signature) {
+		valid = true
+	}
+
+	if !valid {
 		return nil, fmt.Errorf("invalid session signature")
 	}
 
@@ -819,6 +899,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.challengeMu.Unlock()
 
 	if !ok || entry.UserID != solve.UserID {
+		log.Printf("DEBUG: handleLogin: invalid challenge or user ID mismatch. entryFound=%v, entryUser=%s, solveUser=%s", ok, entry.UserID, solve.UserID)
 		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
@@ -831,6 +912,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if plain == nil {
+			log.Printf("DEBUG: handleLogin: user %s not found in FSM", solve.UserID)
 			return fmt.Errorf("user not found")
 		}
 		return json.Unmarshal(plain, &user)
@@ -841,6 +923,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
+		log.Printf("DEBUG: handleLogin: invalid signature for user %s", solve.UserID)
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -856,7 +939,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload, _ := json.Marshal(st)
-	sig := s.signKey.Sign(payload)
+
+	csk := s.getClusterSignKey()
+
+	var sig []byte
+	if csk != nil {
+		sig = csk.Sign(payload)
+	} else {
+		sig = s.signKey.Sign(payload)
+	}
 
 	signed := SignedSessionToken{
 		Token:     st,
@@ -927,9 +1018,11 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	if exists {
 		bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-		if bypass && s.fsm.IsAdmin(user.ID) {
+		isAdmin := s.fsm.IsAdmin(user.ID)
+		if bypass && isAdmin {
 			// Bypass enabled and authorized
 		} else if inode.OwnerID != user.ID {
+			fmt.Printf("DEBUG: handleIssueToken: Permission check. User=%s, Owner=%s, Mode=%s, InodeMode=%o, GroupID=%s\n", user.ID, inode.OwnerID, req.Mode, inode.Mode, inode.GroupID)
 			// World Readable/Writable?
 			if req.Mode == "R" && (inode.Mode&0004) != 0 {
 				// Authorized for reading
@@ -943,14 +1036,17 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 					} else if req.Mode == "W" && (inode.Mode&0020) != 0 {
 						// Authorized for group writing
 					} else {
+						fmt.Printf("DEBUG: handleIssueToken: Forbidden (Group). User=%s, Group=%s, Mode=%s\n", user.ID, inode.GroupID, req.Mode)
 						http.Error(w, "forbidden", http.StatusForbidden)
 						return
 					}
 				} else {
+					fmt.Printf("DEBUG: handleIssueToken: Forbidden (Not in Group). User=%s, Group=%s\n", user.ID, inode.GroupID)
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
 				}
 			} else {
+				fmt.Printf("DEBUG: handleIssueToken: Forbidden (World). User=%s, Mode=%s\n", user.ID, req.Mode)
 				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
@@ -977,10 +1073,20 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	payload, _ := json.Marshal(capToken)
-	sig := s.signKey.Sign(payload)
+
+	csk := s.getClusterSignKey()
+
+	var sig []byte
+	signerID := s.nodeID
+	if csk != nil {
+		sig = csk.Sign(payload)
+		signerID = "" // Distinguish as Cluster-wide
+	} else {
+		sig = s.signKey.Sign(payload)
+	}
 
 	signed := SignedAuthToken{
-		SignerID:  s.nodeID,
+		SignerID:  signerID,
 		Payload:   payload,
 		Signature: sig,
 	}

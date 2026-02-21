@@ -44,100 +44,6 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKey, []byte, *Server) {
-	tmpDir := t.TempDir()
-
-	mk, err := storage_crypto.CreateAESMasterKeyForTest()
-	if err != nil {
-		t.Fatal(err)
-	}
-	st := storage.New(tmpDir, mk)
-
-	nodeKey, _ := crypto.GenerateIdentityKey()
-	nodeID := fmt.Sprintf("node-%d", time.Now().UnixNano())
-
-	node, err := NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
-	if err != nil {
-		t.Fatalf("NewRaftNode failed: %v", err)
-	}
-
-	cfg := raft.Configuration{
-		Servers: []raft.Server{
-			{
-				ID:      raft.ServerID(nodeID),
-				Address: node.Transport.LocalAddr(),
-			},
-		},
-	}
-	f := node.Raft.BootstrapCluster(cfg)
-	if err := f.Error(); err != nil {
-		node.Shutdown()
-		t.Fatalf("Bootstrap failed: %v", err)
-	}
-
-	WaitLeader(t, node.Raft)
-
-	// Bootstrap cluster key
-	dk, _ := crypto.GenerateEncryptionKey()
-	ek := dk.EncapsulationKey()
-	key := ClusterKey{
-		ID:        "key-1",
-		EncKey:    ek.Bytes(),
-		DecKey:    dk.Bytes(),
-		CreatedAt: time.Now().Unix(),
-	}
-	keyBytes, _ := json.Marshal(key)
-	cmd := LogCommand{Type: CmdRotateKey, Data: keyBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	f = node.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Bootstrap key apply failed: %v", err)
-	}
-
-	signKey, _ := crypto.GenerateIdentityKey()
-	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0)
-	ts := httptest.NewServer(server)
-	return node, ts, signKey, ek.Bytes(), server
-}
-
-func loginSession(t *testing.T, ts *httptest.Server, userID string, userSignKey *crypto.IdentityKey) string {
-	// 1. Get Challenge
-	reqData := AuthChallengeRequest{UserID: userID}
-	b, _ := json.Marshal(reqData)
-	resp, err := http.Post(ts.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatalf("challenge request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("challenge request status: %d", resp.StatusCode)
-	}
-
-	var challengeRes AuthChallengeResponse
-	json.NewDecoder(resp.Body).Decode(&challengeRes)
-
-	// 2. Solve Challenge
-	sig := userSignKey.Sign(challengeRes.Challenge)
-	solve := AuthChallengeSolve{
-		UserID:    userID,
-		Challenge: challengeRes.Challenge,
-		Signature: sig,
-	}
-	b, _ = json.Marshal(solve)
-	resp, err = http.Post(ts.URL+"/v1/login", "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatalf("login request failed: %v", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login request status: %d", resp.StatusCode)
-	}
-
-	var sessionRes SessionResponse
-	json.NewDecoder(resp.Body).Decode(&sessionRes)
-	return sessionRes.Token
-}
-
 func unsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, serverSignPK []byte, resp *http.Response) []byte {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
 		b, _ := io.ReadAll(resp.Body)
@@ -187,7 +93,7 @@ func TestMetadataCluster(t *testing.T) {
 		t.Fatalf("Raft Apply user failed: %v", err)
 	}
 
-	token := loginSession(t, ts, "u1", userSignKey)
+	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Test Create Inode
 	inode := Inode{
@@ -212,10 +118,10 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Unseal response if needed (Create Inode returns the created Inode)
-	_ = unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	_ = UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 
 	// Test Get Inode
-	token = loginSession(t, ts, "u1", userSignKey)
+	token = LoginSessionForTest(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
@@ -227,7 +133,7 @@ func TestMetadataCluster(t *testing.T) {
 		t.Errorf("GET status %d", resp.StatusCode)
 	}
 
-	opened := unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	opened := UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 	var got Inode
 	json.Unmarshal(opened, &got)
 	if got.ID != "inode-1" {
@@ -235,7 +141,7 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Test Delete Inode
-	token = loginSession(t, ts, "u1", userSignKey)
+	token = LoginSessionForTest(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
@@ -247,7 +153,7 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Verify Deleted
-	token = loginSession(t, ts, "u1", userSignKey)
+	token = LoginSessionForTest(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
@@ -283,8 +189,8 @@ func TestSecurity_AccessControl(t *testing.T) {
 
 	// 2. User 1 creates a private inode (0600)
 	payload, _ := json.Marshal(Inode{ID: "private-1", OwnerID: "u1", Mode: 0600})
-	body := sealTestRequest(t, "u1", u1Sign, serverEK, payload)
-	token1 := loginSession(t, ts, "u1", u1Sign)
+	body := SealTestRequest(t, "u1", u1Sign, serverEK, payload)
+	token1 := LoginSessionForTest(t, ts, "u1", u1Sign)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token1)
@@ -294,7 +200,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 3. User 2 attempts to GET User 1's inode (Should fail)
-	token2 := loginSession(t, ts, "u2", u2Sign)
+	token2 := LoginSessionForTest(t, ts, "u2", u2Sign)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/private-1", nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
@@ -313,7 +219,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 
 	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
 	payload, _ = json.Marshal(Inode{ID: "private-1", Mode: 0777, Version: 1})
-	body = sealTestRequest(t, "u2", u2Sign, serverEK, payload)
+	body = SealTestRequest(t, "u2", u2Sign, serverEK, payload)
 	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/inode/private-1", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
@@ -386,12 +292,12 @@ func TestIdentityRegistry(t *testing.T) {
 		t.Fatalf("FSM Apply failed: %v", err)
 	}
 
-	token := loginSession(t, ts, "u1", userSignKey)
+	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Create Group
 	group := Group{ID: "g1", OwnerID: "u1"}
 	payload, _ := json.Marshal(group)
-	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
+	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -404,7 +310,7 @@ func TestIdentityRegistry(t *testing.T) {
 		t.Errorf("Group Create failed: %d", resp.StatusCode)
 	}
 
-	_ = unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	_ = UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 
 	// Register Node
 	n := Node{ID: "node-data-1", Status: NodeStatusActive}
@@ -511,8 +417,8 @@ func TestKeySync(t *testing.T) {
 	// 4. POST (Store) with Session + Sealing
 	blob := KeySyncBlob{KDF: "argon2id", Salt: []byte("salt"), Ciphertext: []byte("data")}
 	payload, _ := json.Marshal(blob)
-	body := sealTestRequest(t, userID, u1Sign, serverEK, payload)
-	sessionToken := loginSession(t, ts, userID, u1Sign)
+	body := SealTestRequest(t, userID, u1Sign, serverEK, payload)
+	sessionToken := LoginSessionForTest(t, ts, userID, u1Sign)
 
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/user/keysync", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -658,7 +564,7 @@ func TestChunkPagination(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatalf("Raft Apply user failed: %v", err)
 	}
-	token := loginSession(t, ts, "u1", userSignKey)
+	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Create Inode with many chunks
 	chunkCount := ChunkPageSize + 50 // 1050
@@ -674,7 +580,7 @@ func TestChunkPagination(t *testing.T) {
 		ChunkManifest: manifest,
 	}
 	payload, _ := json.Marshal(inode)
-	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
+	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
 	// POST /v1/meta/inode
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
@@ -689,10 +595,10 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("POST status %d", resp.StatusCode)
 	}
 
-	_ = unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	_ = UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 
 	// Verify via API (Transparent Reconstruction)
-	token = loginSession(t, ts, "u1", userSignKey)
+	token = LoginSessionForTest(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/paginated-file", nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
@@ -704,7 +610,7 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("GET status %d", resp.StatusCode)
 	}
 
-	opened := unsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	opened := UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 	var got Inode
 	if err := json.Unmarshal(opened, &got); err != nil {
 		t.Fatalf("Decode failed: %v", err)
@@ -1016,7 +922,7 @@ func TestSecurity_IDOR_User(t *testing.T) {
 	})
 
 	// Login as User 1
-	token1 := loginSession(t, ts, u1ID, sk1)
+	token1 := LoginSessionForTest(t, ts, u1ID, sk1)
 
 	// 2. User 1 requests self (Should be FULL)
 	req, _ := http.NewRequest("GET", ts.URL+"/v1/user/"+u1ID, nil)
@@ -1034,7 +940,7 @@ func TestSecurity_IDOR_User(t *testing.T) {
 	}
 
 	// 3. User 2 requests User 1 (Should be REDACTED)
-	token2 := loginSession(t, ts, u2ID, sk2)
+	token2 := LoginSessionForTest(t, ts, u2ID, sk2)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/"+u1ID, nil)
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
@@ -1071,5 +977,44 @@ func TestSecurity_IDOR_User(t *testing.T) {
 
 	if resAdmin.Quota.MaxInodes != 200 || resAdmin.Usage.InodeCount != 20 {
 		t.Errorf("Admin saw redacted metadata: %+v", resAdmin)
+	}
+}
+
+func TestInode_Migration(t *testing.T) {
+	// Legacy Inode JSON with symlink_target
+	legacyJSON := `{
+		"id": "sym-1",
+		"type": 2,
+		"symlink_target": "/etc/passwd",
+		"owner_id": "u1",
+		"version": 1
+	}`
+
+	var inode Inode
+	if err := json.Unmarshal([]byte(legacyJSON), &inode); err != nil {
+		t.Fatalf("Failed to unmarshal legacy Inode: %v", err)
+	}
+
+	if string(inode.EncryptedSymlinkTarget) != "/etc/passwd" {
+		t.Errorf("Migration failed: expected /etc/passwd, got %s", string(inode.EncryptedSymlinkTarget))
+	}
+
+	// Verify that new field takes precedence
+	modernJSON := `{
+		"id": "sym-2",
+		"type": 2,
+		"symlink_target": "legacy",
+		"enc_symlink_target": "bW9kZXJu",
+		"owner_id": "u1",
+		"version": 1
+	}` // bW9kZXJu is "modern" in base64
+
+	var inode2 Inode
+	if err := json.Unmarshal([]byte(modernJSON), &inode2); err != nil {
+		t.Fatalf("Failed to unmarshal modern Inode: %v", err)
+	}
+
+	if string(inode2.EncryptedSymlinkTarget) != "modern" {
+		t.Errorf("Precedence failed: expected modern, got %s", string(inode2.EncryptedSymlinkTarget))
 	}
 }

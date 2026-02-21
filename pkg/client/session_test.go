@@ -27,7 +27,7 @@ func TestClientSessionManagement(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)

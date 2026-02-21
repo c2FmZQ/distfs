@@ -268,30 +268,31 @@ func (fsm *MetadataFSM) GetNodeByRaftAddress(raftAddr string) (*Node, error) {
 type CommandType uint8
 
 const (
-	CmdCreateInode     CommandType = 1
-	CmdUpdateInode     CommandType = 2
-	CmdDeleteInode     CommandType = 3
-	CmdRegisterNode    CommandType = 4
-	CmdCreateUser      CommandType = 6
-	CmdCreateGroup     CommandType = 7
-	CmdUpdateGroup     CommandType = 8
-	CmdAddChild        CommandType = 9
-	CmdAddChunkReplica CommandType = 11
-	CmdSetAttr         CommandType = 13
-	CmdGCRemove        CommandType = 15
-	CmdInitSecret      CommandType = 16
-	CmdSetUserQuota    CommandType = 17
-	CmdRotateKey       CommandType = 18
-	CmdInitWorld       CommandType = 19
-	CmdStoreKeySync    CommandType = 20
-	CmdBatch           CommandType = 21
-	CmdAcquireLeases   CommandType = 22
-	CmdReleaseLeases   CommandType = 23
-	CmdPromoteAdmin    CommandType = 24
-	CmdAdminChown      CommandType = 25
-	CmdAdminChmod      CommandType = 26
-	CmdStoreMetrics    CommandType = 27
-	CmdSetGroupQuota   CommandType = 28
+	CmdCreateInode       CommandType = 1
+	CmdUpdateInode       CommandType = 2
+	CmdDeleteInode       CommandType = 3
+	CmdRegisterNode      CommandType = 4
+	CmdCreateUser        CommandType = 6
+	CmdCreateGroup       CommandType = 7
+	CmdUpdateGroup       CommandType = 8
+	CmdAddChild          CommandType = 9
+	CmdAddChunkReplica   CommandType = 11
+	CmdSetAttr           CommandType = 13
+	CmdGCRemove          CommandType = 15
+	CmdInitSecret        CommandType = 16
+	CmdSetUserQuota      CommandType = 17
+	CmdRotateKey         CommandType = 18
+	CmdInitWorld         CommandType = 19
+	CmdStoreKeySync      CommandType = 20
+	CmdBatch             CommandType = 21
+	CmdAcquireLeases     CommandType = 22
+	CmdReleaseLeases     CommandType = 23
+	CmdPromoteAdmin      CommandType = 24
+	CmdAdminChown        CommandType = 25
+	CmdAdminChmod        CommandType = 26
+	CmdStoreMetrics      CommandType = 27
+	CmdSetGroupQuota     CommandType = 28
+	CmdSetClusterSignKey CommandType = 29
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -481,6 +482,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeStoreMetrics(tx, data)
 	case CmdSetGroupQuota:
 		return fsm.executeSetGroupQuota(tx, data)
+	case CmdSetClusterSignKey:
+		return fsm.executeSetClusterSignKey(tx, data)
 	case CmdBatch:
 		return fsm.applyBatchTx(tx, data, depth+1)
 	}
@@ -1098,6 +1101,53 @@ func (fsm *MetadataFSM) executeInitSecret(tx *bolt.Tx, data []byte) interface{} 
 		return err
 	}
 	return nil
+}
+
+func (fsm *MetadataFSM) executeSetClusterSignKey(tx *bolt.Tx, data []byte) interface{} {
+	if existing, _ := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key")); existing != nil {
+		return fmt.Errorf("cluster signing key already initialized")
+	}
+	return fsm.Put(tx, []byte("system"), []byte("cluster_sign_key"), data)
+}
+
+func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
+	var pub []byte
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
+			return ErrNotFound
+		}
+		var key ClusterSignKey
+		if err := json.Unmarshal(plain, &key); err != nil {
+			return err
+		}
+		pub = key.Public
+		return nil
+	})
+	return pub, err
+}
+
+func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
+	var priv []byte
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
+			return ErrNotFound
+		}
+		var key ClusterSignKey
+		if err := json.Unmarshal(plain, &key); err != nil {
+			return err
+		}
+		priv = key.EncryptedPrivate
+		return nil
+	})
+	return priv, err
 }
 
 func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {

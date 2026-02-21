@@ -39,7 +39,7 @@ func TestSmallFileInlining(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK := bootstrapCluster(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)
@@ -55,7 +55,7 @@ func TestSmallFileInlining(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, signKey.Public(), nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{

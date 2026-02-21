@@ -16,7 +16,6 @@ package metadata
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -205,23 +204,11 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 	}
 
 	// Add Auth Token (System Token)
-	if rm.server.signKey != nil {
-		capToken := CapabilityToken{
-			Chunks: []string{chunkID},
-			Mode:   "RW",
-			Exp:    time.Now().Add(30 * time.Minute).Unix(),
-		}
-		capBytes, _ := json.Marshal(capToken)
-		sig := rm.server.signKey.Sign(capBytes)
-		signed := SignedAuthToken{
-			SignerID:  rm.server.nodeID,
-			Payload:   capBytes,
-			Signature: sig,
-		}
-		b, _ := json.Marshal(signed)
-		token := base64.StdEncoding.EncodeToString(b)
-		req.Header.Set("Authorization", "Bearer "+token)
+	token, err := rm.server.generateSelfToken([]string{chunkID}, "RW")
+	if err != nil {
+		return err
 	}
+	req.Header.Set("Authorization", "Bearer "+token)
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

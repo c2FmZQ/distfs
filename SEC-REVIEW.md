@@ -35,12 +35,12 @@ This document outlines the security vulnerabilities identified during the manual
 *   **Resolution:** Implemented ownership and administrator checks in `handleGetUser`. If the requester is neither the owner of the user account nor a cluster administrator, the sensitive `Usage` and `Quota` fields are redacted (zeroed out) before returning the user metadata. Public keys (`SignKey`, `EncKey`) remain accessible to all authenticated users to support distributed signature verification and encrypted sharing.
 
 ### 2.2. Shared Secret Leakage in Node Discovery
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Broken Access Control / Info Leak
 *   **Location:** `pkg/metadata/server.go` (`handleClusterJoin`)
 *   **Severity:** **HIGH**
 *   **Description:** The Leader sends the global `X-Raft-Secret` to the provided join address during discovery.
-*   **Impact:** A malicious node can steal the cluster's management secret.
-*   **Recommendation:** Use short-lived join tokens instead of the global secret.
+*   **Resolution:** Implemented a Mutual HMAC-SHA256 Challenge-Response handshake. The Leader and Candidate node now prove knowledge of the `X-Raft-Secret` using random nonces without ever transmitting the secret itself over the network. This provides mutual authentication and replay protection for the discovery process.
 
 ### 2.3. Arbitrary Code Execution in Device Flow
 *   **Vulnerability Type:** Command Injection
@@ -51,12 +51,12 @@ This document outlines the security vulnerabilities identified during the manual
 *   **Recommendation:** Sanitize or allow-list browser commands.
 
 ### 2.4. Cross-Node Token Forgery
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Broken Access Control
 *   **Location:** `pkg/data/api.go` (`authenticate`)
 *   **Severity:** **HIGH**
 *   **Description:** Data nodes trust tokens signed by *any* registered node.
-*   **Impact:** A single compromised storage node can grant itself access to all chunks in the cluster.
-*   **Recommendation:** Trust only the authoritative Metadata Leader for token signing.
+*   **Resolution:** Implemented a cluster-wide PQC signing key managed by the Raft cluster. Metadata leaders now sign all session and capability tokens using this shared key. Data nodes strictly verify tokens against the cluster public key stored in the FSM. This prevents any single compromised storage node from forging tokens for other nodes.
 
 ---
 
