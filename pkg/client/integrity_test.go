@@ -318,7 +318,7 @@ func TestGroupIntegrity(t *testing.T) {
 		t.Fatalf("DB tamper failed: %v", err)
 	}
 
-	_, err = client.GetGroup(t.Context(), group.ID)
+	_, err = client.GetGroupUnverified(t.Context(), group.ID)
 	if err == nil {
 		t.Error("Expected error when fetching tampered group, but got nil")
 	} else {

@@ -83,7 +83,8 @@ func TestClientSessionManagement(t *testing.T) {
 	c.sessionExpiry = time.Now().Add(-1 * time.Minute)
 	c.sessionMu.Unlock()
 
-	_, err = c.GetUser(t.Context(), user.ID)
+	time.Sleep(2 * time.Second)
+	_, err = c.ListGroups(t.Context())
 	if err != nil {
 		t.Fatalf("Third request failed: %v", err)
 	}
@@ -93,7 +94,7 @@ func TestClientSessionManagement(t *testing.T) {
 	c.sessionMu.RUnlock()
 
 	if token1 == token3 {
-		t.Fatal("session token did not refresh after expiry")
+		t.Fatalf("session token did not refresh after expiry. T1: %s, T3: %s", token1, token3)
 	}
 
 	if token3 == "" {

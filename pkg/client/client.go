@@ -214,6 +214,10 @@ type Client struct {
 	groupKeys     map[string]*mlkem.DecapsulationKey768
 	groupSignKeys map[string]*crypto.IdentityKey
 
+	userCache  map[string]*metadata.User
+	groupCache map[string]*metadata.Group
+	cacheMu    *sync.RWMutex
+
 	sessionToken  string
 	sessionExpiry time.Time
 	sessionKey    []byte // Cached shared secret for memoization
@@ -252,6 +256,9 @@ func NewClient(serverAddr string) *Client {
 		pathMu:        &sync.RWMutex{},
 		groupKeys:     make(map[string]*mlkem.DecapsulationKey768),
 		groupSignKeys: make(map[string]*crypto.IdentityKey),
+		userCache:     make(map[string]*metadata.User),
+		groupCache:    make(map[string]*metadata.Group),
+		cacheMu:       &sync.RWMutex{},
 		sessionMu:     &sync.RWMutex{},
 		loginMu:       &sync.Mutex{},
 		controlSem:    make(chan struct{}, 1024), // High throughput for metadata
@@ -312,6 +319,9 @@ func (c *Client) UserID() string {
 
 // Login performs the challenge-response handshake to obtain a session token.
 func (c *Client) Login(ctx context.Context) error {
+	c.loginMu.Lock()
+	defer c.loginMu.Unlock()
+
 	// 1. Get Challenge
 	reqData := metadata.AuthChallengeRequest{UserID: c.userID}
 	b, _ := json.Marshal(reqData)
@@ -424,24 +434,12 @@ func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) err
 
 	// If token is missing or about to expire, perform a login handshake.
 	if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
-		// Acquire login lock to serialize handshakes
-		c.loginMu.Lock()
-		defer c.loginMu.Unlock()
-
-		// Double check under RLock after acquiring loginMu
+		if err := c.Login(ctx); err != nil {
+			return fmt.Errorf("session login failed: %w", err)
+		}
 		c.sessionMu.RLock()
 		token = c.sessionToken
-		expiry = c.sessionExpiry
 		c.sessionMu.RUnlock()
-
-		if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
-			if err := c.Login(ctx); err != nil {
-				return fmt.Errorf("session login failed: %w", err)
-			}
-			c.sessionMu.RLock()
-			token = c.sessionToken
-			c.sessionMu.RUnlock()
-		}
 	}
 
 	req.Header.Set("Session-Token", token)
@@ -890,6 +888,19 @@ func (c *Client) ListGroups(ctx context.Context) ([]metadata.GroupListEntry, err
 }
 
 func (c *Client) GetUser(ctx context.Context, id string) (*metadata.User, error) {
+	return c.getUserInternal(ctx, id, false)
+}
+
+func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache bool) (*metadata.User, error) {
+	if !bypassCache {
+		c.cacheMu.RLock()
+		if u, ok := c.userCache[id]; ok {
+			c.cacheMu.RUnlock()
+			return u, nil
+		}
+		c.cacheMu.RUnlock()
+	}
+
 	var user metadata.User
 	err := c.withRetry(ctx, func() error {
 		if err := c.acquireControl(ctx); err != nil {
@@ -927,6 +938,11 @@ func (c *Client) GetUser(ctx context.Context, id string) (*metadata.User, error)
 	if err != nil {
 		return nil, err
 	}
+
+	c.cacheMu.Lock()
+	c.userCache[id] = &user
+	c.cacheMu.Unlock()
+
 	return &user, nil
 }
 
@@ -958,6 +974,8 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 			SymlinkTarget:     inode.GetSymlinkTarget(),
 			InlineData:        inode.GetInlineData(),
 			MTime:             inode.GetMTime(),
+			UID:               inode.GetUID(),
+			GID:               inode.GetGID(),
 			SignerID:          c.userID,
 			AuthorizedSigners: authSigners,
 		}
@@ -1429,7 +1447,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	return inodes, nil
 }
 
-func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string) error {
+func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
@@ -1464,6 +1482,10 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		if name != "" {
 			inode.SetName(name)
 		}
+		if uid != 0 || gid != 0 {
+			inode.SetUID(uid)
+			inode.SetGID(gid)
+		}
 		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
@@ -1486,6 +1508,8 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		if name != "" {
 			inode.SetName(name)
 		}
+		inode.SetUID(uid)
+		inode.SetGID(gid)
 		inode.SetFileKey(fileKey)
 		created, err := c.createInode(ctx, inode)
 		if err != nil {
@@ -1617,7 +1641,7 @@ func (c *Client) WriteFile(ctx context.Context, id string, r io.Reader, size int
 		}
 	}
 
-	if err := c.writeInodeContent(ctx, id, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC); err != nil {
+	if err := c.writeInodeContent(ctx, id, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC, 0, 0); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -2443,6 +2467,8 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		inode.SetSymlinkTarget(blob.SymlinkTarget)
 		inode.SetInlineData(blob.InlineData)
 		inode.SetMTime(blob.MTime)
+		inode.SetUID(blob.UID)
+		inode.SetGID(blob.GID)
 		inode.SetSignerID(blob.SignerID)
 		inode.SetAuthorizedSigners(blob.AuthorizedSigners)
 	}
@@ -2820,6 +2846,19 @@ func (c *Client) GetWorldPrivateKey(ctx context.Context) (*mlkem.DecapsulationKe
 
 // GetGroup fetches the group metadata.
 func (c *Client) GetGroup(ctx context.Context, id string) (*metadata.Group, error) {
+	return c.getGroupInternal(ctx, id, false)
+}
+
+func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bool) (*metadata.Group, error) {
+	if !bypassCache {
+		c.cacheMu.RLock()
+		if g, ok := c.groupCache[id]; ok {
+			c.cacheMu.RUnlock()
+			return g, nil
+		}
+		c.cacheMu.RUnlock()
+	}
+
 	group, err := c.getGroupRaw(ctx, id)
 	if err != nil {
 		return nil, err
@@ -2840,7 +2879,17 @@ func (c *Client) GetGroup(ctx context.Context, id string) (*metadata.Group, erro
 		}
 	}
 
+	c.cacheMu.Lock()
+	c.groupCache[id] = group
+	c.cacheMu.Unlock()
+
 	return group, nil
+}
+
+// GetGroupUnverified fetches the group metadata skipping cache.
+// Useful for integrity verification tests.
+func (c *Client) GetGroupUnverified(ctx context.Context, id string) (*metadata.Group, error) {
+	return c.getGroupInternal(ctx, id, true)
 }
 
 func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, error) {
@@ -4246,7 +4295,7 @@ func (c *Client) updateGroup(ctx context.Context, id string, modifier func(*meta
 
 	var updated *metadata.Group
 	err := c.withConflictRetry(ctx, func() error {
-		latest, err := c.GetGroup(ctx, id)
+		latest, err := c.getGroupInternal(ctx, id, true)
 		if err != nil {
 			return err
 		}

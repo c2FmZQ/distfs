@@ -17,7 +17,6 @@ package metadata
 import (
 	"encoding/binary"
 	"encoding/json"
-	"fmt"
 	"sort"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -188,7 +187,13 @@ func (g *Group) Hash() []byte {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		fmt.Fprintf(h, "%s:%t,", k, g.Members[k])
+		h.Write([]byte(k))
+		h.Write([]byte(":"))
+		if g.Members[k] {
+			h.Write([]byte("1,"))
+		} else {
+			h.Write([]byte("0,"))
+		}
 	}
 	h.Write([]byte("|"))
 
@@ -348,6 +353,8 @@ type Inode struct {
 	symlinkTarget     string
 	inlineData        []byte
 	mtime             int64
+	uid               uint32
+	gid               uint32
 	signerID          string
 	authorizedSigners []string
 	fileKey           []byte
@@ -361,6 +368,10 @@ func (i *Inode) GetInlineData() []byte     { return i.inlineData }
 func (i *Inode) SetInlineData(d []byte)    { i.inlineData = d }
 func (i *Inode) GetMTime() int64           { return i.mtime }
 func (i *Inode) SetMTime(t int64)          { i.mtime = t }
+func (i *Inode) GetUID() uint32            { return i.uid }
+func (i *Inode) SetUID(u uint32)           { i.uid = u }
+func (i *Inode) GetGID() uint32            { return i.gid }
+func (i *Inode) SetGID(g uint32)           { i.gid = g }
 func (i *Inode) GetSignerID() string       { return i.signerID }
 
 func (i *Inode) SetSignerID(s string)            { i.signerID = s }
@@ -468,6 +479,19 @@ func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
 	if len(i.authorizedSigners) == 0 && i.OwnerID != "" {
 		i.authorizedSigners = []string{i.OwnerID}
 	}
+
+	// For tests, we simulate the ClientBlob so ManifestHash is consistent
+	blob := InodeClientBlob{
+		Name:              i.name,
+		SymlinkTarget:     i.symlinkTarget,
+		InlineData:        i.inlineData,
+		MTime:             i.mtime,
+		UID:               i.uid,
+		GID:               i.gid,
+		SignerID:          i.signerID,
+		AuthorizedSigners: i.authorizedSigners,
+	}
+	i.ClientBlob, _ = json.Marshal(blob)
 
 	// Note: We use Version+1 because FSM increments version during apply
 	orig := i.Version
