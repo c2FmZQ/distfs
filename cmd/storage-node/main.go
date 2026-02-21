@@ -259,6 +259,7 @@ func main() {
 	publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 	publicMux.Handle("/v1/meta/key", metaServer)
 	publicMux.Handle("/v1/health", metaServer)
+	publicMux.Handle("/v1/node", metaServer)
 
 	publicMux.Handle("/v1/user/", metaServer)
 	publicMux.Handle("/v1/group/", metaServer)

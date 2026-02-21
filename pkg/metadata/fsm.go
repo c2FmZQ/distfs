@@ -290,11 +290,11 @@ const (
 	CmdPromoteAdmin      CommandType = 24
 	CmdAdminChown        CommandType = 25
 	CmdAdminChmod        CommandType = 26
-		CmdStoreMetrics    CommandType = 27
-		CmdSetGroupQuota   CommandType = 28
-		CmdSetClusterSignKey CommandType = 29
-		CmdRemoveNode      CommandType = 30
-	)
+	CmdStoreMetrics      CommandType = 27
+	CmdSetGroupQuota     CommandType = 28
+	CmdSetClusterSignKey CommandType = 29
+	CmdRemoveNode        CommandType = 30
+)
 
 // LogCommand is the structure stored in the Raft log.
 type LogCommand struct {
