@@ -175,7 +175,7 @@ func TestAdminAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	id, err := c.AdminLookup(context.Background(), "alice@example.com")
+	id, err := c.AdminLookup(context.Background(), "alice@example.com", "Test Lookup")
 	if err != nil {
 		t.Fatalf("AdminLookup failed: %v", err)
 	}

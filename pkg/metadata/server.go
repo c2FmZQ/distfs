@@ -2552,11 +2552,18 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
+	user, _ := r.Context().Value(userContextKey).(*User)
 	var req struct {
-		Email string `json:"email"`
+		Email  string `json:"email"`
+		Reason string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+
+	if req.Reason == "" {
+		http.Error(w, "reason required for deanonymization lookup", http.StatusBadRequest)
 		return
 	}
 
@@ -2569,6 +2576,8 @@ func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(req.Email))
 	hash := hex.EncodeToString(mac.Sum(nil))
+
+	log.Printf("AUDIT: Admin %s resolved email to UserID %s. Reason: %s", user.ID, hash, req.Reason)
 
 	s.writeJSON(w, r, map[string]string{"id": hash}, http.StatusOK)
 }

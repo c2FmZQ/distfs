@@ -3549,8 +3549,11 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 	return status, err
 }
 
-func (c *Client) AdminLookup(ctx context.Context, email string) (string, error) {
-	payload, _ := json.Marshal(map[string]string{"email": email})
+func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string, error) {
+	payload, _ := json.Marshal(map[string]string{
+		"email":  email,
+		"reason": reason,
+	})
 	var result struct {
 		ID string `json:"id"`
 	}

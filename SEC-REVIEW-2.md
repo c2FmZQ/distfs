@@ -29,12 +29,13 @@ This document outlines security weaknesses identified during the manual audit fo
 *   **Impact:** Bulk exposure of User IDs and public keys facilitates correlation attacks, undermining the anonymity provided by the HMAC-based User ID scheme.
 
 ### 2.2. Targeted Deanonymization via Admin Lookup
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Privacy Violation
 *   **Location:** `pkg/metadata/server.go` (`handleClusterLookup`)
 *   **Severity:** **HIGH**
 *   **Description:** The admin lookup endpoint allows resolving any email address to its User ID.
+*   **Resolution:** Implemented mandatory audit logging and justification requirements for the deanonymization lookup. The `AdminLookup` API now requires a `reason` parameter, which is logged on the server along with the administrator's ID and the resulting User ID. This provides a clear audit trail and acts as a deterrent against unauthorized deanonymization.
 *   **Impact:** Allows a compromised or malicious administrator to deanonymize any user in the system.
-*   **Recommendation:** Limit lookup functionality or require additional justification/logging for deanonymization actions.
 
 ---
 

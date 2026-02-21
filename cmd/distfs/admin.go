@@ -59,7 +59,7 @@ type AdminClient interface {
 	AdminListGroups(ctx context.Context) ([]metadata.Group, error)
 	AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error)
 	AdminListNodes(ctx context.Context) ([]metadata.Node, error)
-	AdminLookup(ctx context.Context, email string) (string, error)
+	AdminLookup(ctx context.Context, email, reason string) (string, error)
 	AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error
 	AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error
 	AdminPromote(ctx context.Context, userID string) error
@@ -317,7 +317,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			email := m.lookupInput.Value()
 			if email != "" {
 				return m, func() tea.Msg {
-					id, err := m.client.AdminLookup(context.Background(), email)
+					id, err := m.client.AdminLookup(context.Background(), email, "Blind Lookup Tool")
 					if err != nil {
 						return lookupMsg(fmt.Sprintf("Error: %v", err))
 					}
@@ -574,7 +574,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.AdminLookup(ctx, email)
+				id, err := m.client.AdminLookup(ctx, email, "Quota Management")
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -610,7 +610,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.AdminLookup(ctx, email)
+				id, err := m.client.AdminLookup(ctx, email, "Quota Management")
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -728,7 +728,7 @@ func cmdAdminChown(args []string) {
 	// 1. Resolve email to UserID
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(context.Background(), email)
+		id, err := c.AdminLookup(context.Background(), email, "CLI chown")
 		if err != nil {
 			log.Fatalf("failed to resolve email %s: %v", email, err)
 		}
@@ -829,7 +829,7 @@ func cmdAdminPromote(args []string) {
 	// Resolve email to UserID
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(context.Background(), email)
+		id, err := c.AdminLookup(context.Background(), email, "CLI promote")
 		if err != nil {
 			log.Fatalf("failed to resolve email %s: %v", email, err)
 		}
@@ -851,7 +851,7 @@ func cmdAdminUserQuota(args []string) {
 
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(context.Background(), email)
+		id, err := c.AdminLookup(context.Background(), email, "CLI user quota")
 		if err != nil {
 			log.Fatalf("failed to resolve email %s: %v", email, err)
 		}
