@@ -113,7 +113,7 @@ func TestChunkEncryption(t *testing.T) {
 	key := make([]byte, 32)
 	data := []byte("hello distributed world")
 
-	id, ct, err := EncryptChunk(key, data)
+	id, ct, err := EncryptChunk(key, data, 0)
 	if err != nil {
 		t.Fatalf("EncryptChunk failed: %v", err)
 	}
@@ -122,17 +122,25 @@ func TestChunkEncryption(t *testing.T) {
 		t.Error("Ciphertext should be larger than ChunkSize (overhead)")
 	}
 
-	// Verify CAS (Deterministic)
-	id2, ct2, _ := EncryptChunk(key, data)
+	// Verify Determinism (Same Index)
+	id2, ct2, _ := EncryptChunk(key, data, 0)
 	if id != id2 {
-		t.Error("EncryptChunk is not deterministic")
+		t.Error("EncryptChunk is not deterministic for same index")
 	}
-	// Check bytes
 	for i := range ct {
 		if ct[i] != ct2[i] {
-			t.Error("Ciphertext mismatch")
+			t.Error("Ciphertext mismatch for same index")
 			break
 		}
+	}
+
+	// Verify Uniqueness (Different Index)
+	id3, ct3, _ := EncryptChunk(key, data, 1)
+	if id == id3 {
+		t.Error("EncryptChunk should produce different ID for different index")
+	}
+	if string(ct) == string(ct3) {
+		t.Error("Ciphertext should differ for different index")
 	}
 
 	// Decrypt

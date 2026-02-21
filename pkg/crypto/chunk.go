@@ -16,30 +16,27 @@ package crypto
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 )
 
 const ChunkSize = 1024 * 1024 // 1 MB
 
-// EncryptChunk pads plaintext to 1MB, encrypts it, and returns the ChunkID (Hash) and Ciphertext.
-func EncryptChunk(fileKey []byte, plaintext []byte) (chunkID string, ciphertext []byte, err error) {
+// EncryptChunk pads plaintext to 1MB, encrypts it using chunkIndex for uniqueness, and returns the ChunkID (Hash) and Ciphertext.
+func EncryptChunk(fileKey []byte, plaintext []byte, chunkIndex uint64) (chunkID string, ciphertext []byte, err error) {
 	if len(plaintext) > ChunkSize {
 		return "", nil, fmt.Errorf("plaintext larger than chunk size")
 	}
 
-	// Pad with zeros to ChunkSize for CAS determinism and size hiding
+	// Pad with zeros to ChunkSize for size hiding
 	padded := make([]byte, ChunkSize)
 	copy(padded, plaintext)
 
-	// Deterministic Nonce for Idempotency/CAS: SHA256(Key || PaddedPlaintext)[:12]
-	// This ensures that if we retry an upload of the same chunk with the same file key,
-	// we get the exact same ChunkID and Ciphertext.
-	h := sha256.New()
-	h.Write(fileKey)
-	h.Write(padded)
-	sum := h.Sum(nil)
-	nonce := sum[:12]
+	// Deterministic Nonce based on Chunk Index (BigEndian, 12 bytes)
+	// This ensures uniqueness per chunk within a file (assuming unique fileKey).
+	nonce := make([]byte, 12)
+	binary.BigEndian.PutUint64(nonce[4:], chunkIndex)
 
 	// Encrypt
 	ct, err := EncryptDEMWithNonce(fileKey, nonce, padded)

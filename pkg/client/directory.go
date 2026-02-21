@@ -235,7 +235,7 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 	var newInode *metadata.Inode
 
 	if iType == metadata.FileType {
-		if err := c.writeInodeContent(ctx, newID, iType, newKey, r, size, name, encNameBlob, mode, groupID, parentID, encName); err != nil {
+		if err := c.writeInodeContent(ctx, newID, iType, newKey, r, size, name, encNameBlob, mode, groupID, parentID, encName, uid, gid); err != nil {
 			return nil, nil, err
 		}
 		newInode, err = c.getInode(ctx, newID)
@@ -632,7 +632,7 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 			if len(parts) == 2 {
 				pID, nHMAC = parts[0], parts[1]
 			}
-			return c.writeInodeContent(ctx, existingID, metadata.FileType, key, r, size, name, nil, inode.Mode, inode.GroupID, pID, nHMAC)
+			return c.writeInodeContent(ctx, existingID, metadata.FileType, key, r, size, name, nil, inode.Mode, inode.GroupID, pID, nHMAC, 0, 0)
 		}
 		return fmt.Errorf("entry %s already exists and is not a file", name)
 	}

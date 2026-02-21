@@ -1540,15 +1540,17 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		inode.SetInlineData(nil)
 		var chunkEntries []metadata.ChunkEntry
 		buf := make([]byte, crypto.ChunkSize)
+		var chunkIndex uint64
 
 		for {
 			n, err := io.ReadFull(r, buf)
 			if n > 0 {
 				chunkData := buf[:n]
-				cid, ct, err := crypto.EncryptChunk(fileKey, chunkData)
+				cid, ct, err := crypto.EncryptChunk(fileKey, chunkData, chunkIndex)
 				if err != nil {
 					return err
 				}
+				chunkIndex++
 
 				token, err := c.issueToken(ctx, id, []string{cid}, "W")
 				if err != nil {
@@ -2086,7 +2088,9 @@ func (w *FileWriter) flushChunk() error {
 	if len(w.buf) == 0 {
 		return nil
 	}
-	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf)
+	// Use next chunk index (current manifest length)
+	chunkIndex := uint64(len(w.manifest))
+	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf, chunkIndex)
 	if err != nil {
 		return err
 	}
@@ -2274,7 +2278,7 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 			chunkData := buf[:n]
 
 			// Encrypt
-			cid, ct, err := crypto.EncryptChunk(key, chunkData)
+			cid, ct, err := crypto.EncryptChunk(key, chunkData, uint64(i))
 			if err != nil {
 				return nil, err
 			}
