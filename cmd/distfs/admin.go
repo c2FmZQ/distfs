@@ -64,6 +64,7 @@ type AdminClient interface {
 	AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error
 	AdminPromote(ctx context.Context, userID string) error
 	AdminJoinNode(ctx context.Context, address string) error
+	AdminRemoveNode(ctx context.Context, id string) error
 	DecryptGroupName(entry metadata.GroupListEntry) (string, error)
 	ResolvePath(path string) (*metadata.Inode, []byte, error)
 	AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error
@@ -269,6 +270,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "j": // Join Node
 			m.activeModal = "join"
 			m.inputs = []textinput.Model{newInput("Node Address (https://node:9090)")}
+			m.focusedInput = 0
+			m.inputs[0].Focus()
+			return m, nil
+		case "r": // Remove Node
+			m.activeModal = "remove"
+			m.inputs = []textinput.Model{newInput("Node ID")}
 			m.focusedInput = 0
 			m.inputs[0].Focus()
 			return m, nil
@@ -537,6 +544,7 @@ func (m model) overviewView() string {
 		" (g) Set Group Quota",
 		" (p) Promote Admin",
 		" (j) Join Node",
+		" (r) Remove Node",
 	)
 }
 
@@ -621,6 +629,14 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 			}
 			return refresh()
 		}
+	case "remove":
+		id := m.inputs[0].Value()
+		return m, func() tea.Msg {
+			if err := m.client.AdminRemoveNode(ctx, id); err != nil {
+				return errMsg(err)
+			}
+			return refresh()
+		}
 	}
 	return m, nil
 }
@@ -678,6 +694,18 @@ func cmdAdminJoin(args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Join request for %s submitted to cluster.\n", address)
+}
+
+func cmdAdminRemove(args []string) {
+	if len(args) < 1 {
+		log.Fatal("node ID required")
+	}
+	id := args[0]
+	c := loadClient()
+	if err := c.AdminRemoveNode(context.Background(), id); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Node %s removed from cluster.\n", id)
 }
 
 func cmdAdminChown(args []string) {

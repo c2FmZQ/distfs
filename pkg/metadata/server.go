@@ -1721,7 +1721,28 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleRemoveNode(w http.ResponseWriter, r *http.Request, id string) {
-	s.ApplyRaftCommandRaw(w, r, CmdRemoveNode, []byte(id), http.StatusOK)
+	if err := s.removeNodeInternal(id); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) removeNodeInternal(id string) error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not leader")
+	}
+
+	// 1. Remove from Raft (Configuration Change)
+	f := s.raft.RemoveServer(raft.ServerID(id), 0, 0)
+	if err := f.Error(); err != nil {
+		// Log but continue to ensure FSM is also purged if possible.
+		log.Printf("Warning: Raft RemoveServer for %s: %v", id, err)
+	}
+
+	// 2. Remove from FSM (Registry & Trust)
+	_, err := s.ApplyRaftCommandInternal(CmdRemoveNode, []byte(id))
+	return err
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -2511,11 +2532,6 @@ func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
-	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
-		return
-	}
-
 	var req struct {
 		ID string `json:"id"`
 	}
@@ -2524,8 +2540,7 @@ func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	f := s.raft.RemoveServer(raft.ServerID(req.ID), 0, 0)
-	if err := f.Error(); err != nil {
+	if err := s.removeNodeInternal(req.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

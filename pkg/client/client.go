@@ -3602,6 +3602,41 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	})
 }
 
+func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
+	payload, _ := json.Marshal(map[string]string{"id": id})
+	return c.withRetry(ctx, func() error {
+		c.acquireControl()
+		defer c.releaseControl()
+
+		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/remove", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(req); err != nil {
+			return err
+		}
+		if err := c.sealBody(req, payload); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(body)
+			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		}
+		return nil
+	})
+}
+
 func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
 	data, _ := json.Marshal(req)
 	return c.withRetry(ctx, func() error {
