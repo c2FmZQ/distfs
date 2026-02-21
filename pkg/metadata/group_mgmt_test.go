@@ -45,11 +45,15 @@ func TestGroupManagementSecurity(t *testing.T) {
 	// 2. Alice creates Group A
 	tokenAlice := LoginSessionForTest(t, ts, "alice", uAliceSign)
 	groupA := Group{
-		ID:      "group-a",
-		OwnerID: "alice",
-		GID:     10001,
-		Lockbox: crypto.NewLockbox(),
+		ID:       "group-a",
+		OwnerID:  "alice",
+		SignerID: "alice",
+		Members:  map[string]bool{"alice": true},
+		Version:  1,
+		GID:      10001,
+		Lockbox:  crypto.NewLockbox(),
 	}
+	groupA.Signature = uAliceSign.Sign(groupA.Hash())
 	payload, _ := json.Marshal(groupA)
 	body := sealTestRequest(t, "alice", uAliceSign, serverEK, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))

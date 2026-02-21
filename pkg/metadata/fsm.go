@@ -103,7 +103,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	return fsm, nil
 }
 
-func (fsm *MetadataFSM) encryptValue(data []byte) ([]byte, error) {
+func (fsm *MetadataFSM) EncryptValue(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
 	}
@@ -126,7 +126,7 @@ func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket []byte, key []byte, value []byte
 	if b == nil {
 		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
 	}
-	enc, err := fsm.encryptValue(value)
+	enc, err := fsm.EncryptValue(value)
 	if err != nil {
 		return err
 	}
@@ -819,7 +819,10 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
 	}
 
-	group.Version = 1
+	// We trust the client's version (should be 1 for a new group)
+	if group.Version == 0 {
+		group.Version = 1
+	}
 	encoded, err := json.Marshal(group)
 	if err != nil {
 		return err
@@ -889,7 +892,7 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 	mb := tx.Bucket([]byte("user_memberships"))
 	ob := tx.Bucket([]byte("owner_groups"))
 
-	encOne, _ := fsm.encryptValue([]byte("1"))
+	encOne, _ := fsm.EncryptValue([]byte("1"))
 
 	// 1. Membership Updates
 	if existing == nil {
@@ -1434,7 +1437,7 @@ func (fsm *MetadataFSM) enqueueGC(tx *bolt.Tx, inode *Inode) error {
 		nodesJSON, _ := json.Marshal(chunk.Nodes)
 		// GC bucket might not need encryption if chunkIDs are anonymous,
 		// but let's be consistent and encrypt values.
-		enc, _ := fsm.encryptValue(nodesJSON)
+		enc, _ := fsm.EncryptValue(nodesJSON)
 		if err := b.Put([]byte(chunk.ID), enc); err != nil {
 			return err
 		}

@@ -1,6 +1,7 @@
 package metadata_test
 
 import (
+	"context"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 3. Alice adds Bob to Group A (Bob is Member)
-	err = clientAlice.AddUserToGroup(groupA.ID, "bob", "Bob info", nil)
+	err = clientAlice.AddUserToGroup(context.Background(), groupA.ID, "bob", "Bob info", nil)
 	if err != nil {
 		t.Fatalf("AddUserToGroup Bob failed: %v", err)
 	}
@@ -61,7 +62,7 @@ func TestGroupDiscovery(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup B failed: %v", err)
 	}
-	err = clientAlice.GroupChown(groupB.ID, groupA.ID)
+	err = clientAlice.GroupChown(context.Background(), groupB.ID, groupA.ID)
 	if err != nil {
 		t.Fatalf("GroupChown B failed: %v", err)
 	}
@@ -134,7 +135,7 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// Bob: Transfer Group C to Alice.
-	err = clientBob.GroupChown(groupC.ID, "alice")
+	err = clientBob.GroupChown(context.Background(), groupC.ID, "alice")
 	if err != nil {
 		t.Fatalf("Bob GroupChown C to Alice failed: %v", err)
 	}

@@ -155,7 +155,7 @@ func TestManifestIntegrity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
-	if err := clientA.AddUserToGroup(group.ID, userID, "User B (Test)", nil); err != nil {
+	if err := clientA.AddUserToGroup(context.Background(), group.ID, userID, "User B (Test)", nil); err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
 
@@ -228,5 +228,97 @@ func TestManifestIntegrity(t *testing.T) {
 		t.Error("Expected error when fetching rolled-back inode, but got nil")
 	} else {
 		t.Logf("Caught expected rollback error: %v", err)
+	}
+}
+
+func TestGroupIntegrity(t *testing.T) {
+	// 1. Setup Node & Server
+	tmpDir := t.TempDir()
+	st, _ := createTestStorage(t, tmpDir)
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeID := "node1"
+
+	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	if err != nil {
+		t.Fatalf("NewRaftNode failed: %v", err)
+	}
+	defer raftNode.Shutdown()
+
+	cfg := raft.Configuration{
+		Servers: []raft.Server{{ID: raft.ServerID(nodeID), Address: raftNode.Transport.LocalAddr()}},
+	}
+	raftNode.Raft.BootstrapCluster(cfg)
+	waitLeader(t, raftNode.Raft)
+	ek, _ := bootstrapCluster(t, raftNode)
+
+	// Phase 31: Initialize Cluster Secret
+	clusterSecret := make([]byte, 32)
+	raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: clusterSecret}.Marshal(), 5*time.Second)
+
+	serverSignKey, _ := crypto.GenerateIdentityKey()
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0)
+	ts := httptest.NewServer(server)
+	defer ts.Close()
+
+	// 2. Setup Identity
+	userID := "alice"
+	dk, _ := crypto.GenerateEncryptionKey()
+	sk, _ := crypto.GenerateIdentityKey()
+	u := metadata.User{ID: userID, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
+	createUser(t, raftNode, u)
+
+	client := NewClient(ts.URL).WithIdentity(userID, dk).WithSignKey(sk).WithServerKey(ek)
+	if err := client.Login(); err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	// 3. Create Group (Verified initial signature)
+	group, err := client.CreateGroup("integrity-group")
+	if err != nil {
+		t.Fatalf("CreateGroup failed: %v", err)
+	}
+
+	if group.SignerID != userID {
+		t.Errorf("Expected SignerID %s, got %s", userID, group.SignerID)
+	}
+	if len(group.Signature) == 0 {
+		t.Error("Missing Signature on group")
+	}
+
+	// 4. Verify Fetching
+	fetched, err := client.GetGroup(group.ID)
+	if err != nil {
+		t.Fatalf("GetGroup failed: %v", err)
+	}
+	if fetched.ID != group.ID {
+		t.Error("Group ID mismatch")
+	}
+
+	// 5. ADVERSARIAL: Evil Server Tampering
+	// Manually modify the group owner in the DB without updating signature
+	err = raftNode.FSM.DB().Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("groups"))
+		v := b.Get([]byte(group.ID))
+		var g metadata.Group
+		plain, err := raftNode.FSM.DecryptValue(v)
+		if err != nil {
+			return err
+		}
+		json.Unmarshal(plain, &g)
+		g.OwnerID = "malicious-user" // TAMPERED metadata
+		// We DO NOT update the Signature here.
+		data, _ := json.Marshal(g)
+		enc, _ := raftNode.FSM.EncryptValue(data)
+		return b.Put([]byte(group.ID), enc)
+	})
+	if err != nil {
+		t.Fatalf("DB tamper failed: %v", err)
+	}
+
+	_, err = client.GetGroup(group.ID)
+	if err == nil {
+		t.Error("Expected error when fetching tampered group, but got nil")
+	} else {
+		t.Logf("Caught expected group tampering error: %v", err)
 	}
 }

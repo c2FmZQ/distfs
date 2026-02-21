@@ -52,6 +52,10 @@ func (m *mockAdminClient) AdminPromote(ctx context.Context, userID string) error
 func (m *mockAdminClient) AdminJoinNode(ctx context.Context, address string) error {
 	return m.err
 }
+
+func (m *mockAdminClient) AdminRemoveNode(ctx context.Context, id string) error {
+	return m.err
+}
 func (m *mockAdminClient) DecryptGroupName(entry metadata.GroupListEntry) (string, error) {
 	return "decrypted-group", m.err
 }

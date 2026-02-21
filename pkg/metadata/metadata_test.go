@@ -295,7 +295,15 @@ func TestIdentityRegistry(t *testing.T) {
 	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Create Group
-	group := Group{ID: "g1", OwnerID: "u1"}
+	group := Group{
+		ID:       "g1",
+		OwnerID:  "u1",
+		SignerID: "u1",
+		GID:      1001,
+		SignKey:  user.SignKey, // Use user's key as group key for test simplicity
+		Version:  1,
+	}
+	group.Signature = userSignKey.Sign(group.Hash())
 	payload, _ := json.Marshal(group)
 	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))

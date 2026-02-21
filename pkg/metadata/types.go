@@ -17,6 +17,7 @@ package metadata
 import (
 	"encoding/binary"
 	"encoding/json"
+	"fmt"
 	"sort"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -170,7 +171,7 @@ func (g *Group) Hash() []byte {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		h.Write([]byte(k + ":" + iif(g.Members[k], "1", "0") + ","))
+		fmt.Fprintf(h, "%s:%t,", k, g.Members[k])
 	}
 	h.Write([]byte("|"))
 

@@ -548,7 +548,7 @@ func cmdGroupAdd(args []string) {
 		}
 	}
 
-	if err := c.AddUserToGroup(groupID, userID, info, ci); err != nil {
+	if err := c.AddUserToGroup(context.Background(), groupID, userID, info, ci); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s added to group %s\n", userID, groupID)
@@ -589,7 +589,7 @@ func cmdGroupRemove(args []string) {
 	}
 	groupID, userID := args[0], args[1]
 	c := loadClient()
-	if err := c.RemoveUserFromGroup(groupID, userID); err != nil {
+	if err := c.RemoveUserFromGroup(context.Background(), groupID, userID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("User %s removed from group %s\n", userID, groupID)
@@ -671,7 +671,7 @@ func cmdGroupChown(args []string) {
 	}
 	groupID, ownerID := args[0], args[1]
 	c := loadClient()
-	if err := c.GroupChown(groupID, ownerID); err != nil {
+	if err := c.GroupChown(context.Background(), groupID, ownerID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Owner of group %s changed to %s\n", groupID, ownerID)

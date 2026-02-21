@@ -1,6 +1,7 @@
 package metadata_test
 
 import (
+	"context"
 	"crypto/rand"
 	"testing"
 	"time"
@@ -47,7 +48,7 @@ func TestGroupMemberRegistry(t *testing.T) {
 	groupID := group.ID
 
 	// 3. Alice adds Bob with info
-	err = clientAlice.AddUserToGroup(groupID, "bob", "bob@example.com (Staff)", nil)
+	err = clientAlice.AddUserToGroup(context.Background(), groupID, "bob", "bob@example.com (Staff)", nil)
 	if err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}

@@ -1,6 +1,7 @@
 package metadata_test
 
 import (
+	"context"
 	"crypto/rand"
 	"sync"
 	"testing"
@@ -56,12 +57,12 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 
 	go func() {
 		defer wg.Done()
-		err1Ch <- clientAlice.AddUserToGroup(group.ID, "user1", "User 1 Info", nil)
+		err1Ch <- clientAlice.AddUserToGroup(context.Background(), group.ID, "user1", "User 1 Info", nil)
 	}()
 
 	go func() {
 		defer wg.Done()
-		err2Ch <- clientAlice.AddUserToGroup(group.ID, "user2", "User 2 Info", nil)
+		err2Ch <- clientAlice.AddUserToGroup(context.Background(), group.ID, "user2", "User 2 Info", nil)
 	}()
 
 	wg.Wait()

@@ -629,6 +629,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleListGroups(w, r)
 		return
 	}
+	if r.URL.Path == "/v1/group/gid/allocate" && r.Method == http.MethodGet {
+		s.handleAllocateGID(w, r)
+		return
+	}
 	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
 		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
 		s.handleGetUser(w, r, id)
@@ -1720,6 +1724,31 @@ func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 	s.ApplyRaftCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
 }
 
+func (s *Server) handleAllocateGID(w http.ResponseWriter, r *http.Request) {
+	var gid uint32
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		for i := 0; i < 1000; i++ {
+			gid = generateID32()
+			if gid < 1000 {
+				continue
+			}
+			v, err := s.fsm.Get(tx, []byte("gids"), uint32ToBytes(gid))
+			if err != nil {
+				return err
+			}
+			if v == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("exhausted GID allocation attempts")
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	s.writeJSON(w, r, map[string]uint32{"gid": gid}, http.StatusOK)
+}
+
 func (s *Server) handleRemoveNode(w http.ResponseWriter, r *http.Request, id string) {
 	if err := s.removeNodeInternal(id); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -1752,20 +1781,6 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req struct {
-		EncName           []byte         `json:"enc_name"`
-		Lockbox           crypto.Lockbox `json:"lockbox"`
-		RegistryLockbox   crypto.Lockbox `json:"registry_lockbox"`
-		EncryptedRegistry []byte         `json:"enc_registry"`
-		EncKey            []byte         `json:"enc_key"`
-		SignKey           []byte         `json:"sign_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		log.Printf("GROUP: handleCreateGroup decode failed: %v", err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
 		log.Printf("GROUP: handleCreateGroup unauthorized")
@@ -1773,57 +1788,68 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 1. Generate unique GID (POSIX)
-	var gid uint32
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		for i := 0; i < 1000; i++ {
-			gid = generateID32()
-			if gid < 1000 {
-				continue
-			}
-			v, err := s.fsm.Get(tx, []byte("gids"), uint32ToBytes(gid))
-			if err != nil {
-				log.Printf("GROUP: GID %d lookup error during allocation: %v", gid, err)
-				return err
-			}
-			if v == nil {
-				return nil
-			}
-		}
-		return fmt.Errorf("exhausted GID allocation attempts (possible collision or full range)")
-	})
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
 	if err != nil {
-		log.Printf("GROUP: handleCreateGroup GID allocation failed: %v", err)
-		http.Error(w, "failed to allocate GID", http.StatusInternalServerError)
+		log.Printf("GROUP: handleCreateGroup read failed: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// 2. Generate Random GroupID (UUID replacement)
-	idBytes := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, idBytes); err != nil {
-		http.Error(w, "random failed", http.StatusInternalServerError)
+	var group Group
+	if err := json.Unmarshal(body, &group); err != nil {
+		log.Printf("GROUP: handleCreateGroup decode failed: %v", err)
+		http.Error(w, "bad request", http.StatusBadRequest)
 		return
 	}
-	groupID := hex.EncodeToString(idBytes)
 
-	log.Printf("GROUP: handleCreateGroup creating (ID: %s, GID: %d) for user %s", groupID, gid, user.ID)
-
-	group := Group{
-		ID:                groupID,
-		EncryptedName:     req.EncName,
-		GID:               gid,
-		OwnerID:           user.ID,
-		Members:           map[string]bool{user.ID: true},
-		EncKey:            req.EncKey,
-		SignKey:           req.SignKey,
-		Lockbox:           req.Lockbox,
-		RegistryLockbox:   req.RegistryLockbox,
-		EncryptedRegistry: req.EncryptedRegistry,
-		Version:           1,
+	// 1. Generate unique GID (POSIX) if not provided
+	if group.GID == 0 {
+		var gid uint32
+		err = s.fsm.db.View(func(tx *bolt.Tx) error {
+			for i := 0; i < 1000; i++ {
+				gid = generateID32()
+				if gid < 1000 {
+					continue
+				}
+				v, err := s.fsm.Get(tx, []byte("gids"), uint32ToBytes(gid))
+				if err != nil {
+					return err
+				}
+				if v == nil {
+					return nil
+				}
+			}
+			return fmt.Errorf("exhausted GID allocation attempts")
+		})
+		if err != nil {
+			log.Printf("GROUP: handleCreateGroup GID allocation failed: %v", err)
+			http.Error(w, "failed to allocate GID", http.StatusInternalServerError)
+			return
+		}
+		group.GID = gid
 	}
-	body, _ := json.Marshal(group)
 
-	log.Printf("GROUP: handleCreateGroup applying Raft command for ID=%s", groupID)
+	// 2. Verify Signer matches Authenticated User
+	if group.SignerID != user.ID {
+		log.Printf("GROUP: handleCreateGroup signer ID mismatch: expected %s, got %s", user.ID, group.SignerID)
+		http.Error(w, "forbidden: signer ID mismatch", http.StatusForbidden)
+		return
+	}
+
+	// 3. Verify Initial Signature
+	// Note: Version should be 1 for a new group
+	hash := group.Hash()
+	if !crypto.VerifySignature(user.SignKey, hash, group.Signature) {
+		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		return
+	}
+
+	// Re-marshal with GID
+	body, _ = json.Marshal(group)
+
+	log.Printf("GROUP: handleCreateGroup creating (ID: %s, GID: %d) for user %s", group.ID, group.GID, user.ID)
+
+	log.Printf("GROUP: handleCreateGroup applying Raft command for ID=%s", group.ID)
 	_, err = s.ApplyRaftCommandInternal(CmdCreateGroup, body)
 	if err != nil {
 		log.Printf("GROUP: handleCreateGroup raft apply failed: %v", err)
@@ -1840,14 +1866,14 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusCreated)
 			w.Write(sealed)
-			log.Printf("GROUP: handleCreateGroup finished for %s (SEALED)", groupID)
+			log.Printf("GROUP: handleCreateGroup finished for %s (SEALED)", group.ID)
 			return
 		}
 	}
 
 	w.WriteHeader(http.StatusCreated)
 	w.Write(body)
-	log.Printf("GROUP: handleCreateGroup finished for %s", groupID)
+	log.Printf("GROUP: handleCreateGroup finished for %s", group.ID)
 }
 
 func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id string) {
