@@ -573,7 +573,9 @@ func (c *Client) unsealResponse(resp *http.Response) (io.ReadCloser, error) {
 func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 	var nodes []metadata.Node
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/allocate", nil)
@@ -625,7 +627,9 @@ func (c *Client) issueToken(inodeID string, chunks []string, mode string) (strin
 
 	var token string
 	err := c.withRetry(context.Background(), func() error {
-		c.acquireControl()
+		if err := c.acquireControl(context.Background()); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequest("POST", c.serverURL+"/v1/meta/token", nil)
@@ -685,7 +689,9 @@ func (c *Client) uploadChunk(id string, data []byte, nodes []metadata.Node, toke
 	}
 
 	return c.withRetry(context.Background(), func() error {
-		c.acquireData()
+		if err := c.acquireData(context.Background()); err != nil {
+			return err
+		}
 		defer c.releaseData()
 
 		req, err := http.NewRequest("PUT", url, bytes.NewReader(data))
@@ -737,7 +743,10 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				}
 			}
 			go func(targetURL string) {
-				c.acquireData()
+				if err := c.acquireData(lctx); err != nil {
+					resCh <- result{err: err}
+					return
+				}
 				defer c.releaseData()
 
 				req, err := http.NewRequestWithContext(lctx, "GET", targetURL+"/v1/data/"+id, nil)
@@ -825,7 +834,9 @@ func (e *APIError) ToPOSIX() error {
 func (c *Client) ListGroups() ([]metadata.GroupListEntry, error) {
 	var resp metadata.GroupListResponse
 	err := c.withRetry(context.Background(), func() error {
-		c.acquireControl()
+		if err := c.acquireControl(context.Background()); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/groups", nil)
@@ -863,7 +874,9 @@ func (c *Client) ListGroups() ([]metadata.GroupListEntry, error) {
 func (c *Client) GetUser(id string) (*metadata.User, error) {
 	var user metadata.User
 	err := c.withRetry(context.Background(), func() error {
-		c.acquireControl()
+		if err := c.acquireControl(context.Background()); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequest("GET", c.serverURL+"/v1/user/"+id, nil)
@@ -978,7 +991,9 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 
 	err = c.withRetry(ctx, func() error {
 
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 
 		defer c.releaseControl()
 
@@ -1104,7 +1119,9 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 		}
 
 		err = c.withRetry(ctx, func() error {
-			c.acquireControl()
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
 			defer c.releaseControl()
 
 			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
@@ -1181,7 +1198,9 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 	}
 
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/batch", nil)
@@ -1228,7 +1247,9 @@ func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
 
 func (c *Client) DeleteInode(ctx context.Context, id string) error {
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "DELETE", c.serverURL+"/v1/meta/inode/"+id, nil)
@@ -1260,7 +1281,9 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (*metadata.Inode, error) {
 	var inode metadata.Inode
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/meta/inode/"+id, nil)
@@ -1332,7 +1355,9 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 
 	var inodes []*metadata.Inode
 	err = c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inodes", nil)
@@ -3339,16 +3364,26 @@ func (c *Client) PullKeySync(jwt string) (*metadata.KeySyncBlob, error) {
 	return &blob, nil
 }
 
-func (c *Client) acquireControl() {
-	c.controlSem <- struct{}{}
+func (c *Client) acquireControl(ctx context.Context) error {
+	select {
+	case c.controlSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) releaseControl() {
 	<-c.controlSem
 }
 
-func (c *Client) acquireData() {
-	c.dataSem <- struct{}{}
+func (c *Client) acquireData(ctx context.Context) error {
+	select {
+	case c.dataSem <- struct{}{}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (c *Client) releaseData() {
@@ -3444,7 +3479,9 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 func (c *Client) GetClusterStats() (*metadata.ClusterStats, error) {
 	var stats metadata.ClusterStats
 	err := c.withRetry(context.Background(), func() error {
-		c.acquireControl()
+		if err := c.acquireControl(context.Background()); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequest("GET", c.serverURL+"/v1/cluster/stats", nil)
@@ -3484,7 +3521,9 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 	data, _ := json.Marshal(req)
 
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/lease/acquire", nil)
@@ -3523,7 +3562,9 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 	data, _ := json.Marshal(req)
 
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/lease/release", nil)
@@ -3558,7 +3599,9 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
 func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 	var users []metadata.User
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/users", nil)
@@ -3593,7 +3636,9 @@ func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) {
 	var groups []metadata.Group
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/groups", nil)
@@ -3628,7 +3673,9 @@ func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) 
 func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error) {
 	var leases []metadata.LeaseInfo
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/leases", nil)
@@ -3663,7 +3710,9 @@ func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, err
 func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 	var nodes []metadata.Node
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/nodes", nil)
@@ -3698,7 +3747,9 @@ func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
 	var status map[string]interface{}
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/status", nil)
@@ -3739,7 +3790,9 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 		ID string `json:"id"`
 	}
 	err := c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/lookup", nil)
@@ -3776,7 +3829,9 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/promote", nil)
@@ -3811,7 +3866,9 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	payload, _ := json.Marshal(map[string]string{"address": address})
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/join", nil)
@@ -3846,7 +3903,9 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 	payload, _ := json.Marshal(map[string]string{"id": id})
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/remove", nil)
@@ -3881,7 +3940,9 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
 	data, _ := json.Marshal(req)
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/quota/user", nil)
@@ -3916,7 +3977,9 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error {
 	data, _ := json.Marshal(req)
 	return c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/quota/group", nil)
@@ -4071,7 +4134,9 @@ func (c *Client) updateGroupInternal(ctx context.Context, group *metadata.Group)
 	}
 
 	err = c.withRetry(ctx, func() error {
-		c.acquireControl()
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
 		defer c.releaseControl()
 
 		req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+group.ID, bytes.NewReader(data))
