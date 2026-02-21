@@ -20,12 +20,13 @@ This document outlines security weaknesses identified during the manual audit fo
 ## 2. High-Severity Vulnerabilities
 
 ### 2.1. Admin API Over-Exposure (PII/Metadata Leak)
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Information Disclosure / Privacy Violation
-*   **Location:** `pkg/metadata/server.go` (`handleClusterUsers` and `handleClusterNodes`)
+*   **Location:** `pkg/metadata/server.go` (`handleClusterUsers`, `handleClusterNodes`, and `handleClusterGroups`)
 *   **Severity:** **HIGH**
-*   **Description:** Administrative endpoints return full `User` and `Node` objects, exposing all public keys and detailed usage metrics in bulk.
+*   **Description:** Administrative endpoints return full `User`, `Node`, and `Group` objects, exposing all public keys and detailed usage metrics in bulk.
+*   **Resolution:** Modified bulk administrative list handlers to redact sensitive cryptographic fields (SignKey, EncKey, Lockbox, etc.) from the response. Administrators can still retrieve full metadata for a specific object by ID through the established single-object GET endpoints, which enforce appropriate authorization checks.
 *   **Impact:** Bulk exposure of User IDs and public keys facilitates correlation attacks, undermining the anonymity provided by the HMAC-based User ID scheme.
-*   **Recommendation:** Redact public keys from bulk admin list responses unless explicitly requested for a specific ID.
 
 ### 2.2. Targeted Deanonymization via Admin Lookup
 *   **Vulnerability Type:** Privacy Violation

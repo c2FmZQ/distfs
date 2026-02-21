@@ -2474,6 +2474,9 @@ func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 		return s.fsm.ForEach(tx, []byte("users"), func(k, v []byte) error {
 			var u User
 			if err := json.Unmarshal(v, &u); err == nil {
+				// Redact public keys in bulk list
+				u.SignKey = nil
+				u.EncKey = nil
 				users = append(users, u)
 			}
 			return nil
@@ -2502,6 +2505,16 @@ func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Redact sensitive fields in bulk list
+	for i := range groups {
+		groups[i].EncKey = nil
+		groups[i].SignKey = nil
+		groups[i].EncryptedSignKey = nil
+		groups[i].Lockbox = nil
+		groups[i].RegistryLockbox = nil
+		groups[i].EncryptedRegistry = nil
+	}
+
 	if nextCursor != "" {
 		w.Header().Set("X-DistFS-Next-Cursor", nextCursor)
 	}
@@ -2523,6 +2536,9 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		return s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
+				// Redact public keys in bulk list
+				n.PublicKey = nil
+				n.SignKey = nil
 				nodes = append(nodes, n)
 			}
 			return nil
