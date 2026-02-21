@@ -1018,3 +1018,52 @@ func TestInode_Migration(t *testing.T) {
 		t.Errorf("Precedence failed: expected modern, got %s", string(inode2.EncryptedSymlinkTarget))
 	}
 }
+
+func TestNodeRevocation(t *testing.T) {
+	node, ts, _, _, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Register a node
+	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeID := "rogue-node"
+	n := Node{
+		ID:        nodeID,
+		PublicKey: nodeKey.Public(),
+		Status:    NodeStatusActive,
+	}
+	body, _ := json.Marshal(n)
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/node", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("Failed to register node: %v, status: %d", err, resp.StatusCode)
+	}
+
+	// Verify trusted
+	if !node.FSM.IsTrusted(nodeKey.Public()) {
+		t.Error("Node key should be trusted after registration")
+	}
+
+	// 2. Revoke/Remove node
+	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/node/"+nodeID, nil)
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("Failed to remove node: %v, status: %d", err, resp.StatusCode)
+	}
+
+	// Verify untrusted
+	if node.FSM.IsTrusted(nodeKey.Public()) {
+		t.Error("Node key should NOT be trusted after revocation")
+	}
+
+	// Verify node gone from list
+	nodes, _ := node.FSM.GetNodes()
+	for _, n := range nodes {
+		if n.ID == nodeID {
+			t.Errorf("Node %s still exists in registry", nodeID)
+		}
+	}
+}

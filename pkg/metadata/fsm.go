@@ -290,10 +290,11 @@ const (
 	CmdPromoteAdmin      CommandType = 24
 	CmdAdminChown        CommandType = 25
 	CmdAdminChmod        CommandType = 26
-	CmdStoreMetrics      CommandType = 27
-	CmdSetGroupQuota     CommandType = 28
-	CmdSetClusterSignKey CommandType = 29
-)
+		CmdStoreMetrics    CommandType = 27
+		CmdSetGroupQuota   CommandType = 28
+		CmdSetClusterSignKey CommandType = 29
+		CmdRemoveNode      CommandType = 30
+	)
 
 // LogCommand is the structure stored in the Raft log.
 type LogCommand struct {
@@ -484,6 +485,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeSetGroupQuota(tx, data)
 	case CmdSetClusterSignKey:
 		return fsm.executeSetClusterSignKey(tx, data)
+	case CmdRemoveNode:
+		return fsm.executeRemoveNode(tx, data)
 	case CmdBatch:
 		return fsm.applyBatchTx(tx, data, depth+1)
 	}
@@ -668,6 +671,31 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 		return err
 	}
 	return fsm.Put(tx, []byte("nodes"), []byte(node.ID), encoded)
+}
+
+func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} {
+	nodeID := string(data)
+	plain, err := fsm.Get(tx, []byte("nodes"), []byte(nodeID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
+		return ErrNotFound
+	}
+
+	var node Node
+	if err := json.Unmarshal(plain, &node); err != nil {
+		return err
+	}
+
+	// Remove from in-memory trust cache
+	fsm.mu.Lock()
+	delete(fsm.trusted, string(node.PublicKey))
+	delete(fsm.trusted, string(node.SignKey))
+	fsm.mu.Unlock()
+	fsm.saveTrustState()
+
+	return fsm.Delete(tx, []byte("nodes"), []byte(nodeID))
 }
 
 func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} {

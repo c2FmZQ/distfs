@@ -513,16 +513,27 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Mutation & Protected Routes
 	if r.URL.Path == "/v1/node" {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		if r.Method == http.MethodPost {
-			if !s.checkRaftSecret(r) {
-				http.Error(w, "unauthorized", http.StatusUnauthorized)
-				return
-			}
 			s.handleRegisterNode(w, r)
 			return
 		}
 		if r.Method == http.MethodGet {
 			s.handleGetNodes(w, r)
+			return
+		}
+	}
+	if strings.HasPrefix(r.URL.Path, "/v1/node/") {
+		if !s.checkRaftSecret(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/node/")
+		if r.Method == http.MethodDelete {
+			s.handleRemoveNode(w, r, id)
 			return
 		}
 	}
@@ -772,13 +783,8 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	status := map[string]interface{}{
-		"id":     s.nodeID,
-		"state":  s.raft.State().String(),
-		"leader": s.raft.Leader(),
-	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(status)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -1545,7 +1551,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1024*1024)
+	r.Body = http.MaxBytesReader(w, r.Body, 256*1024)
 
 	var ids []string
 	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
@@ -1616,7 +1622,7 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
@@ -1653,7 +1659,7 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 		}
 		return
 	}
-	s.ApplyRaftCommand(w, r, CmdUpdateInode, 10*1024*1024, http.StatusOK)
+	s.ApplyRaftCommand(w, r, CmdUpdateInode, 1024*1024, http.StatusOK)
 }
 
 func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
@@ -1712,6 +1718,10 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
 	s.ApplyRaftCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
+}
+
+func (s *Server) handleRemoveNode(w http.ResponseWriter, r *http.Request, id string) {
+	s.ApplyRaftCommandRaw(w, r, CmdRemoveNode, []byte(id), http.StatusOK)
 }
 
 func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
@@ -1899,7 +1909,7 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
@@ -1977,7 +1987,7 @@ func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256*1024))
 	if err != nil {
 		http.Error(w, "failed to read body", http.StatusBadRequest)
 		return
@@ -2931,8 +2941,14 @@ func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	resp := map[string]interface{}{
+		"id":     s.nodeID,
+		"state":  s.raft.State().String(),
+		"leader": s.raft.Leader(),
+		"nodes":  nodes,
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(nodes)
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) resolveURLs(manifest []ChunkEntry) {

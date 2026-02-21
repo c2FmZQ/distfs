@@ -63,25 +63,25 @@ This document outlines the security vulnerabilities identified during the manual
 ## 3. Medium & Low Severity Vulnerabilities
 
 ### 3.1. Unauthenticated Information Disclosure
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Information Disclosure
 *   **Location:** `pkg/metadata/server.go` (`/v1/health` and `/v1/node`)
 *   **Severity:** **MEDIUM**
 *   **Description:** Health and node list endpoints are public and return detailed Raft/Network stats.
-*   **Impact:** Aids attacker in mapping the cluster architecture.
-*   **Recommendation:** Restrict to authenticated users.
+*   **Resolution:** Refactored `/v1/health` to return only a minimal `{"status": "ok"}` message. Moved all detailed cluster and Raft status information to the `/v1/node` endpoint, which is now strictly protected by `X-Raft-Secret` authentication for both GET and POST methods. Updated E2E scripts to use authenticated discovery.
 
 ### 3.2. Denial of Service (DoS) via Memory Exhaustion
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** DoS
 *   **Location:** `pkg/metadata/server.go` (Multiple)
 *   **Severity:** **MEDIUM**
 *   **Description:** Large request bodies (10MB) are read fully into memory.
-*   **Impact:** Server crash under concurrent high-volume requests.
-*   **Recommendation:** Implement streaming or stricter limits.
+*   **Resolution:** Implemented stricter request body limits across all Metadata API endpoints. Single-object mutations (Inode/Group) are now limited to 1MB, and small-data endpoints (SetAttr, GetInodes) are limited to 256KB. The 10MB limit is only retained for the batch API which handles up to 1000 aggregated commands. This significantly reduces the memory pressure during high-concurrency or malicious request bursts.
 
 ### 3.3. Lack of Trust Revocation
+*   **Status:** **RESOLVED**
 *   **Vulnerability Type:** Broken Access Control
 *   **Location:** `pkg/metadata/fsm.go`
 *   **Severity:** **MEDIUM**
 *   **Description:** No mechanism to remove node keys from the `trusted` map.
-*   **Impact:** Compromised nodes cannot be easily evicted.
-*   **Recommendation:** Implement a node removal/revocation Raft command.
+*   **Resolution:** Implemented a `CmdRemoveNode` Raft command that removes a node from the cluster registry and deletes its public keys from the global `trusted` map. Added a `DELETE /v1/node/{id}` API endpoint, protected by `X-Raft-Secret`, to allow administrators to securely evict compromised or decommissioned nodes from the cluster trust domain.

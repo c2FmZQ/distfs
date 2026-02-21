@@ -18,7 +18,7 @@ echo "Waiting for cluster leader..."
 COUNT=0
 LEADER_URL=""
 while true; do
-  STATUS=$(wget -qO- --timeout=2 http://storage-node-1:8080/v1/health 2>&1 || true)
+  STATUS=$(wget -qO- --timeout=2 --header "X-Raft-Secret: supersecret" http://storage-node-1:8080/v1/node 2>&1 || true)
   echo "DEBUG STATUS: $STATUS"
   if echo "$STATUS" | grep -q '"state":"Leader"'; then
     echo "storage-node-1 is Leader"
