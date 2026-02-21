@@ -101,6 +101,7 @@ func TestMetadataCluster(t *testing.T) {
 		OwnerID: "u1",
 		Type:    FileType,
 	}
+	inode.SignInodeForTest("u1", userSignKey)
 	payload, _ := json.Marshal(inode)
 	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
@@ -188,7 +189,9 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 2. User 1 creates a private inode (0600)
-	payload, _ := json.Marshal(Inode{ID: "private-1", OwnerID: "u1", Mode: 0600})
+	i1 := Inode{ID: "private-1", OwnerID: "u1", Mode: 0600}
+	i1.SignInodeForTest("u1", u1Sign)
+	payload, _ := json.Marshal(i1)
 	body := SealTestRequest(t, "u1", u1Sign, serverEK, payload)
 	token1 := LoginSessionForTest(t, ts, "u1", u1Sign)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
@@ -218,7 +221,9 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
-	payload, _ = json.Marshal(Inode{ID: "private-1", Mode: 0777, Version: 1})
+	i1u := Inode{ID: "private-1", Mode: 0777, Version: 1}
+	i1u.SignInodeForTest("u2", u2Sign)
+	payload, _ = json.Marshal(i1u)
 	body = SealTestRequest(t, "u2", u2Sign, serverEK, payload)
 	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/inode/private-1", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -587,6 +592,7 @@ func TestChunkPagination(t *testing.T) {
 		OwnerID:       "u1",
 		ChunkManifest: manifest,
 	}
+	inode.SignInodeForTest("u1", userSignKey)
 	payload, _ := json.Marshal(inode)
 	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
@@ -985,45 +991,6 @@ func TestSecurity_IDOR_User(t *testing.T) {
 
 	if resAdmin.Quota.MaxInodes != 200 || resAdmin.Usage.InodeCount != 20 {
 		t.Errorf("Admin saw redacted metadata: %+v", resAdmin)
-	}
-}
-
-func TestInode_Migration(t *testing.T) {
-	// Legacy Inode JSON with symlink_target
-	legacyJSON := `{
-		"id": "sym-1",
-		"type": 2,
-		"symlink_target": "/etc/passwd",
-		"owner_id": "u1",
-		"version": 1
-	}`
-
-	var inode Inode
-	if err := json.Unmarshal([]byte(legacyJSON), &inode); err != nil {
-		t.Fatalf("Failed to unmarshal legacy Inode: %v", err)
-	}
-
-	if string(inode.EncryptedSymlinkTarget) != "/etc/passwd" {
-		t.Errorf("Migration failed: expected /etc/passwd, got %s", string(inode.EncryptedSymlinkTarget))
-	}
-
-	// Verify that new field takes precedence
-	modernJSON := `{
-		"id": "sym-2",
-		"type": 2,
-		"symlink_target": "legacy",
-		"enc_symlink_target": "bW9kZXJu",
-		"owner_id": "u1",
-		"version": 1
-	}` // bW9kZXJu is "modern" in base64
-
-	var inode2 Inode
-	if err := json.Unmarshal([]byte(modernJSON), &inode2); err != nil {
-		t.Fatalf("Failed to unmarshal modern Inode: %v", err)
-	}
-
-	if string(inode2.EncryptedSymlinkTarget) != "modern" {
-		t.Errorf("Precedence failed: expected modern, got %s", string(inode2.EncryptedSymlinkTarget))
 	}
 }
 

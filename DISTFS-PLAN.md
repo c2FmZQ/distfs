@@ -626,3 +626,25 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** **Unit Test:** Verify human-readable formatting across different scales (B, KB, MB, GB).
     *   **Action:** **Integration Test:** Perform a recursive `ls -R` on a complex directory tree and verify total entry count and metadata accuracy.
     *   **Action:** **Integration Test:** Verify that `-a` correctly toggles visibility of hidden files.
+
+---
+
+## Phase 36: Opaque Client Metadata (ClientBlob)
+**Goal:** Consolidate non-enforcement metadata into a single encrypted blob to maximize zero-knowledge privacy.
+
+*   **Step 36.1: ClientBlob Specification**
+    *   **Action:** Define `InodeClientBlob` and `GroupClientBlob` structs in `pkg/metadata`.
+    *   **Inode Fields:** `Name`, `SymlinkTarget`, `InlineData`, `MTime`, `UID`, `GID`, `SignerID`, `AuthorizedSigners`.
+    *   **Group Fields:** `Name`.
+*   **Step 36.2: Metadata Schema Migration**
+    *   **Action:** Add `ClientBlob []byte` to `Inode` and `Group` structs in `pkg/metadata/types.go`.
+    *   **Action:** Update `ManifestHash()` and `Group.Hash()` to include `ClientBlob` and exclude moved fields.
+*   **Step 36.3: Client-Side Implementation**
+    *   **Action:** Update `signInode` and `signGroup` to serialize and encrypt the `ClientBlob`.
+    *   **Action:** Update `VerifyInode` and `GetGroup` to decrypt and unpack the `ClientBlob` into transient memory fields.
+*   **Step 36.4: Cleanup & Enforcement**
+    *   **Action:** Remove legacy fields from `Inode` and `Group` structs.
+    *   **Action:** Update `FSM` and `Server` to strictly ignore or reject legacy fields.
+*   **Step 36.5: Testing & Verification**
+    *   **Action:** Add E2E tests to verify that common operations (ls, stat, read) work correctly with the blob-based architecture.
+    *   **Action:** Verify via raw DB inspection that sensitive fields are no longer stored in plaintext (or even separate ciphertext fields).

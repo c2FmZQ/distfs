@@ -78,7 +78,7 @@ func TestSmallFileInlining(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inode.InlineData == nil {
+	if len(inode.GetInlineData()) == 0 {
 		t.Error("Expected InlineData to be set for small file")
 	}
 	if len(inode.ChunkManifest) != 0 {
@@ -108,7 +108,7 @@ func TestSmallFileInlining(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if inode.InlineData != nil {
+	if len(inode.GetInlineData()) > 0 {
 		t.Error("Expected InlineData to be cleared after growth")
 	}
 	if len(inode.ChunkManifest) == 0 {

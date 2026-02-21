@@ -334,16 +334,6 @@ type RenameRequest struct {
 	NewName     string `json:"new_name"`
 }
 
-type SetAttrRequest struct {
-	InodeID string  `json:"inode_id"`
-	Mode    *uint32 `json:"mode,omitempty"`
-	UID     *uint32 `json:"uid,omitempty"`
-	GID     *uint32 `json:"gid,omitempty"`
-	GroupID *string `json:"group_id,omitempty"`
-	Size    *uint64 `json:"size,omitempty"`
-	MTime   *int64  `json:"mtime,omitempty"`
-}
-
 type LinkRequest struct {
 	ParentID string `json:"parent_id"`
 	Name     string `json:"name"`
@@ -500,14 +490,8 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 	}
 
 	now := time.Now().UnixNano()
-	if inode.MTime == 0 {
-		inode.MTime = now
-	}
 	if inode.CTime == 0 {
 		inode.CTime = now
-	}
-	if inode.NLink == 0 {
-		inode.NLink = 1
 	}
 	if inode.Mode == 0 {
 		if inode.Type == DirType {
@@ -971,12 +955,6 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 	if req.Mode != nil {
 		inode.Mode = SanitizeMode(*req.Mode, inode.Type)
 	}
-	if req.UID != nil {
-		inode.UID = *req.UID
-	}
-	if req.GID != nil {
-		inode.GID = *req.GID
-	}
 	if req.GroupID != nil && *req.GroupID != inode.GroupID {
 		newGroupID := *req.GroupID
 		// 1. Decrement old group/owner FIRST
@@ -995,7 +973,7 @@ func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
 		}
 	}
 	if req.MTime != nil {
-		inode.MTime = *req.MTime
+		inode.SetMTime(*req.MTime)
 	}
 
 	inode.Version++
@@ -1964,13 +1942,6 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 		}
 	}
 
-	if req.UID != nil {
-		inode.UID = *req.UID
-	}
-	if req.GID != nil {
-		inode.GID = *req.GID
-	}
-
 	inode.CTime = time.Now().UnixNano()
 	inode.Version++
 
@@ -2103,15 +2074,15 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 				}
 
 				entries = append(entries, GroupListEntry{
-					ID:            g.ID,
-					OwnerID:       g.OwnerID,
-					EncryptedName: g.EncryptedName,
-					Role:          role,
-					EncKey:        g.EncKey,
-					Lockbox:       filteredLockbox,
-					IsSystem:      g.IsSystem,
-					Usage:         g.Usage,
-					Quota:         g.Quota,
+					ID:         g.ID,
+					OwnerID:    g.OwnerID,
+					Role:       role,
+					EncKey:     g.EncKey,
+					Lockbox:    filteredLockbox,
+					IsSystem:   g.IsSystem,
+					ClientBlob: g.ClientBlob,
+					Usage:      g.Usage,
+					Quota:      g.Quota,
 				})
 			}
 		}

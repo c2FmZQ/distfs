@@ -209,7 +209,7 @@ func TestAdminOverrides(t *testing.T) {
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uBBytes}.Marshal(), 5*time.Second)
 
 	// 3. Create a File owned by Admin
-	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600, MTime: time.Now().UnixNano(), NLink: 1}
+	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600}
 	inode.SignInodeForTest(adminID, skA)
 	iBytes, _ := json.Marshal(inode)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)

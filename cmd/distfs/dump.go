@@ -69,12 +69,8 @@ func dumpInode(i *metadata.Inode) {
 	fmt.Printf("  SignerID: %s\n", i.GetSignerID())
 	fmt.Printf("  AuthorizedSigners: %v\n", i.GetAuthorizedSigners())
 
-	if l := len(i.EncryptedSymlinkTarget); l > 0 {
-		prefixLen := 8
-		if l < prefixLen {
-			prefixLen = l
-		}
-		fmt.Printf("  EncryptedSymlinkTarget: %x... (len=%d)\n", i.EncryptedSymlinkTarget[:prefixLen], l)
+	if target := i.GetSymlinkTarget(); target != "" {
+		fmt.Printf("  SymlinkTarget: %s\n", target)
 	}
 
 	// Print raw signature bytes (truncated)
@@ -91,8 +87,8 @@ func dumpInode(i *metadata.Inode) {
 	if len(i.ChunkPages) > 0 {
 		fmt.Printf("  ChunkPages: %d\n", len(i.ChunkPages))
 	}
-	if len(i.InlineData) > 0 {
-		fmt.Printf("  InlineData: %d bytes\n", len(i.InlineData))
+	if data := i.GetInlineData(); data != nil {
+		fmt.Printf("  InlineData: %d bytes\n", len(data))
 	}
 	fmt.Println("")
 }

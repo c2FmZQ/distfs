@@ -380,9 +380,9 @@ func (m *model) updateGroupTable() {
 		// Attempt to decrypt if admin has access
 		// We can reuse the group list logic from the client
 		if decrypted, err := m.client.DecryptGroupName(metadata.GroupListEntry{
-			ID:            g.ID,
-			EncryptedName: g.EncryptedName,
-			Lockbox:       g.Lockbox,
+			ID:         g.ID,
+			ClientBlob: g.ClientBlob,
+			Lockbox:    g.Lockbox,
 		}); err == nil {
 			name = decrypted
 		}

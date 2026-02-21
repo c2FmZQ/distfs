@@ -195,6 +195,8 @@ func (e *DistDirEntry) Info() (fs.FileInfo, error) {
 	return &DistFileInfo{inode: e.inode, name: e.name}, nil
 }
 
+func (e *DistDirEntry) Inode() *metadata.Inode { return e.inode }
+
 func (e *DistDirEntry) InodeID() string { return e.inode.ID }
 func (e *DistDirEntry) Mode() fs.FileMode {
 	m := fs.FileMode(e.inode.Mode)
@@ -205,7 +207,7 @@ func (e *DistDirEntry) Mode() fs.FileMode {
 }
 func (e *DistDirEntry) Size() int64 { return int64(e.inode.Size) }
 
-func (e *DistDirEntry) ModTime() time.Time { return time.Unix(0, e.inode.MTime) }
+func (e *DistDirEntry) ModTime() time.Time { return time.Unix(0, e.inode.GetMTime()) }
 
 // DistFileInfo implements fs.FileInfo.
 type DistFileInfo struct {
@@ -216,7 +218,7 @@ type DistFileInfo struct {
 func (i *DistFileInfo) Name() string       { return i.name }
 func (i *DistFileInfo) Size() int64        { return int64(i.inode.Size) }
 func (i *DistFileInfo) Mode() fs.FileMode  { return fs.FileMode(i.inode.Mode) }
-func (i *DistFileInfo) ModTime() time.Time { return time.Unix(0, i.inode.MTime) }
+func (i *DistFileInfo) ModTime() time.Time { return time.Unix(0, i.inode.GetMTime()) }
 func (i *DistFileInfo) IsDir() bool        { return i.inode.Type == metadata.DirType }
 func (i *DistFileInfo) Sys() any           { return i.inode }
 

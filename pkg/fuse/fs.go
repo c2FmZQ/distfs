@@ -16,7 +16,6 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	"github.com/c2FmZQ/distfs/pkg/client"
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
@@ -145,11 +144,8 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 
 	a.Mode = os.ModeDir | os.FileMode(d.inode.Mode)
 	a.Size = uint64(len(d.inode.Children))
-	a.Uid = d.inode.UID
-	a.Gid = d.inode.GID
-	a.Mtime = time.Unix(0, d.inode.MTime)
 	a.Ctime = time.Unix(0, d.inode.CTime)
-	a.Nlink = d.inode.NLink
+	a.Mtime = time.Unix(0, d.inode.GetMTime())
 	return nil
 }
 
@@ -245,13 +241,8 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	var dirents []fuse.Dirent
 	for _, childInode := range inodes {
-		childKey, err := d.fs.client.UnlockInode(childInode)
-		if err != nil {
-			continue
-		}
-
-		nameBytes, err := crypto.DecryptDEM(childKey, childInode.EncryptedName)
-		if err != nil {
+		name := childInode.GetName()
+		if name == "" {
 			continue
 		}
 
@@ -259,7 +250,7 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 		if childInode.Type == metadata.DirType {
 			t = fuse.DT_Dir
 		}
-		dirents = append(dirents, fuse.Dirent{Name: string(nameBytes), Type: t})
+		dirents = append(dirents, fuse.Dirent{Name: name, Type: t})
 	}
 	return dirents, nil
 }
@@ -549,23 +540,13 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		a.Mode |= os.ModeSymlink
 	}
 	a.Size = f.inode.Size
-	a.Uid = f.inode.UID
-	a.Gid = f.inode.GID
-	a.Mtime = time.Unix(0, f.inode.MTime)
 	a.Ctime = time.Unix(0, f.inode.CTime)
-	a.Nlink = f.inode.NLink
+	a.Mtime = time.Unix(0, f.inode.GetMTime())
 	return nil
 }
 
 func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
-	if len(f.inode.EncryptedSymlinkTarget) == 0 {
-		return "", nil
-	}
-	plain, err := crypto.DecryptDEM(f.key, f.inode.EncryptedSymlinkTarget)
-	if err != nil {
-		return "", mapError(err)
-	}
-	return string(plain), nil
+	return f.inode.GetSymlinkTarget(), nil
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
@@ -850,14 +831,6 @@ func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse
 		m := uint32(req.Mode)
 		mode = &m
 	}
-	var uid *uint32
-	if req.Valid.Uid() {
-		uid = &req.Uid
-	}
-	var gid *uint32
-	if req.Valid.Gid() {
-		gid = &req.Gid
-	}
 	var size *uint64
 	if req.Valid.Size() {
 		size = &req.Size
@@ -871,8 +844,6 @@ func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse
 	err := c.SetAttrByID(inode, inodeKey, metadata.SetAttrRequest{
 		InodeID: inode.ID,
 		Mode:    mode,
-		UID:     uid,
-		GID:     gid,
 		Size:    size,
 		MTime:   mtime,
 	})
@@ -886,11 +857,8 @@ func setAttr(c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse
 		respAttr.Mode |= os.ModeSymlink
 	}
 	respAttr.Size = inode.Size
-	respAttr.Uid = inode.UID
-	respAttr.Gid = inode.GID
-	respAttr.Mtime = time.Unix(0, inode.MTime)
 	respAttr.Ctime = time.Unix(0, inode.CTime)
-	respAttr.Nlink = inode.NLink
+	respAttr.Mtime = time.Unix(0, inode.GetMTime())
 
 	return nil
 }

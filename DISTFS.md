@@ -72,7 +72,19 @@ While TLS (Layer 4) protects the connection, DistFS implements **Layer 7 End-to-
 3.  **Unsealed at Edges:** Encryption/Decryption happens exclusively at the Client and the Raft Leader. Intermediate nodes or proxies see only opaque blobs.
 4.  **Replay Protection:** Each sealed envelope includes a high-resolution timestamp and is subject to sliding-window nonce verification.
 
-### 3.5 Multi-Device Key Synchronization (Zero-Knowledge Sync)
+### 3.5 Opaque Client Metadata (ClientBlob)
+To maximize user privacy and minimize the server's knowledge of the filesystem content, all metadata that is not strictly required for server-side enforcement (e.g., filenames, timestamps, fine-grained ACLs) is consolidated into a single encrypted blob.
+
+1.  **ClientBlob Envelope:** An AES-256-GCM encrypted structure stored within the `Inode` and `Group` objects.
+2.  **Encryption Keys:**
+    *   **Inode:** Encrypted with the **File Key**.
+    *   **Group:** Encrypted with the **Group Encryption Key**.
+3.  **Encapsulated Fields:**
+    *   **Inodes:** Filenames (`Name`), symbolic link targets, modification times (`MTime`), small file content (`InlineData`), POSIX ownership (`UID`/`GID`), and the interaction history (`SignerID`, `AuthorizedSigners`).
+    *   **Groups:** Human-readable group names.
+4.  **Integrity:** The `ClientBlob` is included in the cryptographic hash signed by the client. The server verifies the signature to ensure the blob hasn't been tampered with, even though it cannot read the content.
+
+### 3.6 Multi-Device Key Synchronization (Zero-Knowledge Sync)
 To support seamless multi-device usage without compromising the "Trust No One" model, DistFS provides a unified onboarding flow that combines identity initialization, registration, and cloud-backed recovery.
 
 1.  **Unified Onboarding (`init` command):**
@@ -82,7 +94,7 @@ To support seamless multi-device usage without compromising the "Trust No One" m
 3.  **Passphrase-Encrypted Blob:** The server only ever sees the opaque ciphertext (`KeySyncBlob`).
 4.  **Security Enforcement:** To prevent unauthorized overwrites, storing or updating a sync blob requires a valid `Session-Token` and mandatory **Layer 7 E2EE (Sealing)**.
 
-### 3.6 Secure Passphrase Entry (Pinentry)
+### 3.7 Secure Passphrase Entry (Pinentry)
 To enhance security during passphrase entry, DistFS supports the **Assuan protocol** via the `pinentry` suite of tools.
 1.  **Standard Protocol:** The client communicates with `pinentry` binaries (e.g., `pinentry-curses`, `pinentry-qt`, `pinentry-mac`) to securely capture user passphrases.
 2.  **Environment Integration:** Supports `GPG_TTY` for terminal-based entry and respects `~/.gnupg/gpg-agent.conf` configurations.
@@ -100,8 +112,9 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
     *   `HMAC(email) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
-    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, EncName, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature}`.
+    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, ClientBlob, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature}`.
         *   **OwnerID:** Can be a `UserID` or another `GroupID`.
+        *   **ClientBlob:** AES-GCM encrypted metadata (e.g., Group Name).
         *   **Lockbox:** Shares Group Private Keys among all members.
         *   **RegistryLockbox:** Shares a symmetric **Registry Key** only among authorized managers (`OwnerID`).
         *   **EncryptedRegistry:** An opaque blob containing member emails and UserIDs, encrypted with the Registry Key.
@@ -113,9 +126,10 @@ The Raft FSM stores the "Inode" table and Directory Structure.
     *   `UserID -> List[GroupID]` (Direct Membership Index).
     *   `OwnerID -> List[GroupID]` (Ownership/Management Index).
 *   **Inode Structure:**
-    *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, UserSig, GroupSig}`.
+    *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, ClientBlob, UserSig, GroupSig}`.
+        *   **ClientBlob:** AES-GCM encrypted metadata (Name, MTime, ACLs, InlineData).
 *   **Directory Structure:** The Metadata Layer MUST know the file system hierarchy to enforce permissions and perform Garbage Collection.
-    *   **Directory Inodes:** Store a list of children: `EncryptedName -> InodeID`. This allows traversal and GC traversing without knowing plaintext names.
+    *   **Directory Inodes:** Store a list of children: `HMAC(Name) -> InodeID`. This allows traversal and GC traversing without knowing plaintext names.
     *   **File Inodes:** Store `ChunkManifest` (List of Chunk IDs + DataNode locations).
     *   **Garbage Collection:** Orphaned Inodes and Chunks (not referenced by any live Inode) are garbage collected.
 
@@ -163,7 +177,7 @@ To support collaboration without a central directory, the metadata layer provide
     *   **Owner:** The user is the direct `OwnerID`.
     *   **Manager:** The user is a member of a group that is the `OwnerID`.
     *   **Member:** The user is a direct member of the group.
-3.  **Privacy Preservation:** The server returns only the `GroupID`, `EncryptedName`, and the resolved `Role`. The MetaNode does not know the plaintext names; the client must use its local keys to decrypt and display the group names to the user.
+3.  **Privacy Preservation:** The server returns only the `GroupID`, the encrypted `ClientBlob`, and the resolved `Role`. The MetaNode does not know the plaintext names; the client must use its local keys to decrypt and display the group names to the user.
 
 ### 4.8 Resource Quotas
 DistFS enforces multi-tenant resource limits at both the User and Group levels to ensure fair resource allocation and prevent accidental or malicious exhaustion of cluster storage.
@@ -230,9 +244,9 @@ The client library implements `io.fs.FS` and `io.fs.File`.
 
 *   `Open(name string)`:
     1.  Resolve path by traversing Directory Inodes (fetching `Children`).
-    2.  Decrypt directory names locally to find path components.
-    3.  Fetch file metadata (Lockbox + Manifest).
-    4.  Decrypt File Key.
+    2.  Decrypt `ClientBlob` from parent directory to find component IDs.
+    3.  Fetch file metadata (`Lockbox` + `ChunkManifest` + `ClientBlob`).
+    4.  Decrypt `ClientBlob` using **File Key** from `Lockbox`.
     5.  Return a `File` handle.
 *   `Read(b []byte)`:
     1.  Calculate which Chunk(s) correspond to the requested byte range.

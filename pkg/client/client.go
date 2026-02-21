@@ -247,7 +247,7 @@ func NewClient(serverAddr string) *Client {
 		sessionMu:     &sync.RWMutex{},
 		loginMu:       &sync.Mutex{},
 		controlSem:    make(chan struct{}, 1024), // High throughput for metadata
-		dataSem:       make(chan struct{}, 64),  // Limit chunk I/O
+		dataSem:       make(chan struct{}, 64),   // Limit chunk I/O
 		mutationMu:    &sync.Mutex{},
 		mutationLocks: make(map[string]*sync.Mutex),
 	}
@@ -924,11 +924,9 @@ func (c *Client) signInode(inode *metadata.Inode) {
 	if len(fileKey) > 0 {
 		blob := metadata.InodeClientBlob{
 			Name:              inode.GetName(),
-			SymlinkTarget:     string(inode.EncryptedSymlinkTarget),
-			InlineData:        inode.InlineData,
-			MTime:             inode.MTime,
-			UID:               inode.UID,
-			GID:               inode.GID,
+			SymlinkTarget:     inode.GetSymlinkTarget(),
+			InlineData:        inode.GetInlineData(),
+			MTime:             inode.GetMTime(),
 			SignerID:          c.userID,
 			AuthorizedSigners: authSigners,
 		}
@@ -954,8 +952,8 @@ func (c *Client) signInode(inode *metadata.Inode) {
 
 func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
 	now := time.Now().UnixNano()
-	if inode.MTime == 0 {
-		inode.MTime = now
+	if inode.GetMTime() == 0 {
+		inode.SetMTime(now)
 	}
 	if inode.CTime == 0 {
 		inode.CTime = now
@@ -1089,12 +1087,8 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			}
 			// Transfer updated fields to latest
 			latest.Size = inode.Size
-			latest.MTime = inode.MTime
 			latest.Mode = inode.Mode
-			latest.UID = inode.UID
-			latest.GID = inode.GID
 			latest.GroupID = inode.GroupID
-			latest.InlineData = inode.InlineData
 			latest.ChunkManifest = inode.ChunkManifest
 			latest.ChunkPages = inode.ChunkPages
 			latest.Children = inode.Children
@@ -1415,12 +1409,10 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 				inode.Lockbox.AddRecipient(groupID, gpk, fileKey)
 			}
 		}
-		if encryptedName != nil {
-			inode.EncryptedName = encryptedName
-		}
 		if name != "" {
 			inode.SetName(name)
 		}
+		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
 		lb := c.createLockbox(fileKey, mode, groupID)
@@ -1436,7 +1428,6 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 			Size:          uint64(size),
 			ChunkManifest: nil,
 			Lockbox:       lb,
-			EncryptedName: encryptedName,
 			OwnerID:       c.userID,
 			GroupID:       groupID,
 		}
@@ -1449,7 +1440,9 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 			return err
 		}
 		inode = *created
-		inode.SetName(name)
+		if name != "" {
+			inode.SetName(name)
+		}
 		inode.SetFileKey(fileKey)
 	} else {
 		return err
@@ -1461,18 +1454,14 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		if err != nil {
 			return err
 		}
-		// Encrypt as single blob using DEM
-		ciphertext, err := crypto.EncryptDEM(fileKey, data)
-		if err != nil {
-			return fmt.Errorf("failed to encrypt inline data: %w", err)
-		}
-		inode.InlineData = ciphertext
+		// Set transient field, signInode will pack it into ClientBlob
+		inode.SetInlineData(data)
 		inode.ChunkManifest = nil
 		inode.ChunkPages = nil
 		inode.Size = uint64(len(data))
 	} else {
 		// 2. Chunk Path
-		inode.InlineData = nil
+		inode.SetInlineData(nil)
 		var chunkEntries []metadata.ChunkEntry
 		buf := make([]byte, crypto.ChunkSize)
 
@@ -1522,7 +1511,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 			key:     fileKey,
 			groupID: groupID,
 			linkTag: parentID + ":" + nameHMAC,
-			inlined: inode.InlineData != nil,
+			inlined: inode.GetInlineData() != nil,
 		}
 		c.keyMu.Unlock()
 	}
@@ -1643,7 +1632,7 @@ func (c *Client) NewReader(id string, fileKey []byte) (*FileReader, error) {
 			key:     fileKey,
 			groupID: inode.GroupID,
 			linkTag: linkTag,
-			inlined: inode.InlineData != nil,
+			inlined: inode.GetInlineData() != nil,
 		}
 		c.keyMu.Unlock()
 	}
@@ -1730,15 +1719,11 @@ func (r *FileReader) read(p []byte) (int, error) {
 		}
 
 		var pt []byte
-		var err error
 		if chunkIdx == r.currentChunkIdx && r.currentChunk != nil {
 			pt = r.currentChunk
-		} else if r.inode.InlineData != nil {
+		} else if data := r.inode.GetInlineData(); data != nil {
 			// Handle Inlined File
-			pt, err = crypto.DecryptDEM(r.fileKey, r.inode.InlineData)
-			if err != nil {
-				return totalRead, fmt.Errorf("failed to decrypt inline data: %w", err)
-			}
+			pt = data
 			r.currentChunk = pt
 			r.currentChunkIdx = 0
 		} else {
@@ -2058,18 +2043,14 @@ func (w *FileWriter) Close() error {
 
 	// Handle Inlining for small files
 	if len(w.manifest) == 0 && len(w.buf) <= metadata.InlineLimit {
-		ciphertext, err := crypto.EncryptDEM(w.fileKey, w.buf)
-		if err != nil {
-			return err
-		}
-		w.inode.InlineData = ciphertext
+		w.inode.SetInlineData(w.buf)
 		w.inode.ChunkManifest = nil
 		w.inode.Size = uint64(len(w.buf))
 	} else {
 		if err := w.flushChunk(); err != nil {
 			return err
 		}
-		w.inode.InlineData = nil
+		w.inode.SetInlineData(nil)
 		w.inode.ChunkManifest = w.manifest
 		w.inode.Size = uint64(w.written)
 	}
@@ -2112,7 +2093,7 @@ func (w *FileWriter) Close() error {
 			key:     w.fileKey,
 			groupID: w.inode.GroupID,
 			linkTag: w.parentID + ":" + w.nameHMAC,
-			inlined: w.inode.InlineData != nil,
+			inlined: w.inode.GetInlineData() != nil,
 		}
 		w.client.keyMu.Unlock()
 
@@ -2132,9 +2113,9 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 		return nil, err
 	}
 	// Handle inline data
-	if inode.InlineData != nil {
+	if data := inode.GetInlineData(); data != nil {
 		if chunkIdx == 0 {
-			return crypto.DecryptDEM(key, inode.InlineData)
+			return data, nil
 		}
 		return nil, io.EOF
 	}
@@ -2174,11 +2155,7 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 		if _, err := r.ReadAt(buf, 0); err != nil && err != io.EOF {
 			return nil, err
 		}
-		ciphertext, err := crypto.EncryptDEM(key, buf)
-		if err != nil {
-			return nil, err
-		}
-		inode.InlineData = ciphertext
+		inode.SetInlineData(buf)
 		inode.ChunkManifest = nil
 		inode.ChunkPages = nil
 		inode.Size = uint64(size)
@@ -2186,7 +2163,7 @@ func (c *Client) SyncFile(id string, r io.ReaderAt, size int64, dirtyChunks map[
 	}
 
 	// 3. Handle Chunked File (Differential Update)
-	inode.InlineData = nil
+	inode.SetInlineData(nil)
 	numChunks := (size + crypto.ChunkSize - 1) / crypto.ChunkSize
 	newManifest := make([]metadata.ChunkEntry, numChunks)
 	buf := make([]byte, crypto.ChunkSize)
@@ -2414,16 +2391,11 @@ func (c *Client) VerifyInode(inode *metadata.Inode) error {
 		}
 		// Populate transient fields
 		inode.SetName(blob.Name)
+		inode.SetSymlinkTarget(blob.SymlinkTarget)
+		inode.SetInlineData(blob.InlineData)
+		inode.SetMTime(blob.MTime)
 		inode.SetSignerID(blob.SignerID)
 		inode.SetAuthorizedSigners(blob.AuthorizedSigners)
-		// Overwrite legacy fields if needed for compatibility during transition
-		inode.MTime = blob.MTime
-		inode.UID = blob.UID
-		inode.GID = blob.GID
-		inode.InlineData = blob.InlineData
-		if blob.SymlinkTarget != "" {
-			inode.EncryptedSymlinkTarget = []byte(blob.SymlinkTarget)
-		}
 	}
 
 	signerID := inode.GetSignerID()
@@ -2501,7 +2473,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 			key:     key,
 			groupID: inode.GroupID,
 			linkTag: linkTag,
-			inlined: inode.InlineData != nil,
+			inlined: inode.GetInlineData() != nil,
 		}
 		c.keyMu.Unlock()
 		return key, nil
@@ -2527,7 +2499,7 @@ func (c *Client) UnlockInode(inode *metadata.Inode) ([]byte, error) {
 			key:     key,
 			groupID: inode.GroupID,
 			linkTag: linkTag,
-			inlined: inode.InlineData != nil,
+			inlined: inode.GetInlineData() != nil,
 		}
 		c.keyMu.Unlock()
 		return key, nil
@@ -2880,12 +2852,7 @@ func (c *Client) GetGroupName(group *metadata.Group) (string, error) {
 		}
 	}
 
-	// Fallback to legacy field
-	nameBytes, err := crypto.Unseal(group.EncryptedName, gk)
-	if err != nil {
-		return "", fmt.Errorf("failed to decrypt group name: %w", err)
-	}
-	return string(nameBytes), nil
+	return "", fmt.Errorf("failed to decrypt group name: client blob missing or invalid")
 }
 
 // DecryptGroupName decrypts a group name from a list entry using cached or provided keys.
@@ -2937,11 +2904,7 @@ func (c *Client) DecryptGroupName(entry metadata.GroupListEntry) (string, error)
 		}
 	}
 
-	nameBytes, err := crypto.Unseal(entry.EncryptedName, gdk)
-	if err != nil {
-		return "", err
-	}
-	return string(nameBytes), nil
+	return "", fmt.Errorf("failed to decrypt group name")
 }
 
 // GetGroupRegistryKey retrieves and decrypts the group registry key.
@@ -3025,34 +2988,12 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 		return nil, err
 	}
 
-	// 3.1 Fetch a GID from the server to ensure valid signature
-	var gid uint32
-	gidUrl := c.serverURL + "/v1/group/gid/allocate"
-	hReq, err := http.NewRequest("GET", gidUrl, nil)
-	if err == nil {
-		if err := c.authenticateRequest(hReq); err == nil {
-			gidResp, err := c.httpClient.Do(hReq)
-			if err == nil && gidResp.StatusCode == http.StatusOK {
-				var res struct {
-					GID uint32 `json:"gid"`
-				}
-				if err := json.NewDecoder(gidResp.Body).Decode(&res); err == nil {
-					gid = res.GID
-				}
-				gidResp.Body.Close()
-			}
-		}
-	}
-
 	// 3.2 Prepare ClientBlob
 	blob := metadata.GroupClientBlob{Name: name}
 	encBlob, err := c.encryptClientBlob(blob, dk.EncapsulationKey())
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt group client blob: %w", err)
 	}
-
-	// Legacy: encrypted name for transition
-	encName, _ := crypto.Seal([]byte(name), dk.EncapsulationKey(), 0)
 
 	rlb := crypto.NewLockbox()
 	// Encrypt Registry Key for the owner
@@ -3088,8 +3029,6 @@ func (c *Client) createGroupInternal(name string, isSystem bool) (*metadata.Grou
 
 	group := &metadata.Group{
 		ID:                groupID,
-		EncryptedName:     encName,
-		GID:               gid,
 		OwnerID:           c.userID,
 		Members:           map[string]bool{c.userID: true},
 		EncKey:            pk,
@@ -3289,12 +3228,6 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 	if attr.Mode != nil {
 		inode.Mode = *attr.Mode
 	}
-	if attr.UID != nil {
-		inode.UID = *attr.UID
-	}
-	if attr.GID != nil {
-		inode.GID = *attr.GID
-	}
 	if attr.GroupID != nil {
 		inode.GroupID = *attr.GroupID
 	}
@@ -3302,7 +3235,7 @@ func (c *Client) SetAttrByID(inode *metadata.Inode, key []byte, attr metadata.Se
 		inode.Size = *attr.Size
 	}
 	if attr.MTime != nil {
-		inode.MTime = *attr.MTime
+		inode.SetMTime(*attr.MTime)
 	}
 
 	// 2. Handle Lockbox updates (World & Group)
@@ -4052,12 +3985,6 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 				}
 			}
 		}
-	}
-	if req.UID != nil {
-		inode.UID = *req.UID
-	}
-	if req.GID != nil {
-		inode.GID = *req.GID
 	}
 
 	_, err = c.updateInodeInternal(ctx, *inode, false)

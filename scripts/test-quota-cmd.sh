@@ -23,8 +23,8 @@ distfs -use-pinentry=false -config $USER_CONFIG group-create "my-project"
 G_ID=$(distfs -use-pinentry=false -config $USER_CONFIG group-list | grep "my-project" | awk '{print $1}')
 
 # Admin: Set Group Quota
-echo "Admin: Setting Group Quota..."
-distfs -use-pinentry=false -config $ADMIN_CONFIG admin-group-quota $G_ID 2000 5
+echo "Admin: Setting Group Quota for G_ID: '$G_ID'..."
+distfs -use-pinentry=false -config $ADMIN_CONFIG admin-group-quota "$G_ID" 2000 5
 
 # User: Check Quota
 echo "User: Running 'distfs quota'..."

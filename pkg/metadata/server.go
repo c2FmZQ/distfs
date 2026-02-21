@@ -1647,7 +1647,9 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify that the submitter signed this manifest
+	inode.Version++
 	hash := inode.ManifestHash()
+	inode.Version--
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
 		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
 		return
@@ -1684,7 +1686,9 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// Verify that the submitter signed this manifest
+	inode.Version++
 	hash := inode.ManifestHash()
+	inode.Version--
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
 		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
 		return
