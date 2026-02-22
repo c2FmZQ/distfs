@@ -35,10 +35,11 @@ func SealRequest(serverPK *mlkem.EncapsulationKey768, clientSK *IdentityKey, pay
 	sig := clientSK.Sign(toSign)
 
 	// Inner: [Timestamp][Signature][Payload]
-	inner := make([]byte, 8+len(sig)+len(payload))
+	sigSize := SignatureSize()
+	inner := make([]byte, 8+sigSize+len(payload))
 	copy(inner[0:8], tsBytes)
-	copy(inner[8:8+len(sig)], sig)
-	copy(inner[8+len(sig):], payload)
+	copy(inner[8:8+sigSize], sig)
+	copy(inner[8+sigSize:], payload)
 
 	// 2. Encapsulate for server
 	sharedSecret, kemCT := Encapsulate(serverPK)
@@ -79,14 +80,15 @@ func OpenRequest(serverSK *mlkem.DecapsulationKey768, clientPK []byte, sealed []
 		return 0, nil, nil, fmt.Errorf("dem decrypt failed: %w", err)
 	}
 
-	if len(inner) < 8+64 { // ts(8) + ed25519 sig(64)
+	sigSize := SignatureSize()
+	if len(inner) < 8+sigSize {
 		return 0, nil, nil, fmt.Errorf("decrypted payload too short")
 	}
 
 	// 3. Parse Inner
 	ts := int64(binary.BigEndian.Uint64(inner[0:8]))
-	sig := inner[8 : 8+64]
-	payload := inner[8+64:]
+	sig := inner[8 : 8+sigSize]
+	payload := inner[8+sigSize:]
 
 	// 4. Verify Signature
 	toVerify := make([]byte, 8+len(payload))
@@ -116,14 +118,15 @@ func OpenRequestSymmetric(sharedSecret []byte, clientPK []byte, sealed []byte) (
 		return 0, nil, fmt.Errorf("dem decrypt failed: %w", err)
 	}
 
-	if len(inner) < 8+64 {
+	sigSize := SignatureSize()
+	if len(inner) < 8+sigSize {
 		return 0, nil, fmt.Errorf("decrypted payload too short")
 	}
 
 	// 2. Parse Inner
 	ts := int64(binary.BigEndian.Uint64(inner[0:8]))
-	sig := inner[8 : 8+64]
-	payload := inner[8+64:]
+	sig := inner[8 : 8+sigSize]
+	payload := inner[8+sigSize:]
 
 	// 3. Verify Signature
 	toVerify := make([]byte, 8+len(payload))
@@ -150,10 +153,11 @@ func SealResponse(clientPK *mlkem.EncapsulationKey768, serverSK *IdentityKey, pa
 	sig := serverSK.Sign(toSign)
 
 	// Inner: [Timestamp][Signature][Payload]
-	inner := make([]byte, 8+len(sig)+len(payload))
+	sigSize := SignatureSize()
+	inner := make([]byte, 8+sigSize+len(payload))
 	copy(inner[0:8], tsBytes)
-	copy(inner[8:8+len(sig)], sig)
-	copy(inner[8+len(sig):], payload)
+	copy(inner[8:8+sigSize], sig)
+	copy(inner[8+sigSize:], payload)
 
 	// 2. Encapsulate for client
 	sharedSecret, kemCT := Encapsulate(clientPK)
@@ -194,14 +198,15 @@ func OpenResponse(clientSK *mlkem.DecapsulationKey768, serverPK []byte, sealed [
 		return 0, nil, fmt.Errorf("dem decrypt failed: %w", err)
 	}
 
-	if len(inner) < 8+64 { // ts(8) + sig(64)
+	sigSize := SignatureSize()
+	if len(inner) < 8+sigSize { // ts(8) + sig(sigSize)
 		return 0, nil, fmt.Errorf("decrypted response too short")
 	}
 
 	// 3. Parse Inner
 	ts := int64(binary.BigEndian.Uint64(inner[0:8]))
-	sig := inner[8 : 8+64]
-	payload := inner[8+64:]
+	sig := inner[8 : 8+sigSize]
+	payload := inner[8+sigSize:]
 
 	// 4. Verify Signature
 	toVerify := make([]byte, 8+len(payload))

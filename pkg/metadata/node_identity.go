@@ -15,9 +15,10 @@
 package metadata
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/hex"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
 )
 
@@ -26,30 +27,41 @@ type KeyData struct {
 	Bytes []byte `json:"bytes"`
 }
 
+// NodeKey represents an Ed25519 key pair used for mTLS and Raft identity.
+type NodeKey struct {
+	Priv ed25519.PrivateKey
+	Pub  ed25519.PublicKey
+}
+
+func (k *NodeKey) Public() []byte  { return k.Pub }
+func (k *NodeKey) Private() []byte { return k.Priv }
+
 // LoadOrGenerateNodeKey loads the Ed25519 node key from storage,
 // or generates a new one if it doesn't exist.
-func LoadOrGenerateNodeKey(st *storage.Storage, name string) (*crypto.IdentityKey, error) {
+func LoadOrGenerateNodeKey(st *storage.Storage, name string) (*NodeKey, error) {
 	var kd KeyData
 	if err := st.ReadDataFile(name, &kd); err == nil {
-		return crypto.UnmarshalIdentityKey(kd.Bytes), nil
+		priv := ed25519.PrivateKey(kd.Bytes)
+		pub := priv.Public().(ed25519.PublicKey)
+		return &NodeKey{Priv: priv, Pub: pub}, nil
 	}
 
-	key, err := crypto.GenerateIdentityKey()
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, err
 	}
 
-	kd.Bytes = key.MarshalPrivate()
+	kd.Bytes = priv
 	if err := st.SaveDataFile(name, kd); err != nil {
 		return nil, err
 	}
 
-	return key, nil
+	return &NodeKey{Priv: priv, Pub: pub}, nil
 }
 
 // NodeIDFromKey derives the Raft Node ID from the public key.
-func NodeIDFromKey(key *crypto.IdentityKey) string {
-	return NodeIDFromPublicKey(key.Public())
+func NodeIDFromKey(key *NodeKey) string {
+	return NodeIDFromPublicKey(key.Pub)
 }
 
 // NodeIDFromPublicKey derives the Raft Node ID from the raw public key bytes.

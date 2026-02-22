@@ -15,7 +15,6 @@
 package crypto
 
 import (
-	"crypto/ed25519"
 	"testing"
 )
 
@@ -25,8 +24,8 @@ func TestIdentityKey(t *testing.T) {
 		t.Fatalf("GenerateIdentityKey failed: %v", err)
 	}
 
-	if len(k.Public()) != ed25519.PublicKeySize {
-		t.Errorf("Unexpected public key size: %d", len(k.Public()))
+	if len(k.Public()) != PublicKeySize() {
+		t.Errorf("Unexpected public key size: %d, expected %d", len(k.Public()), PublicKeySize())
 	}
 
 	msg := []byte("hello world")

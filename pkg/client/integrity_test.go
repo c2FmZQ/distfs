@@ -18,7 +18,7 @@ func TestManifestIntegrity(t *testing.T) {
 	// 1. Setup Node & Server
 	tmpDir := t.TempDir()
 	st, _ := createTestStorage(t, tmpDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key")
 	nodeID := "node1"
 
 	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
@@ -238,7 +238,7 @@ func TestGroupIntegrity(t *testing.T) {
 	// 1. Setup Node & Server
 	tmpDir := t.TempDir()
 	st, _ := createTestStorage(t, tmpDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key")
 	nodeID := "node1"
 
 	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)

@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"crypto/mlkem"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -88,8 +87,11 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	}
 	st := storage.New(tmpDir, mk)
 
-	nodeKey, _ := crypto.GenerateIdentityKey()
-	nodeID := fmt.Sprintf("node-%d", time.Now().UnixNano())
+	nodeKey, err := LoadOrGenerateNodeKey(st, "node.key")
+	if err != nil {
+		t.Fatalf("failed to generate node key: %v", err)
+	}
+	nodeID := NodeIDFromKey(nodeKey)
 
 	node, err := NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
 	if err != nil {

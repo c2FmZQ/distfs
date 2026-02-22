@@ -31,7 +31,7 @@ func TestPathCache(t *testing.T) {
 	// 1. Setup Cluster
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{

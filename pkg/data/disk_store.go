@@ -171,29 +171,12 @@ func (s *DiskStore) QuarantineChunk(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	found := false
-	var path string
+	name := getShardPath(id)
+	path := filepath.Join(s.st.Dir(), name)
 
-	err := filepath.WalkDir(s.st.Dir(), func(p string, d os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() {
-			return nil
-		}
-		if d.Name() == id {
-			found = true
-			path = p
-			return fmt.Errorf("stop")
-		}
-		return nil
-	})
-
-	if found && path != "" {
-		return os.Rename(path, path+".corrupted")
-	}
-	if err != nil && err.Error() != "stop" {
+	if _, err := os.Stat(path); err != nil {
 		return err
 	}
-	return os.ErrNotExist
+
+	return os.Rename(path, path+".corrupted")
 }

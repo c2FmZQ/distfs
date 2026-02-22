@@ -392,12 +392,34 @@ func (fsm *MetadataFSM) applyBatch(data []byte) interface{} {
 	}
 
 	var results []interface{}
-	// We use a single transaction for performance.
-	_ = fsm.db.Update(func(tx *bolt.Tx) error {
+	// We use a single transaction for performance and atomicity.
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		results = fsm.executeBatchCommands(tx, cmds, 0)
+		if fsm.containsError(results) {
+			return fmt.Errorf("batch failure") // Trigger rollback
+		}
 		return nil
 	})
+	if err != nil {
+		// If the batch failed, we return the results slice anyway so the caller
+		// can see WHICH command failed, but the transaction has been rolled back.
+		return results
+	}
 	return results
+}
+
+func (fsm *MetadataFSM) containsError(res interface{}) bool {
+	if _, ok := res.(error); ok {
+		return true
+	}
+	if slice, ok := res.([]interface{}); ok {
+		for _, item := range slice {
+			if fsm.containsError(item) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int) []interface{} {

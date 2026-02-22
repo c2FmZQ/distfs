@@ -118,3 +118,74 @@ func TestSessionKeyMemoization(t *testing.T) {
 		t.Fatalf("Second Mkdir failed: %v", err)
 	}
 }
+
+func TestBatchAtomicity(t *testing.T) {
+	node, _, _, _, server := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	metadata.WaitLeader(t, node.Raft)
+
+	// Create user
+	dk, _ := crypto.GenerateEncryptionKey()
+	sk, _ := crypto.GenerateIdentityKey()
+	u1 := "user-atom"
+	user := metadata.User{
+		ID:      u1,
+		SignKey: sk.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+		Quota:   metadata.UserQuota{MaxInodes: 1}, // Only allow 1 inode
+	}
+	metadata.CreateUser(t, node, user)
+
+	// Prepare a batch:
+	// 1. Create Inode f1 (Valid)
+	// 2. Create Inode f2 (Should FAIL due to quota)
+
+	i1 := metadata.Inode{ID: "f1", OwnerID: u1, Type: metadata.FileType}
+	i1.SignInodeForTest(u1, sk)
+	i1Bytes, _ := json.Marshal(i1)
+
+	i2 := metadata.Inode{ID: "f2", OwnerID: u1, Type: metadata.FileType}
+	i2.SignInodeForTest(u1, sk)
+	i2Bytes, _ := json.Marshal(i2)
+
+	batch := []metadata.LogCommand{
+		{Type: metadata.CmdCreateInode, Data: i1Bytes},
+		{Type: metadata.CmdCreateInode, Data: i2Bytes},
+	}
+	batchBytes, _ := json.Marshal(batch)
+
+	// Apply batch
+	res, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes)
+	if err != nil {
+		t.Fatalf("Raft apply failed: %v", err)
+	}
+
+	// 'res' should be []interface{} containing the results of the two commands.
+	results, ok := res.([]interface{})
+	if !ok {
+		t.Fatalf("Expected []interface{}, got %T", res)
+	}
+
+	foundErr := false
+	for _, r := range results {
+		if e, ok := r.(error); ok && e != nil {
+			foundErr = true
+			break
+		}
+	}
+	if !foundErr {
+		t.Errorf("Expected at least one error in batch results, got %v", results)
+	}
+
+	// Verify f1 was NOT created (atomicity check)
+	server.FSM().DB().View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		if b.Get([]byte("f1")) != nil {
+			t.Errorf("Inode f1 was created despite batch failure")
+		}
+		if b.Get([]byte("f2")) != nil {
+			t.Errorf("Inode f2 was created despite batch failure")
+		}
+		return nil
+	})
+}

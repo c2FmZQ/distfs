@@ -15,21 +15,25 @@
 package crypto
 
 import (
-	"crypto/ed25519"
+	"crypto"
 	"crypto/rand"
 	"fmt"
+
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 )
 
+// TODO: Switch to crypto/mldsa (standard library) when it becomes available in Go (planned for Go 1.27).
+
 // IdentityKey represents a user's asymmetric key pair for signing/identity.
-// Currently backed by Ed25519.
+// Currently backed by ML-DSA-65 (FIPS 204).
 type IdentityKey struct {
-	priv ed25519.PrivateKey
-	pub  ed25519.PublicKey
+	priv *mldsa65.PrivateKey
+	pub  *mldsa65.PublicKey
 }
 
 // GenerateIdentityKey creates a new random identity key.
 func GenerateIdentityKey() (*IdentityKey, error) {
-	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate identity key: %w", err)
 	}
@@ -38,33 +42,50 @@ func GenerateIdentityKey() (*IdentityKey, error) {
 
 // Sign signs the message.
 func (k *IdentityKey) Sign(msg []byte) []byte {
-	return ed25519.Sign(k.priv, msg)
+	// mldsa65.PrivateKey.Sign implements crypto.Signer
+	sig, _ := k.priv.Sign(rand.Reader, msg, crypto.Hash(0))
+	return sig
 }
 
 // Public returns the public key bytes.
 func (k *IdentityKey) Public() []byte {
-	// Make a copy to prevent modification
-	p := make([]byte, len(k.pub))
-	copy(p, k.pub)
-	return p
+	return k.pub.Bytes()
 }
 
 // MarshalPrivate serializes the private key.
 func (k *IdentityKey) MarshalPrivate() []byte {
-	return k.priv
+	return k.priv.Bytes()
 }
 
 // UnmarshalIdentityKey deserializes the private key.
 func UnmarshalIdentityKey(b []byte) *IdentityKey {
-	priv := ed25519.PrivateKey(b)
-	pub := priv.Public().(ed25519.PublicKey)
-	return &IdentityKey{priv: priv, pub: pub}
+	var priv mldsa65.PrivateKey
+	if err := priv.UnmarshalBinary(b); err != nil {
+		return nil
+	}
+	pub := priv.Public().(*mldsa65.PublicKey)
+	return &IdentityKey{priv: &priv, pub: pub}
 }
 
 // VerifySignature checks the signature against the public key.
 func VerifySignature(pubKey []byte, msg, sig []byte) bool {
-	if len(pubKey) != ed25519.PublicKeySize {
+	if len(pubKey) != mldsa65.PublicKeySize {
 		return false
 	}
-	return ed25519.Verify(pubKey, msg, sig)
+	var pub mldsa65.PublicKey
+	if err := pub.UnmarshalBinary(pubKey); err != nil {
+		return false
+	}
+	// ctx is optional, we use nil
+	return mldsa65.Verify(&pub, msg, nil, sig)
+}
+
+// SignatureSize returns the size of an ML-DSA-65 signature.
+func SignatureSize() int {
+	return mldsa65.SignatureSize
+}
+
+// PublicKeySize returns the size of an ML-DSA-65 public key.
+func PublicKeySize() int {
+	return mldsa65.PublicKeySize
 }

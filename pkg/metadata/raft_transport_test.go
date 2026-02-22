@@ -2,16 +2,18 @@
 package metadata
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
 	"testing"
 	"time"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/hashicorp/raft"
 )
 
 func TestTLSStreamLayer(t *testing.T) {
-	key, _ := crypto.GenerateIdentityKey()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key := &NodeKey{Pub: pub, Priv: priv}
 	cert, _ := GenerateSelfSignedCert(key)
 	tlsConfig := NewServerTLSConfig(cert, func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		return nil

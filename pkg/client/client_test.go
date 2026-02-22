@@ -124,7 +124,7 @@ func TestClientIntegration(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -239,7 +239,7 @@ func TestReplication(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -341,7 +341,7 @@ func TestDirectories(t *testing.T) {
 	// Setup Cluster (Single node fine for logic)
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -438,7 +438,7 @@ func TestReplicationRepair(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -549,7 +549,7 @@ func TestReadAhead(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -666,7 +666,7 @@ func TestGarbageCollection(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)
@@ -768,7 +768,7 @@ func TestGarbageCollection(t *testing.T) {
 func TestResolvePathComplex(t *testing.T) {
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{

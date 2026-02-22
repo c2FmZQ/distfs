@@ -48,7 +48,7 @@ type RaftNode struct {
 }
 
 // NewRaftNode creates and bootstraps a new Raft node with mTLS and encryption.
-func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *crypto.IdentityKey) (*RaftNode, error) {
+func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *NodeKey) (*RaftNode, error) {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
 	// NoSnapshotRestoreOnStart default is false.

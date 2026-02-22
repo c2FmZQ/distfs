@@ -751,11 +751,22 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 		for i, url := range urls {
 			started++
 			if i > 0 {
-				// Staggered start
+				// Staggered start: Wait for timeout OR a result from previous attempts
+				wait := time.NewTimer(1 * time.Second)
 				select {
 				case <-lctx.Done():
+					wait.Stop()
 					return lctx.Err()
-				case <-time.After(1 * time.Second):
+				case res := <-resCh:
+					wait.Stop()
+					consumed++
+					if res.err == nil {
+						data = res.data
+						return nil
+					}
+					// If it was an error, we continue to start the next staggered request immediately
+				case <-wait.C:
+					// Timeout reached, start next replica
 				}
 			}
 			go func(targetURL string) {

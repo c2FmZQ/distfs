@@ -33,7 +33,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	// 1. Setup Cluster
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
 	if err != nil {
 		t.Fatal(err)

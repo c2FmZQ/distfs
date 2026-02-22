@@ -2,12 +2,13 @@
 package metadata
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
@@ -23,7 +24,8 @@ func TestKeyRotation(t *testing.T) {
 	}
 	st := storage.New(tmpDir, mk)
 
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	nodeKey := &NodeKey{Pub: pub, Priv: priv}
 
 	// 1. Start Node
 	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)

@@ -15,7 +15,6 @@
 package metadata
 
 import (
-	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
@@ -23,14 +22,12 @@ import (
 	"fmt"
 	"math/big"
 	"time"
-
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
-// GenerateSelfSignedCert generates a self-signed X.509 certificate using the provided IdentityKey.
-func GenerateSelfSignedCert(key *crypto.IdentityKey) (*tls.Certificate, error) {
-	edPriv := ed25519.PrivateKey(key.MarshalPrivate())
-	edPub := ed25519.PublicKey(key.Public())
+// GenerateSelfSignedCert generates a self-signed X.509 certificate using the provided NodeKey (Ed25519).
+func GenerateSelfSignedCert(key *NodeKey) (*tls.Certificate, error) {
+	edPriv := key.Priv
+	edPub := key.Pub
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)

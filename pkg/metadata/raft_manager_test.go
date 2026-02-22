@@ -2,19 +2,21 @@
 package metadata
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"testing"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
 )
 
 func TestNodeIDFromPublicKey(t *testing.T) {
-	key, _ := crypto.GenerateIdentityKey()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key := &NodeKey{Pub: pub, Priv: priv}
 	id1 := NodeIDFromKey(key)
-	id2 := NodeIDFromPublicKey(key.Public())
+	id2 := NodeIDFromPublicKey(key.Pub)
 	if id1 != id2 {
 		t.Errorf("ID mismatch: %s != %s", id1, id2)
 	}
@@ -27,7 +29,8 @@ func TestRaftNode_KeyRing(t *testing.T) {
 	tmpDir := t.TempDir()
 	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st := storage.New(tmpDir, mk)
-	nodeKey, _ := crypto.GenerateIdentityKey()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	nodeKey := &NodeKey{Pub: pub, Priv: priv}
 
 	// 1. Create RaftNode
 	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)

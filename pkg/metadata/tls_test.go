@@ -2,15 +2,16 @@
 package metadata
 
 import (
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"testing"
-
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 func TestTLS_Configs(t *testing.T) {
-	key, _ := crypto.GenerateIdentityKey()
+	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+	key := &NodeKey{Pub: pub, Priv: priv}
 	cert, err := GenerateSelfSignedCert(key)
 	if err != nil {
 		t.Fatal(err)
