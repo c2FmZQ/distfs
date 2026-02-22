@@ -417,6 +417,15 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	if err != nil {
 		return err
 	}
+
+	// Success: Sync in-memory KeyRing and disk file
+	if cmd.Type == CmdRotateFSMKey {
+		fsm.db.View(func(tx *bolt.Tx) error {
+			fsm.syncKeyRing(tx)
+			return nil
+		})
+	}
+
 	return result
 }
 
@@ -440,7 +449,39 @@ func (fsm *MetadataFSM) applyBatch(data []byte) interface{} {
 		// can see WHICH command failed, but the transaction has been rolled back.
 		return results
 	}
+
+	// Success: Check if any command was a key rotation
+	for _, cmd := range cmds {
+		if cmd.Type == CmdRotateFSMKey {
+			fsm.db.View(func(tx *bolt.Tx) error {
+				fsm.syncKeyRing(tx)
+				return nil
+			})
+			break
+		}
+	}
+
 	return results
+}
+
+func (fsm *MetadataFSM) syncKeyRing(tx *bolt.Tx) {
+	krData, err := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
+	if err != nil || krData == nil {
+		return
+	}
+
+	kr, err := crypto.UnmarshalKeyRing(krData)
+	if err != nil {
+		return
+	}
+
+	fsm.mu.Lock()
+	fsm.keyRing = kr
+	fsm.mu.Unlock()
+
+	if fsm.st != nil {
+		fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: krData})
+	}
 }
 
 func (fsm *MetadataFSM) containsError(res interface{}) bool {
@@ -2075,12 +2116,21 @@ func (fsm *MetadataFSM) executeRotateFSMKey(tx *bolt.Tx, data []byte) interface{
 	if err := json.Unmarshal(data, &req); err != nil {
 		return err
 	}
-	fsm.keyRing.AddKey(req.Gen, req.NewKey)
-	if fsm.st != nil {
-		if err := fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: fsm.keyRing.Marshal()}); err != nil {
-			return err
-		}
+
+	// We'll update the KeyRing in memory only AFTER the transaction commits.
+	// For now, store the entire updated keyring in the system bucket to ensure
+	// it's part of the Raft-applied state and is included in future snapshots.
+	
+	// Temporarily add to a copy to marshal the full ring
+	// Note: keyRing.Marshal() is thread-safe but we are in a write lock context anyway.
+	krCopy, _ := crypto.UnmarshalKeyRing(fsm.keyRing.Marshal())
+	krCopy.AddKey(req.Gen, req.NewKey)
+	
+	krData := krCopy.Marshal()
+	if err := fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData); err != nil {
+		return err
 	}
+	
 	return nil
 }
 

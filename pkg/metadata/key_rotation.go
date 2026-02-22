@@ -30,6 +30,9 @@ type KeyRotationWorker struct {
 	server   *Server
 	stopChan chan struct{}
 	interval time.Duration
+
+	// Progress tracking for background scanning
+	lastKeys map[string][]byte
 }
 
 // NewKeyRotationWorker creates a new key rotation worker.
@@ -42,6 +45,7 @@ func NewKeyRotationWorker(s *Server) *KeyRotationWorker {
 		server:   s,
 		stopChan: make(chan struct{}),
 		interval: interval,
+		lastKeys: make(map[string][]byte),
 	}
 }
 
@@ -114,6 +118,10 @@ func (w *KeyRotationWorker) reencryptSlowly() {
 	_, activeGen := w.server.fsm.keyRing.Current()
 
 	for _, bucket := range buckets {
+		var candidates [][]byte
+		var lastKey []byte
+		finished := false
+
 		err := w.server.fsm.db.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket(bucket)
 			if b == nil {
@@ -121,25 +129,47 @@ func (w *KeyRotationWorker) reencryptSlowly() {
 			}
 			c := b.Cursor()
 			count := 0
-			for k, v := c.First(); k != nil; k, v = c.Next() {
+
+			// Start from the last scanned key
+			startK := w.lastKeys[string(bucket)]
+			for k, v := c.Seek(startK); k != nil; k, v = c.Next() {
 				count++
 				if count > 1000 {
-					return nil // Scan limit per tick to avoid CPU spikes
+					lastKey = k
+					return nil // Pause scan for this bucket
 				}
 				if len(v) < 4 {
 					continue
 				}
 				gen := binary.BigEndian.Uint32(v[:4])
 				if gen != activeGen {
-					// Found a candidate for re-encryption
-					w.reencryptRecord(bucket, k)
-					return ErrStopIteration
+					candidates = append(candidates, append([]byte{}, k...))
+					if len(candidates) >= 50 { // Limit candidates per tick
+						lastKey = k
+						return nil
+					}
 				}
 			}
+			finished = true
 			return nil
 		})
-		if err == ErrStopIteration {
-			break // Done for this tick
+
+		if err != nil {
+			continue
+		}
+
+		// Process candidates found in this bucket
+		if len(candidates) > 0 {
+			for _, k := range candidates {
+				w.reencryptRecord(bucket, k)
+			}
+		}
+
+		if finished {
+			delete(w.lastKeys, string(bucket))
+		} else if lastKey != nil {
+			w.lastKeys[string(bucket)] = lastKey
+			break // Limit to one bucket scan per tick if paused
 		}
 	}
 }

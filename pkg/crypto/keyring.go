@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"sort"
 	"sync"
 )
 
@@ -72,7 +73,17 @@ func (kr *KeyRing) Marshal() []byte {
 	b := make([]byte, 4)
 	binary.BigEndian.PutUint32(b, kr.current)
 
-	for gen, key := range kr.keys {
+	// Sort generations for deterministic output
+	gens := make([]uint32, 0, len(kr.keys))
+	for gen := range kr.keys {
+		gens = append(gens, gen)
+	}
+	sort.Slice(gens, func(i, j int) bool {
+		return gens[i] < gens[j]
+	})
+
+	for _, gen := range gens {
+		key := kr.keys[gen]
 		genBuf := make([]byte, 4)
 		binary.BigEndian.PutUint32(genBuf, gen)
 		b = append(b, genBuf...)
