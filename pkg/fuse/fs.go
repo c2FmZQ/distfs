@@ -591,6 +591,7 @@ type FileHandle struct {
 	reader *client.FileReader
 	mu     sync.Mutex
 	pages  map[int64][]byte
+	stagingManifest map[int64]metadata.ChunkEntry // index -> entry
 	size   uint64
 }
 
@@ -644,8 +645,26 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 					if avail > toRead {
 						avail = toRead
 					}
+					bytesRead += avail
 				}
-				bytesRead += toRead
+				continue
+			}
+		}
+
+		if h.stagingManifest != nil {
+			if entry, ok := h.stagingManifest[pageIdx]; ok {
+				// Evicted but uncommitted chunk
+				page, err := h.file.fs.client.DownloadChunkData(ctx, h.file.inode.ID, entry.ID, entry.URLs, h.file.key)
+				if err != nil {
+					return mapError(err)
+				}
+				if pageOff < len(page) {
+					avail := copy(data[bytesRead:], page[pageOff:])
+					if avail > toRead {
+						avail = toRead
+					}
+					bytesRead += avail
+				}
 				continue
 			}
 		}
@@ -676,6 +695,9 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 		h.pages = make(map[int64][]byte)
 		h.size = h.file.inode.Size
 	}
+	if h.stagingManifest == nil {
+		h.stagingManifest = make(map[int64]metadata.ChunkEntry)
+	}
 
 	const chunkSize = 1024 * 1024
 
@@ -695,9 +717,16 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 		// Load Page
 		page, ok := h.pages[pageIdx]
 		if !ok {
-			// Fetch from server if it exists
-			if pageIdx < int64(len(h.file.inode.ChunkManifest)) {
-				// Fetch
+			// Check staging first (evicted page)
+			if entry, staged := h.stagingManifest[pageIdx]; staged {
+				// Fetch back for modification (Read-Modify-Write)
+				data, err := h.file.fs.client.DownloadChunkData(ctx, h.file.inode.ID, entry.ID, entry.URLs, h.file.key)
+				if err != nil {
+					return mapError(err)
+				}
+				page = data
+			} else if pageIdx < int64(len(h.file.inode.ChunkManifest)) {
+				// Fetch from server if it exists committed
 				data, err := h.file.fs.client.FetchChunk(ctx, h.file.inode.ID, h.file.key, pageIdx)
 				if err != nil {
 					return mapError(err)
@@ -727,6 +756,20 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 		copy(page[pageOffset:], req.Data[written:written+toWrite])
 		h.pages[pageIdx] = page
 
+		// Incremental Flush: If page is full, upload and evict
+		if len(page) == chunkSize {
+			bgCtx := context.Background()
+			entry, err := h.file.fs.client.UploadChunkData(bgCtx, h.file.inode.ID, h.file.key, uint64(pageIdx), page)
+			if err != nil {
+				log.Printf("Incremental upload failed: %v", err)
+				// Keep dirty page in memory, don't fail write? Or fail?
+				// Better to fail so user knows.
+				return mapError(err)
+			}
+			h.stagingManifest[pageIdx] = entry
+			delete(h.pages, pageIdx) // Evict
+		}
+
 		written += toWrite
 	}
 
@@ -744,17 +787,49 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if len(h.pages) > 0 {
-		dirtyMap := make(map[int64]bool)
-		for idx := range h.pages {
-			dirtyMap[idx] = true
+	// 1. Upload remaining dirty pages
+	bgCtx := context.Background()
+	for idx, page := range h.pages {
+		entry, err := h.file.fs.client.UploadChunkData(bgCtx, h.file.inode.ID, h.file.key, uint64(idx), page)
+		if err != nil {
+			log.Printf("FUSE Flush upload failed (idx=%d): %v", idx, err)
+			return mapError(err)
+		}
+		if h.stagingManifest == nil {
+			h.stagingManifest = make(map[int64]metadata.ChunkEntry)
+		}
+		h.stagingManifest[idx] = entry
+	}
+
+	// 2. Commit Manifest if there are changes
+	if len(h.stagingManifest) > 0 {
+		// Start with existing manifest
+		manifest := make([]metadata.ChunkEntry, len(h.file.inode.ChunkManifest))
+		copy(manifest, h.file.inode.ChunkManifest)
+
+		// Determine new length
+		maxIdx := int64(len(manifest)) - 1
+		for idx := range h.stagingManifest {
+			if idx > maxIdx {
+				maxIdx = idx
+			}
 		}
 
-		// The ctx gets canceled too soon by fuse and/or the kernel.
-		// Thus context.WithoutCancel.
-		updated, err := h.file.fs.client.SyncFile(context.WithoutCancel(ctx), h.file.inode.ID, h, int64(h.size), dirtyMap)
+		// Grow manifest if needed
+		if maxIdx >= int64(len(manifest)) {
+			newManifest := make([]metadata.ChunkEntry, maxIdx+1)
+			copy(newManifest, manifest)
+			manifest = newManifest
+		}
+
+		// Apply updates
+		for idx, entry := range h.stagingManifest {
+			manifest[idx] = entry
+		}
+
+		updated, err := h.file.fs.client.CommitInodeManifest(bgCtx, h.file.inode.ID, manifest, h.size)
 		if err != nil {
-			log.Printf("FUSE Flush sync failed (size=%d, ctxErr=%v): %v", h.size, ctx.Err(), err)
+			log.Printf("FUSE Flush commit failed: %v", err)
 			return mapError(err)
 		}
 
@@ -763,8 +838,9 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		h.file.inode = updated
 		h.file.mu.Unlock()
 
-		// Clear dirty pages after successful sync
-		h.pages = make(map[int64][]byte)
+		// Clear buffers
+		h.pages = nil
+		h.stagingManifest = nil
 		h.size = updated.Size
 	}
 	return nil

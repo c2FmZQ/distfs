@@ -2214,6 +2214,58 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 	return crypto.DecryptChunk(key, ct)
 }
 
+func (c *Client) DownloadChunkData(ctx context.Context, inodeID string, chunkID string, urls []string, key []byte) ([]byte, error) {
+	token, err := c.issueToken(ctx, inodeID, []string{chunkID}, "R")
+	if err != nil {
+		return nil, err
+	}
+	enc, err := c.downloadChunk(ctx, chunkID, urls, token)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.DecryptChunk(key, enc)
+}
+
+func (c *Client) UploadChunkData(ctx context.Context, id string, key []byte, chunkIndex uint64, data []byte) (metadata.ChunkEntry, error) {
+	// Encrypt
+	cid, ct, err := crypto.EncryptChunk(key, data, chunkIndex)
+	if err != nil {
+		return metadata.ChunkEntry{}, err
+	}
+
+	// Upload
+	token, err := c.issueToken(ctx, id, []string{cid}, "W")
+	if err != nil {
+		return metadata.ChunkEntry{}, err
+	}
+	nodes, err := c.allocateNodes(ctx)
+	if err != nil {
+		return metadata.ChunkEntry{}, err
+	}
+	if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
+		return metadata.ChunkEntry{}, err
+	}
+
+	var nodeIDs []string
+	var nodeURLs []string
+	for _, node := range nodes {
+		nodeIDs = append(nodeIDs, node.ID)
+		nodeURLs = append(nodeURLs, node.Address)
+	}
+	return metadata.ChunkEntry{ID: cid, Nodes: nodeIDs, URLs: nodeURLs}, nil
+}
+
+func (c *Client) CommitInodeManifest(ctx context.Context, id string, manifest []metadata.ChunkEntry, size uint64) (*metadata.Inode, error) {
+	inode, err := c.getInode(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	inode.ChunkManifest = manifest
+	inode.Size = size
+	inode.SetInlineData(nil) // Ensure we are not inline if we have chunks
+	return c.updateInode(ctx, *inode)
+}
+
 func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) (*metadata.Inode, error) {
 	// 1. Get current inode state
 	inode, err := c.getInode(ctx, id)
