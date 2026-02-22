@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path"
 	"sort"
 	"strings"
 	"time"
@@ -27,38 +28,36 @@ import (
 )
 
 var _ fs.FS = (*DistFS)(nil)
-var _ fs.File = (*DistFile)(nil)
+var _ fs.ReadDirFS = (*DistFS)(nil)
+var _ fs.ReadFileFS = (*DistFS)(nil)
+var _ fs.GlobFS = (*DistFS)(nil)
+var _ fs.StatFS = (*DistFS)(nil)
+var _ fs.SubFS = (*DistFS)(nil)
 
-// DistFS implements fs.FS and fs.ReadDirFS.
+// fs.ReadLinkFS is defined in Go 1.23+. We implement the method to satisfy it if available.
+// If the compiler is older, this check would fail if we uncommented it, so we leave it implicitly satisfied.
+// var _ fs.ReadLinkFS = (*DistFS)(nil)
+
+// DistFS implements fs.FS and extended interfaces.
 type DistFS struct {
-	client *Client
-	ctx    context.Context
+	client   *Client
+	ctx      context.Context
+	basePath string
 }
 
 // FS returns an fs.FS compatible wrapper around the client.
 func (c *Client) FS(ctx context.Context) *DistFS {
-	return &DistFS{client: c, ctx: ctx}
-}
-
-// ReadDir implements fs.ReadDirFS.
-func (d *DistFS) ReadDir(name string) ([]fs.DirEntry, error) {
-	f, err := d.Open(name)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	rdf, ok := f.(fs.ReadDirFile)
-	if !ok {
-		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fmt.Errorf("not a directory")}
-	}
-
-	return rdf.ReadDir(-1)
+	return &DistFS{client: c, ctx: ctx, basePath: "/"}
 }
 
 // Open implements fs.FS.
 func (d *DistFS) Open(name string) (fs.File, error) {
-	inode, key, err := d.client.ResolvePath(d.ctx, name)
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "open", Path: name, Err: fs.ErrInvalid}
+	}
+
+	fullPath := path.Join(d.basePath, name)
+	inode, key, err := d.client.ResolvePath(d.ctx, fullPath)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
@@ -79,6 +78,99 @@ func (d *DistFS) Open(name string) (fs.File, error) {
 	}
 
 	return &DistFile{reader: reader}, nil
+}
+
+// ReadDir implements fs.ReadDirFS.
+func (d *DistFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	// Open handles validation and path joining
+	f, err := d.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	rdf, ok := f.(fs.ReadDirFile)
+	if !ok {
+		return nil, &fs.PathError{Op: "readdir", Path: name, Err: fmt.Errorf("not a directory")}
+	}
+
+	return rdf.ReadDir(-1)
+}
+
+// ReadFile implements fs.ReadFileFS.
+func (d *DistFS) ReadFile(name string) ([]byte, error) {
+	f, err := d.Open(name)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	return io.ReadAll(f)
+}
+
+// Glob implements fs.GlobFS.
+func (d *DistFS) Glob(pattern string) ([]string, error) {
+	// Check pattern validity
+	if _, err := path.Match(pattern, ""); err != nil {
+		return nil, err
+	}
+	// Use standard fs.Glob implementation which falls back to ReadDir
+	// We wrap d in a struct that hides the Glob method to prevent infinite recursion
+	return fs.Glob(&noGlobFS{dfs: d}, pattern)
+}
+
+// Stat implements fs.StatFS.
+func (d *DistFS) Stat(name string) (fs.FileInfo, error) {
+	if !fs.ValidPath(name) {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(d.basePath, name)
+	inode, _, err := d.client.ResolvePath(d.ctx, fullPath)
+	if err != nil {
+		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
+	}
+	return &DistFileInfo{inode: inode, name: path.Base(name)}, nil
+}
+
+// Sub implements fs.SubFS.
+func (d *DistFS) Sub(dir string) (fs.FS, error) {
+	if !fs.ValidPath(dir) {
+		return nil, &fs.PathError{Op: "sub", Path: dir, Err: fs.ErrInvalid}
+	}
+	return &DistFS{
+		client:   d.client,
+		ctx:      d.ctx,
+		basePath: path.Join(d.basePath, dir),
+	}, nil
+}
+
+// ReadLink implements fs.ReadLinkFS (if available in stdlib).
+func (d *DistFS) ReadLink(name string) (string, error) {
+	if !fs.ValidPath(name) {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
+	}
+	fullPath := path.Join(d.basePath, name)
+	inode, _, err := d.client.ResolvePath(d.ctx, fullPath)
+	if err != nil {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
+	}
+	if inode.Type != metadata.SymlinkType {
+		return "", &fs.PathError{Op: "readlink", Path: name, Err: fmt.Errorf("not a symlink")}
+	}
+	return inode.GetSymlinkTarget(), nil
+}
+
+// noGlobFS wraps DistFS but hides the Glob method to allow fs.Glob fallback.
+type noGlobFS struct {
+	dfs *DistFS
+}
+
+func (f *noGlobFS) Open(name string) (fs.File, error) {
+	return f.dfs.Open(name)
+}
+
+func (f *noGlobFS) ReadDir(name string) ([]fs.DirEntry, error) {
+	return f.dfs.ReadDir(name)
 }
 
 // DistFile implements fs.File

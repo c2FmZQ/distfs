@@ -16,7 +16,6 @@ package client
 
 import (
 	"bytes"
-	"crypto/mlkem"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -30,37 +29,6 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-func bootstrapClusterFS(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, []byte) {
-	dk, _ := crypto.GenerateEncryptionKey()
-	ek := dk.EncapsulationKey()
-	key := metadata.ClusterKey{
-		ID:        "key-1",
-		EncKey:    ek.Bytes(),
-		DecKey:    dk.Bytes(),
-		CreatedAt: time.Now().Unix(),
-	}
-	keyBytes, _ := json.Marshal(key)
-	cmd := metadata.LogCommand{Type: metadata.CmdRotateKey, Data: keyBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
-	}
-
-	// Bootstrap cluster sign key
-	csk, _ := crypto.GenerateIdentityKey()
-	cskData := metadata.ClusterSignKey{
-		Public:           csk.Public(),
-		EncryptedPrivate: csk.MarshalPrivate(),
-	}
-	cskBytes, _ := json.Marshal(cskData)
-	future = raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Bootstrap sign key apply failed: %v", err)
-	}
-
-	return dk.EncapsulationKey(), csk.Public()
-}
 
 func TestDistFS_ReadDir(t *testing.T) {
 	// 1. Setup Cluster
@@ -76,9 +44,8 @@ func TestDistFS_ReadDir(t *testing.T) {
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
 	})
-	time.Sleep(2 * time.Second)
 
-	serverEK, metaSignPK := bootstrapClusterFS(t, metaNode)
+	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
 	tsMeta := httptest.NewServer(metaServer)

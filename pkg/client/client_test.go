@@ -215,7 +215,7 @@ func TestClientIntegration(t *testing.T) {
 	}
 
 	dfs := c.FS(t.Context())
-	f, err := dfs.Open(fileName)
+	f, err := dfs.Open("file-2.txt")
 	if err != nil {
 		t.Fatalf("FS Open failed: %v", err)
 	}
