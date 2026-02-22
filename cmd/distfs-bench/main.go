@@ -24,6 +24,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -219,7 +220,9 @@ func main() {
 					bytesTransferred = uint64(*size)
 				case "get":
 					// High level Open uses io.fs interface
-					f, ferr := c.FS(ctx).Open(benchDir + "/bench-target")
+					// Strip leading slash for fs.FS compatibility
+					targetPath := strings.TrimPrefix(benchDir+"/bench-target", "/")
+					f, ferr := c.FS(ctx).Open(targetPath)
 					if ferr != nil {
 						err = ferr
 					} else {

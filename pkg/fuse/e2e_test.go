@@ -330,7 +330,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	unmount1()
 
 	fsClient := newClient()
-	rb2, err := iofs.ReadFile(fsClient.FS(t.Context()), "/testfile.bin")
+	rb2, err := iofs.ReadFile(fsClient.FS(t.Context()), "testfile.bin")
 	if err != nil {
 		t.Fatalf("fs.ReadFile: %v", err)
 	}

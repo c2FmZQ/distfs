@@ -29,7 +29,6 @@ import (
 	"github.com/hashicorp/raft"
 )
 
-
 func TestDistFS_ReadDir(t *testing.T) {
 	// 1. Setup Cluster
 	metaDir := t.TempDir()
