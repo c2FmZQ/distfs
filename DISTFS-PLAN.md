@@ -648,3 +648,30 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 36.5: Testing & Verification**
     *   **Action:** Add E2E tests to verify that common operations (ls, stat, read) work correctly with the blob-based architecture.
     *   **Action:** Verify via raw DB inspection that sensitive fields are no longer stored in plaintext (or even separate ciphertext fields).
+
+---
+
+## Phase 37: FSM Key Rotation & KeyRing Implementation
+**Goal:** Implement cryptographic agility and forward secrecy for the metadata layer by introducing a rotating FSM key ring.
+
+*   **Step 37.1: KeyRing Integration in FSM**
+    *   **Action:** Refactor `MetadataFSM` struct in `pkg/metadata/fsm.go` to use `crypto.KeyRing` instead of a static `[]byte` for `fsmKey`.
+    *   **Action:** Update `NewMetadataFSM` to initialize/load the `KeyRing` from `fsm.key`.
+*   **Step 37.2: Prefixed Ciphertext Format**
+    *   **Action:** Update `EncryptValue` to prepend the 4-byte Key Generation ID to the ciphertext.
+    *   **Action:** Update `DecryptValue` to read the ID and use the corresponding key from the `KeyRing`.
+*   **Step 37.3: Synchronized Key Rotation**
+    *   **Action:** Implement `CmdRotateFSMKey` Raft command.
+    *   **Action:** When applied, all nodes call `fsm.keyRing.Rotate()` and persist the updated ring to their local `fsm.key` via `fsm.st`.
+*   **Step 37.4: Background Re-encryption Worker**
+    *   **Action:** Implement `KeyRotationWorker` in `pkg/metadata/key_rotation.go` (Leader-only).
+    *   **Action:** The worker slowly scans BoltDB buckets (Inodes, Users, Groups, etc.).
+    *   **Action:** For values not encrypted with the *active* key, it re-encrypts them and proposes an update via Raft (e.g., `CmdUpdateInode`).
+    *   **Action:** Implement throttling to ensure minimal impact on cluster performance.
+*   **Step 37.5: Snapshot & Restore Evolution**
+    *   **Action:** Update `MetadataSnapshot.Persist` to write the full serialized `KeyRing` to the snapshot stream.
+    *   **Action:** Update `MetadataFSM.Restore` to read and initialize the `KeyRing` from the stream.
+*   **Step 37.6: Testing & Verification**
+    *   **Action:** **Unit Test:** Verify that `DecryptValue` correctly handles multiple key generations.
+    *   **Action:** **Integration Test:** Perform a key rotation and verify that the background worker successfully updates all values to the new key without downtime.
+    *   **Action:** **Reliability Test:** Verify that a node can join the cluster and correctly sync the full `KeyRing` from a snapshot.

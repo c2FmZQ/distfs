@@ -132,7 +132,7 @@ func TestSnapshotEncryption(t *testing.T) {
 	if err := st2.ReadDataFile("fsm.key", &keyData); err != nil {
 		t.Fatal("fsm.key not saved")
 	}
-	if string(keyData.Bytes) != string(fsm1.FSMKey()) {
+	if string(keyData.Bytes) != string(fsm1.keyRing.Marshal()) {
 		t.Error("fsm.key mismatch")
 	}
 }

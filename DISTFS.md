@@ -39,7 +39,9 @@ The system is designed to scale horizontally, with the following soft limits:
     *   **Root Secret:** A `DISTFS_MASTER_KEY` environment variable provides the master passphrase.
     *   **Master Key:** A `crypto.MasterKey` is derived from this passphrase to decrypt the node-local key store (`data/master.key`).
     *   **Isolation:** Encryption keys are node-local and never shared across the network.
-*   **Key Rotation:** The encryption key for Raft logs MUST be rotated after every snapshot.
+*   **Key Rotation:** 
+    *   **Raft Logs:** The encryption key for Raft logs MUST be rotated after every snapshot.
+    *   **FSM Metadata:** Metadata values in BoltDB are encrypted using a cluster-wide **FSM KeyRing**. The active key is used for new writes, while old keys are retained for decryption. A background worker periodically re-encrypts old records with the active key to provide forward secrecy.
 
 ### 3.2 Key Hierarchy & Cryptography
 Users control their identity via an asymmetric key pair using **Post-Quantum Cryptography (PQC)** algorithms (e.g., CRYSTALS-Kyber for encapsulation, CRYSTALS-Dilithium for signatures) to future-proof against quantum threats.

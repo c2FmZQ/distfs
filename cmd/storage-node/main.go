@@ -410,7 +410,9 @@ func loadOrGenerateSignKey(st *storage.Storage) (*crypto.IdentityKey, error) {
 		signKey = crypto.UnmarshalIdentityKey(signData.Bytes)
 	} else {
 		signKey, _ = crypto.GenerateIdentityKey()
-		st.SaveDataFile(signKeyName, KeyData{Bytes: signKey.MarshalPrivate()})
+		if err := st.SaveDataFile(signKeyName, KeyData{Bytes: signKey.MarshalPrivate()}); err != nil {
+			return nil, err
+		}
 	}
 
 	return signKey, nil

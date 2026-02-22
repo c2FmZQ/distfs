@@ -38,6 +38,16 @@ func (kr *KeyRing) Get(gen uint32) ([]byte, bool) {
 	return k, ok
 }
 
+// AddKey adds a specific key generation to the keyring.
+func (kr *KeyRing) AddKey(gen uint32, key []byte) {
+	kr.mu.Lock()
+	defer kr.mu.Unlock()
+	kr.keys[gen] = key
+	if gen > kr.current {
+		kr.current = gen
+	}
+}
+
 // Rotate generates a new key and increments the generation.
 func (kr *KeyRing) Rotate() (uint32, error) {
 	kr.mu.Lock()

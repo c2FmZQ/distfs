@@ -45,10 +45,10 @@ var (
 type MetadataFSM struct {
 	db         *bolt.DB
 	path       string
-	OnSnapshot func()
+	OnSnapshot func() error
 
 	st      *storage.Storage
-	fsmKey  []byte
+	keyRing *crypto.KeyRing
 	trusted map[string]bool // PubKey(bytes) -> true
 	mu      sync.RWMutex
 
@@ -76,15 +76,22 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 		return nil, err
 	}
 
-	// Derive FSM Key from Storage
+	// Load or Initialize FSM KeyRing
 	var keyData KeyData
-	if err := st.ReadDataFile("fsm.key", &keyData); err != nil {
+	var kr *crypto.KeyRing
+	if err := st.ReadDataFile("fsm.key", &keyData); err == nil {
+		kr, _ = crypto.UnmarshalKeyRing(keyData.Bytes)
+	}
+
+	if kr == nil {
+		// Initialize new KeyRing
 		k := make([]byte, 32)
 		if _, err := io.ReadFull(rand.Reader, k); err != nil {
 			db.Close()
 			return nil, err
 		}
-		keyData.Bytes = k
+		kr = crypto.NewKeyRing(k)
+		keyData.Bytes = kr.Marshal()
 		if err := st.SaveDataFile("fsm.key", keyData); err != nil {
 			db.Close()
 			return nil, err
@@ -95,7 +102,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 		db:      db,
 		path:    path,
 		st:      st,
-		fsmKey:  keyData.Bytes,
+		keyRing: kr,
 		trusted: make(map[string]bool),
 		metrics: NewMetricsCollector(),
 	}
@@ -107,18 +114,34 @@ func (fsm *MetadataFSM) EncryptValue(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
 	}
-	return crypto.EncryptDEM(fsm.fsmKey, data)
+	key, gen := fsm.keyRing.Current()
+	ct, err := crypto.EncryptDEM(key, data)
+	if err != nil {
+		return nil, err
+	}
+
+	// Result: [Gen(4)][Ciphertext]
+	out := make([]byte, 4+len(ct))
+	binary.BigEndian.PutUint32(out[:4], gen)
+	copy(out[4:], ct)
+	return out, nil
 }
 
 func (fsm *MetadataFSM) DecryptValue(data []byte) ([]byte, error) {
-	if len(data) == 0 {
+	if len(data) < 4 {
 		return data, nil
 	}
-	return crypto.DecryptDEM(fsm.fsmKey, data)
+	gen := binary.BigEndian.Uint32(data[:4])
+	key, ok := fsm.keyRing.Get(gen)
+	if !ok {
+		return nil, fmt.Errorf("fsm key generation %d not found", gen)
+	}
+	return crypto.DecryptDEM(key, data[4:])
 }
 
 func (fsm *MetadataFSM) FSMKey() []byte {
-	return fsm.fsmKey
+	k, _ := fsm.keyRing.Current()
+	return k
 }
 
 func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket []byte, key []byte, value []byte) error {
@@ -193,9 +216,9 @@ func (fsm *MetadataFSM) loadTrustState() {
 	}
 }
 
-func (fsm *MetadataFSM) saveTrustState() {
+func (fsm *MetadataFSM) saveTrustState() error {
 	if fsm.st == nil {
-		return
+		return nil
 	}
 	fsm.mu.RLock()
 	var keys []string
@@ -205,7 +228,7 @@ func (fsm *MetadataFSM) saveTrustState() {
 	fsm.mu.RUnlock()
 
 	td := TrustData{Keys: keys}
-	fsm.st.SaveDataFile("trust.bin", td)
+	return fsm.st.SaveDataFile("trust.bin", td)
 }
 
 func (fsm *MetadataFSM) IsInitialized() bool {
@@ -294,6 +317,8 @@ const (
 	CmdSetGroupQuota     CommandType = 28
 	CmdSetClusterSignKey CommandType = 29
 	CmdRemoveNode        CommandType = 30
+	CmdRotateFSMKey      CommandType = 31
+	CmdReencryptValue    CommandType = 32
 )
 
 // LogCommand is the structure stored in the Raft log.
@@ -305,6 +330,11 @@ type LogCommand struct {
 func (c LogCommand) Marshal() []byte {
 	b, _ := json.Marshal(c)
 	return b
+}
+
+type ReencryptRequest struct {
+	Bucket []byte `json:"bucket"`
+	Key    []byte `json:"key"`
 }
 
 type LeaseRequest struct {
@@ -338,6 +368,11 @@ type LinkRequest struct {
 	ParentID string `json:"parent_id"`
 	Name     string `json:"name"`
 	TargetID string `json:"target_id"`
+}
+
+type RotateFSMKeyRequest struct {
+	NewKey []byte `json:"new_key"`
+	Gen    uint32 `json:"gen"`
 }
 
 type SetUserQuotaRequest struct {
@@ -499,6 +534,10 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeSetClusterSignKey(tx, data)
 	case CmdRemoveNode:
 		return fsm.executeRemoveNode(tx, data)
+	case CmdRotateFSMKey:
+		return fsm.executeRotateFSMKey(tx, data)
+	case CmdReencryptValue:
+		return fsm.executeReencryptValue(tx, data)
 	case CmdBatch:
 		return fsm.applyBatchTx(tx, data, depth+1)
 	}
@@ -669,7 +708,9 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 	fsm.mu.Unlock()
 
 	if len(node.PublicKey) > 0 || len(node.SignKey) > 0 {
-		fsm.saveTrustState()
+		if err := fsm.saveTrustState(); err != nil {
+			return err
+		}
 	}
 
 	encoded, err := json.Marshal(node)
@@ -699,7 +740,9 @@ func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} 
 	delete(fsm.trusted, string(node.PublicKey))
 	delete(fsm.trusted, string(node.SignKey))
 	fsm.mu.Unlock()
-	fsm.saveTrustState()
+	if err := fsm.saveTrustState(); err != nil {
+		return err
+	}
 
 	return fsm.Delete(tx, []byte("nodes"), []byte(nodeID))
 }
@@ -1200,9 +1243,11 @@ func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
 // Snapshot returns a snapshot of the current state.
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	if fsm.OnSnapshot != nil {
-		fsm.OnSnapshot()
+		if err := fsm.OnSnapshot(); err != nil {
+			return nil, err
+		}
 	}
-	return &MetadataSnapshot{db: fsm.db, fsmKey: fsm.fsmKey}, nil
+	return &MetadataSnapshot{db: fsm.db, keyRing: fsm.keyRing}, nil
 }
 
 func (fsm *MetadataFSM) ValidateNode(address string) error {
@@ -1236,11 +1281,23 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 		return fmt.Errorf("close db: %w", err)
 	}
 
-	// 1. Read FSM Key
-	newKey := make([]byte, 32)
-	if _, err := io.ReadFull(rc, newKey); err != nil {
+	// 1. Read FSM KeyRing
+	lBuf := make([]byte, 4)
+	if _, err := io.ReadFull(rc, lBuf); err != nil {
 		fsm.reopen()
-		return fmt.Errorf("read fsm key: %w", err)
+		return fmt.Errorf("read keyring length: %w", err)
+	}
+	l := binary.BigEndian.Uint32(lBuf)
+	krData := make([]byte, l)
+	if _, err := io.ReadFull(rc, krData); err != nil {
+		fsm.reopen()
+		return fmt.Errorf("read keyring data: %w", err)
+	}
+
+	kr, err := crypto.UnmarshalKeyRing(krData)
+	if err != nil {
+		fsm.reopen()
+		return fmt.Errorf("unmarshal keyring: %w", err)
 	}
 
 	// 2. Restore DB
@@ -1271,15 +1328,14 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 
 	// 3. Update and Save FSM Key only after successful DB restore
 	if fsm.st != nil {
-		if err := fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: newKey}); err != nil {
+		if err := fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: krData}); err != nil {
 			return fmt.Errorf("save fsm key: %w", err)
 		}
 	}
-	fsm.fsmKey = newKey
+	fsm.keyRing = kr
 
 	// Rebuild the in-memory trust cache and persist it to trust.bin after restoring from snapshot.
-	fsm.rebuildTrustCache()
-	return nil
+	return fsm.rebuildTrustCache()
 }
 
 func (fsm *MetadataFSM) reopen() error {
@@ -1291,12 +1347,12 @@ func (fsm *MetadataFSM) reopen() error {
 	return nil
 }
 
-func (fsm *MetadataFSM) rebuildTrustCache() {
+func (fsm *MetadataFSM) rebuildTrustCache() error {
 	fsm.mu.Lock()
 	defer fsm.mu.Unlock()
 	fsm.trusted = make(map[string]bool)
 
-	fsm.db.View(func(tx *bolt.Tx) error {
+	err := fsm.db.View(func(tx *bolt.Tx) error {
 		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
@@ -1305,6 +1361,9 @@ func (fsm *MetadataFSM) rebuildTrustCache() {
 			return nil
 		})
 	})
+	if err != nil {
+		return err
+	}
 
 	// We should also persist it to trust.bin to match
 	keys := make([]string, 0, len(fsm.trusted))
@@ -1312,21 +1371,28 @@ func (fsm *MetadataFSM) rebuildTrustCache() {
 		keys = append(keys, k)
 	}
 	if fsm.st != nil {
-		fsm.st.SaveDataFile("trust.bin", TrustData{Keys: keys})
+		return fsm.st.SaveDataFile("trust.bin", TrustData{Keys: keys})
 	}
+	return nil
 }
 
 type MetadataSnapshot struct {
-	db     *bolt.DB
-	fsmKey []byte
+	db      *bolt.DB
+	keyRing *crypto.KeyRing
 }
 
 func (s *MetadataSnapshot) Persist(sink raft.SnapshotSink) error {
-	// 1. Write FSM Key (32 bytes)
-	if len(s.fsmKey) != 32 {
-		return fmt.Errorf("invalid fsm key length: %d", len(s.fsmKey))
+	// 1. Write FSM KeyRing
+	krData := s.keyRing.Marshal()
+	l := uint32(len(krData))
+	lBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lBuf, l)
+
+	if _, err := sink.Write(lBuf); err != nil {
+		sink.Cancel()
+		return err
 	}
-	if _, err := sink.Write(s.fsmKey); err != nil {
+	if _, err := sink.Write(krData); err != nil {
 		sink.Cancel()
 		return err
 	}
@@ -2002,6 +2068,52 @@ func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{
 	}
 
 	return fsm.Put(tx, []byte("metrics"), int64ToBytes(snap.Timestamp), data)
+}
+
+func (fsm *MetadataFSM) executeRotateFSMKey(tx *bolt.Tx, data []byte) interface{} {
+	var req RotateFSMKeyRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+	fsm.keyRing.AddKey(req.Gen, req.NewKey)
+	if fsm.st != nil {
+		if err := fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: fsm.keyRing.Marshal()}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (fsm *MetadataFSM) executeReencryptValue(tx *bolt.Tx, data []byte) interface{} {
+	var req ReencryptRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+
+	b := tx.Bucket(req.Bucket)
+	if b == nil {
+		return nil
+	}
+	v := b.Get(req.Key)
+	if v == nil {
+		return nil
+	}
+
+	if len(v) < 4 {
+		return nil
+	}
+
+	_, activeGen := fsm.keyRing.Current()
+	if binary.BigEndian.Uint32(v[:4]) == activeGen {
+		return nil // Already updated
+	}
+
+	// Fetch (decrypts automatically) and Put (encrypts with active key)
+	plain, err := fsm.Get(tx, req.Bucket, req.Key)
+	if err != nil {
+		return err
+	}
+	return fsm.Put(tx, req.Bucket, req.Key, plain)
 }
 
 func int64ToBytes(v int64) []byte {

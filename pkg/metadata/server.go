@@ -408,6 +408,27 @@ func (s *Server) StopKeyRotation() {
 	}
 }
 
+func (s *Server) RotateFSMKey() error {
+	if s.raft.State() != raft.Leader {
+		return fmt.Errorf("not leader")
+	}
+
+	newKey := make([]byte, 32)
+	if _, err := rand.Read(newKey); err != nil {
+		return err
+	}
+
+	_, gen := s.fsm.keyRing.Current()
+	req := RotateFSMKeyRequest{
+		NewKey: newKey,
+		Gen:    gen + 1,
+	}
+	data, _ := json.Marshal(req)
+
+	_, err := s.ApplyRaftCommandInternal(CmdRotateFSMKey, data)
+	return err
+}
+
 type contextKey string
 
 const (

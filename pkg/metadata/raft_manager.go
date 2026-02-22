@@ -178,12 +178,14 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	stableStore := NewEncryptedStableStore(boltStore, stableKey.Bytes)
 	snapStore := NewStorageSnapshotStore(st)
 
-	fsm.OnSnapshot = func() {
+	fsm.OnSnapshot = func() error {
 		kr.Rotate()
-		st.SaveDataFile(keyRingName, KeyRingData{Bytes: kr.Marshal()})
+		if err := st.SaveDataFile(keyRingName, KeyRingData{Bytes: kr.Marshal()}); err != nil {
+			return err
+		}
 		// Note: Trust state is persisted only during snapshots to optimize I/O performance.
 		// Newly registered nodes are trusted in-memory until then.
-		fsm.saveTrustState()
+		return fsm.saveTrustState()
 	}
 
 	r, err = raft.NewRaft(config, fsm, logStore, stableStore, snapStore, transport)

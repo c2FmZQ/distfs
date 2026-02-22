@@ -4,6 +4,7 @@ package metadata
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -14,6 +15,111 @@ import (
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
+
+func TestFSMKeyRotation(t *testing.T) {
+	node, ts, _, _, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	// 1. Create Inode (Gen 1)
+	inode := Inode{ID: "f1", Type: FileType}
+	iBytes, _ := json.Marshal(inode)
+	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes)
+
+	// 2. Rotate FSM Key (To Gen 2)
+	err := server.RotateFSMKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Create Inode (Gen 2)
+	inode2 := Inode{ID: "f2", Type: FileType}
+	iBytes2, _ := json.Marshal(inode2)
+	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2)
+
+	// 4. Verify decryption of both
+	err = server.FSM().DB().View(func(tx *bolt.Tx) error {
+		v1, _ := server.FSM().Get(tx, []byte("inodes"), []byte("f1"))
+		if v1 == nil {
+			t.Error("f1 missing")
+		}
+		v2, _ := server.FSM().Get(tx, []byte("inodes"), []byte("f2"))
+		if v2 == nil {
+			t.Error("f2 missing")
+		}
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
+
+	// 5. Force Re-encryption
+	server.keyWorker.reencryptSlowly()
+	// Wait for async Raft apply
+	time.Sleep(500 * time.Millisecond)
+
+	// 6. Verify f1 is now Gen 2 in raw storage
+	server.FSM().DB().View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("inodes"))
+		v1 := b.Get([]byte("f1"))
+		if binary.BigEndian.Uint32(v1[:4]) != 2 {
+			t.Errorf("f1 not re-encrypted: gen %d", binary.BigEndian.Uint32(v1[:4]))
+		}
+		return nil
+	})
+}
+
+func TestFSMKeyRingSync(t *testing.T) {
+	node, ts, _, _, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	// 1. Rotate a few times
+	server.RotateFSMKey()
+	server.RotateFSMKey()
+	_, gen := server.FSM().keyRing.Current()
+	if gen < 3 {
+		t.Errorf("Expected gen >= 3, got %d", gen)
+	}
+
+	// 2. Take Snapshot
+	if err := node.Raft.Snapshot().Error(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. New Node Joins
+	tmpDir2 := t.TempDir()
+	mk2, _ := storage_crypto.CreateAESMasterKeyForTest()
+	st2 := storage.New(tmpDir2, mk2)
+	pub2, priv2, _ := ed25519.GenerateKey(rand.Reader)
+	nodeKey2 := &NodeKey{Pub: pub2, Priv: priv2}
+	nodeID2 := NodeIDFromKey(nodeKey2)
+
+	node2, err := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer node2.Shutdown()
+
+	// Add to cluster
+	f := node.Raft.AddVoter(raft.ServerID(nodeID2), node2.Transport.LocalAddr(), 0, 0)
+	if err := f.Error(); err != nil {
+		t.Fatal(err)
+	}
+
+	// 4. Wait for Restore on node2
+	time.Sleep(2 * time.Second)
+
+	// 5. Verify node2 has matching KeyRing
+	_, gen2 := node2.FSM.keyRing.Current()
+	if gen2 != gen {
+		t.Errorf("Node 2 KeyRing generation mismatch: expected %d, got %d", gen, gen2)
+	}
+
+	// Verify it can decrypt data from gen 1
+}
 
 func TestKeyRotation(t *testing.T) {
 	tmpDir := t.TempDir()
