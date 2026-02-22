@@ -750,11 +750,11 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 			dirtyMap[idx] = true
 		}
 
-		// Use FileHandle as ReaderAt
-		// SyncFile uses this to read the modified chunks
-		updated, err := h.file.fs.client.SyncFile(ctx, h.file.inode.ID, h, int64(h.size), dirtyMap)
+		// The ctx gets canceled too soon by fuse and/or the kernel.
+		// Thus context.WithoutCancel.
+		updated, err := h.file.fs.client.SyncFile(context.WithoutCancel(ctx), h.file.inode.ID, h, int64(h.size), dirtyMap)
 		if err != nil {
-			log.Printf("FUSE Flush sync failed: %v", err)
+			log.Printf("FUSE Flush sync failed (size=%d, ctxErr=%v): %v", h.size, ctx.Err(), err)
 			return mapError(err)
 		}
 

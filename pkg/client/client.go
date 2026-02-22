@@ -2243,6 +2243,15 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 	inode.SetInlineData(nil)
 	numChunks := (size + crypto.ChunkSize - 1) / crypto.ChunkSize
 	newManifest := make([]metadata.ChunkEntry, numChunks)
+
+	type chunkUpload struct {
+		index int64
+		id    string
+		data  []byte
+	}
+	var uploads []chunkUpload
+	var chunkIDs []string
+
 	buf := make([]byte, crypto.ChunkSize)
 
 	for i := int64(0); i < numChunks; i++ {
@@ -2266,7 +2275,7 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 				chunkSize = size - offset
 			}
 
-			// Clear buffer for safety (avoid leaking previous chunk data in partial reads)
+			// Clear buffer for safety
 			for k := range buf {
 				buf[k] = 0
 			}
@@ -2275,7 +2284,8 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 			if err != nil && err != io.EOF {
 				return nil, err
 			}
-			chunkData := buf[:n]
+			chunkData := make([]byte, n)
+			copy(chunkData, buf[:n])
 
 			// Encrypt
 			cid, ct, err := crypto.EncryptChunk(key, chunkData, uint64(i))
@@ -2283,24 +2293,38 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 				return nil, err
 			}
 
-			// Upload
-			token, err := c.issueToken(ctx, id, []string{cid}, "W")
-			if err != nil {
-				return nil, err
-			}
-			nodes, err := c.allocateNodes(ctx)
-			if err != nil {
-				return nil, err
-			}
-			if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
-				return nil, err
-			}
+			uploads = append(uploads, chunkUpload{
+				index: i,
+				id:    cid,
+				data:  ct,
+			})
+			chunkIDs = append(chunkIDs, cid)
+		}
+	}
 
-			var nodeIDs []string
-			for _, node := range nodes {
-				nodeIDs = append(nodeIDs, node.ID)
+	if len(uploads) > 0 {
+		// Batch: Issue one token for all chunks
+		token, err := c.issueToken(ctx, id, chunkIDs, "W")
+		if err != nil {
+			return nil, err
+		}
+		// Batch: Allocate nodes once
+		nodes, err := c.allocateNodes(ctx)
+		if err != nil {
+			return nil, err
+		}
+
+		var nodeIDs []string
+		for _, node := range nodes {
+			nodeIDs = append(nodeIDs, node.ID)
+		}
+
+		// Perform uploads (could be parallelized, but serial is safer for now)
+		for _, u := range uploads {
+			if err := c.uploadChunk(ctx, u.id, u.data, nodes, token); err != nil {
+				return nil, err
 			}
-			newManifest[i] = metadata.ChunkEntry{ID: cid, Nodes: nodeIDs}
+			newManifest[u.index] = metadata.ChunkEntry{ID: u.id, Nodes: nodeIDs}
 		}
 	}
 
