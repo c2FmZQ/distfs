@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"hash/fnv"
 	"io"
 	"log"
 	"os"
@@ -142,8 +143,11 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 		}
 	}
 
+	a.Inode = inodeToUint64(d.inode.ID)
 	a.Mode = os.ModeDir | os.FileMode(d.inode.Mode)
 	a.Size = uint64(len(d.inode.Children))
+	a.Uid = d.inode.GetUID()
+	a.Gid = d.inode.GetGID()
 	a.Ctime = time.Unix(0, d.inode.CTime)
 	a.Mtime = time.Unix(0, d.inode.GetMTime())
 	return nil
@@ -168,10 +172,15 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	}
 
 	// Freshness check: only refetch if older than 100ms
-	if time.Since(d.lastUpdate) > 100*time.Millisecond {
-		if updated, err := d.fs.client.GetInode(ctx, d.inode.ID); err == nil {
+	forceRefresh := d.lastUpdate.IsZero()
+	if forceRefresh || time.Since(d.lastUpdate) > 100*time.Millisecond {
+		id := d.inode.ID
+		if updated, err := d.fs.client.GetInode(ctx, id); err == nil {
 			d.inode = updated
 			d.lastUpdate = time.Now()
+		} else if forceRefresh {
+			d.mu.Unlock()
+			return nil, mapError(err)
 		}
 	}
 
@@ -503,6 +512,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 }
 
 func (d *Dir) Forget() {
+	// In a more complex implementation, we would prune local caches here.
 }
 
 // File implements both fs.Node and fs.Handle for files.
@@ -535,17 +545,25 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		*f.inode = *updated
 	}
 
+	a.Inode = inodeToUint64(f.inode.ID)
 	a.Mode = os.FileMode(f.inode.Mode)
 	if f.inode.Type == metadata.SymlinkType {
 		a.Mode |= os.ModeSymlink
 	}
 	a.Size = f.inode.Size
+	a.Uid = f.inode.GetUID()
+	a.Gid = f.inode.GetGID()
 	a.Ctime = time.Unix(0, f.inode.CTime)
 	a.Mtime = time.Unix(0, f.inode.GetMTime())
 	return nil
 }
 
 func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.inode.Type != metadata.SymlinkType {
+		return "", syscall.EINVAL
+	}
 	return f.inode.GetSymlinkTarget(), nil
 }
 
@@ -587,12 +605,12 @@ func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 
 // FileHandle manages the state of an open file, including buffering writes to a temporary file.
 type FileHandle struct {
-	file   *File
-	reader *client.FileReader
-	mu     sync.Mutex
-	pages  map[int64][]byte
+	file            *File
+	reader          *client.FileReader
+	mu              sync.Mutex
+	pages           map[int64][]byte
 	stagingManifest map[int64]metadata.ChunkEntry // index -> entry
-	size   uint64
+	size            uint64
 }
 
 var _ fs.HandleReader = (*FileHandle)(nil)
@@ -762,12 +780,13 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 			entry, err := h.file.fs.client.UploadChunkData(bgCtx, h.file.inode.ID, h.file.key, uint64(pageIdx), page)
 			if err != nil {
 				log.Printf("Incremental upload failed: %v", err)
-				// Keep dirty page in memory, don't fail write? Or fail?
-				// Better to fail so user knows.
 				return mapError(err)
 			}
 			h.stagingManifest[pageIdx] = entry
-			delete(h.pages, pageIdx) // Evict
+			// Only evict if it's still the SAME data we uploaded
+			if p, exists := h.pages[pageIdx]; exists && len(p) == chunkSize {
+				delete(h.pages, pageIdx) // Evict
+			}
 		}
 
 		written += toWrite
@@ -787,9 +806,23 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if h.pages == nil && len(h.stagingManifest) == 0 {
+		return nil
+	}
+
 	// 1. Upload remaining dirty pages
+	// Collect indices first to avoid concurrent map access panic when unlocking
+	var indices []int64
+	for idx := range h.pages {
+		indices = append(indices, idx)
+	}
+
 	bgCtx := context.Background()
-	for idx, page := range h.pages {
+	for _, idx := range indices {
+		page, ok := h.pages[idx]
+		if !ok {
+			continue
+		}
 		entry, err := h.file.fs.client.UploadChunkData(bgCtx, h.file.inode.ID, h.file.key, uint64(idx), page)
 		if err != nil {
 			log.Printf("FUSE Flush upload failed (idx=%d): %v", idx, err)
@@ -799,6 +832,10 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 			h.stagingManifest = make(map[int64]metadata.ChunkEntry)
 		}
 		h.stagingManifest[idx] = entry
+		// Remove from pages only if it hasn't been modified/re-added
+		if p, exists := h.pages[idx]; exists && len(p) == len(page) {
+			delete(h.pages, idx)
+		}
 	}
 
 	// 2. Commit Manifest if there are changes
@@ -807,9 +844,11 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		manifest := make([]metadata.ChunkEntry, len(h.file.inode.ChunkManifest))
 		copy(manifest, h.file.inode.ChunkManifest)
 
-		// Determine new length
+		// Determine new length and collect what we are committing
+		committedIndices := make([]int64, 0, len(h.stagingManifest))
 		maxIdx := int64(len(manifest)) - 1
 		for idx := range h.stagingManifest {
+			committedIndices = append(committedIndices, idx)
 			if idx > maxIdx {
 				maxIdx = idx
 			}
@@ -822,12 +861,15 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 			manifest = newManifest
 		}
 
-		// Apply updates
+		// Apply updates from staging
 		for idx, entry := range h.stagingManifest {
 			manifest[idx] = entry
 		}
 
-		updated, err := h.file.fs.client.CommitInodeManifest(bgCtx, h.file.inode.ID, manifest, h.size)
+		// Capture size for commit
+		commitSize := h.size
+
+		updated, err := h.file.fs.client.CommitInodeManifest(bgCtx, h.file.inode.ID, manifest, commitSize)
 		if err != nil {
 			log.Printf("FUSE Flush commit failed: %v", err)
 			return mapError(err)
@@ -838,10 +880,14 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		h.file.inode = updated
 		h.file.mu.Unlock()
 
-		// Clear buffers
-		h.pages = nil
-		h.stagingManifest = nil
-		h.size = updated.Size
+		// Clear only the indices we committed
+		for _, idx := range committedIndices {
+			delete(h.stagingManifest, idx)
+		}
+		// If size hasn't changed concurrently, sync it
+		if h.size == commitSize {
+			h.size = updated.Size
+		}
 	}
 	return nil
 }
@@ -937,4 +983,10 @@ func setAttr(ctx context.Context, c *client.Client, inode *metadata.Inode, inode
 	respAttr.Mtime = time.Unix(0, inode.GetMTime())
 
 	return nil
+}
+
+func inodeToUint64(id string) uint64 {
+	h := fnv.New64a()
+	h.Write([]byte(id))
+	return h.Sum64()
 }

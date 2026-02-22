@@ -46,11 +46,20 @@ func mapError(err error) error {
 	if strings.Contains(msg, "directory not empty") {
 		return syscall.ENOTEMPTY
 	}
+	if strings.Contains(msg, "not a directory") {
+		return syscall.ENOTDIR
+	}
+	if strings.Contains(msg, "is a directory") {
+		return syscall.EISDIR
+	}
 	if strings.Contains(msg, "access denied") || strings.Contains(msg, "forbidden") {
 		return syscall.EACCES
 	}
 	if strings.Contains(msg, "timeout") || strings.Contains(msg, "retry") || strings.Contains(msg, "busy") {
 		return syscall.EAGAIN
+	}
+	if strings.Contains(msg, "text file busy") {
+		return syscall.ETXTBSY
 	}
 
 	// 3. Fallback to general I/O error
