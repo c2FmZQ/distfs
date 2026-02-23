@@ -186,6 +186,10 @@ func (f *DistFile) Read(p []byte) (int, error) {
 	return f.reader.Read(p)
 }
 
+func (f *DistFile) ReadAt(p []byte, off int64) (int, error) {
+	return f.reader.ReadAt(p, off)
+}
+
 func (f *DistFile) Close() error {
 	return nil
 }

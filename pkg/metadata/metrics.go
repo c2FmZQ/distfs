@@ -137,6 +137,9 @@ func (mc *MetricsCollector) SnapshotAndReset() MetricSnapshot {
 }
 
 func calculatePercentile(buckets [15]uint64, total uint64, percentile float64) int64 {
+	if total == 0 {
+		return 0
+	}
 	target := uint64(float64(total) * percentile)
 	if target == 0 && total > 0 {
 		target = 1 // At least the first one

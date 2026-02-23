@@ -5,7 +5,9 @@ import (
 	"bytes"
 	"crypto/mlkem"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -15,6 +17,7 @@ import (
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
+	bolt "go.etcd.io/bbolt"
 )
 
 func UnsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, serverSignPK []byte, resp *http.Response) []byte {
@@ -199,4 +202,22 @@ func WaitLeader(t *testing.T, r *raft.Raft) {
 	if !leader {
 		t.Fatal("Node did not become leader")
 	}
+}
+
+func GetClusterSignKey(fsm *MetadataFSM) ClusterSignKey {
+	var csk ClusterSignKey
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		v, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+		if err != nil {
+			return err
+		}
+		if v == nil {
+			return fmt.Errorf("cluster_sign_key missing")
+		}
+		return json.Unmarshal(v, &csk)
+	})
+	if err != nil {
+		log.Printf("GetClusterSignKey failed: %v", err)
+	}
+	return csk
 }

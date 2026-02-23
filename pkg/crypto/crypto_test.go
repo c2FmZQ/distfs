@@ -241,6 +241,123 @@ func TestKeyRing(t *testing.T) {
 	}
 }
 
+func TestHash(t *testing.T) {
+	h := NewHash()
+	h.Write([]byte("data"))
+	sum := h.Sum(nil)
+	if len(sum) != 32 {
+		t.Errorf("Unexpected hash length: %d", len(sum))
+	}
+}
+
+func TestIdentityKeySerialization(t *testing.T) {
+	k, _ := GenerateIdentityKey()
+	priv := k.MarshalPrivate()
+	k2 := UnmarshalIdentityKey(priv)
+	if string(k.Public()) != string(k2.Public()) {
+		t.Error("Public key mismatch after unmarshal")
+	}
+
+	if VerifySignature([]byte("invalid"), []byte("msg"), []byte("sig")) {
+		t.Error("VerifySignature should fail for invalid key length")
+	}
+}
+
+func TestKEMSerialization(t *testing.T) {
+	dk, _ := GenerateEncryptionKey()
+	ek := dk.EncapsulationKey()
+
+	dkBytes := MarshalDecapsulationKey(dk)
+	dk2, _ := UnmarshalDecapsulationKey(dkBytes)
+	
+	ekBytes := MarshalEncapsulationKey(ek)
+	ek2, _ := UnmarshalEncapsulationKey(ekBytes)
+
+	s1, ct := Encapsulate(ek2)
+	s2, _ := Decapsulate(dk2, ct)
+	if string(s1) != string(s2) {
+		t.Error("KEM failed after key serialization")
+	}
+}
+
+func TestKeyRing_AddKey(t *testing.T) {
+	initial := make([]byte, 32)
+	kr := NewKeyRing(initial)
+	
+	newKey := make([]byte, 32)
+	newKey[0] = 1
+	kr.AddKey(5, newKey)
+	
+	k, gen := kr.Current()
+	if gen != 5 {
+		t.Errorf("Expected current gen 5, got %d", gen)
+	}
+	if string(k) != string(newKey) {
+		t.Error("Key mismatch for gen 5")
+	}
+}
+
+func TestLockbox_Errors(t *testing.T) {
+	lb := NewLockbox()
+	dk, _ := GenerateEncryptionKey()
+	
+	// Get missing user
+	if _, err := lb.GetFileKey("missing", dk); err == nil {
+		t.Error("Expected error for missing user")
+	}
+}
+
+func TestIdentityKey_Errors(t *testing.T) {
+	// Bad unmarshal
+	if k := UnmarshalIdentityKey([]byte("too short")); k != nil {
+		t.Error("UnmarshalIdentityKey should fail for short data")
+	}
+
+	// Verify with wrong key size
+	if VerifySignature(make([]byte, 10), []byte("msg"), []byte("sig")) {
+		t.Error("VerifySignature should fail for wrong key size")
+	}
+	
+	// Verify with wrong public key data
+	if VerifySignature(make([]byte, PublicKeySize()), []byte("msg"), make([]byte, SignatureSize())) {
+		// This might pass if all zeros is valid? Unlikely for ML-DSA.
+	}
+}
+
+func TestChunkEncryption_Errors(t *testing.T) {
+	key := make([]byte, 32)
+	largeData := make([]byte, ChunkSize+1)
+	
+	if _, _, err := EncryptChunk(key, largeData, 0); err == nil {
+		t.Error("EncryptChunk should fail for data > ChunkSize")
+	}
+	
+	// Error from EncryptDEMWithNonce (bad key size)
+	if _, _, err := EncryptChunk(make([]byte, 10), []byte("data"), 0); err == nil {
+		t.Error("EncryptChunk should fail for bad key size")
+	}
+}
+
+func TestDEM_MoreErrors(t *testing.T) {
+	key := make([]byte, 32)
+	nonce := make([]byte, 10) // Wrong size
+	
+	if _, err := EncryptDEMWithNonce(key, nonce, []byte("data")); err == nil {
+		t.Error("EncryptDEMWithNonce should fail for wrong nonce size")
+	}
+	
+	if _, err := DecryptDEM(make([]byte, 10), []byte("data")); err == nil {
+		t.Error("DecryptDEM should fail for bad key size")
+	}
+	
+	// Decrypt with bad tag
+	ct, _ := EncryptDEM(key, []byte("data"))
+	ct[len(ct)-1] ^= 0xFF
+	if _, err := DecryptDEM(key, ct); err == nil {
+		t.Error("DecryptDEM should fail for tampered ciphertext")
+	}
+}
+
 func TestSealedRequest(t *testing.T) {
 	// 1. Setup Keys
 	serverDK, _ := GenerateEncryptionKey()

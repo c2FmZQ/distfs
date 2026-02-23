@@ -2683,7 +2683,11 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	infoURL := strings.TrimSuffix(req.Address, "/") + "/v1/node/info"
-	discoveryReq, _ := http.NewRequest("GET", infoURL, nil)
+	discoveryReq, err := http.NewRequest("GET", infoURL, nil)
+	if err != nil {
+		http.Error(w, "invalid address", http.StatusBadRequest)
+		return
+	}
 	discoveryReq.Header.Set(raftNonceHeader, hex.EncodeToString(nonce))
 	discoveryReq.Header.Set(raftSignatureHeader, s.signNonce(nonce, "LEADER_PROBE"))
 

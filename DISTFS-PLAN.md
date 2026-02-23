@@ -675,3 +675,27 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** **Unit Test:** Verify that `DecryptValue` correctly handles multiple key generations.
     *   **Action:** **Integration Test:** Perform a key rotation and verify that the background worker successfully updates all values to the new key without downtime.
     *   **Action:** **Reliability Test:** Verify that a node can join the cluster and correctly sync the full `KeyRing` from a snapshot.
+
+---
+
+## Phase 38: Comprehensive Test Coverage (Target 90%)
+**Goal:** Achieve and maintain a minimum of 90% statement coverage across all core packages to ensure long-term stability and prevent regressions.
+
+*   **Step 38.1: Crypto Package Hardening (Target: 90%)**
+    *   **Action:** Add exhaustive unit tests for `pkg/crypto/sealed.go` covering all error paths (too short payloads, invalid signatures, expired timestamps).
+    *   **Action:** Implement property-based tests for `KeyRing` serialization and `Lockbox` recipient management.
+*   **Step 38.2: Metadata FSM Branch Coverage (Target: 90%)**
+    *   **Action:** Meticulously test every error path in `fsm.go` by injecting corrupted data into BoltDB buckets or simulating unmarshal failures.
+    *   **Action:** Add tests for `KeyRotationWorker` edge cases, such as multiple concurrent rotations or bucket exhaustion during scans.
+*   **Step 38.3: Client Library Resilience (Target: 90%)**
+    *   **Action:** Use an HTTP mock transport to simulate varied failure modes: network timeouts, 500-series server errors, and malformed sealed responses.
+    *   **Action:** Verify the efficiency of the hedged read cancellation logic by instrumenting the mock nodes to return data at precise intervals.
+*   **Step 38.4: Data Layer and Scrubber Stress (Target: 90%)**
+    *   **Action:** Simulate disk I/O errors and "disk full" scenarios in `pkg/data/disk_store.go`.
+    *   **Action:** Enhance Scrubber tests to verify the exact quarantine and reporting lifecycle for varied corruption types (truncated files, random bit flips).
+*   **Step 38.5: FUSE Protocol Fidelity (Target: 90%)**
+    *   **Action:** Implement unit tests for individual FUSE operations (Stat, ReadDir, Chmod) that bypass the kernel using mock request objects.
+    *   **Action:** Verify node eviction (`Forget`) and memory management logic under heavy inode pressure.
+*   **Step 38.6: CLI Command Coverage (Target: 90%)**
+    *   **Action:** Implement a test suite for `cmd/distfs` that captures stdout/stderr and verifies exit codes for all valid and invalid flag combinations.
+    *   **Action:** Test the interactive Admin CUI components using Bubble Tea's testing framework.

@@ -38,6 +38,7 @@ const (
 
 // RaftNode wraps the Hashicorp Raft instance and its dependencies.
 type RaftNode struct {
+	NodeID          string
 	Raft            *raft.Raft
 	FSM             *MetadataFSM
 	Transport       raft.Transport
@@ -197,6 +198,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	}
 
 	return &RaftNode{
+		NodeID:          nodeID,
 		Raft:            r,
 		FSM:             fsm,
 		Transport:       transport,

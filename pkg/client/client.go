@@ -63,7 +63,8 @@ func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to get server sign key: %d", resp.StatusCode)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 
 	b, _ := io.ReadAll(resp.Body)
@@ -91,7 +92,8 @@ func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch server key: %d", resp.StatusCode)
+		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 	b, _ := io.ReadAll(resp.Body)
 	pk, err := crypto.UnmarshalEncapsulationKey(b)
@@ -1983,9 +1985,12 @@ func (c *Client) OpenBlobWrite(ctx context.Context, id string) (io.WriteCloser, 
 		inode, _ = c.getInode(ctx, id)
 	} else {
 		// 1. Try getInode directly (Treating id as InodeID)
-		inode, _ = c.getInode(ctx, id)
-		if inode != nil {
-			fileKey, _ = c.UnlockInode(ctx, inode)
+		// Only try this if it doesn't look like a path to avoid hitting placeholders.
+		if !strings.Contains(id, "/") {
+			inode, _ = c.getInode(ctx, id)
+			if inode != nil {
+				fileKey, _ = c.UnlockInode(ctx, inode)
+			}
 		}
 
 		if fileKey == nil {
@@ -2009,6 +2014,9 @@ func (c *Client) OpenBlobWrite(ctx context.Context, id string) (io.WriteCloser, 
 				if inode != nil {
 					fileKey, _ = c.UnlockInode(ctx, inode)
 				}
+			} else {
+				// Path resolved but entry not found in parent: definitely new.
+				inode = nil
 			}
 		}
 	}

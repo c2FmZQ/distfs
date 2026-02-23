@@ -73,6 +73,15 @@ func TestSnapshotStore_Errors(t *testing.T) {
 	if len(snaps) != 0 {
 		t.Errorf("Expected 0 snaps, got %d", len(snaps))
 	}
+
+	// List malformed
+	if err := st.SaveDataFile("snap-malformed.meta", map[string]string{"invalid": "data"}); err != nil {
+		t.Fatalf("failed to save malformed snap: %v", err)
+	}
+	snaps, _ = store.List()
+	if len(snaps) != 0 {
+		t.Errorf("Expected 0 valid snaps after malformed, got %d", len(snaps))
+	}
 }
 
 func TestSnapshotEncryption(t *testing.T) {
