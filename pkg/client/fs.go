@@ -191,7 +191,7 @@ func (f *DistFile) ReadAt(p []byte, off int64) (int, error) {
 }
 
 func (f *DistFile) Close() error {
-	return nil
+	return f.reader.Close()
 }
 
 // DistDir implements fs.ReadDirFile

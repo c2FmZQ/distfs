@@ -134,6 +134,18 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		t.Fatalf("Bootstrap key apply failed: %v", err)
 	}
 
+	// Register the bootstrapped node in FSM
+	nodeInfo := Node{
+		ID:          nodeID,
+		RaftAddress: string(node.Transport.LocalAddr()),
+		Status:      NodeStatusActive,
+	}
+	nb, _ := json.Marshal(nodeInfo)
+	f = node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Bootstrap RegisterNode failed: %v", err)
+	}
+
 	// Bootstrap cluster sign key
 	csk, _ := crypto.GenerateIdentityKey()
 	cskData := ClusterSignKey{

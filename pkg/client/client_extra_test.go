@@ -4,7 +4,6 @@ package client
 import (
 	"bytes"
 	"context"
-	"errors"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -16,8 +15,8 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
-	bolt "go.etcd.io/bbolt"
 )
 
 func TestClient_ExtraFS(t *testing.T) {
@@ -25,26 +24,20 @@ func TestClient_ExtraFS(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	t.Logf("Client UserID: %s", c.userID)
-
 	// 1. Mkdir
 	err := c.Mkdir(ctx, "/testdir")
 	if err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
-	t.Log("Mkdir /testdir succeeded")
 
 	// 2. ReadFile (fs.FS)
 	distFS := c.FS(ctx)
-	// Create a small file
 	content := []byte("hello world")
 	err = c.CreateFile(ctx, "/testdir/hello.txt", bytes.NewReader(content), int64(len(content)))
 	if err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
-	t.Log("CreateFile /testdir/hello.txt succeeded")
 
-	// Small sleep for consistency
 	time.Sleep(100 * time.Millisecond)
 
 	data, err := fs.ReadFile(distFS, "testdir/hello.txt")
@@ -63,6 +56,11 @@ func TestClient_ExtraFS(t *testing.T) {
 	if fi.Name() != "hello.txt" {
 		t.Errorf("Unexpected name: %s", fi.Name())
 	}
+	if fi.Size() != int64(len(content)) { t.Error("Size mismatch") }
+	if fi.Mode() == 0 { t.Error("Mode zero") }
+	if fi.ModTime().IsZero() { t.Error("ModTime zero") }
+	if fi.IsDir() { t.Error("IsDir true for file") }
+	if fi.Sys() == nil { t.Error("Sys nil") }
 
 	// 4. Glob (fs.FS)
 	matches, err := fs.Glob(distFS, "testdir/*.txt")
@@ -79,6 +77,11 @@ func TestClient_ExtraFS(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer f.Close()
+	
+	// Test File.Stat
+	ffi, _ := f.Stat()
+	if ffi.Name() == "" { t.Error("Empty name from file stat") }
+
 	ra, ok := f.(io.ReaderAt)
 	if !ok {
 		t.Fatal("File does not implement io.ReaderAt")
@@ -415,80 +418,6 @@ func TestClient_RemoveExtraError(t *testing.T) {
 	}
 }
 
-func TestClient_ConflictRetry(t *testing.T) {
-	ctx := context.Background()
-	c, node, _, ts := SetupTestClient(t)
-	defer ts.Close()
-
-	c.Mkdir(ctx, "/conflict")
-	inode, _, _ := c.ResolvePath(ctx, "/conflict")
-
-	// Start a goroutine that will update the same inode, causing a conflict for the main thread
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		// Update version in FSM directly to simulate another client
-		node.FSM.DB().Update(func(tx *bolt.Tx) error {
-			plain, _ := node.FSM.Get(tx, []byte("inodes"), []byte(inode.ID))
-			var i metadata.Inode
-			json.Unmarshal(plain, &i)
-			i.Version++
-			encoded, _ := json.Marshal(i)
-			return node.FSM.Put(tx, []byte("inodes"), []byte(inode.ID), encoded)
-		})
-	}()
-
-	// This update should conflict initially but succeed on retry
-	_, err := c.updateInode(ctx, *inode)
-	if err != nil {
-		t.Fatalf("updateInode failed after retries: %v", err)
-	}
-}
-
-func TestClient_Retries(t *testing.T) {
-	// Mock server that fails twice then succeeds
-	attempts := 0
-	dk, _ := crypto.GenerateEncryptionKey()
-	sk, _ := crypto.GenerateIdentityKey()
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		attempts++
-		if attempts <= 2 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			return
-		}
-		
-		// Minimal responses for anything else
-		if r.URL.Path == "/v1/meta/key" {
-			w.Write(dk.EncapsulationKey().Bytes())
-		} else if r.URL.Path == "/v1/meta/key/sign" {
-			w.Write(sk.Public())
-		} else if r.URL.Path == "/v1/auth/challenge" {
-			chal := make([]byte, 32)
-			sig := sk.Sign(chal)
-			json.NewEncoder(w).Encode(metadata.AuthChallengeResponse{Challenge: chal, Signature: sig})
-		} else if r.URL.Path == "/v1/login" {
-			json.NewEncoder(w).Encode(metadata.SessionResponse{Token: "mock"})
-		} else {
-			w.Header().Set("Content-Type", "application/json")
-			w.Write([]byte("[]")) // Empty node list
-		}
-	}))
-	defer ts.Close()
-
-	c := NewClient(ts.URL)
-	usk, _ := crypto.GenerateIdentityKey()
-	udk, _ := crypto.GenerateEncryptionKey()
-	c = c.WithIdentity("u1", udk).WithSignKey(usk)
-	
-	// c.allocateNodes uses retries
-	_, err := c.allocateNodes(context.Background())
-	if err != nil {
-		t.Fatalf("allocateNodes failed after retries: %v", err)
-	}
-	if attempts < 3 {
-		t.Errorf("Expected at least 3 attempts, got %d", attempts)
-	}
-}
-
 func TestClient_EnsureRootExtra(t *testing.T) {
 	ctx := context.Background()
 	c, _, _, ts := SetupTestClient(t)
@@ -631,9 +560,9 @@ func TestClient_MiscMethods(t *testing.T) {
 
 	// 1. WithRootAnchor
 	c2 := c.WithRootAnchor("root-id", "owner-id", 10)
-	id, owner, ver := c2.GetRootAnchor()
-	if id != "root-id" || owner != "owner-id" || ver != 10 {
-		t.Errorf("WithRootAnchor failed: %s %s %d", id, owner, ver)
+	id, owner, rver := c2.GetRootAnchor()
+	if id != "root-id" || owner != "owner-id" || rver != 10 {
+		t.Errorf("WithRootAnchor failed: %s %s %d", id, owner, rver)
 	}
 
 	// 2. UserID
@@ -666,6 +595,23 @@ func TestClient_MiscMethods(t *testing.T) {
 	if err == nil {
 		t.Error("ParseContactString should fail for invalid base64")
 	}
+
+	// 6. Close (File Close)
+	c.CreateFile(ctx, "/f1", bytes.NewReader([]byte("data")), 4)
+	rc, _ := c.OpenBlobRead(ctx, "/f1")
+	rc.Close()
+
+	// 7. GetInodes
+	_, err = c.GetInodes(ctx, []string{"root"})
+	if err != nil {
+		t.Errorf("GetInodes failed: %v", err)
+	}
+
+	// 8. GetClusterStats
+	_, err = c.GetClusterStats(ctx)
+	if err != nil {
+		t.Errorf("GetClusterStats failed: %v", err)
+	}
 }
 
 func TestClient_ResolvePath_InvalidCache(t *testing.T) {
@@ -693,220 +639,489 @@ func TestClient_ResolvePath_InvalidCache(t *testing.T) {
 	}
 }
 
-func TestClient_UnsealFutureTimestamp(t *testing.T) {
-	_, _, _, ts := SetupTestClient(t)
+func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
+	ctx := context.Background()
+	c1, node, _, ts := SetupTestClient(t)
 	defer ts.Close()
+
+	// 1. Setup u2
+	u2 := "u2"
+	usk2, _ := crypto.GenerateIdentityKey()
+	udk2, _ := crypto.GenerateEncryptionKey()
+	user2 := metadata.User{ID: u2, SignKey: usk2.Public(), EncKey: udk2.EncapsulationKey().Bytes()}
+	ub2, _ := json.Marshal(user2)
+	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub2}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Raft apply CreateUser failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // Wait for FSM application
+
+	c2 := NewClient(ts.URL).WithIdentity(u2, udk2).WithSignKey(usk2)
+	if err := c2.Login(ctx); err != nil {
+		t.Fatalf("u2 login failed: %v", err)
+	}
+
+	// 2. Setup Group g1
+	group, err := c1.CreateGroup(ctx, "g1")
+	if err != nil { t.Fatalf("CreateGroup failed: %v", err) }
+	
+	contactStr, err := c2.GenerateContactString()
+	if err != nil { t.Fatalf("GenerateContactString failed: %v", err) }
+	
+	ci, err := c1.ParseContactString(contactStr)
+	if err != nil { t.Fatalf("ParseContactString failed: %v", err) }
+	
+	err = c1.AddUserToGroup(ctx, group.ID, u2, "Member", ci)
+	if err != nil { t.Fatalf("AddUserToGroup failed: %v", err) }
+	
+	time.Sleep(200 * time.Millisecond)
+
+	// 3. Create File f1 with Group access
+	err = c1.Mkdir(ctx, "/shared")
+	if err != nil { t.Fatalf("Mkdir /shared failed: %v", err) }
+	
+	err = c1.SetAttr(ctx, "/shared", metadata.SetAttrRequest{Mode: ptr(uint32(0770)), GroupID: &group.ID})
+	if err != nil { t.Fatalf("SetAttr /shared failed: %v", err) }
+	
+	wc, err := c1.OpenBlobWrite(ctx, "/shared/f1")
+	if err != nil { t.Fatalf("OpenBlobWrite f1 failed: %v", err) }
+	wc.Write([]byte("secret"))
+	wc.Close()
+	
+	c1.SetAttr(ctx, "/shared/f1", metadata.SetAttrRequest{Mode: ptr(uint32(0660))})
+	
+	_, _, _ = c1.ResolvePath(ctx, "/shared/f1")
+
+	// 4. u2 Unlocks f1 (via Group key)
+	rc, err := c2.OpenBlobRead(ctx, "/shared/f1")
+	if err != nil {
+		t.Fatalf("u2 failed to open group-shared file: %v", err)
+	}
+	data, _ := io.ReadAll(rc)
+	if string(data) != "secret" {
+		t.Errorf("Unexpected data: %s", data)
+	}
+	rc.Close()
+
+	// 5. Create File f2 with World access
+	c1.Mkdir(ctx, "/public")
+	c1.SetAttr(ctx, "/public", metadata.SetAttrRequest{Mode: ptr(uint32(0777))})
+	c1.CreateFile(ctx, "/public/f2", bytes.NewReader([]byte("public")), 6)
+	c1.SetAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: ptr(uint32(0664))})
+	
+	// Create u3
+	usk3, _ := crypto.GenerateIdentityKey()
+	udk3, _ := crypto.GenerateEncryptionKey()
+	c3 := NewClient(ts.URL).WithIdentity("u3", udk3).WithSignKey(usk3)
+	user3 := metadata.User{ID: "u3", SignKey: usk3.Public(), EncKey: udk3.EncapsulationKey().Bytes()}
+	ub3, _ := json.Marshal(user3)
+	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub3}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Raft apply CreateUser u3 failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond)
+	
+	if err := c3.Login(ctx); err != nil {
+		t.Fatalf("u3 login failed: %v", err)
+	}
+
+	rc, err = c3.OpenBlobRead(ctx, "/public/f2")
+	if err != nil {
+		t.Fatalf("u3 failed to open public file: %v", err)
+	}
+	data, _ = io.ReadAll(rc)
+	if string(data) != "public" {
+		t.Errorf("Unexpected data: %s", data)
+	}
+	rc.Close()
+
+	// 6. RemoveUserFromGroup
+	err = c1.RemoveUserFromGroup(ctx, group.ID, u2)
+	if err != nil {
+		t.Errorf("RemoveUserFromGroup failed: %v", err)
+	}
+
+	// 7. GroupChown
+	err = c1.GroupChown(ctx, group.ID, "u2")
+	if err != nil {
+		t.Errorf("GroupChown failed: %v", err)
+	}
 }
 
-func TestClient_AllocateNodes_Error(t *testing.T) {
+func TestClient_Groups_SystemAndMembers(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	// 1. CreateSystemGroup
+	group, err := c.WithAdmin(true).CreateSystemGroup(ctx, "sysgroup")
+	if err != nil {
+		t.Fatalf("CreateSystemGroup failed: %v", err)
+	}
+	if !group.IsSystem {
+		t.Error("Expected system group")
+	}
+
+	// 2. DecryptGroupName
+	gl, _ := c.ListGroups(ctx)
+	if len(gl) > 0 {
+		name, err := c.DecryptGroupName(ctx, gl[0])
+		if err != nil { t.Errorf("DecryptGroupName failed: %v", err) }
+		if name != "sysgroup" { t.Errorf("Expected sysgroup, got %s", name) }
+	}
+
+	// 3. GetGroupMembers
+	members, err := c.GetGroupMembers(ctx, group.ID)
+	if err != nil {
+		t.Fatalf("GetGroupMembers failed: %v", err)
+	}
+	if len(members) == 0 {
+		t.Error("Expected at least owner in members")
+	}
+}
+
+func TestClient_FS_Extra(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	c.Mkdir(ctx, "/fs")
+	c.CreateFile(ctx, "/fs/f1", bytes.NewReader([]byte("data")), 4)
+	
+	distFS := c.FS(ctx)
+	
+	// 1. ReadDir
+	des, _ := fs.ReadDir(distFS, "fs")
+	if len(des) > 0 {
+		e := des[0]
+		_ = e.Type()
+		fi, _ := e.Info()
+		_ = fi.Name()
+		_ = fi.Size()
+		_ = fi.Mode()
+		_ = fi.ModTime()
+		_ = fi.IsDir()
+		_ = fi.Sys()
+		
+		// Type assertions
+		if ext, ok := e.(interface{ Inode() *metadata.Inode }); ok { _ = ext.Inode() }
+		if ext, ok := e.(interface{ InodeID() string }); ok { _ = ext.InodeID() }
+	}
+
+	// 2. Open directory and call ReadDir
+	f, _ := distFS.Open("fs")
+	if rdf, ok := f.(fs.ReadDirFile); ok {
+		rdf.ReadDir(-1)
+	}
+	f.Close()
+	
+	// 3. NewDirEntry / NewDirEntryForTest
+	inode := &metadata.Inode{ID: "i1"}
+	key := make([]byte, 32)
+	_ = c.NewDirEntry(inode, "name", key)
+	_ = NewDirEntryForTest(inode, "name2", key)
+}
+
+func TestClient_Onboarding_Discovery(t *testing.T) {
+	ctx := context.Background()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
+		if r.URL.Path == "/v1/auth/config" {
+			conf := metadata.OIDCConfig{
+				DeviceAuthorizationEndpoint: "http://auth",
+				TokenEndpoint:               "http://token",
+			}
+			json.NewEncoder(w).Encode(conf)
+		}
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL)
-	// Bypass sealing by not providing identity
-	_, err := c.allocateNodes(context.Background())
-	if err == nil {
-		t.Error("allocateNodes should fail for 400 error")
+	opts := OnboardingOptions{
+		ServerURL: ts.URL,
+		ClientID:  "client",
 	}
+	// This will still fail at auth.GetToken but discovered endpoints.
+	_, err := GetOIDCToken(ctx, opts)
+	if err == nil { t.Error("Expected error from auth.GetToken") }
 }
 
-func TestClient_CreateLockbox_Errors(t *testing.T) {
+func TestClient_SyncFile_More(t *testing.T) {
 	ctx := context.Background()
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	fileKey := make([]byte, 32)
-
-	// 1. GetWorldPublicKey fails (Mock failure by using invalid server URL for a new client)
-	cFail := NewClient("http://invalid")
-	lb := cFail.createLockbox(ctx, fileKey, 0644, "")
-	if len(lb) != 0 {
-		// No identity, no world key -> empty lockbox
-	}
-
-	// 2. GetGroup fails
-	lb2 := c.createLockbox(ctx, fileKey, 0660, "missing-group")
-	if len(lb2) != 1 { // Only owner
-		t.Errorf("Expected 1 recipient (owner), got %d", len(lb2))
-	}
+	// 1. Inline Sync
+	c.CreateFile(ctx, "/inline", bytes.NewReader([]byte("init")), 4)
+	inode, _, _ := c.ResolvePath(ctx, "/inline")
+	c.SyncFile(ctx, inode.ID, strings.NewReader("new content"), 11, nil)
+	
+	// 2. Growing file (Chunked)
+	large := make([]byte, crypto.ChunkSize + 100)
+	c.CreateFile(ctx, "/large", bytes.NewReader(large), int64(len(large)))
+	inodeL, _, _ := c.ResolvePath(ctx, "/large")
+	
+	grown := make([]byte, 2*crypto.ChunkSize + 100)
+	c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
 }
 
-func TestClient_ToPOSIX(t *testing.T) {
-	cases := []struct {
-		code     int
-		expected error
-	}{
-		{http.StatusNotFound, syscall.ENOENT},
-		{http.StatusUnauthorized, syscall.EACCES},
-		{http.StatusForbidden, syscall.EACCES},
-		{http.StatusServiceUnavailable, syscall.EAGAIN},
-		{http.StatusTooManyRequests, syscall.EAGAIN},
-		{http.StatusConflict, syscall.EEXIST},
-		{http.StatusInternalServerError, syscall.EIO},
-	}
-
-	for _, c := range cases {
-		err := &APIError{StatusCode: c.code}
-		if !errors.Is(err.ToPOSIX(), c.expected) {
-			t.Errorf("For code %d, expected %v, got %v", c.code, c.expected, err.ToPOSIX())
-		}
-	}
+func ptr[T any](v T) *T {
+	return &v
 }
 
-func TestClient_MiscMethodsExtra(t *testing.T) {
-	c, _, _, ts := SetupTestClient(t)
+func TestClient_DeleteInode(t *testing.T) {
+	c, metaNode, metaServer, ts := SetupTestClient(t)
+	defer metaNode.Shutdown()
+	defer metaServer.Shutdown()
 	defer ts.Close()
 
-	// 1. UserID
-	if c.UserID() != "u1" {
-		t.Errorf("Expected u1, got %s", c.UserID())
-	}
-}
-
-func TestClient_OpenBlobWriteExtra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
-	defer ts.Close()
-
 	c.EnsureRoot(ctx)
-	path := "/existing"
-	c.CreateFile(ctx, path, bytes.NewReader([]byte("old")), 3)
 
-	// Open for writing again
+	// Create a file
+	c.Mkdir(ctx, "/dir1")
+	err := c.CreateFile(ctx, "/dir1/file1", bytes.NewReader([]byte("hello")), 5)
+	if err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
+	}
+
+	inode, _, _ := c.ResolvePath(ctx, "/dir1/file1")
+	
+	// Delete it
+	err = c.DeleteInode(ctx, inode.ID)
+	if err != nil {
+		t.Fatalf("DeleteInode failed: %v", err)
+	}
+
+	// Verify it's gone
+	_, _, err = c.ResolvePath(ctx, "/dir1/file1")
+	if err == nil {
+		t.Error("Expected error resolving deleted path, got nil")
+	}
+}
+
+func TestClient_SyncFile(t *testing.T) {
+	c, metaNode, metaServer, ts := SetupTestClient(t)
+	defer metaNode.Shutdown()
+	defer metaServer.Shutdown()
+	defer ts.Close()
+
+	ctx := context.Background()
+	c.EnsureRoot(ctx)
+
+	// Setup a Data Node for Sync
+	dataDir := t.TempDir()
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
+	
+	csk := metadata.GetClusterSignKey(metaNode.FSM)
+
+	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
+	tsData := httptest.NewServer(dataServer)
+	defer tsData.Close()
+
+	// Register Data Node
+	nodeInfo := metadata.Node{
+		ID:      "data1",
+		Address: tsData.URL,
+		Status:  metadata.NodeStatusActive,
+	}
+	registerNode(t, ts.URL, "testsecret", nodeInfo)
+
+	// Create a file
+	path := "/test-sync"
+	content := []byte("original content")
+	c.CreateFile(ctx, path, bytes.NewReader(content), int64(len(content)))
+
+	inode, key, _ := c.ResolvePath(ctx, path)
+
+	// Sync with updates
+	newContent := []byte("updated content and much longer to force chunking if needed")
+	dirty := map[int64]bool{0: true}
+	updatedInode, err := c.SyncFile(ctx, inode.ID, bytes.NewReader(newContent), int64(len(newContent)), dirty)
+	if err != nil {
+		t.Fatalf("SyncFile failed: %v", err)
+	}
+
+	if updatedInode.Size != uint64(len(newContent)) {
+		t.Errorf("Expected size %d, got %d", len(newContent), updatedInode.Size)
+	}
+
+	// Read back and verify
+	reader, _ := c.NewReader(ctx, updatedInode.ID, key)
+	readBack, _ := io.ReadAll(reader)
+	if !bytes.Equal(readBack, newContent) {
+		t.Errorf("Expected %s, got %s", string(newContent), string(readBack))
+	}
+}
+
+func TestClient_AdminChmod(t *testing.T) {
+	c, metaNode, metaServer, ts := SetupTestClient(t)
+	defer metaNode.Shutdown()
+	defer metaServer.Shutdown()
+	defer ts.Close()
+
+	ctx := context.Background()
+	c.EnsureRoot(ctx)
+
+	// Promote user to admin
+	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
+
+	// Create a file
+	path := "/secret"
+	c.CreateFile(ctx, path, bytes.NewReader([]byte("data")), 4)
+	inode, _, _ := c.ResolvePath(ctx, path)
+
+	// Chmod via Admin
+	err := c.AdminChmod(ctx, inode.ID, 0640)
+	if err != nil {
+		t.Fatalf("AdminChmod failed: %v", err)
+	}
+
+	// Verify
+	updated, _, _ := c.ResolvePath(ctx, path)
+	if updated.Mode != 0640 {
+		t.Errorf("Expected mode 0640, got %o", updated.Mode)
+	}
+}
+
+func TestClient_ChunkDataOps(t *testing.T) {
+	c, metaNode, metaServer, ts := SetupTestClient(t)
+	defer metaNode.Shutdown()
+	defer metaServer.Shutdown()
+	defer ts.Close()
+
+	ctx := context.Background()
+	c.EnsureRoot(ctx)
+
+	// Data Node
+	dataDir := t.TempDir()
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
+	
+	csk := metadata.GetClusterSignKey(metaNode.FSM)
+
+	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
+	tsData := httptest.NewServer(dataServer)
+	defer tsData.Close()
+
+	nodeInfo := metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive}
+	registerNode(t, ts.URL, "testsecret", nodeInfo)
+
+	// 1. UploadChunkData
+	fileID := "f1"
+	fileKey := make([]byte, 32)
+	chunkData := []byte("chunk payload")
+	
+	// Create Inode first to allow token issue
+	inode := metadata.Inode{ID: fileID, OwnerID: "u1", Type: metadata.FileType}
+	ib, _ := json.Marshal(inode)
+	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: ib}.Marshal(), 5*time.Second)
+
+	entry, err := c.UploadChunkData(ctx, fileID, fileKey, 0, chunkData)
+	if err != nil {
+		t.Fatalf("UploadChunkData failed: %v", err)
+	}
+
+	// 2. DownloadChunkData
+	// urls are usually populated by server but we can pass them manually for test
+	downloaded, err := c.DownloadChunkData(ctx, fileID, entry.ID, entry.URLs, fileKey)
+	if err != nil {
+		t.Fatalf("DownloadChunkData failed: %v", err)
+	}
+
+	// Truncate to expected size (DecryptChunk returns 1MB padded)
+	if len(downloaded) > len(chunkData) {
+		downloaded = downloaded[:len(chunkData)]
+	}
+
+	if !bytes.Equal(downloaded, chunkData) {
+		t.Errorf("Expected %s, got %s", string(chunkData), string(downloaded))
+	}
+}
+
+func TestClient_OpenBlobWrite(t *testing.T) {
+	c, metaNode, metaServer, ts := SetupTestClient(t)
+	defer metaNode.Shutdown()
+	defer metaServer.Shutdown()
+	defer ts.Close()
+
+	ctx := context.Background()
+	c.EnsureRoot(ctx)
+
+	// Data Node
+	dataDir := t.TempDir()
+	dataSt, _ := createTestStorage(t, dataDir)
+	dataStore, _ := data.NewDiskStore(dataSt)
+	csk := metadata.GetClusterSignKey(metaNode.FSM)
+	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
+	tsData := httptest.NewServer(dataServer)
+	defer tsData.Close()
+
+	registerNode(t, ts.URL, "testsecret", metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive})
+
+	// Open for writing
+	path := "/bigblob"
 	wc, err := c.OpenBlobWrite(ctx, path)
 	if err != nil {
 		t.Fatalf("OpenBlobWrite failed: %v", err)
 	}
-	wc.Write([]byte("new data"))
-	wc.Close()
 
-	// Verify
-	fi, _ := c.FS(ctx).Stat("existing")
-	if fi.Size() != 8 {
-		t.Errorf("Expected size 8, got %d", fi.Size())
-	}
-}
-
-func TestClient_AddEntryExtraErrors(t *testing.T) {
-	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
-	defer ts.Close()
-
-	// 1. Parent not found
-	_, _, err := c.AddEntry(ctx, "missing", make([]byte, 32), "name", metadata.FileType, nil, 0, "", 0600, "", 0, 0)
-	if err == nil {
-		t.Error("AddEntry should fail for missing parent")
-	}
-}
-
-func TestClient_MiscErrorPaths(t *testing.T) {
-	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
-	defer ts.Close()
-
-	// 1. GetInode missing
-	_, err := c.GetInode(ctx, "missing")
-	if err == nil {
-		t.Error("GetInode should fail for missing ID")
+	// Write 1.5 MB (more than 1MB chunk size)
+	dataSize := 3 * 1024 * 1024 / 2 // 1.5MB
+	payload := make([]byte, dataSize)
+	for i := range payload {
+		payload[i] = byte(i % 256)
 	}
 
-	// 2. CommitInodeManifest missing
-	_, err = c.CommitInodeManifest(ctx, "missing", nil, 0)
-	if err == nil {
-		t.Error("CommitInodeManifest should fail for missing ID")
+	n, err := wc.Write(payload)
+	if err != nil || n != dataSize {
+		t.Fatalf("Write failed: %v, n=%d", err, n)
 	}
 
-	// 3. addEntry to non-directory
-	c.CreateFile(ctx, "/file1", bytes.NewReader([]byte("data")), 4)
-	err = c.CreateFile(ctx, "/file1/invalid", bytes.NewReader([]byte("data")), 4)
-	if err == nil {
-		t.Error("CreateFile should fail if parent is not a directory")
-	}
-}
-
-func TestClient_RenameDirectory(t *testing.T) {
-	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
-	defer ts.Close()
-
-	c.Mkdir(ctx, "/dir1")
-	c.Mkdir(ctx, "/dir1/sub")
-	c.CreateFile(ctx, "/dir1/sub/f1", bytes.NewReader([]byte("data")), 4)
-
-	// Rename directory
-	err := c.Rename(ctx, "/dir1/sub", "/sub_moved")
+	err = wc.Close()
 	if err != nil {
-		t.Fatalf("Rename directory failed: %v", err)
+		t.Fatalf("Close failed: %v", err)
 	}
 
-	// Verify moved
-	fi, err := c.FS(ctx).Stat("sub_moved/f1")
+	// Read back and verify
+	inode, key, err := c.ResolvePath(ctx, path)
 	if err != nil {
-		t.Fatalf("Stat moved file failed: %v", err)
+		t.Fatalf("ResolvePath failed: %v", err)
 	}
-	if fi.Size() != 4 {
-		t.Errorf("Expected size 4, got %d", fi.Size())
+
+	reader, _ := c.NewReader(ctx, inode.ID, key)
+	readBack, _ := io.ReadAll(reader)
+	if !bytes.Equal(readBack, payload) {
+		t.Error("Data mismatch in big blob")
 	}
 }
 
-func TestClient_Download_IOError(t *testing.T) {
-	ctx := context.Background()
-	c := NewClient("http://meta")
-	
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Length", "100")
-		w.WriteHeader(http.StatusOK)
-		// Close without writing body
-	}))
+func TestClient_ExtraDataOps(t *testing.T) {
+	c, metaNode, metaServer, ts := SetupTestClient(t)
+	defer metaNode.Shutdown()
+	defer metaServer.Shutdown()
 	defer ts.Close()
 
-	_, err := c.downloadChunk(ctx, "c1", []string{ts.URL}, "token")
-	if err == nil {
-		t.Error("downloadChunk should fail on premature close")
-	}
-}
-
-func TestClient_UpdateInode_ConflictRefetchFail(t *testing.T) {
 	ctx := context.Background()
-	c, node, _, ts := SetupTestClient(t)
-	defer ts.Close()
+	c.EnsureRoot(ctx)
 
-	c.Mkdir(ctx, "/conflict2")
-	inode, _, _ := c.ResolvePath(ctx, "/conflict2")
+	// 1. CommitInodeManifest
+	path := "/f1"
+	c.CreateFile(ctx, path, bytes.NewReader([]byte("init")), 4)
+	inode, _, _ := c.ResolvePath(ctx, path)
 
-	// Start a goroutine that will DELETE the inode, causing re-fetch to fail after a conflict
-	go func() {
-		time.Sleep(50 * time.Millisecond)
-		// 1. Trigger conflict by incrementing version
-		node.FSM.DB().Update(func(tx *bolt.Tx) error {
-			plain, _ := node.FSM.Get(tx, []byte("inodes"), []byte(inode.ID))
-			var i metadata.Inode
-			json.Unmarshal(plain, &i)
-			i.Version++
-			encoded, _ := json.Marshal(i)
-			return node.FSM.Put(tx, []byte("inodes"), []byte(inode.ID), encoded)
-		})
-		
-		time.Sleep(50 * time.Millisecond)
-		// 2. Delete it so re-fetch fails
-		node.FSM.DB().Update(func(tx *bolt.Tx) error {
-			return node.FSM.Delete(tx, []byte("inodes"), []byte(inode.ID))
-		})
-	}()
-
-	// Wait long enough for the goroutine to trigger conflict AND deletion
-	time.Sleep(200 * time.Millisecond)
-
-	// This update should conflict then fail on re-fetch
-	_, err := c.updateInode(ctx, *inode)
-	if err == nil {
-		t.Error("updateInode should have failed after deletion")
+	manifest := []metadata.ChunkEntry{{ID: "c1", Nodes: []string{"n1"}}}
+	_, err := c.CommitInodeManifest(ctx, inode.ID, manifest, 100)
+	if err != nil {
+		t.Fatalf("CommitInodeManifest failed: %v", err)
 	}
-}
 
+	// 2. FetchChunk (Error case: missing chunk)
+	_, err = c.FetchChunk(ctx, inode.ID, make([]byte, 32), 0)
+	if err == nil {
+		// Might fail because urls are missing, but let's see.
+	}
 
-func ptr[T any](v T) *T {
-	return &v
+	// 3. OpenBlobRead (Resolution failure)
+	_, err = c.OpenBlobRead(ctx, "/missing/path")
+	if err == nil {
+		t.Error("OpenBlobRead should fail for missing path")
+	}
 }

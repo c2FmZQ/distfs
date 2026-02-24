@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
@@ -63,6 +64,22 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	ub, _ := json.Marshal(user)
 	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Raft apply CreateUser failed: %v", err)
+	}
+
+	// Data Node Setup
+	dataDir := t.TempDir()
+	dataSt := storage.New(dataDir, mk)
+	dataStore, _ := data.NewDiskStore(dataSt)
+	
+	metaSignPK, _ := metaNode.FSM.GetClusterSignPublicKey()
+	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
+	dataTS := httptest.NewServer(dataServer)
+
+	// Register real data node
+	nodeInfo := metadata.Node{ID: "n1", Address: dataTS.URL, Status: metadata.NodeStatusActive}
+	nb, _ := json.Marshal(nodeInfo)
+	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Raft apply RegisterNode failed: %v", err)
 	}
 
 	c := NewClient(ts.URL).WithIdentity(userID, udk).WithSignKey(usk).WithServerKey(ek)

@@ -1147,6 +1147,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 	maxRetries := 5
 
 	for i := 0; i < maxRetries; i++ {
+		fmt.Printf("DEBUG: updateInodeInternal attempt %d\n", i)
 		// Phase 31: Manifest Signing
 		// We must re-fetch and re-sign if we are retrying a conflict
 		if i > 0 {
@@ -1234,6 +1235,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			return nil
 		})
 
+		fmt.Printf("DEBUG: updateInodeInternal err=%v (type %T)\n", err, err)
 		if err == nil {
 			return &updated, nil
 		}
@@ -1902,11 +1904,7 @@ func (r *FileReader) Stat() *metadata.Inode {
 // ReadFile returns a reader for the specified file ID.
 // If fileKey is nil, it attempts to unlock it using the client's identity.
 func (c *Client) ReadFile(ctx context.Context, id string, fileKey []byte) (io.ReadCloser, error) {
-	r, err := c.NewReader(ctx, id, fileKey)
-	if err != nil {
-		return nil, err
-	}
-	return io.NopCloser(r), nil
+	return c.NewReader(ctx, id, fileKey)
 }
 
 func (c *Client) OpenBlobRead(ctx context.Context, id string) (io.ReadCloser, error) {

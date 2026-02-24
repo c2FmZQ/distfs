@@ -900,6 +900,8 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		return ErrExists
 	}
 
+	log.Printf("FSM: executeCreateGroup creating group ID=%s GID=%d EncSignKeyLen=%d", group.ID, group.GID, len(group.EncryptedSignKey))
+
 	// Ensure GID is unique
 	existing, err := fsm.Get(tx, []byte("gids"), uint32ToBytes(group.GID))
 	if err != nil {
@@ -1836,11 +1838,13 @@ func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
 			return err
 		}
 		if plain == nil {
+			log.Printf("FSM: IsUserInGroup groupID=%s NOT FOUND", groupID)
 			return ErrNotFound
 		}
 		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
+		log.Printf("FSM: IsUserInGroup groupID=%s error: %v", groupID, err)
 		return false, err
 	}
 	return group.Members[userID] || group.OwnerID == userID, nil
@@ -2013,10 +2017,13 @@ func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
 				nodes = append(nodes, n)
+			} else {
+				log.Printf("FSM: GetNodes unmarshal failed for key %s: %v", string(k), err)
 			}
 			return nil
 		})
 	})
+	log.Printf("FSM: GetNodes returning %d nodes", len(nodes))
 	return nodes, err
 }
 

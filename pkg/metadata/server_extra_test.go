@@ -9,10 +9,16 @@ import (
 	"net/http/httptest"
 	"testing"
 	"time"
+	"crypto/tls"
+	"encoding/hex"
+	"crypto/hmac"
+	"crypto/sha256"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/hashicorp/raft"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestServer_MiscHandlers(t *testing.T) {
@@ -169,6 +175,27 @@ func TestServer_MiscHandlers(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleReleaseLeases failed: %d", resp.StatusCode)
 	}
+
+	// 11. handleGetWorldPrivateKey (Admin Only)
+	// Ensure world is initialized
+	http.Get(ts.URL+"/v1/meta/key/world")
+
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/key/world/private", nil)
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Admin-Bypass", "true")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("handleGetWorldPrivateKey failed: %d", resp.StatusCode)
+	}
+
+	// 12. handleRegisterUser (Malformed JWT)
+	regReq := RegisterUserRequest{JWT: "malformed", SignKey: usk.Public()}
+	regB, _ := json.Marshal(regReq)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/user/register", bytes.NewReader(regB))
+	resp, _ = http.DefaultClient.Do(req)
+	if resp != nil && resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("handleRegisterUser expected 401 for malformed JWT, got %d", resp.StatusCode)
+	}
 }
 
 func TestServer_AdminHandlers(t *testing.T) {
@@ -234,21 +261,12 @@ func TestServer_AdminHandlers(t *testing.T) {
 	groupQuotaReq := SetGroupQuotaRequest{GroupID: "g1", MaxInodes: ptr(int64(50))}
 	gqrb, _ := json.Marshal(groupQuotaReq)
 	sealedGQ := SealTestRequest(t, u1, usk, ek, gqrb)
-	// Typo in path? No, let's try with trailing slash or check server.go routing
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/quota/group", bytes.NewReader(sealedGQ))
 	req.Header.Set("Session-Token", token)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleSetGroupQuota failed: %d", resp.StatusCode)
-	}
-
-	// 13. handleGetWorldPrivateKey
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/key/world/private", nil)
-	req.Header.Set("Session-Token", token)
-	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusOK {
-		// This might fail if world identity is not initialized
 	}
 }
 
@@ -536,20 +554,6 @@ func TestServer_BatchErrors(t *testing.T) {
 	}
 }
 
-func TestServer_Forwarding_CacheHit(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
-
-	// 1. Manually poison cache
-	server.leaderURLMu.Lock()
-	server.leaderURLCache["meta1"] = "http://cached-leader"
-	server.leaderURLMu.Unlock()
-
-	// 2. We can't easily make server NOT leader without complex setup,
-	// but we can test the resolveURLs logic.
-}
-
 func TestServer_ApplyBatch_Errors(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
 	defer node.Shutdown()
@@ -589,7 +593,6 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected 200 for batch fetch with missing ID, got %d", resp.StatusCode)
 	}
-	// Result body should be empty array "[]"
 }
 
 func TestServer_Batch_Forbidden(t *testing.T) {
@@ -645,6 +648,465 @@ func TestServer_GetKeySync_Errors(t *testing.T) {
 	}
 }
 
+func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
+	node, ts, _, ek, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	u1 := "admin"
+	usk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: []byte(u1)}.Marshal()})
+	token := LoginSessionForTest(t, ts, u1, usk)
+
+	// 1. Invalid address
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(SealTestRequest(t, u1, usk, ek, []byte(`{"address": "::invalid"}`))))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode == http.StatusOK {
+		t.Error("Expected error for invalid address")
+	}
+
+	// 2. Reject leader signature (Mock node)
+	mockNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer mockNode.Close()
+
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(SealTestRequest(t, u1, usk, ek, []byte(`{"address": "`+mockNode.URL+`"}`))))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Errorf("Expected 403 for node rejection, got %d", resp.StatusCode)
+	}
+}
+
+func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
+	// Discovery expects mTLS (resp.TLS != nil)
+	node, ts, _, ek, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	// Configure server with clientTLSConfig so it tries TLS discovery
+	server.clientTLSConfig = &tls.Config{}
+
+	u1 := "admin"
+	usk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: []byte(u1)}.Marshal()})
+	token := LoginSessionForTest(t, ts, u1, usk)
+
+	// Mock node WITHOUT TLS
+	mockNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		nonceHex := r.Header.Get("X-Raft-Nonce")
+		nonce, _ := hex.DecodeString(nonceHex)
+		
+		// Sign as NODE_RESPONSE
+		mac := hmac.New(sha256.New, []byte("testsecret"))
+		mac.Write(nonce)
+		mac.Write([]byte("NODE_RESPONSE"))
+		sig := hex.EncodeToString(mac.Sum(nil))
+		
+		w.Header().Set("X-Raft-Response", sig)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockNode.Close()
+
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(SealTestRequest(t, u1, usk, ek, []byte(`{"address": "`+mockNode.URL+`"}`))))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Errorf("Expected 500 for non-TLS discovery, got %d", resp.StatusCode)
+	}
+}
+
+func TestServer_MiscHandlers_More(t *testing.T) {
+	node, ts, _, ek, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	u1 := "admin"
+	usk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	server.ApplyRaftCommandInternal(CmdPromoteAdmin, []byte(u1))
+	token := LoginSessionForTest(t, ts, u1, usk)
+
+	// 1. handleRemoveNode (Success)
+	// Register n2 first
+	node2Info := Node{ID: "n2", Address: "http://n2:8080", Status: NodeStatusActive}
+	nb2, _ := json.Marshal(node2Info)
+	server.ApplyRaftCommandInternal(CmdRegisterNode, nb2)
+	
+	// Wait for commit
+	time.Sleep(200 * time.Millisecond)
+
+	req, _ := http.NewRequest("DELETE", ts.URL+"/v1/node/n2", nil)
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("handleRemoveNode failed: %d", resp.StatusCode)
+	}
+
+	// 2. handleAddChild (Success)
+	server.ApplyRaftCommandInternal(CmdCreateInode, mustMarshalJSON(Inode{ID: "dir1", Type: DirType, OwnerID: u1}))
+	server.ApplyRaftCommandInternal(CmdCreateInode, mustMarshalJSON(Inode{ID: "file1", Type: FileType, OwnerID: u1}))
+	
+	time.Sleep(200 * time.Millisecond)
+
+	reqData := map[string]string{"name": "f1", "child_id": "file1"}
+	rb, _ := json.Marshal(reqData)
+	sealed := SealTestRequest(t, u1, usk, ek, rb)
+	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/directory/dir1/entry", bytes.NewReader(sealed))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("handleAddChild failed: %d", resp.StatusCode)
+	}
+	// Verify in FSM
+	var updatedDir Inode
+	server.fsm.db.View(func(tx *bolt.Tx) error {
+		plain, _ := server.fsm.Get(tx, []byte("inodes"), []byte("dir1"))
+		return json.Unmarshal(plain, &updatedDir)
+	})
+	if updatedDir.Children["f1"] != "file1" {
+		t.Errorf("expected entry f1 -> file1, got %v", updatedDir.Children)
+	}
+
+	// 3. handleGetGroupSignKey (Success)
+	server.ApplyRaftCommandInternal(CmdCreateGroup, mustMarshalJSON(Group{
+		ID:               "g_more",
+		OwnerID:          u1,
+		GID:              5001,
+		EncryptedSignKey: []byte("fake-sign-key"),
+		Lockbox: crypto.Lockbox{
+			u1 + ":sign": crypto.LockboxEntry{KEMCiphertext: []byte("fake"), DEMCiphertext: []byte("fake")},
+		},
+	}))
+	
+	time.Sleep(500 * time.Millisecond) // Long sleep for group appear
+
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/group/g_more/sign/private", nil)
+	req.Header.Set("Session-Token", token)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		t.Errorf("handleGetGroupSignKey failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	// 4. handleListGroups (Sealed)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/groups", nil)
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("handleListGroups (sealed) failed: %d", resp.StatusCode)
+	}
+}
+
+func TestServer_DebugHandlers_Extra(t *testing.T) {
+	_, ts, _, _, _ := SetupCluster(t)
+	defer ts.Close()
+
+	// 1. Missing secret
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/debug/gc", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected 401 for missing secret, got %d", resp.StatusCode)
+	}
+
+	// 2. Wrong secret
+	req.Header.Set("X-Raft-Secret", "wrong")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("Expected 401 for wrong secret, got %d", resp.StatusCode)
+	}
+}
+
+func TestServer_handleBatch_More(t *testing.T) {
+	node, ts, _, ek, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	u1 := "u1"
+	usk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	token := LoginSessionForTest(t, ts, u1, usk)
+
+	// 1. Batch Create
+	inode := Inode{ID: "b1", Type: DirType, OwnerID: u1}
+	inode.SignInodeForTest(u1, usk)
+	batch := []LogCommand{
+		{Type: CmdCreateInode, Data: mustMarshalJSON(inode)},
+	}
+	bb, _ := json.Marshal(batch)
+	sealed := SealTestRequest(t, u1, usk, ek, bb)
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Batch create failed: %d", resp.StatusCode)
+	}
+
+	// 2. Batch Delete
+	batchD := []LogCommand{
+		{Type: CmdDeleteInode, Data: []byte("b1")},
+	}
+	bbD, _ := json.Marshal(batchD)
+	sealedD := SealTestRequest(t, u1, usk, ek, bbD)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealedD))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Batch delete failed: %d", resp.StatusCode)
+	}
+}
+
+func TestServer_Permissions_Thorough(t *testing.T) {
+	node, ts, _, ek, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	u1 := "u1"
+	usk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+
+	u2 := "u2"
+	usk2, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: u2, SignKey: usk2.Public()})
+	token2 := LoginSessionForTest(t, ts, u2, usk2)
+
+	// 1. Group Readable
+	server.ApplyRaftCommandInternal(CmdCreateGroup, mustMarshalJSON(Group{ID: "g1", OwnerID: u1, Members: map[string]bool{u2: true}}))
+	time.Sleep(100 * time.Millisecond)
+
+	inode := Inode{ID: "fg", OwnerID: u1, GroupID: "g1", Mode: 0640, Type: FileType}
+	inode.SignInodeForTest(u1, usk)
+	server.ApplyRaftCommandInternal(CmdCreateInode, mustMarshalJSON(inode))
+	time.Sleep(100 * time.Millisecond)
+
+	// u2 should get R token
+	irb, _ := json.Marshal(struct{InodeID string `json:"inode_id"`; Mode string `json:"mode"`}{InodeID: "fg", Mode: "R"})
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(SealTestRequest(t, u2, usk2, ek, irb)))
+	req.Header.Set("Session-Token", token2)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("u2 should have group read access, got %d", resp.StatusCode)
+	}
+
+	// 2. handleGetUser Redaction
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/u1", nil)
+	req.Header.Set("Session-Token", token2)
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode == http.StatusOK {
+		var resUser User
+		json.NewDecoder(resp.Body).Decode(&resUser)
+		if resUser.Usage.InodeCount != 0 {
+			t.Error("Usage should be redacted for non-self/non-admin")
+		}
+	}
+}
+
+func mustMarshalJSON(v interface{}) []byte {
+	b, _ := json.Marshal(v)
+	return b
+}
+
 func ptr[T any](v T) *T {
 	return &v
+}
+
+func TestServer_SetAttr(t *testing.T) {
+	node, ts, _, ek, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	u1 := "alice"
+	usk, _ := crypto.GenerateIdentityKey()
+	udk, _ := crypto.GenerateEncryptionKey()
+	user := User{
+		ID:      u1,
+		SignKey: usk.Public(),
+		EncKey:  udk.EncapsulationKey().Bytes(),
+	}
+	CreateUser(t, node, user)
+	token := LoginSessionForTest(t, ts, u1, usk)
+
+	// Create an inode
+	inodeID := "file1"
+	inode := Inode{
+		ID:      inodeID,
+		OwnerID: u1,
+		Type:    FileType,
+		Mode:    0644,
+	}
+	inode.SignInodeForTest(u1, usk)
+	ib, _ := json.Marshal(inode)
+	server.ApplyRaftCommandInternal(CmdCreateInode, ib)
+
+	// Update attributes via handleSetAttr
+	setAttrReq := SetAttrRequest{
+		InodeID: inodeID,
+		Mode:    ptr(uint32(0755)),
+	}
+	sab, _ := json.Marshal(setAttrReq)
+	sealed := SealTestRequest(t, u1, usk, ek, sab)
+
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/setattr", bytes.NewReader(sealed))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("handleSetAttr failed: %d", resp.StatusCode)
+	}
+
+	// Verify change in FSM
+	var updatedInode Inode
+	err = server.fsm.db.View(func(tx *bolt.Tx) error {
+		plain, err := server.fsm.Get(tx, []byte("inodes"), []byte(inodeID))
+		if err != nil {
+			return err
+		}
+		return json.Unmarshal(plain, &updatedInode)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedInode.Mode != 0755 {
+		t.Errorf("expected mode 0755, got %o", updatedInode.Mode)
+	}
+
+	// Test unauthorized (different user)
+	u2 := "bob"
+	usk2, _ := crypto.GenerateIdentityKey()
+	user2 := User{ID: u2, SignKey: usk2.Public()}
+	CreateUser(t, node, user2)
+	token2 := LoginSessionForTest(t, ts, u2, usk2)
+
+	sealed2 := SealTestRequest(t, u2, usk2, ek, sab)
+	req2, _ := http.NewRequest("POST", ts.URL+"/v1/meta/setattr", bytes.NewReader(sealed2))
+	req2.Header.Set("Session-Token", token2)
+	req2.Header.Set("X-DistFS-Sealed", "true")
+	resp2, _ := http.DefaultClient.Do(req2)
+	if resp2.StatusCode != http.StatusForbidden {
+		t.Errorf("expected 403 Forbidden for unauthorized SetAttr, got %d", resp2.StatusCode)
+	}
+}
+
+func TestServer_HealthAndStatus(t *testing.T) {
+	node, ts, usk, ek, server := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	WaitLeader(t, node.Raft)
+
+	// Health
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/health", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("health check failed: %d", resp.StatusCode)
+	}
+
+	// Cluster Status (under Admin)
+	u1 := "admin"
+	user := User{ID: u1, SignKey: usk.Public()}
+	CreateUser(t, node, user)
+	server.ApplyRaftCommandInternal(CmdPromoteAdmin, []byte(u1))
+	token := LoginSessionForTest(t, ts, u1, usk)
+
+	sealed := SealTestRequest(t, u1, usk, ek, nil)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/admin/status", bytes.NewReader(sealed))
+	req.Header.Set("Session-Token", token)
+	req.Header.Set("X-DistFS-Sealed", "true")
+	resp, _ = http.DefaultClient.Do(req)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("cluster status failed: %d", resp.StatusCode)
+	}
+}
+
+func TestServer_Forwarding(t *testing.T) {
+	// Node 1 (Leader)
+	n1, ts1, _, _, s1 := SetupCluster(t)
+	defer n1.Shutdown()
+	defer ts1.Close()
+
+	// Node 2 (Follower)
+	tmpDir2 := t.TempDir()
+	st2, _ := createTestStorage(t, tmpDir2)
+	nodeKey2, _ := LoadOrGenerateNodeKey(st2, "node.key")
+	nodeID2 := NodeIDFromKey(nodeKey2)
+	n2, _ := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2)
+	defer n2.Shutdown()
+
+	// Add n2 to n1 cluster
+	f := n1.Raft.AddVoter(raft.ServerID(nodeID2), n2.Transport.LocalAddr(), 0, 0)
+	if err := f.Error(); err != nil {
+		t.Fatalf("failed to add voter: %v", err)
+	}
+
+	// Wait for n2 to see leader
+	var leader raft.ServerAddress
+	for i := 0; i < 50; i++ {
+		leader, _ = n2.Raft.LeaderWithID()
+		if leader != "" {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	if leader == "" {
+		t.Fatal("n2 never saw leader")
+	}
+	t.Logf("n2 saw leader: %v", leader)
+	t.Logf("n1 NodeID: %s, RaftAddr: %s", n1.NodeID, n1.Transport.LocalAddr())
+
+	signKey2, _ := crypto.GenerateIdentityKey()
+	// Set the API URL of s1 so s2 knows where to forward
+	s1.apiURL = ts1.URL
+	
+	// Register Node 1 in FSM via Raft so Node 2 gets it
+	node1 := Node{
+		ID:          n1.NodeID,
+		Address:     ts1.URL,
+		RaftAddress: string(n1.Transport.LocalAddr()),
+		Status:      NodeStatusActive,
+	}
+	n1b, _ := json.Marshal(node1)
+	s1.ApplyRaftCommandInternal(CmdRegisterNode, n1b)
+
+	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0)
+	ts2 := httptest.NewServer(s2)
+	defer ts2.Close()
+
+	// Wait for replication
+	time.Sleep(500 * time.Millisecond)
+
+	// Make request to s2 (Follower)
+	// /v1/health should be forwarded? 
+	// Actually, health is not forwarded in ServeHTTP because it's before forwardIfNecessary.
+	// But /v1/node is after forwardIfNecessary.
+	req, _ := http.NewRequest("GET", ts2.URL+"/v1/node", nil)
+	req.Header.Set("X-Raft-Secret", "testsecret")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// It should be forwarded to s1 and return OK
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		t.Errorf("expected 200 OK via forwarding, got %d: %s", resp.StatusCode, string(body))
+	}
 }

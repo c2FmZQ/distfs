@@ -48,6 +48,17 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
+type Raft interface {
+	State() raft.RaftState
+	LeaderWithID() (raft.ServerAddress, raft.ServerID)
+	Apply(data []byte, timeout time.Duration) raft.ApplyFuture
+	Leader() raft.ServerAddress
+	Stats() map[string]string
+	VerifyLeader() raft.Future
+	RemoveServer(id raft.ServerID, prevIndex uint64, timeout time.Duration) raft.IndexFuture
+	AddVoter(id raft.ServerID, address raft.ServerAddress, prevIndex uint64, timeout time.Duration) raft.IndexFuture
+}
+
 // Server is the HTTP server for the Metadata Node.
 // It handles client requests and coordinates with the Raft cluster.
 type Server struct {
@@ -55,7 +66,7 @@ type Server struct {
 	apiURL       string
 	raftAddress  string
 	tlsPublicKey []byte
-	raft         *raft.Raft
+	raft         Raft
 	fsm          *MetadataFSM
 	jwks         *jwks.Remote
 	// nodeKey removed - used for mTLS but not passed to Server for auth anymore
@@ -532,6 +543,33 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Authenticate User for remaining routes (if possible)
+	user, err := s.authenticate(r)
+	if err == nil && user != nil {
+		// Handle Sealed Request (Layer 7 E2EE)
+		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
+			payload, err := s.unsealRequest(r, user)
+			if err != nil {
+				http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			r.Body = io.NopCloser(bytes.NewReader(payload))
+			r.ContentLength = int64(len(payload))
+		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
+			// Enforce E2EE for mutations
+			if r.Header.Get("X-DistFS-Sealed") != "true" {
+				http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
+				return
+			}
+		}
+
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
+			ctx = context.WithValue(ctx, adminBypassContextKey, true)
+		}
+		r = r.WithContext(ctx)
+	}
+
 	// Mutation & Protected Routes
 	if r.URL.Path == "/v1/node" {
 		if !s.checkRaftSecret(r) {
@@ -594,37 +632,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet {
 		s.handleGetMetrics(w, r)
 		return
-	}
-
-	// Authenticate User for remaining routes
-	user, err := s.authenticate(r)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-	if user != nil {
-		// Handle Sealed Request (Layer 7 E2EE)
-		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
-			payload, err := s.unsealRequest(r, user)
-			if err != nil {
-				http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
-				return
-			}
-			r.Body = io.NopCloser(bytes.NewReader(payload))
-			r.ContentLength = int64(len(payload))
-		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
-			// Enforce E2EE for mutations
-			if r.Header.Get("X-DistFS-Sealed") != "true" {
-				http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
-				return
-			}
-		}
-
-		ctx := context.WithValue(r.Context(), userContextKey, user)
-		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
-			ctx = context.WithValue(ctx, adminBypassContextKey, true)
-		}
-		r = r.WithContext(ctx)
 	}
 
 	// Admin Routes (Individual PQC Authorization)
@@ -1332,14 +1339,8 @@ func (s *Server) handleStoreKeySync(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	payload, err := s.unsealRequest(r, user)
-	if err != nil {
-		http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-
 	var blob KeySyncBlob
-	if err := json.Unmarshal(payload, &blob); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&blob); err != nil {
 		http.Error(w, "invalid blob format", http.StatusBadRequest)
 		return
 	}
