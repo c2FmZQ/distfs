@@ -28,6 +28,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -548,7 +549,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		isBearer := strings.HasPrefix(authHeader, "Bearer ")
 
-		if !isPublic && !s.checkRaftSecret(r) && !isBearer {
+		// Only allow Bearer tokens to bypass if the route handles its own JWT auth (keysync)
+		if !isPublic && !s.checkRaftSecret(r) && !(isBearer && r.URL.Path == "/v1/user/keysync") {
 			http.Error(w, err.Error(), http.StatusUnauthorized)
 			return
 		}
@@ -557,9 +559,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if user != nil {
 		// Handle Sealed Request (Layer 7 E2EE)
 		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
-			payload, err := s.unsealRequest(r, user)
+			payload, err := s.unsealRequest(w, r, user)
 			if err != nil {
-				http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
+				// unsealRequest already handled http.Error if it was a too large body
+				var maxBytesErr *http.MaxBytesError
+				if !errors.As(err, &maxBytesErr) {
+					http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
+				}
 				return
 			}
 			r.Body = io.NopCloser(bytes.NewReader(payload))
@@ -2904,11 +2910,11 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(resp)
 }
 
-func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
+func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *User) ([]byte, error) {
 	// Limit reading to 10MB to prevent DoS
-	r.Body = http.MaxBytesReader(nil, r.Body, 10*1024*1024)
+	limitBody := http.MaxBytesReader(w, r.Body, 10*1024*1024)
 	var sealed SealedRequest
-	if err := json.NewDecoder(r.Body).Decode(&sealed); err != nil {
+	if err := json.NewDecoder(limitBody).Decode(&sealed); err != nil {
 		return nil, fmt.Errorf("invalid sealed request: %w", err)
 	}
 

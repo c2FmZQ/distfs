@@ -407,7 +407,7 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 	// 1. Invalid JSON
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader([]byte("not-json")))
 	req.Header.Set("X-DistFS-Sealed", "true")
-	_, err := server.unsealRequest(req, &user)
+	_, err := server.unsealRequest(httptest.NewRecorder(), req, &user)
 	if err == nil {
 		t.Error("unsealRequest should fail for invalid JSON")
 	}
@@ -417,7 +417,7 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 	b, _ := json.Marshal(sr)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(b))
 	req.Header.Set("X-DistFS-Sealed", "true")
-	_, err = server.unsealRequest(req, &user)
+	_, err = server.unsealRequest(httptest.NewRecorder(), req, &user)
 	if err == nil {
 		t.Error("unsealRequest should fail for too short payload")
 	}

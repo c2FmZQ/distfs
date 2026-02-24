@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"sort"
 
@@ -57,12 +58,8 @@ func IsInodeID(id string) bool {
 	if len(id) != 64 {
 		return false
 	}
-	for _, c := range id {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
+	_, err := hex.DecodeString(id)
+	return err == nil
 }
 
 // ChunkEntry represents a single chunk of a file and its location.
