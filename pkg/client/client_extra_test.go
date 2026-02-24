@@ -56,11 +56,21 @@ func TestClient_ExtraFS(t *testing.T) {
 	if fi.Name() != "hello.txt" {
 		t.Errorf("Unexpected name: %s", fi.Name())
 	}
-	if fi.Size() != int64(len(content)) { t.Error("Size mismatch") }
-	if fi.Mode() == 0 { t.Error("Mode zero") }
-	if fi.ModTime().IsZero() { t.Error("ModTime zero") }
-	if fi.IsDir() { t.Error("IsDir true for file") }
-	if fi.Sys() == nil { t.Error("Sys nil") }
+	if fi.Size() != int64(len(content)) {
+		t.Error("Size mismatch")
+	}
+	if fi.Mode() == 0 {
+		t.Error("Mode zero")
+	}
+	if fi.ModTime().IsZero() {
+		t.Error("ModTime zero")
+	}
+	if fi.IsDir() {
+		t.Error("IsDir true for file")
+	}
+	if fi.Sys() == nil {
+		t.Error("Sys nil")
+	}
 
 	// 4. Glob (fs.FS)
 	matches, err := fs.Glob(distFS, "testdir/*.txt")
@@ -77,10 +87,12 @@ func TestClient_ExtraFS(t *testing.T) {
 		t.Fatalf("Open failed: %v", err)
 	}
 	defer f.Close()
-	
+
 	// Test File.Stat
 	ffi, _ := f.Stat()
-	if ffi.Name() == "" { t.Error("Empty name from file stat") }
+	if ffi.Name() == "" {
+		t.Error("Empty name from file stat")
+	}
 
 	ra, ok := f.(io.ReaderAt)
 	if !ok {
@@ -134,9 +146,13 @@ func TestClient_Links(t *testing.T) {
 
 	// Verify hard link
 	inode1, _, err := c.ResolvePath(ctx, "/dir/f1")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	inode2, _, err := c.ResolvePath(ctx, "/dir/f2")
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	if inode1.ID != inode2.ID {
 		t.Errorf("Hard links should have same InodeID: %s != %s", inode1.ID, inode2.ID)
 	}
@@ -149,13 +165,15 @@ func TestClient_DeleteExtra(t *testing.T) {
 
 	content := []byte("bye")
 	err := c.CreateFile(ctx, "/delete_me", bytes.NewReader(content), int64(len(content)))
-	if err != nil { t.Fatal(err) }
-	
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	err = c.Remove(ctx, "/delete_me")
 	if err != nil {
 		t.Fatalf("Remove failed: %v", err)
 	}
-	
+
 	_, _, err = c.ResolvePath(ctx, "/delete_me")
 	if err == nil {
 		t.Error("File should be gone")
@@ -216,12 +234,12 @@ func TestClient_AdminMethods(t *testing.T) {
 
 	// Promote user to admin in FSM directly
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
-	
+
 	// Register a node
 	nodeInfo := metadata.Node{ID: "n1", Address: "http://127.0.0.1:8080", Status: metadata.NodeStatusActive}
 	nb, _ := json.Marshal(nodeInfo)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
-	
+
 	time.Sleep(100 * time.Millisecond) // Wait for apply
 
 	// 1. AdminListUsers
@@ -264,9 +282,9 @@ func TestClient_AdminMethods(t *testing.T) {
 
 	// 6. AdminSetUserQuota
 	err = c.WithAdmin(true).AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
-		UserID: "u1",
+		UserID:    "u1",
 		MaxInodes: ptr(int64(100)),
-		MaxBytes: ptr(int64(1000)),
+		MaxBytes:  ptr(int64(1000)),
 	})
 	if err != nil {
 		t.Fatalf("AdminSetUserQuota failed: %v", err)
@@ -274,9 +292,9 @@ func TestClient_AdminMethods(t *testing.T) {
 
 	// 7. AdminSetGroupQuota
 	err = c.WithAdmin(true).AdminSetGroupQuota(ctx, metadata.SetGroupQuotaRequest{
-		GroupID: "g1",
+		GroupID:   "g1",
 		MaxInodes: ptr(int64(50)),
-		MaxBytes: ptr(int64(500)),
+		MaxBytes:  ptr(int64(500)),
 	})
 	if err != nil {
 		// Might fail if g1 not created yet
@@ -301,7 +319,7 @@ func TestClient_AdminMethods(t *testing.T) {
 	user2 := metadata.User{ID: u2, SignKey: usk2.Public()}
 	ub2, _ := json.Marshal(user2)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub2}.Marshal(), 5*time.Second)
-	
+
 	err = c.WithAdmin(true).AdminPromote(ctx, u2)
 	if err != nil {
 		t.Fatalf("AdminPromote failed: %v", err)
@@ -347,10 +365,12 @@ func TestClient_Blob(t *testing.T) {
 
 	content := []byte("blob data")
 	err := c.CreateFile(ctx, "/blob", bytes.NewReader(content), int64(len(content)))
-	if err != nil { t.Fatal(err) }
-	
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	inode, _, _ := c.ResolvePath(ctx, "/blob")
-	
+
 	// 1. OpenBlobRead by Path
 	rc, err := c.OpenBlobRead(ctx, "/blob")
 	if err != nil {
@@ -471,7 +491,7 @@ func TestClient_UnsealExtraErrors(t *testing.T) {
 func TestClient_DownloadHedged(t *testing.T) {
 	ctx := context.Background()
 	c := NewClient("http://meta")
-	
+
 	// Two nodes: one fails, one succeeds
 	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
@@ -494,7 +514,7 @@ func TestClient_DownloadHedged(t *testing.T) {
 
 func TestClient_LoginExtraErrors(t *testing.T) {
 	ctx := context.Background()
-	
+
 	// 1. Invalid server signature on challenge
 	sk, _ := crypto.GenerateIdentityKey()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -520,7 +540,7 @@ func TestClient_LoginExtraErrors(t *testing.T) {
 func TestClient_UploadExtraError(t *testing.T) {
 	ctx := context.Background()
 	c := NewClient("http://meta")
-	
+
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
 	}))
@@ -538,7 +558,7 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 	defer ts.Close()
 
 	fileKey := make([]byte, 32)
-	
+
 	// 1. World access (0004)
 	lb := c.createLockbox(ctx, fileKey, 0644, "")
 	if _, ok := lb[metadata.WorldID]; !ok {
@@ -575,7 +595,7 @@ func TestClient_MiscMethods(t *testing.T) {
 	if apiErr.ToPOSIX() != syscall.ENOENT {
 		t.Errorf("Expected ENOENT, got %v", apiErr.ToPOSIX())
 	}
-	
+
 	// 4. GetServerKey (Pre-configured)
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
@@ -590,7 +610,7 @@ func TestClient_MiscMethods(t *testing.T) {
 	if err == nil {
 		t.Error("ParseContactString should fail for invalid string")
 	}
-	
+
 	_, err = c.ParseContactString("distfs-contact:v1:invalid-base64")
 	if err == nil {
 		t.Error("ParseContactString should fail for invalid base64")
@@ -621,7 +641,7 @@ func TestClient_ResolvePath_InvalidCache(t *testing.T) {
 
 	c.Mkdir(ctx, "/dir")
 	c.CreateFile(ctx, "/dir/f1", bytes.NewReader([]byte("data")), 4)
-	
+
 	// 1. Manually poison cache
 	c.putPathCache("/dir/f1", pathCacheEntry{
 		inodeID: "wrong-id",
@@ -662,33 +682,47 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 
 	// 2. Setup Group g1
 	group, err := c1.CreateGroup(ctx, "g1")
-	if err != nil { t.Fatalf("CreateGroup failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("CreateGroup failed: %v", err)
+	}
+
 	contactStr, err := c2.GenerateContactString()
-	if err != nil { t.Fatalf("GenerateContactString failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("GenerateContactString failed: %v", err)
+	}
+
 	ci, err := c1.ParseContactString(contactStr)
-	if err != nil { t.Fatalf("ParseContactString failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("ParseContactString failed: %v", err)
+	}
+
 	err = c1.AddUserToGroup(ctx, group.ID, u2, "Member", ci)
-	if err != nil { t.Fatalf("AddUserToGroup failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("AddUserToGroup failed: %v", err)
+	}
+
 	time.Sleep(200 * time.Millisecond)
 
 	// 3. Create File f1 with Group access
 	err = c1.Mkdir(ctx, "/shared")
-	if err != nil { t.Fatalf("Mkdir /shared failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("Mkdir /shared failed: %v", err)
+	}
+
 	err = c1.SetAttr(ctx, "/shared", metadata.SetAttrRequest{Mode: ptr(uint32(0770)), GroupID: &group.ID})
-	if err != nil { t.Fatalf("SetAttr /shared failed: %v", err) }
-	
+	if err != nil {
+		t.Fatalf("SetAttr /shared failed: %v", err)
+	}
+
 	wc, err := c1.OpenBlobWrite(ctx, "/shared/f1")
-	if err != nil { t.Fatalf("OpenBlobWrite f1 failed: %v", err) }
+	if err != nil {
+		t.Fatalf("OpenBlobWrite f1 failed: %v", err)
+	}
 	wc.Write([]byte("secret"))
 	wc.Close()
-	
+
 	c1.SetAttr(ctx, "/shared/f1", metadata.SetAttrRequest{Mode: ptr(uint32(0660))})
-	
+
 	_, _, _ = c1.ResolvePath(ctx, "/shared/f1")
 
 	// 4. u2 Unlocks f1 (via Group key)
@@ -707,7 +741,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	c1.SetAttr(ctx, "/public", metadata.SetAttrRequest{Mode: ptr(uint32(0777))})
 	c1.CreateFile(ctx, "/public/f2", bytes.NewReader([]byte("public")), 6)
 	c1.SetAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: ptr(uint32(0664))})
-	
+
 	// Create u3
 	usk3, _ := crypto.GenerateIdentityKey()
 	udk3, _ := crypto.GenerateEncryptionKey()
@@ -718,7 +752,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 		t.Fatalf("Raft apply CreateUser u3 failed: %v", err)
 	}
 	time.Sleep(100 * time.Millisecond)
-	
+
 	if err := c3.Login(ctx); err != nil {
 		t.Fatalf("u3 login failed: %v", err)
 	}
@@ -764,8 +798,12 @@ func TestClient_Groups_SystemAndMembers(t *testing.T) {
 	gl, _ := c.ListGroups(ctx)
 	if len(gl) > 0 {
 		name, err := c.DecryptGroupName(ctx, gl[0])
-		if err != nil { t.Errorf("DecryptGroupName failed: %v", err) }
-		if name != "sysgroup" { t.Errorf("Expected sysgroup, got %s", name) }
+		if err != nil {
+			t.Errorf("DecryptGroupName failed: %v", err)
+		}
+		if name != "sysgroup" {
+			t.Errorf("Expected sysgroup, got %s", name)
+		}
 	}
 
 	// 3. GetGroupMembers
@@ -785,9 +823,9 @@ func TestClient_FS_Extra(t *testing.T) {
 
 	c.Mkdir(ctx, "/fs")
 	c.CreateFile(ctx, "/fs/f1", bytes.NewReader([]byte("data")), 4)
-	
+
 	distFS := c.FS(ctx)
-	
+
 	// 1. ReadDir
 	des, _ := fs.ReadDir(distFS, "fs")
 	if len(des) > 0 {
@@ -800,10 +838,14 @@ func TestClient_FS_Extra(t *testing.T) {
 		_ = fi.ModTime()
 		_ = fi.IsDir()
 		_ = fi.Sys()
-		
+
 		// Type assertions
-		if ext, ok := e.(interface{ Inode() *metadata.Inode }); ok { _ = ext.Inode() }
-		if ext, ok := e.(interface{ InodeID() string }); ok { _ = ext.InodeID() }
+		if ext, ok := e.(interface{ Inode() *metadata.Inode }); ok {
+			_ = ext.Inode()
+		}
+		if ext, ok := e.(interface{ InodeID() string }); ok {
+			_ = ext.InodeID()
+		}
 	}
 
 	// 2. Open directory and call ReadDir
@@ -812,7 +854,7 @@ func TestClient_FS_Extra(t *testing.T) {
 		rdf.ReadDir(-1)
 	}
 	f.Close()
-	
+
 	// 3. NewDirEntry / NewDirEntryForTest
 	inode := &metadata.Inode{ID: "i1"}
 	key := make([]byte, 32)
@@ -839,7 +881,9 @@ func TestClient_Onboarding_Discovery(t *testing.T) {
 	}
 	// This will still fail at auth.GetToken but discovered endpoints.
 	_, err := GetOIDCToken(ctx, opts)
-	if err == nil { t.Error("Expected error from auth.GetToken") }
+	if err == nil {
+		t.Error("Expected error from auth.GetToken")
+	}
 }
 
 func TestClient_SyncFile_More(t *testing.T) {
@@ -851,13 +895,13 @@ func TestClient_SyncFile_More(t *testing.T) {
 	c.CreateFile(ctx, "/inline", bytes.NewReader([]byte("init")), 4)
 	inode, _, _ := c.ResolvePath(ctx, "/inline")
 	c.SyncFile(ctx, inode.ID, strings.NewReader("new content"), 11, nil)
-	
+
 	// 2. Growing file (Chunked)
-	large := make([]byte, crypto.ChunkSize + 100)
+	large := make([]byte, crypto.ChunkSize+100)
 	c.CreateFile(ctx, "/large", bytes.NewReader(large), int64(len(large)))
 	inodeL, _, _ := c.ResolvePath(ctx, "/large")
-	
-	grown := make([]byte, 2*crypto.ChunkSize + 100)
+
+	grown := make([]byte, 2*crypto.ChunkSize+100)
 	c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
 }
 
@@ -882,7 +926,7 @@ func TestClient_DeleteInode(t *testing.T) {
 	}
 
 	inode, _, _ := c.ResolvePath(ctx, "/dir1/file1")
-	
+
 	// Delete it
 	err = c.DeleteInode(ctx, inode.ID)
 	if err != nil {
@@ -909,7 +953,7 @@ func TestClient_SyncFile(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	
+
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
 
 	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
@@ -994,7 +1038,7 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	
+
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
 
 	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
@@ -1008,7 +1052,7 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	fileID := "f1"
 	fileKey := make([]byte, 32)
 	chunkData := []byte("chunk payload")
-	
+
 	// Create Inode first to allow token issue
 	inode := metadata.Inode{ID: fileID, OwnerID: "u1", Type: metadata.FileType}
 	ib, _ := json.Marshal(inode)

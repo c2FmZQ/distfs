@@ -16,8 +16,8 @@ func TestTypes_Misc(t *testing.T) {
 
 	// 2. SignedAuthToken Marshal/Unmarshal
 	sat := &SignedAuthToken{
-		SignerID: "n1",
-		Payload:  []byte("payload"),
+		SignerID:  "n1",
+		Payload:   []byte("payload"),
 		Signature: []byte("sig"),
 	}
 	b := sat.Marshal()

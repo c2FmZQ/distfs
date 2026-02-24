@@ -24,11 +24,11 @@ func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) 
 
 func TestClient_MockedErrors(t *testing.T) {
 	ctx := context.Background()
-	
+
 	sk, _ := crypto.GenerateIdentityKey()
 	dk, _ := crypto.GenerateEncryptionKey()
 	c := NewClient("http://mock").WithSignKey(sk).WithIdentity("u1", dk)
-	
+
 	c.httpClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
@@ -37,7 +37,7 @@ func TestClient_MockedErrors(t *testing.T) {
 			}, nil
 		},
 	}
-	
+
 	err := c.ApplyBatch(ctx, []metadata.LogCommand{{Type: metadata.CmdCreateInode}})
 	if err == nil {
 		t.Error("Expected error from ApplyBatch")
@@ -59,7 +59,7 @@ func TestClient_MockedRetry(t *testing.T) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
 	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk)
-	
+
 	attempts := 0
 	c.httpClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
@@ -107,7 +107,7 @@ func TestClient_MockedConflict(t *testing.T) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
 	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk)
-	
+
 	// Pre-login to avoid login logic in mock
 	c.sessionToken = "fake"
 	c.sessionExpiry = time.Now().Add(time.Hour)
@@ -145,7 +145,7 @@ func TestClient_MockedUnsealError(t *testing.T) {
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
 	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk)
-	
+
 	c.httpClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			return &http.Response{

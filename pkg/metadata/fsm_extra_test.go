@@ -15,13 +15,13 @@
 package metadata
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"testing"
 	"time"
-	"bytes"
-	"io"
 
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
@@ -351,7 +351,9 @@ func TestFSM_GetLeases_Extra(t *testing.T) {
 
 	// 2. GetLeases
 	leases, err := fsm.GetLeases()
-	if err != nil { t.Fatalf("GetLeases failed: %v", err) }
+	if err != nil {
+		t.Fatalf("GetLeases failed: %v", err)
+	}
 	if len(leases) != 1 || leases[0].InodeID != "i1" {
 		t.Errorf("GetLeases failed: %+v", leases)
 	}
@@ -393,9 +395,10 @@ type mockSink struct {
 	canceled bool
 	closed   bool
 }
-func (m *mockSink) ID() string { return "mock" }
+
+func (m *mockSink) ID() string    { return "mock" }
 func (m *mockSink) Cancel() error { m.canceled = true; return nil }
-func (m *mockSink) Close() error { m.closed = true; return nil }
+func (m *mockSink) Close() error  { m.closed = true; return nil }
 
 func TestFSM_Restore_Full(t *testing.T) {
 	fsm := createTestFSM(t)

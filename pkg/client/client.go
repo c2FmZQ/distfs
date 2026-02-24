@@ -62,12 +62,14 @@ func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
 
-	b, _ := io.ReadAll(resp.Body)
 	c.keyMu.Lock()
 	c.serverSignPK = b
 	c.keyMu.Unlock()
@@ -91,11 +93,13 @@ func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, 
 		return nil, err
 	}
 	defer resp.Body.Close()
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 	}
-	b, _ := io.ReadAll(resp.Body)
 	pk, err := crypto.UnmarshalEncapsulationKey(b)
 	if err != nil {
 		return nil, err
@@ -1147,7 +1151,6 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 	maxRetries := 5
 
 	for i := 0; i < maxRetries; i++ {
-		fmt.Printf("DEBUG: updateInodeInternal attempt %d\n", i)
 		// Phase 31: Manifest Signing
 		// We must re-fetch and re-sign if we are retrying a conflict
 		if i > 0 {
@@ -1235,7 +1238,6 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			return nil
 		})
 
-		fmt.Printf("DEBUG: updateInodeInternal err=%v (type %T)\n", err, err)
 		if err == nil {
 			return &updated, nil
 		}
@@ -1984,7 +1986,7 @@ func (c *Client) OpenBlobWrite(ctx context.Context, id string) (io.WriteCloser, 
 	} else {
 		// 1. Try getInode directly (Treating id as InodeID)
 		// Only try this if it doesn't look like a path to avoid hitting placeholders.
-		if !strings.Contains(id, "/") {
+		if metadata.IsInodeID(id) {
 			inode, _ = c.getInode(ctx, id)
 			if inode != nil {
 				fileKey, _ = c.UnlockInode(ctx, inode)

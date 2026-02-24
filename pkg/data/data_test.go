@@ -476,7 +476,7 @@ func TestData_DiskStoreExtra(t *testing.T) {
 	if err != nil {
 		t.Errorf("Stats failed: %v", err)
 	}
-	
+
 	// Stats error (missing dir)
 	os.RemoveAll(tmpDir)
 	_, _, err = ds.Stats()
@@ -492,7 +492,7 @@ func TestData_DiskStoreExtra(t *testing.T) {
 			t.Error("Expected error from ListChunks after dir removal")
 		}
 	}
-	
+
 	// 3. Quarantine missing
 	err = ds.QuarantineChunk("0000000000000000000000000000000000000000000000000000000000000000")
 	if err == nil {
@@ -510,7 +510,7 @@ func TestData_APIHandlersExtra(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
 	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
-	
+
 	id1 := "1111111111111111111111111111111111111111111111111111111111111111"
 	id2 := "2222222222222222222222222222222222222222222222222222222222222222"
 	ds.WriteChunk(id1, bytes.NewReader([]byte("data 1")))
@@ -588,7 +588,7 @@ func TestData_APIHandlersExtra(t *testing.T) {
 	path := filepath.Join(ds.st.Dir(), getShardPath(unreadableID))
 	os.Chmod(path, 0000)
 	defer os.Chmod(path, 0644)
-	
+
 	tokenUnreadable := signToken(t, usk, []string{unreadableID}, "R")
 	req, _ = http.NewRequest("GET", "/v1/data/"+unreadableID, nil)
 	req.Header.Set("Authorization", "Bearer "+tokenUnreadable)
@@ -687,7 +687,7 @@ func TestData_ScrubberErrors(t *testing.T) {
 
 func TestData_NewServerExtra(t *testing.T) {
 	ds, _ := createTestStore(t)
-	
+
 	// 1. With FSM
 	s1 := NewServer(ds, nil, &metadata.MetadataFSM{}, nil)
 	if s1.validator == nil {
@@ -706,7 +706,7 @@ func TestData_Validators(t *testing.T) {
 	if err := dv.ValidateNode("any"); err == nil {
 		t.Error("DenyAllValidator should deny all")
 	}
-	
+
 	nv := NoopValidator{}
 	if err := nv.ValidateNode("any"); err != nil {
 		t.Errorf("NoopValidator should allow all, got %v", err)
@@ -716,46 +716,46 @@ func TestData_Validators(t *testing.T) {
 func TestData_ScrubberExtra(t *testing.T) {
 	ds, tmpDir := createTestStore(t)
 	scrubber := NewIntegrityScrubber(ds, 1*time.Hour)
-	
+
 	// 1. Create a valid chunk
 	data := []byte("valid data")
 	hash := sha256.Sum256(data)
 	id := hex.EncodeToString(hash[:])
 	ds.WriteChunk(id, bytes.NewReader(data))
-	
+
 	// 2. Create a corrupted chunk (id mismatch)
 	corruptID := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	ds.WriteChunk(corruptID, bytes.NewReader([]byte("corrupt")))
-	
+
 	// 3. Create an unreadable chunk (permission denied)
 	unreadableID := "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeffffffffffffffffffffffffffffffff"
 	ds.WriteChunk(unreadableID, bytes.NewReader([]byte("unreadable")))
 	path := filepath.Join(tmpDir, getShardPath(unreadableID))
 	os.Chmod(path, 0000)
 	defer os.Chmod(path, 0644) // Clean up
-	
+
 	// 4. Trigger scrub
 	scrubber.scrub()
-	
+
 	// 5. Verify corruptID is quarantined (gone from store)
 	exists, _ := ds.HasChunk(corruptID)
 	if exists {
 		t.Error("Corrupted chunk should have been quarantined")
 	}
-	
+
 	// 6. Stop scrubber
 	scrubber.Stop()
 }
 
 func TestData_DiskStoreErrors(t *testing.T) {
 	ds, _ := createTestStore(t)
-	
+
 	// 1. WriteChunk bad ID
 	err := ds.WriteChunk("too-short", bytes.NewReader([]byte("data")))
 	if err == nil {
 		t.Error("WriteChunk should fail for bad ID")
 	}
-	
+
 	// 2. ReadChunk missing
 	_, err = ds.ReadChunk("0000000000000000000000000000000000000000000000000000000000000000")
 	if err == nil {
@@ -795,7 +795,7 @@ func TestData_DiskStoreErrors(t *testing.T) {
 	// Make root store dir read-only
 	os.Chmod(ds.st.Dir(), 0500)
 	defer os.Chmod(ds.st.Dir(), 0700)
-	
+
 	err = ds.WriteChunk(id, bytes.NewReader([]byte("data")))
 	if err == nil {
 		t.Error("WriteChunk should fail for read-only store directory")
@@ -822,7 +822,7 @@ func TestData_Scrubber_QuarantineFail(t *testing.T) {
 	// 1. Create a corrupted chunk
 	corruptID := "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
 	ds.WriteChunk(corruptID, bytes.NewReader([]byte("corrupt")))
-	
+
 	// 2. Make shard dir read-only to make QuarantineChunk (rename) fail
 	shardDir := filepath.Join(ds.st.Dir(), corruptID[:2])
 	os.Chmod(shardDir, 0500)
@@ -837,18 +837,18 @@ func TestServer_Get_Abort(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
 	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
-	
+
 	id := "4444444444444444444444444444444444444444444444444444444444444444"
 	// Write large chunk to make Copy take time
 	ds.WriteChunk(id, bytes.NewReader(make([]byte, 1024*1024)))
-	
+
 	ts := httptest.NewServer(server)
 	defer ts.Close()
-	
+
 	token := signToken(t, usk, []string{id}, "R")
 	req, _ := http.NewRequest("GET", ts.URL+"/v1/data/"+id, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
-	
+
 	client := &http.Client{
 		Timeout: 50 * time.Millisecond, // Force abort
 	}
@@ -859,7 +859,7 @@ func TestServer_Get_Abort(t *testing.T) {
 func TestData_Replication_NetworkError(t *testing.T) {
 	ds, _ := createTestStore(t)
 	server := NewServer(ds, nil, nil, NoopValidator{})
-	
+
 	id := "5555555555555555555555555555555555555555555555555555555555555555"
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
 
@@ -875,7 +875,7 @@ func TestData_DiskStoreShortID(t *testing.T) {
 	if path != "a" {
 		t.Errorf("Expected 'a', got %s", path)
 	}
-	
+
 	ds, _ := createTestStore(t)
 	// 1. Idempotency
 	id := "1111111111111111111111111111111111111111111111111111111111111111"
@@ -889,7 +889,7 @@ func TestData_DiskStoreShortID(t *testing.T) {
 	tmpFile := filepath.Join(ds.st.Dir(), "00", "0000000000000000000000000000000000000000000000000000000000000000.tmp")
 	os.MkdirAll(filepath.Dir(tmpFile), 0700)
 	os.WriteFile(tmpFile, []byte("tmp"), 0600)
-	
+
 	count := 0
 	for cid, _ := range ds.ListChunks() {
 		if strings.HasSuffix(cid, ".tmp") {
@@ -901,7 +901,7 @@ func TestData_DiskStoreShortID(t *testing.T) {
 	}
 	// 3. ListChunks break
 	ds.WriteChunk("2222222222222222222222222222222222222222222222222222222222222222", bytes.NewReader([]byte("data")))
-	for _ , _ = range ds.ListChunks() {
+	for _, _ = range ds.ListChunks() {
 		break // Hits !yield branch
 	}
 }
@@ -927,7 +927,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 	}
 
 	// 3. Invalid token structure
-	req.Header.Set("Authorization", "Bearer " + base64.StdEncoding.EncodeToString([]byte("invalid json")))
+	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString([]byte("invalid json")))
 	if err := server.Internal_Authenticate(req, cid, "R"); err == nil || !strings.Contains(err.Error(), "invalid token structure") {
 		t.Errorf("Expected invalid token structure error, got %v", err)
 	}
@@ -944,7 +944,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 		Signature: make([]byte, 64),
 	}
 	signedB, _ := json.Marshal(signed)
-	req.Header.Set("Authorization", "Bearer " + base64.StdEncoding.EncodeToString(signedB))
+	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(signedB))
 	if err := server.Internal_Authenticate(req, cid, "R"); err == nil || !strings.Contains(err.Error(), "invalid signature") {
 		t.Errorf("Expected invalid signature error, got %v", err)
 	}
@@ -956,7 +956,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 	signed.Payload = capB
 	signed.Signature = sig
 	signedB, _ = json.Marshal(signed)
-	req.Header.Set("Authorization", "Bearer " + base64.StdEncoding.EncodeToString(signedB))
+	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(signedB))
 	if err := server.Internal_Authenticate(req, cid, "R"); err == nil || !strings.Contains(err.Error(), "token expired") {
 		t.Errorf("Expected token expired error, got %v", err)
 	}
@@ -969,7 +969,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 	signed.Payload = capB
 	signed.Signature = sig
 	signedB, _ = json.Marshal(signed)
-	req.Header.Set("Authorization", "Bearer " + base64.StdEncoding.EncodeToString(signedB))
+	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(signedB))
 	if err := server.Internal_Authenticate(req, cid, "R"); err == nil || !strings.Contains(err.Error(), "permission denied") {
 		t.Errorf("Expected permission denied error, got %v", err)
 	}
@@ -982,7 +982,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 	signed.Payload = capB
 	signed.Signature = sig
 	signedB, _ = json.Marshal(signed)
-	req.Header.Set("Authorization", "Bearer " + base64.StdEncoding.EncodeToString(signedB))
+	req.Header.Set("Authorization", "Bearer "+base64.StdEncoding.EncodeToString(signedB))
 	if err := server.Internal_Authenticate(req, cid, "R"); err == nil || !strings.Contains(err.Error(), "chunk access denied") {
 		t.Errorf("Expected chunk access denied error, got %v", err)
 	}
@@ -991,7 +991,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 func TestData_Scrubber_Stop(t *testing.T) {
 	ds, _ := NewDiskStore(storage.New(t.TempDir(), nil))
 	scrubber := NewIntegrityScrubber(ds, time.Hour)
-	
+
 	// Pre-fill some chunks
 	for i := 0; i < 10; i++ {
 		id := strings.Repeat(fmt.Sprintf("%x", i), 64)
@@ -1048,10 +1048,10 @@ func TestData_API_GetReadError(t *testing.T) {
 	usk, _ := crypto.GenerateIdentityKey()
 	ms := &mockStore{Store: ds, readErr: fmt.Errorf("injected read error")}
 	server := NewServer(ms, usk.Public(), nil, NoopValidator{})
-	
+
 	id := strings.Repeat("a", 64)
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
-	
+
 	token := signToken(t, usk, []string{id}, "R")
 	req, _ := http.NewRequest("GET", "/v1/data/"+id, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -1066,13 +1066,13 @@ func TestData_API_PutError(t *testing.T) {
 	ds, tmpDir := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
 	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
-	
+
 	id := strings.Repeat("a", 64)
-	
+
 	// Make root dir read-only
 	os.Chmod(tmpDir, 0500)
 	defer os.Chmod(tmpDir, 0700)
-	
+
 	token := signToken(t, usk, []string{id}, "W")
 	req, _ := http.NewRequest("PUT", "/v1/data/"+id, bytes.NewReader([]byte("data")))
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -1087,10 +1087,10 @@ func TestData_API_ReplicateMalformed(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
 	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
-	
+
 	id := strings.Repeat("e", 64)
 	token := signToken(t, usk, []string{id}, "R")
-	
+
 	req, _ := http.NewRequest("POST", "/v1/data/"+id+"/replicate", bytes.NewReader([]byte("invalid")))
 	req.Header.Set("Authorization", "Bearer "+token)
 	rr := httptest.NewRecorder()
@@ -1129,10 +1129,10 @@ func TestData_DiskStore_WriteErrors(t *testing.T) {
 func TestData_Scrubber_ListError(t *testing.T) {
 	ds, tmpDir := createTestStore(t)
 	scrubber := NewIntegrityScrubber(ds, time.Hour)
-	
+
 	id := strings.Repeat("a", 64)
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
-	
+
 	// Simulate walk error by removing the directory mid-scrub?
 	// Hard to time. Let's just remove it and call scrub.
 	os.RemoveAll(tmpDir)
@@ -1144,15 +1144,15 @@ func TestData_API_DeleteError(t *testing.T) {
 	ds, tmpDir := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
 	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
-	
+
 	id := strings.Repeat("d", 64)
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
-	
+
 	// Make shard dir read-only to make os.Remove fail
 	shardDir := filepath.Join(tmpDir, id[:2])
 	os.Chmod(shardDir, 0500)
 	defer os.Chmod(shardDir, 0700)
-	
+
 	token := signToken(t, usk, []string{id}, "D")
 	req, _ := http.NewRequest("DELETE", "/v1/data/"+id, nil)
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -1190,4 +1190,3 @@ func TestData_API_MissingChunks(t *testing.T) {
 		t.Errorf("Expected 404 for missing chunk delete, got %d", resp.StatusCode)
 	}
 }
-

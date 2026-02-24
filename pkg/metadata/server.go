@@ -495,34 +495,41 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Public Health
-	if r.URL.Path == "/v1/health" && r.Method == http.MethodGet {
-		s.handleHealth(w, r)
-		return
+	// 1. Identify Public Routes
+	isPublic := false
+	switch r.URL.Path {
+	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world",
+		"/v1/user/register", "/v1/login", "/v1/auth/config", "/v1/auth/challenge",
+		"/v1/cluster/stats", "/v1/user/keysync":
+		isPublic = true
+	case "/v1/node/info":
+		isPublic = true
 	}
 
-	// Cluster Epoch Key (Public for encapsulation)
-	if r.URL.Path == "/v1/meta/key" && r.Method == http.MethodGet {
-		s.handleGetClusterKey(w, r)
-		return
+	// 2. Handle Public Routes before forwarding (Performance & Availability)
+	if r.Method == http.MethodGet {
+		switch r.URL.Path {
+		case "/v1/health":
+			s.handleHealth(w, r)
+			return
+		case "/v1/meta/key":
+			s.handleGetClusterKey(w, r)
+			return
+		case "/v1/meta/key/sign":
+			s.handleGetServerSignKey(w, r)
+			return
+		case "/v1/meta/key/world":
+			s.handleGetWorldPublicKey(w, r)
+			return
+		case "/v1/node/info":
+			s.handleNodeInfo(w, r)
+			return
+		}
 	}
 
-	// Server Sign Key (Public for verification)
-	if r.URL.Path == "/v1/meta/key/sign" && r.Method == http.MethodGet {
-		s.handleGetServerSignKey(w, r)
-		return
-	}
-
-	// World Public Key (Public)
-	if r.URL.Path == "/v1/meta/key/world" && r.Method == http.MethodGet {
-		s.handleGetWorldPublicKey(w, r)
-		return
-	}
-
-	// World Private Key (Authenticated encapsulation)
+	// Cluster Private Key (Authenticated encapsulation)
 	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
-		s.handleGetWorldPrivateKey(w, r)
-		return
+		// Needs auth, skip for now - will be handled later
 	}
 
 	// Debug Routes (Protected by shared secret)
@@ -530,22 +537,24 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Node registration (Internal Heartbeat / Shared Secret / HMAC Handshake)
-	if r.URL.Path == "/v1/node/info" {
-		if r.Method == http.MethodGet {
-			s.handleNodeInfo(w, r)
-			return
-		}
-	}
-
 	// For all other requests, if we are not the leader, forward to the leader.
 	if s.forwardIfNecessary(w, r) {
 		return
 	}
 
-	// Authenticate User for remaining routes (if possible)
+	// 4. Authenticate User for remaining routes
 	user, err := s.authenticate(r)
-	if err == nil && user != nil {
+	if err != nil {
+		authHeader := r.Header.Get("Authorization")
+		isBearer := strings.HasPrefix(authHeader, "Bearer ")
+
+		if !isPublic && !s.checkRaftSecret(r) && !isBearer {
+			http.Error(w, err.Error(), http.StatusUnauthorized)
+			return
+		}
+	}
+
+	if user != nil {
 		// Handle Sealed Request (Layer 7 E2EE)
 		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
 			payload, err := s.unsealRequest(r, user)
@@ -570,7 +579,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		r = r.WithContext(ctx)
 	}
 
-	// Mutation & Protected Routes
+	// 5. Mutation & Protected Routes
 	if r.URL.Path == "/v1/node" {
 		if !s.checkRaftSecret(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -624,12 +633,25 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
+		if user == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		s.handleGetWorldPrivateKey(w, r)
+		return
+	}
+
 	if r.URL.Path == "/v1/cluster/stats" && r.Method == http.MethodGet {
 		s.handleGetClusterStats(w, r)
 		return
 	}
 
 	if r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet {
+		if !s.checkRaftSecret(r) && user == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
 		s.handleGetMetrics(w, r)
 		return
 	}
@@ -652,94 +674,102 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Standard Inode / User / Group routes
-	if r.URL.Path == "/v1/user/groups" && r.Method == http.MethodGet {
-		s.handleListGroups(w, r)
-		return
-	}
-	if r.URL.Path == "/v1/group/gid/allocate" && r.Method == http.MethodGet {
-		s.handleAllocateGID(w, r)
-		return
-	}
-	if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
-		id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
-		s.handleGetUser(w, r, id)
-		return
+	// 7. Authenticated Standard Routes (Inode / User / Group)
+	if strings.HasPrefix(r.URL.Path, "/v1/user/") || strings.HasPrefix(r.URL.Path, "/v1/group/") || strings.HasPrefix(r.URL.Path, "/v1/meta/") {
+		if user == nil {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+
+		if r.URL.Path == "/v1/user/groups" && r.Method == http.MethodGet {
+			s.handleListGroups(w, r)
+			return
+		}
+		if r.URL.Path == "/v1/group/gid/allocate" && r.Method == http.MethodGet {
+			s.handleAllocateGID(w, r)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
+			s.handleGetUser(w, r, id)
+			return
+		}
+
+		if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/meta/inode/")
+			if r.Method == http.MethodGet {
+				s.handleGetInode(w, r, id)
+				return
+			}
+			if r.Method == http.MethodDelete {
+				s.handleDeleteInode(w, r, id)
+				return
+			}
+			if r.Method == http.MethodPut {
+				s.handleUpdateInode(w, r, id)
+				return
+			}
+		} else if r.URL.Path == "/v1/meta/inode" && r.Method == http.MethodPost {
+			s.handleCreateInode(w, r)
+			return
+		} else if r.URL.Path == "/v1/meta/inodes" && r.Method == http.MethodPost {
+			s.handleGetInodes(w, r)
+			return
+		} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
+			s.handleIssueToken(w, r)
+			return
+		} else if r.URL.Path == "/v1/meta/batch" && r.Method == http.MethodPost {
+			s.handleBatch(w, r)
+			return
+		} else if r.URL.Path == "/v1/group/" && r.Method == http.MethodPost {
+			s.handleCreateGroup(w, r)
+			return
+		} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
+			if id == "" {
+				http.NotFound(w, r)
+				return
+			}
+			if strings.HasSuffix(id, "/sign/private") && r.Method == http.MethodGet {
+				id = strings.TrimSuffix(id, "/sign/private")
+				s.handleGetGroupSignKey(w, r, id)
+				return
+			}
+			if strings.HasSuffix(id, "/private") && r.Method == http.MethodGet {
+				id = strings.TrimSuffix(id, "/private")
+				s.handleGetGroupPrivateKey(w, r, id)
+				return
+			}
+			if r.Method == http.MethodPut {
+				s.handleUpdateGroup(w, r)
+				return
+			}
+			if r.Method == http.MethodGet {
+				s.handleGetGroup(w, r, id)
+				return
+			}
+		} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
+			s.handleAllocateChunk(w, r)
+			return
+		} else if r.URL.Path == "/v1/meta/setattr" && r.Method == http.MethodPost {
+			s.handleSetAttr(w, r)
+			return
+		} else if r.URL.Path == "/v1/meta/lease/acquire" && r.Method == http.MethodPost {
+			s.handleAcquireLeases(w, r)
+			return
+		} else if r.URL.Path == "/v1/meta/lease/release" && r.Method == http.MethodPost {
+			s.handleReleaseLeases(w, r)
+			return
+		} else if strings.HasPrefix(r.URL.Path, "/v1/meta/directory/") && strings.HasSuffix(r.URL.Path, "/entry") {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/meta/directory/")
+			id = strings.TrimSuffix(id, "/entry")
+			if r.Method == http.MethodPut {
+				s.handleAddChild(w, r, id)
+				return
+			}
+		}
 	}
 
-	if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
-		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/inode/")
-		if r.Method == http.MethodGet {
-			s.handleGetInode(w, r, id)
-			return
-		}
-		if r.Method == http.MethodDelete {
-			s.handleDeleteInode(w, r, id)
-			return
-		}
-		if r.Method == http.MethodPut {
-			s.handleUpdateInode(w, r, id)
-			return
-		}
-	} else if r.URL.Path == "/v1/meta/inode" && r.Method == http.MethodPost {
-		s.handleCreateInode(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/inodes" && r.Method == http.MethodPost {
-		s.handleGetInodes(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
-		s.handleIssueToken(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/batch" && r.Method == http.MethodPost {
-		s.handleBatch(w, r)
-		return
-	} else if r.URL.Path == "/v1/group/" && r.Method == http.MethodPost {
-		s.handleCreateGroup(w, r)
-		return
-	} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
-		id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
-		if id == "" {
-			http.NotFound(w, r)
-			return
-		}
-		if strings.HasSuffix(id, "/sign/private") && r.Method == http.MethodGet {
-			id = strings.TrimSuffix(id, "/sign/private")
-			s.handleGetGroupSignKey(w, r, id)
-			return
-		}
-		if strings.HasSuffix(id, "/private") && r.Method == http.MethodGet {
-			id = strings.TrimSuffix(id, "/private")
-			s.handleGetGroupPrivateKey(w, r, id)
-			return
-		}
-		if r.Method == http.MethodPut {
-			s.handleUpdateGroup(w, r)
-			return
-		}
-		if r.Method == http.MethodGet {
-			s.handleGetGroup(w, r, id)
-			return
-		}
-	} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
-		s.handleAllocateChunk(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/setattr" && r.Method == http.MethodPost {
-		s.handleSetAttr(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/lease/acquire" && r.Method == http.MethodPost {
-		s.handleAcquireLeases(w, r)
-		return
-	} else if r.URL.Path == "/v1/meta/lease/release" && r.Method == http.MethodPost {
-		s.handleReleaseLeases(w, r)
-		return
-	} else if strings.HasPrefix(r.URL.Path, "/v1/meta/directory/") && strings.HasSuffix(r.URL.Path, "/entry") {
-		id := strings.TrimPrefix(r.URL.Path, "/v1/meta/directory/")
-		id = strings.TrimSuffix(id, "/entry")
-		if r.Method == http.MethodPut {
-			s.handleAddChild(w, r, id)
-			return
-		}
-	}
 	http.NotFound(w, r)
 }
 
@@ -2875,6 +2905,8 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) unsealRequest(r *http.Request, user *User) ([]byte, error) {
+	// Limit reading to 10MB to prevent DoS
+	r.Body = http.MaxBytesReader(nil, r.Body, 10*1024*1024)
 	var sealed SealedRequest
 	if err := json.NewDecoder(r.Body).Decode(&sealed); err != nil {
 		return nil, fmt.Errorf("invalid sealed request: %w", err)
@@ -3107,6 +3139,10 @@ func (s *Server) resolveURLs(manifest []ChunkEntry) {
 }
 
 func (s *Server) handleGetClusterStats(w http.ResponseWriter, r *http.Request) {
+	if _, ok := r.Context().Value(userContextKey).(*User); !ok {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
 	nodes, err := s.fsm.GetNodes()
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

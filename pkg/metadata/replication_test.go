@@ -107,10 +107,10 @@ func TestReplication_Misc(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
-	
+
 	// 1. Force Scan
 	server.ForceReplicationScan()
-	
+
 	// 2. Stop Monitor
 	server.replMonitor.Stop()
 }
@@ -119,10 +119,10 @@ func TestGC_Misc(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
-	
+
 	// 1. Force Scan
 	server.ForceGCScan()
-	
+
 	// 2. Stop Worker
 	server.gcWorker.Stop()
 }
@@ -165,13 +165,13 @@ func TestReplication_Repair_Fail(t *testing.T) {
 func TestReplication_Repair_RaftFail(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
 	// Don't defer shutdown yet
-	
+
 	source := Node{ID: "n1", Address: ts.URL} // Valid URL but Raft will be gone
 	nodes := map[string]Node{"n2": {ID: "n2", Address: "http://n2"}}
-	
+
 	// Shutdown Raft to force Apply failure
 	node.Raft.Shutdown().Error()
-	
+
 	server.replMonitor.executeRepair("f1", "c1", source, []string{"n2"}, nodes)
 	// Should log "Failed to apply AddReplica"
 	ts.Close()
@@ -196,10 +196,10 @@ func TestKeyRotation_Misc(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
-	
+
 	// 1. Trigger Rotation branch
 	server.keyWorker.checkAndRotate()
-	
+
 	// 2. Stop Worker
 	server.keyWorker.Stop()
 }
@@ -211,7 +211,7 @@ func TestMetrics_CalculatePercentile(t *testing.T) {
 	if p != 0 {
 		t.Errorf("Expected 0 for 0 total, got %v", p)
 	}
-	
+
 	// Single sample in first bucket
 	buckets := [15]uint64{1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 	p = calculatePercentile(buckets, 1, 0.50)

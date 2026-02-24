@@ -2023,7 +2023,6 @@ func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
 			return nil
 		})
 	})
-	log.Printf("FSM: GetNodes returning %d nodes", len(nodes))
 	return nodes, err
 }
 
@@ -2127,17 +2126,17 @@ func (fsm *MetadataFSM) executeRotateFSMKey(tx *bolt.Tx, data []byte) interface{
 	// We'll update the KeyRing in memory only AFTER the transaction commits.
 	// For now, store the entire updated keyring in the system bucket to ensure
 	// it's part of the Raft-applied state and is included in future snapshots.
-	
+
 	// Temporarily add to a copy to marshal the full ring
 	// Note: keyRing.Marshal() is thread-safe but we are in a write lock context anyway.
 	krCopy, _ := crypto.UnmarshalKeyRing(fsm.keyRing.Marshal())
 	krCopy.AddKey(req.Gen, req.NewKey)
-	
+
 	krData := krCopy.Marshal()
 	if err := fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData); err != nil {
 		return err
 	}
-	
+
 	return nil
 }
 

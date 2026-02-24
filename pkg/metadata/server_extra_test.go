@@ -3,21 +3,21 @@ package metadata
 
 import (
 	"bytes"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
-	"crypto/tls"
-	"encoding/hex"
-	"crypto/hmac"
-	"crypto/sha256"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
-	"github.com/hashicorp/raft"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
+	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -88,6 +88,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 
 	// 5. handleGetClusterStats
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/cluster/stats", nil)
+	req.Header.Set("Session-Token", token)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleGetClusterStats failed: %d", resp.StatusCode)
@@ -96,6 +97,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	// 6. handleGetMetrics
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/system/metrics", nil)
 	req.Header.Set("X-Raft-Secret", "testsecret")
+	req.Header.Set("Session-Token", token)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleGetMetrics failed: %d", resp.StatusCode)
@@ -178,7 +180,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 
 	// 11. handleGetWorldPrivateKey (Admin Only)
 	// Ensure world is initialized
-	http.Get(ts.URL+"/v1/meta/key/world")
+	http.Get(ts.URL + "/v1/meta/key/world")
 
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/key/world/private", nil)
 	req.Header.Set("Session-Token", token)
@@ -325,10 +327,10 @@ func TestServer_OIDCDiscovery(t *testing.T) {
 
 	// Manually trigger discovery in background
 	go server.discoverOIDC(tsOIDC.URL)
-	
+
 	// Wait a bit for it to finish first iteration
 	time.Sleep(100 * time.Millisecond)
-	
+
 	server.oidcMu.RLock()
 	if server.oidcConfig == nil || server.oidcConfig.Issuer != "http://mock-issuer" {
 		t.Errorf("OIDC discovery failed to populate config")
@@ -497,10 +499,10 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 	nodeKey, _ := LoadOrGenerateNodeKey(st, "node.key")
 	node2, _ := NewRaftNode("node2", "127.0.0.1:0", "", tmpDir, st, nodeKey)
 	defer node2.Shutdown()
-	
+
 	signKey, _ := crypto.GenerateIdentityKey()
 	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0)
-	
+
 	// node2 has no leader
 	req, _ := http.NewRequest("GET", "/v1/meta/inode/root", nil)
 	rr := httptest.NewRecorder()
@@ -704,13 +706,13 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	mockNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		nonceHex := r.Header.Get("X-Raft-Nonce")
 		nonce, _ := hex.DecodeString(nonceHex)
-		
+
 		// Sign as NODE_RESPONSE
 		mac := hmac.New(sha256.New, []byte("testsecret"))
 		mac.Write(nonce)
 		mac.Write([]byte("NODE_RESPONSE"))
 		sig := hex.EncodeToString(mac.Sum(nil))
-		
+
 		w.Header().Set("X-Raft-Response", sig)
 		w.WriteHeader(http.StatusOK)
 	}))
@@ -742,7 +744,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	node2Info := Node{ID: "n2", Address: "http://n2:8080", Status: NodeStatusActive}
 	nb2, _ := json.Marshal(node2Info)
 	server.ApplyRaftCommandInternal(CmdRegisterNode, nb2)
-	
+
 	// Wait for commit
 	time.Sleep(200 * time.Millisecond)
 
@@ -756,7 +758,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	// 2. handleAddChild (Success)
 	server.ApplyRaftCommandInternal(CmdCreateInode, mustMarshalJSON(Inode{ID: "dir1", Type: DirType, OwnerID: u1}))
 	server.ApplyRaftCommandInternal(CmdCreateInode, mustMarshalJSON(Inode{ID: "file1", Type: FileType, OwnerID: u1}))
-	
+
 	time.Sleep(200 * time.Millisecond)
 
 	reqData := map[string]string{"name": "f1", "child_id": "file1"}
@@ -789,7 +791,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 			u1 + ":sign": crypto.LockboxEntry{KEMCiphertext: []byte("fake"), DEMCiphertext: []byte("fake")},
 		},
 	}))
-	
+
 	time.Sleep(500 * time.Millisecond) // Long sleep for group appear
 
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/group/g_more/sign/private", nil)
@@ -896,7 +898,10 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// u2 should get R token
-	irb, _ := json.Marshal(struct{InodeID string `json:"inode_id"`; Mode string `json:"mode"`}{InodeID: "fg", Mode: "R"})
+	irb, _ := json.Marshal(struct {
+		InodeID string `json:"inode_id"`
+		Mode    string `json:"mode"`
+	}{InodeID: "fg", Mode: "R"})
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(SealTestRequest(t, u2, usk2, ek, irb)))
 	req.Header.Set("Session-Token", token2)
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -1076,7 +1081,7 @@ func TestServer_Forwarding(t *testing.T) {
 	signKey2, _ := crypto.GenerateIdentityKey()
 	// Set the API URL of s1 so s2 knows where to forward
 	s1.apiURL = ts1.URL
-	
+
 	// Register Node 1 in FSM via Raft so Node 2 gets it
 	node1 := Node{
 		ID:          n1.NodeID,
@@ -1095,7 +1100,7 @@ func TestServer_Forwarding(t *testing.T) {
 	time.Sleep(500 * time.Millisecond)
 
 	// Make request to s2 (Follower)
-	// /v1/health should be forwarded? 
+	// /v1/health should be forwarded?
 	// Actually, health is not forwarded in ServeHTTP because it's before forwardIfNecessary.
 	// But /v1/node is after forwardIfNecessary.
 	req, _ := http.NewRequest("GET", ts2.URL+"/v1/node", nil)

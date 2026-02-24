@@ -269,7 +269,7 @@ func TestKEMSerialization(t *testing.T) {
 
 	dkBytes := MarshalDecapsulationKey(dk)
 	dk2, _ := UnmarshalDecapsulationKey(dkBytes)
-	
+
 	ekBytes := MarshalEncapsulationKey(ek)
 	ek2, _ := UnmarshalEncapsulationKey(ekBytes)
 
@@ -283,11 +283,11 @@ func TestKEMSerialization(t *testing.T) {
 func TestKeyRing_AddKey(t *testing.T) {
 	initial := make([]byte, 32)
 	kr := NewKeyRing(initial)
-	
+
 	newKey := make([]byte, 32)
 	newKey[0] = 1
 	kr.AddKey(5, newKey)
-	
+
 	k, gen := kr.Current()
 	if gen != 5 {
 		t.Errorf("Expected current gen 5, got %d", gen)
@@ -300,7 +300,7 @@ func TestKeyRing_AddKey(t *testing.T) {
 func TestLockbox_Errors(t *testing.T) {
 	lb := NewLockbox()
 	dk, _ := GenerateEncryptionKey()
-	
+
 	// Get missing user
 	if _, err := lb.GetFileKey("missing", dk); err == nil {
 		t.Error("Expected error for missing user")
@@ -317,7 +317,7 @@ func TestIdentityKey_Errors(t *testing.T) {
 	if VerifySignature(make([]byte, 10), []byte("msg"), []byte("sig")) {
 		t.Error("VerifySignature should fail for wrong key size")
 	}
-	
+
 	// Verify with wrong public key data
 	if VerifySignature(make([]byte, PublicKeySize()), []byte("msg"), make([]byte, SignatureSize())) {
 		// This might pass if all zeros is valid? Unlikely for ML-DSA.
@@ -327,11 +327,11 @@ func TestIdentityKey_Errors(t *testing.T) {
 func TestChunkEncryption_Errors(t *testing.T) {
 	key := make([]byte, 32)
 	largeData := make([]byte, ChunkSize+1)
-	
+
 	if _, _, err := EncryptChunk(key, largeData, 0); err == nil {
 		t.Error("EncryptChunk should fail for data > ChunkSize")
 	}
-	
+
 	// Error from EncryptDEMWithNonce (bad key size)
 	if _, _, err := EncryptChunk(make([]byte, 10), []byte("data"), 0); err == nil {
 		t.Error("EncryptChunk should fail for bad key size")
@@ -341,15 +341,15 @@ func TestChunkEncryption_Errors(t *testing.T) {
 func TestDEM_MoreErrors(t *testing.T) {
 	key := make([]byte, 32)
 	nonce := make([]byte, 10) // Wrong size
-	
+
 	if _, err := EncryptDEMWithNonce(key, nonce, []byte("data")); err == nil {
 		t.Error("EncryptDEMWithNonce should fail for wrong nonce size")
 	}
-	
+
 	if _, err := DecryptDEM(make([]byte, 10), []byte("data")); err == nil {
 		t.Error("DecryptDEM should fail for bad key size")
 	}
-	
+
 	// Decrypt with bad tag
 	ct, _ := EncryptDEM(key, []byte("data"))
 	ct[len(ct)-1] ^= 0xFF

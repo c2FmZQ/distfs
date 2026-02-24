@@ -49,6 +49,22 @@ const (
 	InlineLimit = 4096
 )
 
+// IsInodeID returns true if the string is a valid Inode ID (64-char hex or special root ID).
+func IsInodeID(id string) bool {
+	if id == RootID {
+		return true
+	}
+	if len(id) != 64 {
+		return false
+	}
+	for _, c := range id {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 // ChunkEntry represents a single chunk of a file and its location.
 type ChunkEntry struct {
 	ID    string   `json:"id"`
