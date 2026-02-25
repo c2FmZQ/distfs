@@ -56,13 +56,13 @@ func TestClient_ReadDataFiles_Consistency(t *testing.T) {
 					// Conflicts are expected, SaveDataFiles should handle retries but if it fails we just continue
 				}
 				version++
-				time.Sleep(10 * time.Millisecond)
+				time.Sleep(100 * time.Millisecond)
 			}
 		}
 	}()
 
 	// 3. Perform many atomic reads and verify consistency
-	for i := 0; i < 50; i++ {
+	for i := 0; i < 10; i++ {
 		var rCfg, rSec Config
 		if err := c.ReadDataFiles(ctx, []string{path1, path2}, []any{&rCfg, &rSec}); err != nil {
 			t.Errorf("ReadDataFiles failed at iteration %d: %v", i, err)

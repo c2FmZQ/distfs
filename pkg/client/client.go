@@ -2370,6 +2370,22 @@ func (w *FileWriter) Close() error {
 	return err
 }
 
+// Abort closes the writer and releases leases WITHOUT committing to Raft.
+func (w *FileWriter) Abort() {
+	if w.closed {
+		return
+	}
+	w.closed = true
+	w.cancel()
+	w.wg.Wait()
+
+	leaseTarget := w.inode.ID
+	if w.swapMode {
+		leaseTarget = w.swapPath
+	}
+	w.client.ReleaseLeases(w.ctx, []string{leaseTarget}, w.leaseNonce)
+}
+
 func (w *FileWriter) leaseRenewalLoop(id string, lType metadata.LeaseType) {
 	defer w.wg.Done()
 	ticker := time.NewTicker(60 * time.Second)
@@ -2688,27 +2704,41 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 	for i, name := range names {
 		b, err := json.Marshal(data[i])
 		if err != nil {
+			for j := 0; j < i; j++ {
+				writers[j].Abort()
+			}
 			return err
 		}
 		wc, err := c.OpenBlobWrite(ctx, name)
 		if err != nil {
-			// Cleanup previously opened writers
 			for j := 0; j < i; j++ {
-				writers[j].Close()
+				writers[j].Abort()
 			}
 			return err
 		}
 		if _, err := wc.Write(b); err != nil {
-			wc.Close()
+			if fw, ok := wc.(*FileWriter); ok {
+				fw.Abort()
+			} else {
+				wc.Close()
+			}
 			for j := 0; j < i; j++ {
-				writers[j].Close()
+				writers[j].Abort()
 			}
 			return err
 		}
-		fw := wc.(*FileWriter)
+		fw, ok := wc.(*FileWriter)
+		if !ok {
+			wc.Close()
+			for j := 0; j < i; j++ {
+				writers[j].Abort()
+			}
+			return fmt.Errorf("unexpected writer type for %s", name)
+		}
 		if err := fw.Finish(); err != nil {
-			for j := 0; j <= i; j++ {
-				writers[j].Close()
+			fw.Abort()
+			for j := 0; j < i; j++ {
+				writers[j].Abort()
 			}
 			return err
 		}

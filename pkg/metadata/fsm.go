@@ -2121,10 +2121,15 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 			fsm.Put(tx, []byte("leases"), []byte(leaseKey), encoded)
 		} else {
 			// Filename lease (Map format)
-			plain, _ := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			if err != nil {
+				return err
+			}
 			leases := make(map[string]LeaseInfo)
 			if plain != nil {
-				json.Unmarshal(plain, &leases)
+				if err := json.Unmarshal(plain, &leases); err != nil {
+					return fmt.Errorf("corrupted filename leases for %s: %w", id, err)
+				}
 			}
 			nonce := req.Nonce
 			if nonce == "" {
@@ -2158,25 +2163,26 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 			}
 			if plain != nil {
 				var leases map[string]LeaseInfo
-				if err := json.Unmarshal(plain, &leases); err == nil {
-					nonce := req.Nonce
-					if nonce == "" {
-						// Robustness: find any lease belonging to this session
-						for n, l := range leases {
-							if l.SessionID == req.SessionID {
-								nonce = n
-								break
-							}
+				if err := json.Unmarshal(plain, &leases); err != nil {
+					return err
+				}
+				nonce := req.Nonce
+				if nonce == "" {
+					// Robustness: find any lease belonging to this session
+					for n, l := range leases {
+						if l.SessionID == req.SessionID {
+							nonce = n
+							break
 						}
 					}
-					if nonce != "" {
-						delete(leases, nonce)
-						if len(leases) == 0 {
-							fb.Delete([]byte(id))
-						} else {
-							encoded, _ := json.Marshal(leases)
-							fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
-						}
+				}
+				if nonce != "" {
+					delete(leases, nonce)
+					if len(leases) == 0 {
+						fb.Delete([]byte(id))
+					} else {
+						encoded, _ := json.Marshal(leases)
+						fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
 					}
 				}
 			}
