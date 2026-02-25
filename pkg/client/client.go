@@ -684,7 +684,6 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(body)
-			fmt.Printf("DEBUG: issueToken failed: status=%d message=%s\n", resp.StatusCode, string(b))
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
 
@@ -739,7 +738,6 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(resp.Body)
-			fmt.Printf("DEBUG: data node error: status=%d message=%s url=%s\n", resp.StatusCode, string(b), url)
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
 		return nil
@@ -1911,14 +1909,16 @@ func (r *FileReader) read(p []byte) (int, error) {
 				}
 				chunkEntry := r.inode.ChunkManifest[chunkIdx]
 
-				// Unlock during network I/O
+				// Capture immutable state before unlocking for network I/O
+				inodeID := r.inode.ID
+				token := r.token
 				r.mu.Unlock()
-				ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, r.token)
+				ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, token)
 				if err != nil {
-					if apiErr, ok := err.(*APIError); ok && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+					var apiErr *APIError
+					if errors.As(err, &apiErr) && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
 						// Token might be stale or file was unlinked/appended.
 						// Refresh metadata AND token.
-						inodeID := r.inode.ID
 						if updated, terr := r.client.GetInode(r.ctx, inodeID); terr == nil {
 							if newToken, terr2 := r.client.issueToken(r.ctx, inodeID, nil, "R"); terr2 == nil {
 								r.mu.Lock()

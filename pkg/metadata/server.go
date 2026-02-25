@@ -563,7 +563,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				var maxBytesErr *http.MaxBytesError
 				if errors.As(err, &maxBytesErr) {
-					http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+					return
 				} else {
 					http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
 				}
@@ -1110,19 +1110,21 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 					} else if req.Mode == "W" && (inode.Mode&0020) != 0 {
 						// Authorized for group writing
 					} else {
-						fmt.Printf("DEBUG: handleIssueToken: Forbidden (Group). User=%s, Group=%s, Mode=%s\n", user.ID, inode.GroupID, req.Mode)
+						msg := fmt.Sprintf("forbidden: group permission check failed (inode=%s group=%s user=%s mode=%s inode_mode=%o)", req.InodeID, inode.GroupID, user.ID, req.Mode, inode.Mode)
+						log.Printf("ERROR: handleIssueToken: %s", msg)
 						http.Error(w, "forbidden", http.StatusForbidden)
 						return
 					}
 				} else {
-					fmt.Printf("DEBUG: handleIssueToken: Forbidden (Not in Group). User=%s, Group=%s\n", user.ID, inode.GroupID)
+					msg := fmt.Sprintf("forbidden: user not in group (inode=%s group=%s user=%s)", req.InodeID, inode.GroupID, user.ID)
+					log.Printf("ERROR: handleIssueToken: %s", msg)
 					http.Error(w, "forbidden", http.StatusForbidden)
 					return
 				}
 			} else {
 				msg := fmt.Sprintf("forbidden: permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
 				log.Printf("ERROR: handleIssueToken: %s", msg)
-				http.Error(w, msg, http.StatusForbidden)
+				http.Error(w, "forbidden", http.StatusForbidden)
 				return
 			}
 		}

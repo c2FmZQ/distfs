@@ -91,15 +91,19 @@ func (g *GCWorker) runUnlinkedCleanup() {
 			}
 
 			active := false
+			maxExpiry := int64(0)
 			for _, l := range inode.Leases {
 				if l.Expiry > now {
 					active = true
 					break
 				}
+				if l.Expiry > maxExpiry {
+					maxExpiry = l.Expiry
+				}
 			}
 
-			// Add a 5-second grace period to account for clock skew and Raft latency
-			if !active && (now-inode.CTime) > int64(5*time.Second) {
+			// Add a 5-second grace period after last lease expiry
+			if !active && maxExpiry < (now-int64(5*time.Second)) {
 				toFinalize = append(toFinalize, id)
 			}
 			return nil
@@ -181,14 +185,14 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 		return nil
 	})
 	if err != nil {
-		fmt.Printf("GC: Failed to resolve nodes: %v\n", err)
+		log.Printf("GC: Failed to resolve nodes: %v", err)
 		return
 	}
 
 	success := true
 	for _, node := range nodes {
 		if err := g.deleteFromNode(node.Address, chunkID, token); err != nil {
-			fmt.Printf("GC: Failed to delete chunk %s from %s: %v\n", chunkID, node.ID, err)
+			log.Printf("GC: Failed to delete chunk %s from %s: %v", chunkID, node.ID, err)
 			success = false
 		}
 	}

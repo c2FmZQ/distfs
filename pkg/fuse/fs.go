@@ -6,7 +6,6 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
@@ -633,8 +632,6 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 	if h.file.inode.Unlinked {
 		if updated, err := h.file.fs.client.GetInode(ctx, h.file.inode.ID); err == nil {
 			*h.file.inode = *updated
-		} else {
-			fmt.Printf("DEBUG: FUSE Read: GetInode failed for unlinked file %s: %v\n", h.file.inode.ID, err)
 		}
 	}
 	h.reader.SetInode(h.file.inode)
