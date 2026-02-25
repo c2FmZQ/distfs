@@ -561,9 +561,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
 			payload, err := s.unsealRequest(w, r, user)
 			if err != nil {
-				// unsealRequest already handled http.Error if it was a too large body
 				var maxBytesErr *http.MaxBytesError
-				if !errors.As(err, &maxBytesErr) {
+				if errors.As(err, &maxBytesErr) {
+					http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+				} else {
 					http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
 				}
 				return
@@ -1096,7 +1097,6 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		if bypass && isAdmin {
 			// Bypass enabled and authorized
 		} else if inode.OwnerID != user.ID {
-			fmt.Printf("DEBUG: handleIssueToken: Permission check. User=%s, Owner=%s, Mode=%s, InodeMode=%o, GroupID=%s\n", user.ID, inode.OwnerID, req.Mode, inode.Mode, inode.GroupID)
 			// World Readable/Writable?
 			if req.Mode == "R" && (inode.Mode&0004) != 0 {
 				// Authorized for reading
@@ -1120,8 +1120,9 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			} else {
-				fmt.Printf("DEBUG: handleIssueToken: Forbidden (World). User=%s, Mode=%s\n", user.ID, req.Mode)
-				http.Error(w, "forbidden", http.StatusForbidden)
+				msg := fmt.Sprintf("forbidden: permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
+				log.Printf("ERROR: handleIssueToken: %s", msg)
+				http.Error(w, msg, http.StatusForbidden)
 				return
 			}
 		}
@@ -3189,7 +3190,7 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Use Session Token as the unique owner ID for the lease
-	req.OwnerID = sessionToken
+	req.SessionID = sessionToken
 	req.UserID = user.ID
 	if req.Duration == 0 {
 		req.Duration = int64(2 * time.Minute) // Default duration
@@ -3218,7 +3219,7 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	req.OwnerID = sessionToken
+	req.SessionID = sessionToken
 	req.UserID = user.ID
 	body, _ := json.Marshal(req)
 	s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)

@@ -256,7 +256,7 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 	}
 
 	// 3. Create Inode 1 in Group G1 (OK)
-	inode1 := Inode{ID: "f1", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode1 := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, GroupID: groupID, Size: 100}
 	inode1.SignInodeForTest(userID, sk)
 	i1Bytes, _ := json.Marshal(inode1)
 	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
@@ -264,7 +264,7 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 	}
 
 	// 4. Create Inode 2 in Group G1 (Fail: Group Inode Quota)
-	inode2 := Inode{ID: "f2", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, GroupID: groupID, Size: 100}
 	inode2.SignInodeForTest(userID, sk)
 	i2Bytes, _ := json.Marshal(inode2)
 	f := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i2Bytes}.Marshal(), 5*time.Second)
@@ -318,7 +318,7 @@ func TestGroupQuotaFallback(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: uReqBytes}.Marshal(), 5*time.Second)
 
 	// 3. Create Inode 1 in Group G1 (OK - falls back to Alice quota 0->1)
-	inode1 := Inode{ID: "f1", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode1 := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, GroupID: groupID, Size: 100}
 	inode1.SignInodeForTest(userID, sk)
 	i1Bytes := marshalInode(t, inode1)
 	f1 := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i1Bytes}.Marshal(), 5*time.Second)
@@ -341,7 +341,7 @@ func TestGroupQuotaFallback(t *testing.T) {
 	}
 
 	// 4. Create Inode 2 in Group G1 (Fail - Alice quota 1->2 > 1)
-	inode2 := Inode{ID: "f2", OwnerID: userID, GroupID: groupID, Size: 100}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, GroupID: groupID, Size: 100}
 	inode2.SignInodeForTest(userID, sk)
 	i2Bytes := marshalInode(t, inode2)
 	f := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: i2Bytes}.Marshal(), 5*time.Second)
@@ -393,7 +393,7 @@ func TestGroupQuotaBypassReproduction(t *testing.T) {
 	// 3. Alice uploads 600 Byte file to Group G1.
 	// Current BUG: Because Group has a quota (Inodes), checkQuota returns nil early.
 	// Expected: Should fail because 600 > User's 500 Byte quota.
-	inode := Inode{ID: "f1", OwnerID: userID, GroupID: groupID, Size: 600}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, GroupID: groupID, Size: 600}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	f := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: inodeBytes}.Marshal(), 5*time.Second)

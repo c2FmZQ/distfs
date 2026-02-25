@@ -43,7 +43,7 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 
 	// 1. Create Inode
 	inode := Inode{
-		ID:   "i1",
+		ID:   "00000000000000000000000000000001",
 		Type: FileType,
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1"}},
@@ -54,7 +54,7 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 
 	// 2. Add Replica
 	req := AddReplicaRequest{
-		InodeID: "i1",
+		InodeID: "00000000000000000000000000000001",
 		ChunkID: "c1",
 		NodeIDs: []string{"n2"},
 	}
@@ -62,7 +62,7 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAddChunkReplica, Data: rb}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		v, _ := fsm.Get(tx, []byte("inodes"), []byte("i1"))
+		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		var res Inode
 		json.Unmarshal(v, &res)
 		if len(res.ChunkManifest[0].Nodes) != 2 {
@@ -198,17 +198,20 @@ func TestFSM_Leases_Full(t *testing.T) {
 
 	// 1. Acquire
 	req := LeaseRequest{
-		UserID:   "u1",
-		InodeIDs: []string{"i1", "i2"},
-		Duration: int64(time.Hour),
+		UserID:    "u1",
+		InodeIDs:  []string{"00000000000000000000000000000001", "00000000000000000000000000000002"},
+		Duration:  int64(time.Hour),
+		Type:      LeaseExclusive,
+		SessionID: "session1",
 	}
 	rb, _ := json.Marshal(req)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: rb}.Marshal()})
 
 	// 2. Release
 	req2 := LeaseRequest{
-		UserID:   "u1",
-		InodeIDs: []string{"i1"},
+		UserID:    "u1",
+		InodeIDs:  []string{"00000000000000000000000000000001"},
+		SessionID: "session1",
 	}
 	rb2, _ := json.Marshal(req2)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReleaseLeases, Data: rb2}.Marshal()})
@@ -282,7 +285,7 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	defer fsm.Close()
 
 	inode := Inode{
-		ID:   "i1",
+		ID:   "00000000000000000000000000000001",
 		Type: FileType,
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1"}},
@@ -292,7 +295,7 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
 	// 1. enqueueGC (via DeleteInode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdDeleteInode, Data: []byte("i1")}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdDeleteInode, Data: []byte("00000000000000000000000000000001")}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("garbage_collection"))
@@ -312,17 +315,17 @@ func TestFSM_AdminChmod_Success(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Create Inode
-	inode := Inode{ID: "i1", Type: FileType, Mode: 0644}
+	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0644}
 	ib, _ := json.Marshal(inode)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
 	// 2. AdminChmod
-	req := AdminChmodRequest{InodeID: "i1", Mode: 0777}
+	req := AdminChmodRequest{InodeID: "00000000000000000000000000000001", Mode: 0777}
 	rb, _ := json.Marshal(req)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAdminChmod, Data: rb}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		v, _ := fsm.Get(tx, []byte("inodes"), []byte("i1"))
+		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		var res Inode
 		json.Unmarshal(v, &res)
 		if res.Mode != 0775 { // 0777 sanitized to 0775
@@ -339,12 +342,14 @@ func TestFSM_GetLeases_Extra(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	id1 := "00000000000000000000000000000001"
 	// 1. Acquire Lease
 	req := LeaseRequest{
-		UserID:   "u1",
-		InodeIDs: []string{"i1"},
-		Duration: int64(time.Hour),
-		OwnerID:  "session1",
+		UserID:    "u1",
+		InodeIDs:  []string{id1},
+		Duration:  int64(time.Hour),
+		SessionID: "session1",
+		Type:      LeaseExclusive,
 	}
 	rb, _ := json.Marshal(req)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: rb}.Marshal()})
@@ -354,7 +359,7 @@ func TestFSM_GetLeases_Extra(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetLeases failed: %v", err)
 	}
-	if len(leases) != 1 || leases[0].InodeID != "i1" {
+	if len(leases) != 1 || leases[0].InodeID != id1 {
 		t.Errorf("GetLeases failed: %+v", leases)
 	}
 }
@@ -364,20 +369,20 @@ func TestFSM_SetAttr_Extra(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Create Inode
-	inode := Inode{ID: "i1", Type: FileType, Mode: 0600, OwnerID: "u1"}
+	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0600, OwnerID: "u1"}
 	ib, _ := json.Marshal(inode)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
 	// 2. SetAttr
 	req := SetAttrRequest{
-		InodeID: "i1",
+		InodeID: "00000000000000000000000000000001",
 		Mode:    ptr(uint32(0644)),
 	}
 	rb, _ := json.Marshal(req)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetAttr, Data: rb}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		v, _ := fsm.Get(tx, []byte("inodes"), []byte("i1"))
+		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		var res Inode
 		json.Unmarshal(v, &res)
 		if res.Mode != 0644 {
@@ -405,7 +410,7 @@ func TestFSM_Restore_Full(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Add some data
-	ib, _ := json.Marshal(Inode{ID: "i1", Type: FileType})
+	ib, _ := json.Marshal(Inode{ID: "00000000000000000000000000000001", Type: FileType})
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
 	// 2. Snapshot
@@ -427,9 +432,9 @@ func TestFSM_Restore_Full(t *testing.T) {
 
 	// 4. Verify data
 	err = fsm2.db.View(func(tx *bolt.Tx) error {
-		v, _ := fsm2.Get(tx, []byte("inodes"), []byte("i1"))
+		v, _ := fsm2.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		if v == nil {
-			return fmt.Errorf("i1 not found after restore")
+			return fmt.Errorf("00000000000000000000000000000001 not found after restore")
 		}
 		return nil
 	})

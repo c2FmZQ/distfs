@@ -43,12 +43,12 @@ func TestClient_MockedErrors(t *testing.T) {
 		t.Error("Expected error from ApplyBatch")
 	}
 
-	_, err = c.getInode(ctx, "i1")
+	_, err = c.getInode(ctx, "00000000000000000000000000000001")
 	if err == nil {
 		t.Error("Expected error from getInode")
 	}
 
-	_, err = c.updateInode(ctx, metadata.Inode{ID: "i1"})
+	_, err = c.updateInode(ctx, metadata.Inode{ID: "00000000000000000000000000000001"})
 	if err == nil {
 		t.Error("Expected error from updateInode")
 	}
@@ -116,7 +116,7 @@ func TestClient_MockedConflict(t *testing.T) {
 	c.httpClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			if req.Method == "GET" {
-				res := metadata.Inode{ID: "i1", Version: 1}
+				res := metadata.Inode{ID: "00000000000000000000000000000001", Version: 1}
 				b, _ := json.Marshal(res)
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -131,7 +131,7 @@ func TestClient_MockedConflict(t *testing.T) {
 		},
 	}
 
-	_, err := c.updateInode(ctx, metadata.Inode{ID: "i1"})
+	_, err := c.updateInode(ctx, metadata.Inode{ID: "00000000000000000000000000000001"})
 	if err == nil {
 		t.Error("updateInode should have failed after retries")
 	}

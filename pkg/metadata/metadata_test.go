@@ -189,7 +189,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 2. User 1 creates a private inode (0600)
-	i1 := Inode{ID: "private-1", OwnerID: "u1", Mode: 0600}
+	i1 := Inode{ID: "00000000000000000000000000000011", OwnerID: "u1", Mode: 0600}
 	i1.SignInodeForTest("u1", u1Sign)
 	payload, _ := json.Marshal(i1)
 	body := SealTestRequest(t, "u1", u1Sign, serverEK, payload)
@@ -204,7 +204,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 
 	// 3. User 2 attempts to GET User 1's inode (Should fail)
 	token2 := LoginSessionForTest(t, ts, "u2", u2Sign)
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/private-1", nil)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
@@ -213,7 +213,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 4. User 2 attempts to DELETE User 1's inode (Should fail)
-	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/private-1", nil)
+	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", nil)
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusForbidden {
@@ -221,11 +221,11 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
-	i1u := Inode{ID: "private-1", Mode: 0777, Version: 1}
+	i1u := Inode{ID: "00000000000000000000000000000011", Mode: 0777, Version: 1}
 	i1u.SignInodeForTest("u2", u2Sign)
 	payload, _ = json.Marshal(i1u)
 	body = SealTestRequest(t, "u2", u2Sign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/inode/private-1", bytes.NewReader(body))
+	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
@@ -234,7 +234,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 6. User 1 successfully deletes their own inode
-	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/private-1", nil)
+	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", nil)
 	req.Header.Set("Session-Token", token1)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
@@ -717,7 +717,7 @@ func TestAccounting(t *testing.T) {
 	checkUsage(0, 0)
 
 	// 2. Create File
-	inode := Inode{ID: "f1", OwnerID: userID, Size: 100}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
@@ -750,7 +750,7 @@ func TestAccounting(t *testing.T) {
 	checkUsage(1, 250)
 
 	// 4. Delete File
-	cmd = LogCommand{Type: CmdDeleteInode, Data: []byte("f1")}
+	cmd = LogCommand{Type: CmdDeleteInode, Data: []byte("0000000000000000000000000000000f")}
 	cmdBytes, _ = json.Marshal(cmd)
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -795,7 +795,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 2. Create File 1 (OK)
-	inode := Inode{ID: "f1", OwnerID: userID, Size: 100}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
@@ -805,7 +805,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 3. Create File 2 (Fail: Inode Quota)
-	inode2 := Inode{ID: "f2", OwnerID: userID, Size: 100}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, Size: 100}
 	inode2.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode2)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
@@ -868,26 +868,26 @@ func TestAdminChownQuota(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: reqBytes}.Marshal(), 5*time.Second)
 
 	// u1 creates a file
-	inode := Inode{ID: "f1", OwnerID: u1, Size: 100}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Size: 100}
 	inode.SignInodeForTest(u1, sk1)
 	iBytes, _ := json.Marshal(inode)
 	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
 
-	// Admin chown f1 from u1 to u2
+	// Admin chown 0000000000000000000000000000000f from u1 to u2
 	// u2 has 0 files, limit 1. Transfer should SUCCEED.
 	// Current BUG: checkQuota(u2, delta=1) sees u2 usage=0, limit=1 -> OK.
 	// Wait, actually the bug is if u2 ALREADY has 1 file?
 	// Let's test the limit case.
 
 	// If u2 has 1 file already.
-	inode2 := Inode{ID: "f2", OwnerID: u2, Size: 100}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: u2, Size: 100}
 	inode2.SignInodeForTest(u2, sk2)
 	iBytes2, _ := json.Marshal(inode2)
 	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes2}.Marshal(), 5*time.Second)
 
 	// Now u2 is at limit (1/1).
-	// Transfer f1 from u1 to u2 should FAIL.
-	chReq := AdminChownRequest{InodeID: "f1", OwnerID: &u2}
+	// Transfer 0000000000000000000000000000000f from u1 to u2 should FAIL.
+	chReq := AdminChownRequest{InodeID: "0000000000000000000000000000000f", OwnerID: &u2}
 	chBytes, _ := json.Marshal(chReq)
 	f := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes}.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -897,10 +897,10 @@ func TestAdminChownQuota(t *testing.T) {
 		t.Errorf("Expected user inode quota exceeded, got %v", f.Response())
 	}
 
-	// Transfer f2 from u2 back to u2 (identity transfer)
+	// Transfer 0000000000000000000000000000002f from u2 back to u2 (identity transfer)
 	// Current BUG: usage is 1/1. checkQuota(u2, delta=1) sees 1+1 > 1 -> FAILS.
 	// Fixed: updateUsage(u2, delta=-1) makes usage 0. checkQuota(u2, delta=1) sees 0+1 <= 1 -> OK.
-	chReq2 := AdminChownRequest{InodeID: "f2", OwnerID: &u2}
+	chReq2 := AdminChownRequest{InodeID: "0000000000000000000000000000002f", OwnerID: &u2}
 	chBytes2, _ := json.Marshal(chReq2)
 	f2 := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes2}.Marshal(), 5*time.Second)
 	if err := f2.Error(); err != nil {

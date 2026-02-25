@@ -83,8 +83,8 @@ func TestStorageAPI_Leases(t *testing.T) {
 	}
 
 	// 3. Test Atomic Acquire
-	ids := []string{f1, f2}
-	if err := c.AcquireLeases(t.Context(), ids, 10*time.Second, nil); err != nil {
+	paths := []string{f1, f2}
+	if err := c.AcquireLeases(t.Context(), paths, 10*time.Second, nil, metadata.LeaseExclusive, ""); err != nil {
 		t.Fatalf("AcquireLeases failed: %v", err)
 	}
 
@@ -100,17 +100,17 @@ func TestStorageAPI_Leases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil)
+	err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil, metadata.LeaseExclusive, "")
 	if err == nil {
 		t.Error("Expected conflict error for leased file, got nil")
 	}
 
 	// 5. Test Release and Re-acquire
-	if err := c.ReleaseLeases(t.Context(), ids); err != nil {
+	if err := c.ReleaseLeases(t.Context(), paths, ""); err != nil {
 		t.Fatalf("ReleaseLeases failed: %v", err)
 	}
 
-	if err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil); err != nil {
+	if err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil, metadata.LeaseExclusive, ""); err != nil {
 		t.Fatalf("c2 failed to acquire released lease: %v", err)
 	}
 }
@@ -170,7 +170,10 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	}
 
 	// 5. Test Abort
-	commit2, _ := c.OpenForUpdate(t.Context(), path, &data)
+	commit2, err := c.OpenForUpdate(t.Context(), path, &data)
+	if err != nil {
+		t.Fatalf("OpenForUpdate 2 failed: %v", err)
+	}
 	data.Value = 999
 	commit2(false) // Abort
 

@@ -32,7 +32,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 	// 2. Setup Inode with under-replication (n1, n3 are owners, but n3 will be "dead" soon)
 	inode := Inode{
-		ID:      "f1",
+		ID:      "0000000000000000000000000000000f",
 		Type:    FileType,
 		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{
@@ -71,7 +71,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 	// 5. Verify Inode updated in FSM
 	err := node.FSM.db.View(func(tx *bolt.Tx) error {
-		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("f1"))
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("0000000000000000000000000000000f"))
 		if err != nil {
 			return err
 		}
@@ -133,17 +133,17 @@ func TestReplication_Scan_Types(t *testing.T) {
 	defer ts.Close()
 
 	// 1. Directory (should be skipped)
-	d := Inode{ID: "dir1", Type: DirType, OwnerID: "u1"}
+	d := Inode{ID: "000000000000000000000000000000d1", Type: DirType, OwnerID: "u1"}
 	db, _ := json.Marshal(d)
 	server.ApplyRaftCommandInternal(CmdCreateInode, db)
 
 	// 2. Symlink (should be skipped)
-	s := Inode{ID: "sym1", Type: SymlinkType, OwnerID: "u1"}
+	s := Inode{ID: "000000000000000000000000000000e1", Type: SymlinkType, OwnerID: "u1"}
 	sb, _ := json.Marshal(s)
 	server.ApplyRaftCommandInternal(CmdCreateInode, sb)
 
 	// 3. Empty file (should be skipped)
-	f := Inode{ID: "empty", Type: FileType, OwnerID: "u1"}
+	f := Inode{ID: "000000000000000000000000000000ee", Type: FileType, OwnerID: "u1"}
 	fb, _ := json.Marshal(f)
 	server.ApplyRaftCommandInternal(CmdCreateInode, fb)
 
@@ -158,7 +158,7 @@ func TestReplication_Repair_Fail(t *testing.T) {
 	// Trigger executeRepair with failing source node
 	source := Node{ID: "n1", Address: "http://invalid"}
 	nodes := map[string]Node{"n2": {ID: "n2", Address: "http://n2"}}
-	server.replMonitor.executeRepair("f1", "c1", source, []string{"n2"}, nodes)
+	server.replMonitor.executeRepair("0000000000000000000000000000000f", "c1", source, []string{"n2"}, nodes)
 	// Should log failure and return
 }
 
@@ -172,7 +172,7 @@ func TestReplication_Repair_RaftFail(t *testing.T) {
 	// Shutdown Raft to force Apply failure
 	node.Raft.Shutdown().Error()
 
-	server.replMonitor.executeRepair("f1", "c1", source, []string{"n2"}, nodes)
+	server.replMonitor.executeRepair("0000000000000000000000000000000f", "c1", source, []string{"n2"}, nodes)
 	// Should log "Failed to apply AddReplica"
 	ts.Close()
 }

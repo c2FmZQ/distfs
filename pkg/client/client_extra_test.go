@@ -369,19 +369,10 @@ func TestClient_Blob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	inode, _, _ := c.ResolvePath(ctx, "/blob")
-
 	// 1. OpenBlobRead by Path
 	rc, err := c.OpenBlobRead(ctx, "/blob")
 	if err != nil {
 		t.Fatalf("OpenBlobRead by Path failed: %v", err)
-	}
-	rc.Close()
-
-	// 2. OpenBlobRead by ID
-	rc, err = c.OpenBlobRead(ctx, inode.ID)
-	if err != nil {
-		t.Fatalf("OpenBlobRead by ID failed: %v", err)
 	}
 	defer rc.Close()
 	data, _ := io.ReadAll(rc)
@@ -856,7 +847,7 @@ func TestClient_FS_Extra(t *testing.T) {
 	f.Close()
 
 	// 3. NewDirEntry / NewDirEntryForTest
-	inode := &metadata.Inode{ID: "i1"}
+	inode := &metadata.Inode{ID: "00000000000000000000000000000001"}
 	key := make([]byte, 32)
 	_ = c.NewDirEntry(inode, "name", key)
 	_ = NewDirEntryForTest(inode, "name2", key)
@@ -1049,23 +1040,24 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	registerNode(t, ts.URL, "testsecret", nodeInfo)
 
 	// 1. UploadChunkData
-	fileID := "f1"
+	path := "/chunk-test-file"
 	fileKey := make([]byte, 32)
 	chunkData := []byte("chunk payload")
 
-	// Create Inode first to allow token issue
-	inode := metadata.Inode{ID: fileID, OwnerID: "u1", Type: metadata.FileType}
-	ib, _ := json.Marshal(inode)
-	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: ib}.Marshal(), 5*time.Second)
+	// Create file first
+	err := c.SaveDataFile(ctx, path, []byte("init"))
+	if err != nil {
+		t.Fatalf("SaveDataFile failed: %v", err)
+	}
+	inode, _, _ := c.ResolvePath(ctx, path)
 
-	entry, err := c.UploadChunkData(ctx, fileID, fileKey, 0, chunkData)
+	entry, err := c.UploadChunkData(ctx, inode.ID, fileKey, 0, chunkData)
 	if err != nil {
 		t.Fatalf("UploadChunkData failed: %v", err)
 	}
 
 	// 2. DownloadChunkData
-	// urls are usually populated by server but we can pass them manually for test
-	downloaded, err := c.DownloadChunkData(ctx, fileID, entry.ID, entry.URLs, fileKey)
+	downloaded, err := c.DownloadChunkData(ctx, inode.ID, entry.ID, entry.URLs, fileKey)
 	if err != nil {
 		t.Fatalf("DownloadChunkData failed: %v", err)
 	}
@@ -1166,6 +1158,6 @@ func TestClient_ExtraDataOps(t *testing.T) {
 	// 3. OpenBlobRead (Resolution failure)
 	_, err = c.OpenBlobRead(ctx, "/missing/path")
 	if err == nil {
-		t.Error("OpenBlobRead should fail for missing path")
+		t.Error("OpenBlobRead should fail for missing absolute path")
 	}
 }

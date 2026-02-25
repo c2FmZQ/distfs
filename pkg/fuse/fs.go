@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
@@ -626,6 +627,18 @@ func (h *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse
 func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+
+	// Sync reader with node's latest metadata (Phase 39: POSIX read-after-write)
+	h.file.mu.Lock()
+	if h.file.inode.Unlinked {
+		if updated, err := h.file.fs.client.GetInode(ctx, h.file.inode.ID); err == nil {
+			*h.file.inode = *updated
+		} else {
+			fmt.Printf("DEBUG: FUSE Read: GetInode failed for unlinked file %s: %v\n", h.file.inode.ID, err)
+		}
+	}
+	h.reader.SetInode(h.file.inode)
+	h.file.mu.Unlock()
 
 	const chunkSize = 1024 * 1024
 	totalSize := int64(h.size)

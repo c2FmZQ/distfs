@@ -105,7 +105,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 
 	// 7. handleIssueToken
 	// Create an inode first
-	inode := Inode{ID: "f1", OwnerID: u1, Type: FileType}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Type: FileType}
 	inode.SignInodeForTest(u1, usk)
 	ib, _ := json.Marshal(inode)
 	server.ApplyRaftCommandInternal(CmdCreateInode, ib)
@@ -115,7 +115,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 		Chunks  []string `json:"chunks"`
 		Mode    string   `json:"mode"`
 	}{
-		InodeID: "f1",
+		InodeID: "0000000000000000000000000000000f",
 		Mode:    "R",
 	}
 	irb, _ := json.Marshal(issueReq)
@@ -129,7 +129,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	}
 
 	// 8. handleGetInodes (Batch)
-	ids := []string{"f1"}
+	ids := []string{"0000000000000000000000000000000f"}
 	idsb, _ := json.Marshal(ids)
 	sealedIds := SealTestRequest(t, u1, usk, ek, idsb)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/inodes", bytes.NewReader(sealedIds))
@@ -156,8 +156,10 @@ func TestServer_MiscHandlers(t *testing.T) {
 
 	// 10. handleAcquireLeases / handleReleaseLeases
 	leaseReq := LeaseRequest{
-		InodeIDs: []string{"f1"},
+		InodeIDs: []string{"0000000000000000000000000000000f"},
 		Duration: int64(10 * 1000 * 1000 * 1000), // 10s
+		Type:     LeaseExclusive,
+		Nonce:    "test-nonce",
 	}
 	lrb, _ := json.Marshal(leaseReq)
 	sealedL := SealTestRequest(t, u1, usk, ek, lrb)
@@ -612,14 +614,14 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 	CreateUser(t, node, User{ID: u2, SignKey: usk2.Public()})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
-	// u1 owns f1
-	inode1 := Inode{ID: "f1", OwnerID: u1, Type: FileType}
+	// u1 owns 0000000000000000000000000000000f
+	inode1 := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Type: FileType}
 	inode1.SignInodeForTest(u1, usk)
-	ib1, _ := json.Marshal(inode1)
-	server.ApplyRaftCommandInternal(CmdCreateInode, ib1)
+	i0000000000000000000000000000000b, _ := json.Marshal(inode1)
+	server.ApplyRaftCommandInternal(CmdCreateInode, i0000000000000000000000000000000b)
 
-	// u2 tries to update f1 via batch
-	batch := []LogCommand{{Type: CmdUpdateInode, Data: ib1}}
+	// u2 tries to update 0000000000000000000000000000000f via batch
+	batch := []LogCommand{{Type: CmdUpdateInode, Data: i0000000000000000000000000000000b}}
 	bb, _ := json.Marshal(batch)
 	sealed := SealTestRequest(t, u2, usk2, ek, bb)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
@@ -761,7 +763,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	reqData := map[string]string{"name": "f1", "child_id": "file1"}
+	reqData := map[string]string{"name": "0000000000000000000000000000000f", "child_id": "file1"}
 	rb, _ := json.Marshal(reqData)
 	sealed := SealTestRequest(t, u1, usk, ek, rb)
 	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/directory/dir1/entry", bytes.NewReader(sealed))
@@ -777,8 +779,8 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 		plain, _ := server.fsm.Get(tx, []byte("inodes"), []byte("dir1"))
 		return json.Unmarshal(plain, &updatedDir)
 	})
-	if updatedDir.Children["f1"] != "file1" {
-		t.Errorf("expected entry f1 -> file1, got %v", updatedDir.Children)
+	if updatedDir.Children["0000000000000000000000000000000f"] != "file1" {
+		t.Errorf("expected entry 0000000000000000000000000000000f -> file1, got %v", updatedDir.Children)
 	}
 
 	// 3. handleGetGroupSignKey (Success)
@@ -843,7 +845,7 @@ func TestServer_handleBatch_More(t *testing.T) {
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Batch Create
-	inode := Inode{ID: "b1", Type: DirType, OwnerID: u1}
+	inode := Inode{ID: "0000000000000000000000000000000b", Type: DirType, OwnerID: u1}
 	inode.SignInodeForTest(u1, usk)
 	batch := []LogCommand{
 		{Type: CmdCreateInode, Data: mustMarshalJSON(inode)},
@@ -860,7 +862,7 @@ func TestServer_handleBatch_More(t *testing.T) {
 
 	// 2. Batch Delete
 	batchD := []LogCommand{
-		{Type: CmdDeleteInode, Data: []byte("b1")},
+		{Type: CmdDeleteInode, Data: []byte("0000000000000000000000000000000b")},
 	}
 	bbD, _ := json.Marshal(batchD)
 	sealedD := SealTestRequest(t, u1, usk, ek, bbD)
@@ -892,7 +894,7 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	server.ApplyRaftCommandInternal(CmdCreateGroup, mustMarshalJSON(Group{ID: "g1", OwnerID: u1, Members: map[string]bool{u2: true}}))
 	time.Sleep(100 * time.Millisecond)
 
-	inode := Inode{ID: "fg", OwnerID: u1, GroupID: "g1", Mode: 0640, Type: FileType}
+	inode := Inode{ID: "0000000000000000000000000000000a", OwnerID: u1, GroupID: "g1", Mode: 0640, Type: FileType}
 	inode.SignInodeForTest(u1, usk)
 	server.ApplyRaftCommandInternal(CmdCreateInode, mustMarshalJSON(inode))
 	time.Sleep(100 * time.Millisecond)
@@ -901,7 +903,7 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	irb, _ := json.Marshal(struct {
 		InodeID string `json:"inode_id"`
 		Mode    string `json:"mode"`
-	}{InodeID: "fg", Mode: "R"})
+	}{InodeID: "0000000000000000000000000000000a", Mode: "R"})
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(SealTestRequest(t, u2, usk2, ek, irb)))
 	req.Header.Set("Session-Token", token2)
 	req.Header.Set("X-DistFS-Sealed", "true")

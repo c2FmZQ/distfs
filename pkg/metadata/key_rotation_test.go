@@ -23,7 +23,7 @@ func TestFSMKeyRotation(t *testing.T) {
 	WaitLeader(t, node.Raft)
 
 	// 1. Create Inode (Gen 1)
-	inode := Inode{ID: "f1", Type: FileType}
+	inode := Inode{ID: "0000000000000000000000000000000f", Type: FileType}
 	iBytes, _ := json.Marshal(inode)
 	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes)
 
@@ -34,19 +34,19 @@ func TestFSMKeyRotation(t *testing.T) {
 	}
 
 	// 3. Create Inode (Gen 2)
-	inode2 := Inode{ID: "f2", Type: FileType}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", Type: FileType}
 	iBytes2, _ := json.Marshal(inode2)
 	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2)
 
 	// 4. Verify decryption of both
 	err = server.FSM().DB().View(func(tx *bolt.Tx) error {
-		v1, _ := server.FSM().Get(tx, []byte("inodes"), []byte("f1"))
+		v1, _ := server.FSM().Get(tx, []byte("inodes"), []byte("0000000000000000000000000000000f"))
 		if v1 == nil {
-			t.Error("f1 missing")
+			t.Error("0000000000000000000000000000000f missing")
 		}
-		v2, _ := server.FSM().Get(tx, []byte("inodes"), []byte("f2"))
+		v2, _ := server.FSM().Get(tx, []byte("inodes"), []byte("0000000000000000000000000000002f"))
 		if v2 == nil {
-			t.Error("f2 missing")
+			t.Error("0000000000000000000000000000002f missing")
 		}
 		return nil
 	})
@@ -59,12 +59,12 @@ func TestFSMKeyRotation(t *testing.T) {
 	// Wait for async Raft apply
 	time.Sleep(500 * time.Millisecond)
 
-	// 6. Verify f1 is now Gen 2 in raw storage
+	// 6. Verify 0000000000000000000000000000000f is now Gen 2 in raw storage
 	server.FSM().DB().View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
-		v1 := b.Get([]byte("f1"))
+		v1 := b.Get([]byte("0000000000000000000000000000000f"))
 		if binary.BigEndian.Uint32(v1[:4]) != 2 {
-			t.Errorf("f1 not re-encrypted: gen %d", binary.BigEndian.Uint32(v1[:4]))
+			t.Errorf("0000000000000000000000000000000f not re-encrypted: gen %d", binary.BigEndian.Uint32(v1[:4]))
 		}
 		return nil
 	})

@@ -98,10 +98,13 @@ fi
 
 echo "TEST 5: Symlinks"
 ln -s f1 $MNT/s1
-if [ "$(readlink $MNT/s1)" = "f1" ]; then
+RL=$(readlink $MNT/s1)
+if [ "$RL" = "f1" ]; then
     echo "PASS: TEST 5"
 else
-    echo "FAIL: TEST 5"
+    echo "FAIL: TEST 5 (Expected f1, got '$RL')"
+    stat $MNT/s1 || echo "s1 does not exist"
+    ls -la $MNT
     exit 1
 fi
 
@@ -139,6 +142,36 @@ if [ "$STAT_MODE" = "775" ]; then
     fi
 else
     echo "FAIL: TEST 8 (Chmod failed: $STAT_MODE)"
+    exit 1
+fi
+
+echo "TEST 9: Delete-while-open (POSIX compliance)"
+# Create the file first
+echo "initial" > $MNT/delete-me
+# Hold it open with a file descriptor
+exec 3< $MNT/delete-me
+# Start a background writer that appends to it
+(for i in $(seq 10); do echo "data-$i"; sleep 1; done) >> $MNT/delete-me &
+WRITER_PID=$!
+sleep 2
+
+# Delete while writer is active and we have it open
+rm $MNT/delete-me
+echo "INFO: Unlinked $MNT/delete-me"
+
+# Wait for writer to finish (writing to unlinked file)
+wait $WRITER_PID
+
+# Read everything from the held descriptor
+cat <&3 > /tmp/posix-test.out
+exec 3<&-
+
+if grep -q "data-10" /tmp/posix-test.out; then
+    echo "PASS: TEST 9"
+else
+    echo "FAIL: TEST 9 (Data missing from unlinked file handle)"
+    echo "--- read output ---"
+    cat /tmp/posix-test.out
     exit 1
 fi
 

@@ -226,7 +226,12 @@ Files are split into fixed-size chunks of **1 MB**. The client library handles p
 
 ### 5.5 Atomicity & Consistency
 *   **Chunk Level:** Writes to DataNodes are atomic. A chunk is either fully written and validated or rejected. Replacements use new Chunk IDs or versioned writes; existing chunks are immutable.
-*   **File Level:** File updates are transactional via Raft. The client uploads new chunks first, then sends a single `UpdateManifest` command to the MetaNode. This atomically swaps the old chunk list for the new one, ensuring readers never see a partial update.
+*   **Path Level (Atomic Swap):** High-level mutation APIs (`OpenManyForUpdate`, `OpenBlobWrite`, `SaveDataFile`) utilize an **Atomic Path Swap** pattern. 
+    1.  The client acquires an **Exclusive Lease on the Filename** (or Path) to prevent concurrent atomic updates.
+    2.  The client writes data to a **New Inode**. Existing readers continue to see the old Inode.
+    3.  On `Close()` or commit, the client performs a batch metadata update that atomically points the directory entry to the New Inode and decrements the old Inode's link count.
+    4.  Active readers of the old Inode are unaffected as they hold leases on the Inode ID, not the path.
+*   **POSIX Level:** Standard FUSE operations (e.g., `write`, `truncate`) follow traditional POSIX semantics, potentially mutating an existing Inode in-place if not unlinked.
 
 ### 5.6 Access Control (Capability Tokens)
 Data Nodes enforce permissions using **Capability Tokens** issued by the Metadata Leader.
@@ -236,6 +241,17 @@ Data Nodes enforce permissions using **Capability Tokens** issued by the Metadat
     3.  Leader issues a time-bound **Signed Token** granting READ/WRITE access to the specific Chunk IDs associated with File X.
     4.  Client presents Token to Data Node.
     5.  Data Node verifies signature and expiry before serving data.
+
+### 5.7 POSIX Deletion (Open Handle Persistence)
+To achieve high-fidelity POSIX compliance, DistFS ensures that unlinked files (where `NLink == 0`) persist on storage nodes as long as they are being actively read or written by a client.
+
+1.  **Usage Leases:** When a client opens a file, it acquires a **Shared Usage Lease** on the Inode. This lease acts as a signal to the cluster that the file is in use.
+2.  **Deferred Deletion:** If a file is deleted (e.g., via `unlink`), the Metadata Server decrements its link count. If `NLink` becomes zero:
+    *   The Inode is removed from the directory namespace (it can no longer be "found" by new `Open` requests).
+    *   If active leases exist, the Inode is marked as **Unlinked (Pending Delete)**.
+    *   The Inode and its associated chunks are **not** enqueued for Garbage Collection yet.
+3.  **Lease Heartbeat:** Clients periodically renew their usage leases as long as the file handle is open. If a client crashes, the lease will naturally expire.
+4.  **Final Cleanup:** The Metadata Server triggers the final deletion (quota reclamation and chunk GC enqueuing) only when the link count is zero **and** all usage leases have expired or been explicitly released.
 
 ---
 

@@ -427,7 +427,7 @@ func (m *model) updateLeaseTable() {
 
 		rows = append(rows, table.Row{
 			l.InodeID,
-			l.Owner,
+			l.SessionID,
 			remaining.String(),
 		})
 	}

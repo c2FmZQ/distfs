@@ -64,7 +64,57 @@ func (g *GCWorker) loop() {
 			return
 		case <-ticker.C:
 			g.runGC()
+			g.runUnlinkedCleanup()
 		}
+	}
+}
+
+func (g *GCWorker) runUnlinkedCleanup() {
+	if g.server.raft.State() != raft.Leader {
+		return
+	}
+
+	var toFinalize []string
+	now := time.Now().UnixNano()
+
+	err := g.server.fsm.db.View(func(tx *bolt.Tx) error {
+		return g.server.fsm.ForEach(tx, []byte("unlinked_inodes"), func(k, v []byte) error {
+			id := string(k)
+			plain, err := g.server.fsm.Get(tx, []byte("inodes"), k)
+			if err != nil || plain == nil {
+				toFinalize = append(toFinalize, id)
+				return nil
+			}
+			var inode Inode
+			if err := json.Unmarshal(plain, &inode); err != nil {
+				return nil
+			}
+
+			active := false
+			for _, l := range inode.Leases {
+				if l.Expiry > now {
+					active = true
+					break
+				}
+			}
+
+			// Add a 5-second grace period to account for clock skew and Raft latency
+			if !active && (now-inode.CTime) > int64(5*time.Second) {
+				toFinalize = append(toFinalize, id)
+			}
+			return nil
+		})
+	})
+
+	if err != nil {
+		log.Printf("GC: unlinked scan error: %v", err)
+	}
+
+	for _, id := range toFinalize {
+		// Propose CmdDeleteInode again. FSM will finalize it if leases are gone.
+		cmd := LogCommand{Type: CmdDeleteInode, Data: []byte(id)}
+		b, _ := json.Marshal(cmd)
+		g.server.raft.Apply(b, 5*time.Second)
 	}
 }
 

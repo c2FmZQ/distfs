@@ -684,6 +684,7 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(body)
+			fmt.Printf("DEBUG: issueToken failed: status=%d message=%s\n", resp.StatusCode, string(b))
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
 
@@ -736,8 +737,9 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 			return err
 		}
 		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusCreated {
+		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(resp.Body)
+			fmt.Printf("DEBUG: data node error: status=%d message=%s url=%s\n", resp.StatusCode, string(b), url)
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
 		return nil
@@ -1155,7 +1157,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 	defer unlock()
 
 	var updated metadata.Inode
-	maxRetries := 5
+	maxRetries := 50
 
 	for i := 0; i < maxRetries; i++ {
 		// Phase 31: Manifest Signing
@@ -1297,6 +1299,17 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 		}
 		return nil
 	})
+}
+
+func (c *Client) PrepareCreate(ctx context.Context, inode metadata.Inode) (metadata.LogCommand, error) {
+	if err := c.signInode(ctx, &inode); err != nil {
+		return metadata.LogCommand{}, err
+	}
+	data, err := json.Marshal(inode)
+	if err != nil {
+		return metadata.LogCommand{}, err
+	}
+	return metadata.LogCommand{Type: metadata.CmdCreateInode, Data: data}, nil
 }
 
 func (c *Client) PrepareUpdate(ctx context.Context, inode metadata.Inode) (metadata.LogCommand, error) {
@@ -1687,6 +1700,7 @@ type FileReader struct {
 	currentChunkIdx int64
 	currentChunk    []byte
 	token           string
+	leaseNonce      string
 	mu              sync.Mutex
 
 	readAhead   map[int64]*readAheadResult
@@ -1694,6 +1708,7 @@ type FileReader struct {
 
 	ctx    context.Context
 	cancel context.CancelFunc
+	wg     sync.WaitGroup
 }
 
 // NewReader creates a new FileReader for the given inode.
@@ -1740,30 +1755,66 @@ func (c *Client) NewReader(ctx context.Context, id string, fileKey []byte) (*Fil
 	}
 
 	token, _ := c.issueToken(ctx, id, nil, "R")
+	nonce := generateID()
+
+	// POSIX compliance: acquire shared usage lease
+	_ = c.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil, metadata.LeaseShared, nonce)
 
 	lctx, cancel := context.WithCancel(context.Background())
-	return &FileReader{
+	r := &FileReader{
 		client:          c,
 		inode:           inode,
 		fileKey:         fileKey,
 		offset:          0,
 		currentChunkIdx: -1,
 		token:           token,
+		leaseNonce:      nonce,
 		readAhead:       make(map[int64]*readAheadResult),
 		ctx:             lctx,
 		cancel:          cancel,
-	}, nil
+	}
+
+	r.wg.Add(1)
+	go r.leaseRenewalLoop(id, metadata.LeaseShared)
+
+	return r, nil
 }
 
 func (r *FileReader) Close() error {
 	r.cancel()
+	r.wg.Wait()
+	// Release lease
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	_ = r.client.ReleaseLeases(ctx, []string{r.inode.ID}, r.leaseNonce)
 	return nil
 }
 
+func (r *FileReader) leaseRenewalLoop(id string, lType metadata.LeaseType) {
+	defer r.wg.Done()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-r.ctx.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = r.client.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil, lType, r.leaseNonce)
+			cancel()
+		}
+	}
+}
+
+// triggerPrefetch starts an asynchronous download of the specified chunk index.
+// The caller MUST hold r.mu.
 func (r *FileReader) triggerPrefetch(idx int64) {
 	if idx < 0 || idx >= int64(len(r.inode.ChunkManifest)) {
 		return
 	}
+	chunkEntry := r.inode.ChunkManifest[idx]
+	token := r.token
 
 	r.readAheadMu.Lock()
 	if _, exists := r.readAhead[idx]; exists {
@@ -1775,8 +1826,7 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 	r.readAheadMu.Unlock()
 
 	go func() {
-		chunkEntry := r.inode.ChunkManifest[idx]
-		ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, r.token)
+		ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, token)
 		var pt []byte
 		if err == nil {
 			pt, err = crypto.DecryptChunk(r.fileKey, ct)
@@ -1846,10 +1896,16 @@ func (r *FileReader) read(p []byte) (int, error) {
 				r.mu.Lock()
 
 				if res.err != nil {
-					return totalRead, res.err
+					// Fallthrough to direct download if prefetch failed with 401/403
+					if apiErr, ok := res.err.(*APIError); !ok || (apiErr.StatusCode != http.StatusUnauthorized && apiErr.StatusCode != http.StatusForbidden) {
+						return totalRead, res.err
+					}
+				} else {
+					pt = res.data
 				}
-				pt = res.data
-			} else {
+			}
+
+			if pt == nil {
 				if chunkIdx >= int64(len(r.inode.ChunkManifest)) {
 					break
 				}
@@ -1858,6 +1914,26 @@ func (r *FileReader) read(p []byte) (int, error) {
 				// Unlock during network I/O
 				r.mu.Unlock()
 				ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, r.token)
+				if err != nil {
+					if apiErr, ok := err.(*APIError); ok && (apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden) {
+						// Token might be stale or file was unlinked/appended.
+						// Refresh metadata AND token.
+						inodeID := r.inode.ID
+						if updated, terr := r.client.GetInode(r.ctx, inodeID); terr == nil {
+							if newToken, terr2 := r.client.issueToken(r.ctx, inodeID, nil, "R"); terr2 == nil {
+								r.mu.Lock()
+								r.inode = updated
+								r.token = newToken
+								r.mu.Unlock()
+								// Retry with new token and potentially new URLs
+								if chunkIdx < int64(len(updated.ChunkManifest)) {
+									newEntry := updated.ChunkManifest[chunkIdx]
+									ct, err = r.client.downloadChunk(r.ctx, newEntry.ID, newEntry.URLs, r.token)
+								}
+							}
+						}
+					}
+				}
 				r.mu.Lock()
 
 				if err != nil {
@@ -1910,121 +1986,126 @@ func (r *FileReader) Stat() *metadata.Inode {
 	return r.inode
 }
 
+func (r *FileReader) SetInode(inode *metadata.Inode) {
+	var needsToken bool
+	r.mu.Lock()
+
+	// Invalidate cache if manifest or inline data changed
+	invalidate := false
+	if len(inode.ChunkManifest) != len(r.inode.ChunkManifest) {
+		invalidate = true
+	} else if !bytes.Equal(inode.GetInlineData(), r.inode.GetInlineData()) {
+		invalidate = true
+	} else {
+		for i := range inode.ChunkManifest {
+			if inode.ChunkManifest[i].ID != r.inode.ChunkManifest[i].ID {
+				invalidate = true
+				break
+			}
+		}
+	}
+
+	if invalidate {
+		r.currentChunkIdx = -1
+		r.currentChunk = nil
+		// Also clear readahead cache
+		r.readAheadMu.Lock()
+		for k := range r.readAhead {
+			delete(r.readAhead, k)
+		}
+		r.readAheadMu.Unlock()
+		needsToken = true
+	}
+
+	r.inode = inode
+	inodeID := r.inode.ID
+	r.mu.Unlock()
+
+	// Refresh token outside the lock if the manifest changed
+	if needsToken {
+		if token, err := r.client.issueToken(r.ctx, inodeID, nil, "R"); err == nil {
+			r.mu.Lock()
+			r.token = token
+			r.mu.Unlock()
+		}
+	}
+}
+
 // ReadFile returns a reader for the specified file ID.
 // If fileKey is nil, it attempts to unlock it using the client's identity.
 func (c *Client) ReadFile(ctx context.Context, id string, fileKey []byte) (io.ReadCloser, error) {
 	return c.NewReader(ctx, id, fileKey)
 }
 
-func (c *Client) OpenBlobRead(ctx context.Context, id string) (io.ReadCloser, error) {
-	// 1. Try treating id as a direct Inode ID (fast path)
-	rc, err := c.ReadFile(ctx, id, nil)
+func (c *Client) OpenBlobRead(ctx context.Context, path string) (io.ReadCloser, error) {
+	// 1. Resolve path to Inode
+	inode, key, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	// 2. Open Reader
+	rc, err := c.ReadFile(ctx, inode.ID, key)
 	if err == nil {
 		return rc, nil
 	}
 
-	// 2. Try resolving as a path if direct read failed
-	// Only try if it looks like a path or the previous error wasn't "not found"
-	var inode *metadata.Inode
-	var key []byte
-	resolveErr := errors.New("resolution skipped")
-
-	if strings.Contains(id, "/") {
-		inode, key, resolveErr = c.ResolvePath(ctx, id)
-		if resolveErr != nil {
-			return nil, resolveErr
-		}
-		rc, err = c.ReadFile(ctx, inode.ID, key)
-		if err == nil {
-			return rc, nil
-		}
-	}
-
 	// 3. Handle Placeholder (Leased) Files
-	// If we hold the lease, and the file is empty/new, return empty reader.
 	if errors.Is(err, crypto.ErrRecipientNotFound) {
-		// Use the inode we resolved, or fetch if we didn't resolve yet
-		if inode == nil {
-			inode, _ = c.getInode(ctx, id)
-		}
-
-		if inode != nil {
-			c.sessionMu.RLock()
-			token := c.sessionToken
-			c.sessionMu.RUnlock()
-			// Strictly check if it's a new placeholder: Owned by us, Version 1, and Empty.
-			if inode.LeaseOwner == token && inode.Version == 1 && inode.Size == 0 {
-				return io.NopCloser(bytes.NewReader(nil)), nil
+		c.sessionMu.RLock()
+		token := c.sessionToken
+		c.sessionMu.RUnlock()
+		// Strictly check if it's a new placeholder: Owned by us, Version 1, and Empty.
+		isPlaceholder := false
+		if inode.Version == 1 && inode.Size == 0 {
+			now := time.Now().UnixNano()
+			for _, l := range inode.Leases {
+				if l.SessionID == token && l.Type == metadata.LeaseExclusive && l.Expiry > now {
+					isPlaceholder = true
+					break
+				}
 			}
+		}
+		if isPlaceholder {
+			return io.NopCloser(bytes.NewReader(nil)), nil
 		}
 	}
 
 	return nil, err
 }
 
-func (c *Client) OpenBlobWrite(ctx context.Context, id string) (io.WriteCloser, error) {
+func (c *Client) OpenBlobWrite(ctx context.Context, path string) (io.WriteCloser, error) {
 	// Acquire lease first to prevent concurrent writers.
-	// Note: We lease the input `id` (which might be a path) to lock the name.
-	if err := c.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil); err != nil {
+	nonce := generateID()
+	err := c.withConflictRetry(ctx, func() error {
+		return c.AcquireLeases(ctx, []string{path}, 2*time.Minute, nil, metadata.LeaseExclusive, nonce)
+	})
+	if err != nil {
 		return nil, err
 	}
 
-	c.keyMu.RLock()
-	meta, ok := c.keyCache[id]
-	c.keyMu.RUnlock()
+	// 1. Try to resolve as Path
+	dir, fileName := filepath.Split(path)
+	pInode, pKey, err := c.ResolvePath(ctx, dir)
+	if err != nil {
+		c.ReleaseLeases(ctx, []string{path}, nonce)
+		return nil, err
+	}
+
+	mac := hmac.New(sha256.New, pKey)
+	mac.Write([]byte(fileName))
+	nameHMAC := hex.EncodeToString(mac.Sum(nil))
+	parentID := pInode.ID
+	groupID := pInode.GroupID
 
 	var fileKey []byte
-	var groupID string
-	var parentID string
-	var parentKey []byte
-	var name string
-	var nameHMAC string
-	var inode *metadata.Inode
+	var oldInodeID string
 
-	if ok {
-		fileKey = meta.key
-		groupID = meta.groupID
-		parts := strings.SplitN(meta.linkTag, ":", 2)
-		if len(parts) == 2 {
-			parentID = parts[0]
-			nameHMAC = parts[1]
-		}
-		inode, _ = c.getInode(ctx, id)
-	} else {
-		// 1. Try getInode directly (Treating id as InodeID)
-		// Only try this if it doesn't look like a path to avoid hitting placeholders.
-		if metadata.IsInodeID(id) {
-			inode, _ = c.getInode(ctx, id)
-			if inode != nil {
-				fileKey, _ = c.UnlockInode(ctx, inode)
-			}
-		}
-
-		if fileKey == nil {
-			// 2. Try to resolve as Path
-			dir, fileName := filepath.Split(id)
-			name = fileName
-			pInode, pKey, err := c.ResolvePath(ctx, dir)
-			if err != nil {
-				return nil, err
-			}
-
-			mac := hmac.New(sha256.New, pKey)
-			mac.Write([]byte(name))
-			nameHMAC = hex.EncodeToString(mac.Sum(nil))
-			parentID = pInode.ID
-			parentKey = pKey
-			groupID = pInode.GroupID
-
-			if childID, exists := pInode.Children[nameHMAC]; exists {
-				inode, _ = c.getInode(ctx, childID)
-				if inode != nil {
-					fileKey, _ = c.UnlockInode(ctx, inode)
-				}
-			} else {
-				// Path resolved but entry not found in parent: definitely new.
-				inode = nil
-			}
+	if childID, exists := pInode.Children[nameHMAC]; exists {
+		oldInodeID = childID
+		oldInode, _ := c.getInode(ctx, childID)
+		if oldInode != nil {
+			fileKey, _ = c.UnlockInode(ctx, oldInode)
 		}
 	}
 
@@ -2033,60 +2114,66 @@ func (c *Client) OpenBlobWrite(ctx context.Context, id string) (io.WriteCloser, 
 		rand.Read(fileKey)
 	}
 
-	isNew := false
-	if inode == nil {
-		if parentID == "" {
-			return nil, fmt.Errorf("cannot create file: parent directory not found or path invalid")
-		}
-		// Generate new UUID for the file
-		uidBytes := make([]byte, 16)
-		rand.Read(uidBytes)
-		newID := hex.EncodeToString(uidBytes)
+	// Always generate new UUID for atomic swap
+	uidBytes := make([]byte, 16)
+	rand.Read(uidBytes)
+	newID := hex.EncodeToString(uidBytes)
 
-		inode = &metadata.Inode{
-			ID:      newID,
-			Type:    metadata.FileType,
-			Mode:    0600,
-			OwnerID: c.userID,
-			GroupID: groupID,
-			// We set links here, but we MUST also update the parent later.
-			Links:   map[string]bool{parentID + ":" + nameHMAC: true},
-			Lockbox: c.createLockbox(ctx, fileKey, 0600, groupID),
-		}
-		inode.SetFileKey(fileKey)
-		isNew = true
-	} else {
-		inode.SetFileKey(fileKey)
+	inode := &metadata.Inode{
+		ID:      newID,
+		Type:    metadata.FileType,
+		Mode:    0600,
+		OwnerID: c.userID,
+		GroupID: groupID,
+		// Links will be updated during commit
+		Links:   map[string]bool{parentID + ":" + nameHMAC: true},
+		Lockbox: c.createLockbox(ctx, fileKey, 0600, groupID),
+	}
+	inode.SetFileKey(fileKey)
+
+	lctx, cancel := context.WithCancel(context.Background())
+	w := &FileWriter{
+		client:     c,
+		ctx:        lctx,
+		cancel:     cancel,
+		leaseNonce: nonce,
+		inode:      *inode,
+		fileKey:    fileKey,
+		parentID:   parentID,
+		nameHMAC:   nameHMAC,
+		swapMode:   true,
+		swapPath:   path,
+		oldInodeID: oldInodeID,
+		isNew:      true, // It's "new" because it's a new InodeID
 	}
 
-	return &FileWriter{
-		client:    c,
-		ctx:       ctx,
-		inode:     *inode,
-		fileKey:   fileKey,
-		parentID:  parentID,
-		parentKey: parentKey,
-		name:      name,
-		nameHMAC:  nameHMAC,
-		buf:       make([]byte, 0, crypto.ChunkSize),
-		isNew:     isNew,
-	}, nil
+	w.wg.Add(1)
+	go w.leaseRenewalLoop(path, metadata.LeaseExclusive)
+
+	return w, nil
 }
 
 type FileWriter struct {
-	client    *Client
-	ctx       context.Context
-	inode     metadata.Inode
-	fileKey   []byte
-	parentID  string
-	parentKey []byte
-	name      string
-	nameHMAC  string
-	buf       []byte
-	manifest  []metadata.ChunkEntry
-	written   int64
-	closed    bool
-	isNew     bool
+	client     *Client
+	ctx        context.Context
+	cancel     context.CancelFunc
+	leaseNonce string
+	wg         sync.WaitGroup
+	inode      metadata.Inode
+
+	fileKey    []byte
+	parentID   string
+	parentKey  []byte
+	name       string
+	nameHMAC   string
+	buf        []byte
+	manifest   []metadata.ChunkEntry
+	written    int64
+	closed     bool
+	isNew      bool
+	swapMode   bool
+	swapPath   string
+	oldInodeID string
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
@@ -2163,53 +2250,127 @@ func (w *FileWriter) Close() error {
 	// Final Metadata Update
 	var err error
 	w.inode.SetFileKey(w.fileKey)
-	if w.isNew {
-		if w.parentID == "" {
-			return fmt.Errorf("cannot link new file: parentID missing")
-		}
-		// 1. Create Inode
-		_, err = w.client.createInode(w.ctx, w.inode)
-		if err != nil {
-			return err
-		}
-		// 2. Link to Parent
-		parent, gerr := w.client.getInode(w.ctx, w.parentID)
-		if gerr != nil {
-			return fmt.Errorf("failed to get parent for link: %w", gerr)
-		}
-		if parent.Children == nil {
-			parent.Children = make(map[string]string)
-		}
-		parent.Children[w.nameHMAC] = w.inode.ID
-		_, err = w.client.updateInode(w.ctx, *parent)
+
+	if w.swapMode {
+		err = w.client.withConflictRetry(w.ctx, func() error {
+			var cmds []metadata.LogCommand
+
+			// 1. Prepare New Inode
+			cmdNew, err := w.client.PrepareCreate(w.ctx, w.inode)
+			if err != nil {
+				return err
+			}
+			cmds = append(cmds, cmdNew)
+
+			// 2. Update Parent Link
+			if w.parentID != "" {
+				parent, err := w.client.getInode(w.ctx, w.parentID)
+				if err != nil {
+					return fmt.Errorf("failed to get parent for swap: %w", err)
+				}
+				if parent.Children == nil {
+					parent.Children = make(map[string]string)
+				}
+				parent.Children[w.nameHMAC] = w.inode.ID
+				cmdParent, err := w.client.PrepareUpdate(w.ctx, *parent)
+				if err != nil {
+					return err
+				}
+				cmds = append(cmds, cmdParent)
+			}
+
+			// 3. Optional: Delete Old Inode (Decrement NLink)
+			if w.oldInodeID != "" && w.oldInodeID != w.inode.ID {
+				cmdOld, err := w.client.PrepareDelete(w.oldInodeID)
+				if err != nil {
+					return err
+				}
+				cmds = append(cmds, cmdOld)
+			}
+
+			// Execute Atomic Batch
+			return w.client.ApplyBatch(w.ctx, cmds)
+		})
 	} else {
-		_, err = w.client.updateInode(w.ctx, w.inode)
+		if w.isNew {
+			if w.parentID == "" {
+				return fmt.Errorf("cannot link new file: parentID missing")
+			}
+			// 1. Create Inode
+			_, err = w.client.createInode(w.ctx, w.inode)
+			if err != nil {
+				return err
+			}
+			// 2. Link to Parent
+			parent, gerr := w.client.getInode(w.ctx, w.parentID)
+			if gerr != nil {
+				return fmt.Errorf("failed to get parent for link: %w", gerr)
+			}
+			if parent.Children == nil {
+				parent.Children = make(map[string]string)
+			}
+			parent.Children[w.nameHMAC] = w.inode.ID
+			_, err = w.client.updateInode(w.ctx, *parent)
+		} else {
+			_, err = w.client.updateInode(w.ctx, w.inode)
+		}
 	}
 
-	if releaseErr := w.client.ReleaseLeases(w.ctx, []string{w.inode.ID}); releaseErr != nil {
-		if err == nil {
-			err = fmt.Errorf("failed to release lease: %w", releaseErr)
-		}
+	// Release Lease
+	leaseTarget := w.inode.ID
+	if w.swapMode {
+		leaseTarget = w.swapPath
+	}
+	if releaseErr := w.client.ReleaseLeases(w.ctx, []string{leaseTarget}, w.leaseNonce); releaseErr != nil {
+		log.Printf("Warning: Failed to release lease for %s: %v", leaseTarget, releaseErr)
 	}
 
 	if err == nil {
 		w.client.keyMu.Lock()
-		w.client.keyCache[w.inode.ID] = fileMetadata{
+		fm := fileMetadata{
 			key:     w.fileKey,
 			groupID: w.inode.GroupID,
 			linkTag: w.parentID + ":" + w.nameHMAC,
 			inlined: w.inode.GetInlineData() != nil,
 		}
+		w.client.keyCache[w.inode.ID] = fm
+		if w.swapMode && w.swapPath != "" {
+			w.client.keyCache[w.swapPath] = fm
+		}
 		w.client.keyMu.Unlock()
 
-		// Cache the path if we know it
-		if w.name != "" && w.parentID != "" {
-			// We don't have the full path here easily unless we passed it or reconstructing it.
-			// But we updated keyCache, which is good enough for ID-based access.
-			// Path cache population is tricky without full path.
+		if w.swapMode && w.swapPath != "" {
+			w.client.pathMu.Lock()
+			w.client.pathCache[w.swapPath] = pathCacheEntry{
+				inodeID: w.inode.ID,
+				key:     w.fileKey,
+				linkTag: w.parentID + ":" + w.nameHMAC,
+			}
+			w.client.pathMu.Unlock()
 		}
 	}
+
+	w.cancel()
+	w.wg.Wait()
+
 	return err
+}
+
+func (w *FileWriter) leaseRenewalLoop(id string, lType metadata.LeaseType) {
+	defer w.wg.Done()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case <-ticker.C:
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = w.client.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil, lType, w.leaseNonce)
+			cancel()
+		}
+	}
 }
 
 func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx int64) ([]byte, error) {
@@ -2450,45 +2611,31 @@ func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []a
 		return nil, fmt.Errorf("names and data length mismatch")
 	}
 
-	// 1. Resolve all paths to InodeIDs
-	ids := make([]string, len(names))
-	for i, name := range names {
-		inode, _, err := c.ResolvePath(ctx, name)
-		if err != nil {
-			ids[i] = name // Fallback to path if not found (e.g. for creation)
-		} else {
-			ids[i] = inode.ID
-		}
-	}
-
-	// Pre-create lockbox for potential new files
-	fileKey := make([]byte, 32)
-	rand.Read(fileKey)
-	lb := c.createLockbox(ctx, fileKey, 0600, "")
-
-	// 2. Acquire leases for all files
-	if err := c.AcquireLeases(ctx, ids, 2*time.Minute, lb); err != nil {
+	// 1. Acquire path-based exclusive leases for all files
+	nonce := generateID()
+	if err := c.AcquireLeases(ctx, names, 2*time.Minute, nil, metadata.LeaseExclusive, nonce); err != nil {
 		return nil, err
 	}
 
-	// 3. Read all files
+	// 2. Read all files
 	for i, name := range names {
 		if err := c.ReadDataFile(ctx, name, data[i]); err != nil {
-			c.ReleaseLeases(ctx, ids)
+			c.ReleaseLeases(ctx, names, nonce)
 			return nil, err
 		}
 	}
 
-	// 4. Return commit callback
+	// 3. Return commit callback
 	return func(commit bool) {
 		if commit {
 			for i, name := range names {
+				// SaveDataFile uses OpenBlobWrite, which uses atomic swap
 				if err := c.SaveDataFile(ctx, name, data[i]); err != nil {
 					log.Printf("Failed to save %s during transactional update: %v", name, err)
 				}
 			}
 		}
-		c.ReleaseLeases(ctx, ids)
+		c.ReleaseLeases(ctx, names, nonce)
 	}, nil
 }
 
@@ -3714,11 +3861,13 @@ func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, e
 	return &stats, nil
 }
 
-func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration, lb crypto.Lockbox) error {
+func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration, lb crypto.Lockbox, lType metadata.LeaseType, nonce string) error {
 	req := metadata.LeaseRequest{
 		InodeIDs: ids,
 		Duration: int64(duration),
 		Lockbox:  lb,
+		Type:     lType,
+		Nonce:    nonce,
 	}
 	data, _ := json.Marshal(req)
 
@@ -3757,9 +3906,10 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 	})
 }
 
-func (c *Client) ReleaseLeases(ctx context.Context, ids []string) error {
+func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) error {
 	req := metadata.LeaseRequest{
 		InodeIDs: ids,
+		Nonce:    nonce,
 	}
 	data, _ := json.Marshal(req)
 

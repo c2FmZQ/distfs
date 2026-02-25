@@ -41,6 +41,14 @@ const (
 	SymlinkType InodeType = 2
 )
 
+// LeaseType represents the type of lease (Shared for readers, Exclusive for writers/placeholders).
+type LeaseType uint8
+
+const (
+	LeaseShared    LeaseType = 0
+	LeaseExclusive LeaseType = 1
+)
+
 const (
 	// RootID is the fixed ID of the root directory.
 	RootID = "root-directory-inode-id-0000000000"
@@ -48,14 +56,16 @@ const (
 	WorldID = "world"
 	// InlineLimit is the maximum size of a file that can be inlined in metadata.
 	InlineLimit = 4096
+	// InodeIDLength is the expected length of a hex-encoded Inode ID (16 random bytes).
+	InodeIDLength = 32
 )
 
-// IsInodeID returns true if the string is a valid Inode ID (64-char hex or special root ID).
+// IsInodeID returns true if the string is a valid Inode ID (32-char hex or special root ID).
 func IsInodeID(id string) bool {
 	if id == RootID {
 		return true
 	}
-	if len(id) != 64 {
+	if len(id) != InodeIDLength {
 		return false
 	}
 	_, err := hex.DecodeString(id)
@@ -338,24 +348,24 @@ type InodeClientBlob struct {
 
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
-	ID            string            `json:"id"`
-	Links         map[string]bool   `json:"links,omitempty"` // Set of "ParentID:NameHMAC"
-	Type          InodeType         `json:"type"`
-	OwnerID       string            `json:"owner_id"` // DistFS User ID
-	GroupID       string            `json:"group_id"` // DistFS Group ID
-	Mode          uint32            `json:"mode"`
-	Size          uint64            `json:"size"`
-	CTime         int64             `json:"ctime"`
-	NLink         uint32            `json:"nlink"`
-	ClientBlob    []byte            `json:"client_blob,omitempty"`
-	Children      map[string]string `json:"children,omitempty"`
-	ChunkManifest []ChunkEntry      `json:"manifest,omitempty"`
-	ChunkPages    []string          `json:"chunk_pages,omitempty"`
-	Lockbox       crypto.Lockbox    `json:"lockbox"`
-	Version       uint64            `json:"version"`
-	IsSystem      bool              `json:"is_system"`
-	LeaseOwner    string            `json:"lease_owner,omitempty"`
-	LeaseExpiry   int64             `json:"lease_expiry,omitempty"`
+	ID            string               `json:"id"`
+	Links         map[string]bool      `json:"links,omitempty"` // Set of "ParentID:NameHMAC"
+	Type          InodeType            `json:"type"`
+	OwnerID       string               `json:"owner_id"` // DistFS User ID
+	GroupID       string               `json:"group_id"` // DistFS Group ID
+	Mode          uint32               `json:"mode"`
+	Size          uint64               `json:"size"`
+	CTime         int64                `json:"ctime"`
+	NLink         uint32               `json:"nlink"`
+	ClientBlob    []byte               `json:"client_blob,omitempty"`
+	Children      map[string]string    `json:"children,omitempty"`
+	ChunkManifest []ChunkEntry         `json:"manifest,omitempty"`
+	ChunkPages    []string             `json:"chunk_pages,omitempty"`
+	Lockbox       crypto.Lockbox       `json:"lockbox"`
+	Version       uint64               `json:"version"`
+	IsSystem      bool                 `json:"is_system"`
+	Leases        map[string]LeaseInfo `json:"leases,omitempty"` // Nonce -> LeaseInfo
+	Unlinked      bool                 `json:"unlinked,omitempty"`
 
 	// Manifest Integrity (Phase 31)
 	UserSig  []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
@@ -551,9 +561,11 @@ type SessionResponse struct {
 }
 
 type LeaseInfo struct {
-	InodeID string `json:"inode_id"`
-	Owner   string `json:"owner"`
-	Expiry  int64  `json:"expiry"`
+	InodeID   string    `json:"inode_id"`
+	SessionID string    `json:"session_id"`
+	Nonce     string    `json:"nonce,omitempty"`
+	Expiry    int64     `json:"expiry"`
+	Type      LeaseType `json:"type"`
 }
 
 // CapabilityToken grants access to specific chunks on Data Nodes.

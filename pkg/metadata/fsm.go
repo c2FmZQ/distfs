@@ -63,7 +63,7 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 	}
 
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases"}
 		for _, bucket := range buckets {
 			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
 				return err
@@ -338,11 +338,13 @@ type ReencryptRequest struct {
 }
 
 type LeaseRequest struct {
-	InodeIDs []string       `json:"inode_ids"`
-	OwnerID  string         `json:"owner_id"` // Session ID
-	UserID   string         `json:"user_id"`  // Actual User ID for placeholders
-	Lockbox  crypto.Lockbox `json:"lockbox,omitempty"`
-	Duration int64          `json:"duration"` // Nanoseconds
+	InodeIDs  []string       `json:"inode_ids"`
+	SessionID string         `json:"session_id"`
+	Nonce     string         `json:"nonce,omitempty"`
+	UserID    string         `json:"user_id"` // Actual User ID for placeholders
+	Type      LeaseType      `json:"type"`
+	Lockbox   crypto.Lockbox `json:"lockbox,omitempty"`
+	Duration  int64          `json:"duration"` // Nanoseconds
 }
 
 type ChildUpdate struct {
@@ -660,6 +662,10 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 			return err
 		}
 		// 2. Check Quota for new owner/group
+		// Safety: NEVER allow clearing OwnerID in an update if it was set
+		if inode.OwnerID == "" {
+			inode.OwnerID = existing.OwnerID
+		}
 		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
@@ -667,6 +673,8 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
+	} else if inode.OwnerID == "" {
+		inode.OwnerID = existing.OwnerID
 	}
 
 	oldPages := existing.ChunkPages
@@ -679,7 +687,18 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 	}
 
 	inode.Version++
-	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
+	inode.Unlinked = existing.Unlinked
+	// Deep copy leases map to be safe
+	if existing.Leases != nil {
+		inode.Leases = make(map[string]LeaseInfo)
+		for k, v := range existing.Leases {
+			inode.Leases[k] = v
+		}
+	}
+
+	if !inode.Unlinked {
+		inode.Mode = SanitizeMode(inode.Mode, inode.Type)
+	}
 	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
@@ -713,24 +732,58 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{}
 	if err != nil {
 		return err
 	}
-	if plain != nil {
-		var inode Inode
-		if err := json.Unmarshal(plain, &inode); err == nil {
-			if len(inode.ChunkPages) > 0 {
-				pb := tx.Bucket([]byte("chunk_pages"))
-				for _, pid := range inode.ChunkPages {
-					pb.Delete([]byte(pid))
-				}
-			}
-			if inode.OwnerID != "" {
-				if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
-					return err
-				}
-			}
-			fsm.enqueueGC(tx, &inode)
+	if plain == nil {
+		return nil
+	}
+
+	var inode Inode
+	if err := json.Unmarshal(plain, &inode); err != nil {
+		return err
+	}
+
+	// Check for active leases
+	now := time.Now().UnixNano()
+	hasActiveLeases := false
+	for _, l := range inode.Leases {
+		if l.Expiry > now {
+			hasActiveLeases = true
+			break
 		}
 	}
-	return fsm.Delete(tx, []byte("inodes"), []byte(id))
+
+	if hasActiveLeases {
+		// Mark as unlinked and defer deletion
+		inode.Unlinked = true
+		if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
+			return err
+		}
+		// Add to unlinked_inodes bucket for reaper index
+		ub := tx.Bucket([]byte("unlinked_inodes"))
+		return ub.Put([]byte(id), []byte("true"))
+	}
+
+	return fsm.finalizeDeleteInode(tx, &inode)
+}
+
+func (fsm *MetadataFSM) finalizeDeleteInode(tx *bolt.Tx, inode *Inode) error {
+	if len(inode.ChunkPages) > 0 {
+		pb := tx.Bucket([]byte("chunk_pages"))
+		for _, pid := range inode.ChunkPages {
+			pb.Delete([]byte(pid))
+		}
+	}
+	if inode.OwnerID != "" {
+		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
+			return err
+		}
+	}
+	fsm.enqueueGC(tx, inode)
+
+	// Clean up unlinked index if it was there
+	ub := tx.Bucket([]byte("unlinked_inodes"))
+	ub.Delete([]byte(inode.ID))
+
+	return fsm.Delete(tx, []byte("inodes"), []byte(inode.ID))
 }
 
 func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{} {
@@ -1900,6 +1953,13 @@ func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
 	return &blob, nil
 }
 
+// InspectBucket allows read-only access to a bucket for testing purposes.
+func (fsm *MetadataFSM) InspectBucket(bucketName string, fn func(k, v []byte) error) error {
+	return fsm.db.View(func(tx *bolt.Tx) error {
+		return fsm.ForEach(tx, []byte(bucketName), fn)
+	})
+}
+
 func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface{} {
 	var req LeaseRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -1907,16 +1967,20 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	}
 
 	lb := tx.Bucket([]byte("leases"))
+	fb := tx.Bucket([]byte("filename_leases"))
 	now := time.Now().UnixNano()
 	expiry := now + req.Duration
 
-	// 0. Proactive Cleanup: Remove a few expired leases to prevent leakage
-	// We do a limited scan to avoid blocking the transaction too long.
+	// 0. Proactive Cleanup (inodes)
 	c := lb.Cursor()
 	purged := 0
 	for k, v := c.First(); k != nil && purged < 10; k, v = c.Next() {
+		plain, err := fsm.DecryptValue(v)
+		if err != nil {
+			continue
+		}
 		var info LeaseInfo
-		if err := json.Unmarshal(v, &info); err == nil {
+		if err := json.Unmarshal(plain, &info); err == nil {
 			if info.Expiry <= now {
 				lb.Delete(k)
 				purged++
@@ -1924,53 +1988,116 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		}
 	}
 
-	// 1. Validation Phase: Check if all are available
-	inodes := make([]*Inode, len(req.InodeIDs))
-	for i, id := range req.InodeIDs {
-		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+	// 0.1 Proactive Cleanup (filenames)
+	fc := fb.Cursor()
+	purged = 0
+	for k, v := fc.First(); k != nil && purged < 10; k, v = fc.Next() {
+		plain, err := fsm.DecryptValue(v)
 		if err != nil {
-			return err
+			continue
 		}
-		if plain == nil {
-			continue // Non-existent inodes can be leased for creation
-		}
-		var inode Inode
-		if err := json.Unmarshal(plain, &inode); err != nil {
-			return err
-		}
-		inodes[i] = &inode
-
-		// Conflict if already owned by someone else AND not expired
-		if inode.LeaseOwner != "" && inode.LeaseOwner != req.OwnerID && inode.LeaseExpiry > now {
-			return ErrConflict
+		var info LeaseInfo
+		if err := json.Unmarshal(plain, &info); err == nil {
+			if info.Expiry <= now {
+				fb.Delete(k)
+				purged++
+			}
 		}
 	}
 
-	// 2. Grant Phase: Apply leases
+	// 1. Validation Phase
+	inodes := make([]*Inode, len(req.InodeIDs))
 	for i, id := range req.InodeIDs {
-		inode := inodes[i]
-		if inode == nil {
-			// Create a minimal inode if it doesn't exist.
-			inode = &Inode{
-				ID:      id,
-				OwnerID: req.UserID,
-				Lockbox: req.Lockbox,
-				Version: 1,
+		if IsInodeID(id) {
+			plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+			if err != nil {
+				return err
+			}
+			if plain == nil {
+				continue
+			}
+			var inode Inode
+			if err := json.Unmarshal(plain, &inode); err != nil {
+				return err
+			}
+			inodes[i] = &inode
+
+			// Conflict check
+			for _, l := range inode.Leases {
+				if l.Expiry <= now {
+					continue
+				}
+				if req.Type == LeaseExclusive {
+					// Exclusive conflicts with ANY lease from another session
+					if l.SessionID != req.SessionID {
+						return ErrConflict
+					}
+				} else {
+					// Shared only conflicts with EXCLUSIVE leases from another session
+					if l.Type == LeaseExclusive && l.SessionID != req.SessionID {
+						return ErrConflict
+					}
+				}
+			}
+		} else {
+			// Filename Lease (always exclusive for atomic writes)
+			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			if err != nil {
+				return err
+			}
+			if plain != nil {
+				var info LeaseInfo
+				if err := json.Unmarshal(plain, &info); err == nil {
+					if info.Expiry > now && info.SessionID != req.SessionID {
+						return ErrConflict
+					}
+				}
 			}
 		}
-		inode.LeaseOwner = req.OwnerID
-		inode.LeaseExpiry = expiry
-		if err := fsm.saveInodeWithPages(tx, inode); err != nil {
-			return err
-		}
+	}
 
+	// 2. Grant Phase
+	for i, id := range req.InodeIDs {
 		info := LeaseInfo{
-			InodeID: id,
-			Owner:   req.OwnerID,
-			Expiry:  expiry,
+			InodeID:   id,
+			SessionID: req.SessionID,
+			Nonce:     req.Nonce,
+			Expiry:    expiry,
+			Type:      req.Type,
 		}
 		encoded, _ := json.Marshal(info)
-		fsm.Put(tx, []byte("leases"), []byte(id), encoded)
+
+		if IsInodeID(id) {
+			inode := inodes[i]
+			if inode == nil {
+				inode = &Inode{
+					ID:      id,
+					OwnerID: req.UserID,
+					Lockbox: req.Lockbox,
+					Version: 1,
+				}
+			}
+
+			if inode.Leases == nil {
+				inode.Leases = make(map[string]LeaseInfo)
+			}
+
+			// Use Nonce as the unique key for this handle's lease
+			nonce := req.Nonce
+			if nonce == "" {
+				nonce = "legacy-" + req.SessionID
+			}
+			inode.Leases[nonce] = info
+
+			if err := fsm.saveInodeWithPages(tx, inode); err != nil {
+				return err
+			}
+			leaseKey := id + ":" + nonce
+			fsm.Put(tx, []byte("leases"), []byte(leaseKey), encoded)
+		} else {
+			// Filename lease
+			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+		}
 	}
 
 	return nil
@@ -1983,27 +2110,77 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 	}
 
 	lb := tx.Bucket([]byte("leases"))
+	fb := tx.Bucket([]byte("filename_leases"))
+	now := time.Now().UnixNano()
+
 	for _, id := range req.InodeIDs {
+		if !IsInodeID(id) {
+			// Filename Lease
+			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			if err != nil {
+				return err
+			}
+			if plain != nil {
+				var info LeaseInfo
+				if err := json.Unmarshal(plain, &info); err == nil {
+					if info.SessionID == req.SessionID {
+						fb.Delete([]byte(id))
+					}
+				}
+			}
+			continue
+		}
+
 		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
 		if err != nil {
 			return err
 		}
 		if plain == nil {
-			continue // Already gone?
+			continue
 		}
 		var inode Inode
 		if err := json.Unmarshal(plain, &inode); err != nil {
 			return err
 		}
 
-		// Only release if we are the owner
-		if inode.LeaseOwner == req.OwnerID {
-			inode.LeaseOwner = ""
-			inode.LeaseExpiry = 0
+		nonce := req.Nonce
+		if nonce == "" {
+			// Robustness: if nonce is omitted, try to find any lease belonging to this session.
+			for n, l := range inode.Leases {
+				if l.SessionID == req.SessionID {
+					nonce = n
+					break
+				}
+			}
+			if nonce == "" {
+				nonce = "legacy-" + req.SessionID
+			}
+		}
+
+		if _, ok := inode.Leases[nonce]; ok {
+			delete(inode.Leases, nonce)
+			lb.Delete([]byte(id + ":" + nonce))
+
+			// Check if we should finalize deletion
+			if inode.Unlinked {
+				active := false
+				for _, l := range inode.Leases {
+					if l.Expiry > now {
+						active = true
+						break
+					}
+				}
+				if !active {
+					if err := fsm.finalizeDeleteInode(tx, &inode); err != nil {
+						return err
+					}
+					continue // Inode deleted
+				}
+			}
+
 			if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 				return err
 			}
-			lb.Delete([]byte(id))
 		}
 	}
 

@@ -454,33 +454,29 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 29: Storage API & Distributed Locking
-**Goal:** Implement a subset of the `storage.Storage` interface to support transactional multi-file updates and high-level E2EE data management.
+## Phase 29: Storage API & Path-Based Atomic Writes
+**Goal:** Implement atomic path-based updates and distributed filename locking.
 
-*   **Step 29.1: Metadata Schema & FSM Expansion**
-    *   **Action:** Add `LeaseOwner string` and `LeaseExpiry int64` to the `Inode` struct in `pkg/metadata/types.go`.
-    *   **Action:** Implement `CmdAcquireLeases` and `CmdReleaseLeases` in `pkg/metadata/fsm.go`.
-    *   **Action:** Add FSM logic to atomically validate and grant leases for multiple Inodes in a single Raft transaction (Deadlock Prevention).
-*   **Step 29.2: Client Locking Primitives**
-    *   **Action:** Implement `AcquireLeases(ctx, ids)` and `ReleaseLeases(ctx, ids)` in `pkg/client/client.go`.
-    *   **Action:** Ensure leases are associated with the `Session-Token`.
-*   **Step 29.3: High-Level Blob API (`OpenBlobRead` / `OpenBlobWrite`)**
-    *   **Action:** Implement `OpenBlobRead(id)` as a wrapper around `NewReader`.
-    *   **Action:** Implement `OpenBlobWrite(id)` by creating a new `FileWriter` that handles streaming chunked encryption and pipelined uploads.
-*   **Step 29.4: Data File API (`ReadDataFile` / `SaveDataFile`)**
-    *   **Action:** Implement E2EE serialization (JSON/Gob) wrappers.
-    *   **Action:** Integrate with Step 24.2 (Small File Inlining) to store these files directly in the Metadata Layer for low latency.
-*   **Step 29.5: Transactional Updates (`OpenForUpdate` / `OpenManyForUpdate`)**
-    *   **Action:** Implement the transactional lifecycle:
-        1.  Acquire exclusive leases for all requested Inodes.
-        2.  Read current data and decrypt.
-        3.  Provide data to user callback.
-        4.  Re-encrypt and perform atomic `UpdateInode` + `ReleaseLease` Raft command.
-    *   **Action:** Implement automatic lease renewal based on client heartbeat to handle long-running transactions.
-*   **Step 29.6: Lease Reaper**
-    *   **Action:** Add a background worker to the `MetadataServer` that monitors session heartbeats.
-    *   **Action:** Automatically release all leases owned by a session if its heartbeat times out or the session is revoked.
-    *   **Action:** Add a "Lease" view to the operator dashboard.
+*   **Step 29.1: Multi-Bucket Leasing (FSM)**
+    *   **Action:** Refactor `executeAcquireLeases` to support two target types:
+        *   **Inode IDs**: Used by POSIX/Readers (Shared/Exclusive). Stored in `inodes` bucket.
+        *   **Filenames/Paths**: Used by Atomic Writes (Exclusive). Stored in a new `filename_leases` bucket.
+    *   **Action:** Update `LeaseInfo` to include the target type.
+*   **Step 29.2: Atomic Swap Protocol (Client)**
+    *   **Action:** Refactor `FileWriter` to support "Atomic Swap" mode.
+    *   **Action:** On `Close()`, if in swap mode:
+        1.  Create a **new InodeID**.
+        2.  Propose a batch: `CreateInode(New)` + `UpdateInode(Parent, Link=New)` + `UpdateInode(Old, NLink--)`.
+*   **Step 29.3: Standardized High-Level API**
+    *   **Action:** Update `OpenBlobWrite` and `SaveDataFile` to:
+        1.  Acquire an **Exclusive Filename Lease** on the path.
+        2.  Initialize `FileWriter` in Atomic Swap mode.
+*   **Step 29.4: Transactional Updates (`OpenManyForUpdate`)**
+    *   **Action:** Update to use path-based locking for all targets.
+    *   **Action:** Perform atomic commit of all modified files using the batch swap protocol.
+*   **Step 29.5: POSIX Compatibility (FUSE)**
+    *   **Action:** Ensure FUSE continues to use Inode-ID based leasing for POSIX compliance.
+    *   **Action:** Verify that unlinked files remain readable even after an atomic swap has replaced their name in the directory.
 
 ---
 
@@ -699,3 +695,31 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 38.6: CLI Command Coverage (Target: 90%)**
     *   **Action:** Implement a test suite for `cmd/distfs` that captures stdout/stderr and verifies exit codes for all valid and invalid flag combinations.
     *   **Action:** Test the interactive Admin CUI components using Bubble Tea's testing framework.
+
+---
+
+## Phase 39: POSIX-Compliant Deletion (Deferred GC)
+**Goal:** Ensure that unlinked files remain accessible to clients with open handles, as required by POSIX.
+
+*   **Step 39.1: Shared Lease Support (FSM)**
+    *   **Action:** Update `LeaseRequest` to include `Type` (SHARED, EXCLUSIVE).
+    *   **Action:** Update `Inode` to store a map of `OwnerID -> Expiry` for SHARED leases.
+    *   **Action:** Refactor `executeAcquireLeases` to allow multiple concurrent SHARED leases.
+*   **Step 39.2: Deferred Deletion Logic (FSM)**
+    *   **Action:** Add `Unlinked bool` field to the `Inode` struct.
+    *   **Action:** Update `executeDeleteInode`: if active leases exist, set `Unlinked = true` and keep the inode in the DB, but remove it from parent directories.
+    *   **Action:** Update `executeReleaseLeases`: if the last lease is released and `Unlinked == true`, trigger the final deletion (quota update + GC enqueue).
+*   **Step 39.3: Client-Side Handle Management**
+    *   **Action:** Update `Client.NewReader` and `Client.OpenBlobWrite` to acquire a SHARED lease.
+    *   **Action:** Implement a background "Lease Renewer" in `FileReader` and `FileWriter`.
+    *   **Action:** Ensure `Close()` explicitly releases the lease.
+*   **Step 39.4: Metadata Reaper Enhancement (Indexed)**
+    *   **Action:** Add `unlinked_inodes` bucket to the FSM to track inodes pending deletion.
+    *   **Action:** Update the leader-only `GCWorker` to scan the `unlinked_inodes` bucket (instead of all inodes) to finalize deletions for crashed clients.
+*   **Step 39.5: Comprehensive Testing Strategy**
+    *   **Action:** **Unit Test (FSM):** Verify that `executeDeleteInode` correctly transitions to the `Unlinked` state when leases are active.
+    *   **Action:** **Unit Test (FSM):** Verify that releasing the last lease on an `Unlinked` inode triggers GC enqueuing.
+    *   **Action:** **Integration Test (Client):** Open a file, delete it via another client, and verify the first client can still read its content.
+    *   **Action:** **E2E Test (FUSE):** Perform a "delete-while-open" test using standard shell commands (`cat & sleep`, `rm`, then finish `cat`).
+    *   **Action:** **Resiliency Test:** Kill a client with an open unlinked file and verify that the `GCWorker` eventually reclaims the space after the lease expires.
+    *   **Action:** **Stress Test:** Rapidly open/delete/close thousands of files to ensure no leaks in the `garbage_collection` bucket or the `leases` bucket.

@@ -183,7 +183,7 @@ func TestClientIntegration(t *testing.T) {
 
 	// 4. Write File (Raw)
 	content := []byte("hello distributed filesystem world")
-	fileID := "file-1"
+	fileID := "00000000000000000000000000000001"
 	key, err := c.WriteFile(t.Context(), fileID, bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile failed: %v", err)

@@ -209,7 +209,7 @@ func TestAdminConsole_AllTabs(t *testing.T) {
 		status: map[string]interface{}{"state": "Leader"},
 		users:  []metadata.User{{ID: "u1"}},
 		groups: []metadata.Group{{ID: "g1"}},
-		leases: []metadata.LeaseInfo{{InodeID: "i1"}},
+		leases: []metadata.LeaseInfo{{InodeID: "00000000000000000000000000000001"}},
 		nodes:  []metadata.Node{{ID: "n1"}},
 	}
 	m := model{

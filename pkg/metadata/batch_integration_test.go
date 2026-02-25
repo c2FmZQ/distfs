@@ -137,14 +137,14 @@ func TestBatchAtomicity(t *testing.T) {
 	metadata.CreateUser(t, node, user)
 
 	// Prepare a batch:
-	// 1. Create Inode f1 (Valid)
-	// 2. Create Inode f2 (Should FAIL due to quota)
+	// 1. Create Inode 0000000000000000000000000000000f (Valid)
+	// 2. Create Inode 0000000000000000000000000000002f (Should FAIL due to quota)
 
-	i1 := metadata.Inode{ID: "f1", OwnerID: u1, Type: metadata.FileType}
+	i1 := metadata.Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Type: metadata.FileType}
 	i1.SignInodeForTest(u1, sk)
 	i1Bytes, _ := json.Marshal(i1)
 
-	i2 := metadata.Inode{ID: "f2", OwnerID: u1, Type: metadata.FileType}
+	i2 := metadata.Inode{ID: "0000000000000000000000000000002f", OwnerID: u1, Type: metadata.FileType}
 	i2.SignInodeForTest(u1, sk)
 	i2Bytes, _ := json.Marshal(i2)
 
@@ -177,14 +177,14 @@ func TestBatchAtomicity(t *testing.T) {
 		t.Errorf("Expected at least one error in batch results, got %v", results)
 	}
 
-	// Verify f1 was NOT created (atomicity check)
+	// Verify 0000000000000000000000000000000f was NOT created (atomicity check)
 	server.FSM().DB().View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
-		if b.Get([]byte("f1")) != nil {
-			t.Errorf("Inode f1 was created despite batch failure")
+		if b.Get([]byte("0000000000000000000000000000000f")) != nil {
+			t.Errorf("Inode 0000000000000000000000000000000f was created despite batch failure")
 		}
-		if b.Get([]byte("f2")) != nil {
-			t.Errorf("Inode f2 was created despite batch failure")
+		if b.Get([]byte("0000000000000000000000000000002f")) != nil {
+			t.Errorf("Inode 0000000000000000000000000000002f was created despite batch failure")
 		}
 		return nil
 	})
