@@ -2228,11 +2228,11 @@ func (w *FileWriter) flushChunk() error {
 	return nil
 }
 
-func (w *FileWriter) Close() error {
+// Finish finalizes the file data (flushing chunks, updating manifest) but does NOT commit metadata to Raft.
+func (w *FileWriter) Finish() error {
 	if w.closed {
 		return nil
 	}
-	w.closed = true
 
 	// Handle Inlining for small files
 	if len(w.manifest) == 0 && len(w.buf) <= metadata.InlineLimit {
@@ -2248,9 +2248,22 @@ func (w *FileWriter) Close() error {
 		w.inode.Size = uint64(w.written)
 	}
 
+	w.inode.SetFileKey(w.fileKey)
+	return nil
+}
+
+func (w *FileWriter) Close() error {
+	if w.closed {
+		return nil
+	}
+
+	if err := w.Finish(); err != nil {
+		return err
+	}
+	w.closed = true
+
 	// Final Metadata Update
 	var err error
-	w.inode.SetFileKey(w.fileKey)
 
 	if w.swapMode {
 		err = w.client.withConflictRetry(w.ctx, func() error {
@@ -2574,33 +2587,222 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 }
 
 func (c *Client) ReadDataFile(ctx context.Context, name string, data any) error {
-	// Map name to a full path if necessary, here we assume names are IDs or paths
-	rc, err := c.OpenBlobRead(ctx, name)
+	return c.ReadDataFiles(ctx, []string{name}, []any{data})
+}
+
+// ReadDataFiles reads and unmarshals multiple files atomically.
+// It uses shared filename leases to ensure a consistent snapshot of the namespace.
+func (c *Client) ReadDataFiles(ctx context.Context, names []string, targets []any) error {
+	if len(names) != len(targets) {
+		return fmt.Errorf("names and targets length mismatch")
+	}
+
+	readers, err := c.NewReaders(ctx, names)
 	if err != nil {
 		return err
 	}
-	defer rc.Close()
-	err = json.NewDecoder(rc).Decode(data)
-	if errors.Is(err, io.EOF) {
-		return nil
+	defer func() {
+		for _, r := range readers {
+			r.Close()
+		}
+	}()
+
+	for i, r := range readers {
+		if err := json.NewDecoder(r).Decode(targets[i]); err != nil {
+			if !errors.Is(err, io.EOF) {
+				return fmt.Errorf("failed to decode %s: %w", names[i], err)
+			}
+		}
 	}
-	return err
+	return nil
+}
+
+// ClearCache clears the client's key and path caches.
+func (c *Client) ClearCache() {
+	c.keyMu.Lock()
+	clear(c.keyCache)
+	c.keyMu.Unlock()
+
+	c.pathMu.Lock()
+	clear(c.pathCache)
+	c.pathMu.Unlock()
+}
+
+// NewReaders returns a collection of Readers for the given paths, ensuring a consistent point-in-time snapshot.
+func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader, error) {
+	if len(paths) == 0 {
+		return nil, nil
+	}
+
+	// 1. Acquire shared filename leases for all paths to "freeze" the namespace.
+	nonce := generateID()
+	err := c.withConflictRetry(ctx, func() error {
+		return c.AcquireLeases(ctx, paths, 2*time.Minute, nil, metadata.LeaseShared, nonce)
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire namespace snapshot: %w", err)
+	}
+	defer c.ReleaseLeases(ctx, paths, nonce)
+
+	// Clear cache to ensure we see the state as of when leases were acquired
+	c.ClearCache()
+
+	// 2. Resolve all paths and initialize readers.
+	// Since we hold the filename leases, concurrent atomic swaps won't change what these paths point to.
+	readers := make([]*FileReader, len(paths))
+	for i, path := range paths {
+		inode, key, err := c.ResolvePath(ctx, path)
+		if err != nil {
+			// Cleanup previously opened readers
+			for j := 0; j < i; j++ {
+				readers[j].Close()
+			}
+			return nil, fmt.Errorf("failed to resolve %s: %w", path, err)
+		}
+
+		r, err := c.NewReader(ctx, inode.ID, key)
+		if err != nil {
+			for j := 0; j < i; j++ {
+				readers[j].Close()
+			}
+			return nil, fmt.Errorf("failed to open %s: %w", path, err)
+		}
+		readers[i] = r
+	}
+
+	return readers, nil
 }
 
 func (c *Client) SaveDataFile(ctx context.Context, name string, data any) error {
-	b, err := json.Marshal(data)
-	if err != nil {
-		return err
+	return c.SaveDataFiles(ctx, []string{name}, []any{data})
+}
+
+// SaveDataFiles writes multiple files atomically in a single Raft transaction.
+func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) error {
+	if len(names) != len(data) {
+		return fmt.Errorf("names and data length mismatch")
 	}
-	wc, err := c.OpenBlobWrite(ctx, name)
-	if err != nil {
-		return err
+
+	// 1. Prepare all writers
+	writers := make([]*FileWriter, len(names))
+	for i, name := range names {
+		b, err := json.Marshal(data[i])
+		if err != nil {
+			return err
+		}
+		wc, err := c.OpenBlobWrite(ctx, name)
+		if err != nil {
+			// Cleanup previously opened writers
+			for j := 0; j < i; j++ {
+				writers[j].Close()
+			}
+			return err
+		}
+		if _, err := wc.Write(b); err != nil {
+			wc.Close()
+			for j := 0; j < i; j++ {
+				writers[j].Close()
+			}
+			return err
+		}
+		fw := wc.(*FileWriter)
+		if err := fw.Finish(); err != nil {
+			for j := 0; j <= i; j++ {
+				writers[j].Close()
+			}
+			return err
+		}
+		writers[i] = fw
 	}
-	if _, err := wc.Write(b); err != nil {
-		wc.Close()
-		return err
+
+	// 2. Perform Atomic Commit for all writers together
+	// Each writer is in swapMode, so they have prepared their new inodes.
+	// We need to collect all their commands and apply them in one batch.
+	err := c.withConflictRetry(ctx, func() error {
+		var allCmds []metadata.LogCommand
+		parents := make(map[string]*metadata.Inode)
+
+		for _, w := range writers {
+			// Phase 31: Prepare New Inode
+			cmdNew, err := c.PrepareCreate(ctx, w.inode)
+			if err != nil {
+				return err
+			}
+			allCmds = append(allCmds, cmdNew)
+
+			// Update Parent Link
+			if w.parentID != "" {
+				parent, ok := parents[w.parentID]
+				if !ok {
+					parent, err = c.getInode(ctx, w.parentID)
+					if err != nil {
+						return err
+					}
+					parents[w.parentID] = parent
+				}
+
+				if parent.Children == nil {
+					parent.Children = make(map[string]string)
+				}
+				parent.Children[w.nameHMAC] = w.inode.ID
+			}
+
+			// Delete Old
+			if w.oldInodeID != "" && w.oldInodeID != w.inode.ID {
+				cmdOld, err := c.PrepareDelete(w.oldInodeID)
+				if err != nil {
+					return err
+				}
+				allCmds = append(allCmds, cmdOld)
+			}
+		}
+
+		// Add all parent updates to the batch
+		for _, parent := range parents {
+			cmdParent, err := c.PrepareUpdate(ctx, *parent)
+			if err != nil {
+				return err
+			}
+			allCmds = append(allCmds, cmdParent)
+		}
+
+		return c.ApplyBatch(ctx, allCmds)
+	})
+
+	// 3. Post-commit: Cleanup and caching
+	for _, w := range writers {
+		// Mark as closed so Close() doesn't try to commit again
+		w.closed = true
+		w.cancel()
+		w.wg.Wait()
+
+		// Release leases
+		c.ReleaseLeases(ctx, []string{w.swapPath}, w.leaseNonce)
+
+		if err == nil {
+			// Update caches
+			fm := fileMetadata{
+				key:     w.fileKey,
+				groupID: w.inode.GroupID,
+				linkTag: w.parentID + ":" + w.nameHMAC,
+				inlined: w.inode.GetInlineData() != nil,
+			}
+			c.keyMu.Lock()
+			c.keyCache[w.inode.ID] = fm
+			c.keyCache[w.swapPath] = fm
+			c.keyMu.Unlock()
+
+			c.pathMu.Lock()
+			c.pathCache[w.swapPath] = pathCacheEntry{
+				inodeID: w.inode.ID,
+				key:     w.fileKey,
+				linkTag: w.parentID + ":" + w.nameHMAC,
+			}
+			c.pathMu.Unlock()
+		}
 	}
-	return wc.Close()
+
+	return err
 }
 
 func (c *Client) OpenForUpdate(ctx context.Context, name string, data any) (func(bool), error) {
@@ -2629,11 +2831,8 @@ func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []a
 	// 3. Return commit callback
 	return func(commit bool) {
 		if commit {
-			for i, name := range names {
-				// SaveDataFile uses OpenBlobWrite, which uses atomic swap
-				if err := c.SaveDataFile(ctx, name, data[i]); err != nil {
-					log.Printf("Failed to save %s during transactional update: %v", name, err)
-				}
+			if err := c.SaveDataFiles(ctx, names, data); err != nil {
+				log.Printf("Failed to save files during transactional update: %v", err)
 			}
 		}
 		c.ReleaseLeases(ctx, names, nonce)

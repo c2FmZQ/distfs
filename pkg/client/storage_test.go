@@ -182,3 +182,66 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 		t.Errorf("Abort failed, data was updated to %d", final.Value)
 	}
 }
+
+func TestStorageAPI_ReadConsistency(t *testing.T) {
+	// 1. Setup Cluster
+	c, metaNode, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	if err := c.EnsureRoot(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+
+	// 2. Prepare two related files (e.g., config and its key)
+	path1 := "/f1"
+	path2 := "/f2"
+
+	writeMatched := func(val int) {
+		data1 := testData{Name: "matched", Value: val}
+		data2 := testData{Name: "matched", Value: val}
+		// SaveDataFiles uses ONE atomic batch commit
+		if err := c.SaveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
+			t.Errorf("Save batch %d failed: %v", val, err)
+		}
+	}
+
+	writeMatched(1) // Initial state
+	t.Log("Initial files created")
+
+	// Verify they exist
+	if _, _, err := c.ResolvePath(t.Context(), path1); err != nil {
+		t.Fatalf("f1 not found after create: %v", err)
+	}
+
+	// 3. Start background writer doing matched swaps
+	// Use a DIFFERENT client instance to ensure lease conflicts
+	cWriter := createExtraClient(t, ts, metaNode, c)
+	done := make(chan bool)
+	go func() {
+		for i := 2; i < 20; i++ {
+			data1 := testData{Name: "matched", Value: i}
+			data2 := testData{Name: "matched", Value: i}
+			if err := cWriter.SaveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
+				// Conflicts are expected
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+		done <- true
+	}()
+
+	// 4. Perform repeated atomic reads and verify they are ALWAYS matched
+	for i := 0; i < 50; i++ {
+		var res1, res2 testData
+		err := c.ReadDataFiles(t.Context(), []string{path1, path2}, []any{&res1, &res2})
+		if err != nil {
+			t.Fatalf("ReadDataFiles failed: %v", err)
+		}
+
+		if res1.Value != res2.Value {
+			t.Errorf("Consistency violation! Read mix of versions: f1=%d, f2=%d", res1.Value, res2.Value)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	<-done
+}

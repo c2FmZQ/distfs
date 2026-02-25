@@ -1996,11 +1996,23 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		if err != nil {
 			continue
 		}
-		var info LeaseInfo
-		if err := json.Unmarshal(plain, &info); err == nil {
-			if info.Expiry <= now {
-				fb.Delete(k)
-				purged++
+		var leases map[string]LeaseInfo
+		if err := json.Unmarshal(plain, &leases); err == nil {
+			changed := false
+			for nonce, info := range leases {
+				if info.Expiry <= now {
+					delete(leases, nonce)
+					changed = true
+				}
+			}
+			if changed {
+				if len(leases) == 0 {
+					fb.Delete(k)
+					purged++
+				} else {
+					encoded, _ := json.Marshal(leases)
+					fsm.Put(tx, []byte("filename_leases"), k, encoded)
+				}
 			}
 		}
 	}
@@ -2040,16 +2052,29 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 				}
 			}
 		} else {
-			// Filename Lease (always exclusive for atomic writes)
+			// Filename Lease
 			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
 			if err != nil {
 				return err
 			}
 			if plain != nil {
-				var info LeaseInfo
-				if err := json.Unmarshal(plain, &info); err == nil {
-					if info.Expiry > now && info.SessionID != req.SessionID {
-						return ErrConflict
+				var leases map[string]LeaseInfo
+				if err := json.Unmarshal(plain, &leases); err == nil {
+					for _, l := range leases {
+						if l.Expiry <= now {
+							continue
+						}
+						if req.Type == LeaseExclusive {
+							// Exclusive conflicts with ANY lease from another session
+							if l.SessionID != req.SessionID {
+								return ErrConflict
+							}
+						} else {
+							// Shared only conflicts with EXCLUSIVE leases from another session
+							if l.Type == LeaseExclusive && l.SessionID != req.SessionID {
+								return ErrConflict
+							}
+						}
 					}
 				}
 			}
@@ -2065,7 +2090,6 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 			Expiry:    expiry,
 			Type:      req.Type,
 		}
-		encoded, _ := json.Marshal(info)
 
 		if IsInodeID(id) {
 			inode := inodes[i]
@@ -2092,10 +2116,22 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 			if err := fsm.saveInodeWithPages(tx, inode); err != nil {
 				return err
 			}
+			encoded, _ := json.Marshal(info)
 			leaseKey := id + ":" + nonce
 			fsm.Put(tx, []byte("leases"), []byte(leaseKey), encoded)
 		} else {
-			// Filename lease
+			// Filename lease (Map format)
+			plain, _ := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			leases := make(map[string]LeaseInfo)
+			if plain != nil {
+				json.Unmarshal(plain, &leases)
+			}
+			nonce := req.Nonce
+			if nonce == "" {
+				nonce = "legacy-" + req.SessionID
+			}
+			leases[nonce] = info
+			encoded, _ := json.Marshal(leases)
 			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
 		}
 	}
@@ -2121,10 +2157,26 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 				return err
 			}
 			if plain != nil {
-				var info LeaseInfo
-				if err := json.Unmarshal(plain, &info); err == nil {
-					if info.SessionID == req.SessionID {
-						fb.Delete([]byte(id))
+				var leases map[string]LeaseInfo
+				if err := json.Unmarshal(plain, &leases); err == nil {
+					nonce := req.Nonce
+					if nonce == "" {
+						// Robustness: find any lease belonging to this session
+						for n, l := range leases {
+							if l.SessionID == req.SessionID {
+								nonce = n
+								break
+							}
+						}
+					}
+					if nonce != "" {
+						delete(leases, nonce)
+						if len(leases) == 0 {
+							fb.Delete([]byte(id))
+						} else {
+							encoded, _ := json.Marshal(leases)
+							fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+						}
 					}
 				}
 			}

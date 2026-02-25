@@ -87,3 +87,14 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 
 	return c, metaNode, metaServer, ts
 }
+
+func createExtraClient(t *testing.T, ts *httptest.Server, metaNode *metadata.RaftNode, original *Client) *Client {
+	ctx := context.Background()
+
+	// Use same identity but it will get a new session on Login
+	c := NewClient(ts.URL).WithIdentity(original.userID, original.decKey).WithSignKey(original.signKey).WithServerKey(original.serverKey)
+	if err := c.Login(ctx); err != nil {
+		t.Fatalf("Extra client login failed: %v", err)
+	}
+	return c
+}

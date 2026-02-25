@@ -276,6 +276,13 @@ The client library implements `io.fs.FS` and `io.fs.File`.
     4.  Upon the first successful download, cancel all remaining parallel requests for that chunk.
     5.  Decrypt chunk in memory and copy to `b`.
 
+*   **Data File API (`ReadDataFile` / `SaveDataFile`)**
+    *   `ReadDataFile(ctx, name, data any)`: Reads and unmarshals a passphrase-encrypted JSON/Gob file from the namespace.
+    *   `SaveDataFile(ctx, name, data any)`: Marshals and writes a file using the **Atomic Swap Protocol** (exclusive filename lease + new inode creation).
+*   **Atomic Multi-File Operations**
+    *   `OpenManyForUpdate(ctx, paths []string, targets []any) (commit func(bool), error)`: Provides transactional write semantics across multiple files.
+    *   `ReadDataFiles(ctx, paths []string, targets []any) error`: Provides a point-in-time consistent snapshot of multiple files by using shared filename-based leases during the path-resolution phase.
+
 ### 6.2 REST API
 Communication uses JSON over HTTP/2 (or gRPC).
 

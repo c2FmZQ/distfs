@@ -723,3 +723,25 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** **E2E Test (FUSE):** Perform a "delete-while-open" test using standard shell commands (`cat & sleep`, `rm`, then finish `cat`).
     *   **Action:** **Resiliency Test:** Kill a client with an open unlinked file and verify that the `GCWorker` eventually reclaims the space after the lease expires.
     *   **Action:** **Stress Test:** Rapidly open/delete/close thousands of files to ensure no leaks in the `garbage_collection` bucket or the `leases` bucket.
+
+---
+
+## Phase 40: Atomic Multi-File Reads
+**Goal:** Implement consistent multi-file reads by combining path-based namespace stability with inode-based data protection.
+
+*   **Step 40.1: Shared Filename Leases (FSM)**
+    *   **Action:** Refactor `executeAcquireLeases` in `pkg/metadata/fsm.go` to support multiple concurrent `LeaseShared` entries for the same path in `filename_leases`.
+    *   **Action:** Implement conflict logic: `Shared` conflicts only with `Exclusive`; `Exclusive` conflicts with all types. Stored as a map of `Nonce -> LeaseInfo` in `filename_leases`.
+*   **Step 40.2: Multi-Reader API (Client)**
+    *   **Action:** Implement `NewReaders(ctx, paths []string) ([]*FileReader, error)` in `pkg/client/client.go`.
+    *   **Action:** Implement the "Snapshot Protocol":
+        1.  Acquire **Shared Filename Leases** for all paths in a single batch. This "freezes" the paths so they can't be swapped out by concurrent atomic writes.
+        2.  Resolve all paths to Inode IDs and Keys.
+        3.  Initialize `FileReader` for each (each will acquire its own **Inode-based lease**).
+        4.  Release the **Filename Leases** (data protection is now handled by Inode leases).
+*   **Step 40.3: High-Level Atomic Read (Client)**
+    *   **Action:** Implement `ReadDataFiles(ctx, paths []string, targets []any) error`.
+    *   **Action:** Coordinate reading and unmarshaling all requested files within the snapshot window.
+*   **Step 40.4: Consistency Verification**
+    *   **Action:** **Unit Test:** Verify that `ReadDataFiles` successfully blocks a concurrent `SaveDataFile` (atomic swap) on the same path until the path-resolution phase is complete.
+    *   **Action:** **Concurrency Test:** Rapidly swap multiple files (e.g., config and key) and verify that the reader always sees a matched pair (never old config with new key).
