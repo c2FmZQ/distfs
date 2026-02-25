@@ -16,6 +16,7 @@ package metadata
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -78,7 +79,12 @@ func (g *GCWorker) runUnlinkedCleanup() {
 	now := time.Now().UnixNano()
 
 	err := g.server.fsm.db.View(func(tx *bolt.Tx) error {
+		count := 0
 		return g.server.fsm.ForEach(tx, []byte("unlinked_inodes"), func(k, v []byte) error {
+			if count >= 100 { // Batch size
+				return ErrStopIteration
+			}
+			count++
 			id := string(k)
 			plain, err := g.server.fsm.Get(tx, []byte("inodes"), k)
 			if err != nil || plain == nil {
@@ -110,7 +116,7 @@ func (g *GCWorker) runUnlinkedCleanup() {
 		})
 	})
 
-	if err != nil {
+	if err != nil && !errors.Is(err, ErrStopIteration) {
 		log.Printf("GC: unlinked scan error: %v", err)
 	}
 
@@ -139,13 +145,13 @@ func (g *GCWorker) runGC() {
 			}
 			count++
 			if count > 100 { // Batch size
-				return fmt.Errorf("batch_limit") // Hack to break ForEach early
+				return ErrStopIteration // Hack to break ForEach early
 			}
 			return nil
 		})
 	})
 
-	if err != nil && err.Error() != "batch_limit" {
+	if err != nil && !errors.Is(err, ErrStopIteration) {
 		log.Printf("GC: scan error: %v", err)
 		return
 	}

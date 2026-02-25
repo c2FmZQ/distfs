@@ -574,8 +574,9 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 	}
 
 	defer resp.Body.Close()
+	limitBody := io.LimitReader(resp.Body, 10*1024*1024)
 	var sealed metadata.SealedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sealed); err != nil {
+	if err := json.NewDecoder(limitBody).Decode(&sealed); err != nil {
 		return nil, fmt.Errorf("failed to decode sealed response: %w", err)
 	}
 
@@ -737,7 +738,7 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
 		return nil
@@ -1928,7 +1929,7 @@ func (r *FileReader) read(p []byte) (int, error) {
 								// Retry with new token and potentially new URLs
 								if chunkIdx < int64(len(updated.ChunkManifest)) {
 									newEntry := updated.ChunkManifest[chunkIdx]
-									ct, err = r.client.downloadChunk(r.ctx, newEntry.ID, newEntry.URLs, r.token)
+									ct, err = r.client.downloadChunk(r.ctx, newEntry.ID, newEntry.URLs, newToken)
 								}
 							}
 						}
