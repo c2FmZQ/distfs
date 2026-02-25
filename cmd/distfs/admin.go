@@ -899,3 +899,16 @@ func cmdAdminGroupQuota(ctx context.Context, args []string) {
 	}
 	fmt.Printf("Group %s quota updated: %d bytes, %d inodes\n", groupID, maxBytes, maxInodes)
 }
+
+func cmdAdminCreateRoot(ctx context.Context, args []string) {
+	id := metadata.RootID
+	if len(args) > 0 {
+		id = args[0]
+	}
+
+	c := loadClient()
+	if err := c.WithRootID(id).EnsureRoot(ctx); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Root inode %s initialized successfully.\n", id)
+}

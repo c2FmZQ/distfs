@@ -102,6 +102,8 @@ func main() {
 		cmdAdminGroupQuota(ctx, args)
 	case "admin-promote":
 		cmdAdminPromote(ctx, args)
+	case "admin-create-root":
+		cmdAdminCreateRoot(ctx, args)
 	case "whoami":
 		cmdWhoami(ctx, args)
 	case "quota":
@@ -144,6 +146,7 @@ func usage() {
 	fmt.Println("  admin-chmod <mode> <path>       Override permissions (Admin only)")
 	fmt.Println("  admin-user-quota <email> <max_bytes> <max_inodes> Set user quota (Admin only)")
 	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
+	fmt.Println("  admin-create-root [id]          Initialize a new root inode (Admin only, defaults to standard root)")
 	fmt.Println("  whoami                          Display your user ID")
 	fmt.Println("  dump-inodes [path|id]           Recursively dump inode metadata for debugging")
 	os.Exit(1)

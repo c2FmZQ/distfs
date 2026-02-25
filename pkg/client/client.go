@@ -278,6 +278,7 @@ func NewClient(serverAddr string) *Client {
 		dataSem:       make(chan struct{}, 64),   // Limit chunk I/O
 		mutationMu:    &sync.Mutex{},
 		mutationLocks: make(map[string]*sync.Mutex),
+		rootID:        metadata.RootID,
 	}
 }
 
@@ -310,6 +311,15 @@ func (c *Client) WithRootAnchor(id, owner string, version uint64) *Client {
 	c2.rootID = id
 	c2.rootOwner = owner
 	c2.rootVersion = version
+	return &c2
+}
+
+// WithRootID returns a new client with a different root inode ID (chroot).
+func (c *Client) WithRootID(id string) *Client {
+	c2 := *c
+	c2.rootID = id
+	c2.pathCache = make(map[string]pathCacheEntry)
+	c2.pathMu = &sync.RWMutex{}
 	return &c2
 }
 

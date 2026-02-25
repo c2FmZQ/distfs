@@ -130,11 +130,9 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 		if !d.isRoot {
 			return syscall.EIO
 		}
-		if err := d.fs.client.EnsureRoot(ctx); err == nil {
-			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-				d.inode = inode
-				d.key = key
-			}
+		if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+			d.inode = inode
+			d.key = key
 		}
 		if d.inode == nil {
 			a.Mode = os.ModeDir | 0000 // Unreachable
@@ -158,11 +156,9 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -216,11 +212,9 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -268,11 +262,9 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -308,11 +300,9 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -341,11 +331,9 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -360,11 +348,9 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 	targetDir.mu.Lock()
 	if targetDir.inode == nil {
 		if targetDir.isRoot {
-			if err := targetDir.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := targetDir.fs.client.ResolvePath(ctx, "/"); err == nil {
-					targetDir.inode = inode
-					targetDir.key = key
-				}
+			if inode, key, err := targetDir.fs.client.ResolvePath(ctx, "/"); err == nil {
+				targetDir.inode = inode
+				targetDir.key = key
 			}
 		}
 		if targetDir.inode == nil {
@@ -393,11 +379,9 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -423,11 +407,9 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -454,11 +436,9 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {
@@ -479,11 +459,9 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
-			if err := d.fs.client.EnsureRoot(ctx); err == nil {
-				if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
-					d.inode = inode
-					d.key = key
-				}
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+				d.inode = inode
+				d.key = key
 			}
 		}
 		if d.inode == nil {

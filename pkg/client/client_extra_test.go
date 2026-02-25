@@ -1161,3 +1161,69 @@ func TestClient_ExtraDataOps(t *testing.T) {
 		t.Error("OpenBlobRead should fail for missing absolute path")
 	}
 }
+
+func TestClient_Chroot(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	// 1. Create a subdirectory to be our new root
+	err := c.EnsureRoot(ctx)
+	if err != nil {
+		t.Fatalf("EnsureRoot failed: %v", err)
+	}
+
+	err = c.Mkdir(ctx, "/jail")
+	if err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	jailInode, _, err := c.ResolvePath(ctx, "/jail")
+	if err != nil {
+		t.Fatalf("ResolvePath failed: %v", err)
+	}
+
+	// Create a file inside the jail using the main client
+	content := []byte("top secret")
+	err = c.CreateFile(ctx, "/jail/secret.txt", bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
+	}
+
+	// 2. Create a chrooted client
+	cj := c.WithRootID(jailInode.ID)
+
+	// Verify ResolvePath("/") returns the jail inode
+	root, _, err := cj.ResolvePath(ctx, "/")
+	if err != nil {
+		t.Fatalf("Chroot ResolvePath(/) failed: %v", err)
+	}
+	if root.ID != jailInode.ID {
+		t.Errorf("Chroot ResolvePath(/) returned %s, expected %s", root.ID, jailInode.ID)
+	}
+
+	// Verify we can see secret.txt at / in the chrooted client
+	inode, _, err := cj.ResolvePath(ctx, "/secret.txt")
+	if err != nil {
+		t.Fatalf("Chroot ResolvePath failed: %v", err)
+	}
+	if inode.ID == jailInode.ID {
+		t.Error("Resolved secret.txt to jail directory ID")
+	}
+
+	// Verify we can't see the original root from the chrooted client
+	inode2, _, err := cj.ResolvePath(ctx, "/jail")
+	if err == nil {
+		t.Errorf("Chrooted client should not see /jail (it is the root), but it found inode %s", inode2.ID)
+	}
+
+	// Verify ReadFile via chrooted client
+	distFS := cj.FS(ctx)
+	data, err := fs.ReadFile(distFS, "secret.txt")
+	if err != nil {
+		t.Fatalf("chroot fs.ReadFile failed: %v", err)
+	}
+	if string(data) != "top secret" {
+		t.Errorf("Unexpected data: %s", data)
+	}
+}

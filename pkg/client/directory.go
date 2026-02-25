@@ -33,7 +33,7 @@ import (
 
 // EnsureRoot makes sure the root directory inode exists.
 func (c *Client) EnsureRoot(ctx context.Context) error {
-	_, err := c.getInode(ctx, metadata.RootID)
+	_, err := c.getInode(ctx, c.rootID)
 	if err == nil {
 		return nil
 	}
@@ -49,7 +49,7 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 
 	lb := c.createLockbox(ctx, rootKey, 0755, "")
 	inode := metadata.Inode{
-		ID:       metadata.RootID,
+		ID:       c.rootID,
 		Type:     metadata.DirType,
 		Mode:     0755,
 		Children: make(map[string]string),
@@ -62,7 +62,7 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
 			// Already exists, but we MUST fetch it to capture the anchor (owner/version)
-			_, err = c.getInode(ctx, metadata.RootID)
+			_, err = c.getInode(ctx, c.rootID)
 			return err
 		}
 		return err
@@ -92,7 +92,7 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 				// Validate hint integrity
 				valid := false
 				if prefix == "/" {
-					valid = inode.ID == metadata.RootID
+					valid = inode.ID == c.rootID
 				} else if inode.Links != nil {
 					valid = inode.Links[entry.linkTag]
 				}
@@ -112,15 +112,9 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 
 	// 2. Sequential Resolution from the found prefix or root
 	if currentInode == nil {
-		rootInode, err := c.getInode(ctx, metadata.RootID)
+		rootInode, err := c.getInode(ctx, c.rootID)
 		if err != nil {
-			if err := c.EnsureRoot(ctx); err != nil {
-				return nil, nil, fmt.Errorf("failed to ensure root inode: %w", err)
-			}
-			rootInode, err = c.getInode(ctx, metadata.RootID)
-			if err != nil {
-				return nil, nil, fmt.Errorf("failed to get root inode after creation: %w", err)
-			}
+			return nil, nil, fmt.Errorf("failed to get root inode %s: %w", c.rootID, err)
 		}
 
 		if c.decKey == nil {
@@ -133,7 +127,7 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 		}
 
 		// Populate cache for root
-		c.putPathCache("/", pathCacheEntry{inodeID: metadata.RootID, key: rootKey})
+		c.putPathCache("/", pathCacheEntry{inodeID: c.rootID, key: rootKey})
 
 		currentInode = rootInode
 		currentKey = rootKey

@@ -71,6 +71,11 @@ DistFS implements a lease-based locking mechanism to prevent concurrent write co
 *   The FSM atomically grants leases within Raft transactions, providing deadlock prevention.
 *   Leases are automatically released upon session heartbeat timeout or explicit client release.
 
+### 4.4 Multiple Roots and Client Chroot
+The system supports hosting multiple independent filesystem trees on a single cluster.
+*   **Independent Namespace:** Administrators can explicitly initialize new root inodes using the `admin-create-root` command.
+*   **Client Chroot:** The client library and FUSE interface support mounting subtrees by specifying a starting Inode ID. Resolution is isolated to the subtree, providing secure multi-tenancy.
+
 ## 5. Data Layer
 
 ### 5.1 Chunking and Inlining

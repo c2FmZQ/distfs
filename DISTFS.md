@@ -193,6 +193,14 @@ DistFS enforces multi-tenant resource limits at both the User and Group levels t
 3.  **Atomic Accounting:** Usage counters are updated atomically within the same Raft transaction as the metadata mutation. Ownership transfers (chown/chgrp) automatically decrement usage from the source entity and increment it for the target, maintaining global consistency.
 4.  **Admin Management:** Resource limits are managed by cluster administrators via the Admin CLI. Limits can be updated dynamically without affecting existing data availability.
 
+### 4.9 Multiple Roots & Client Chroot
+To support multi-tenancy and specialized organizational structures, DistFS supports the creation of multiple independent filesystem roots on a single cluster.
+
+1.  **Independent Hierarchies:** While the system provides a default root (`metadata.RootID`), administrators can initialize any number of independent directory trees. Each root is a fully functional, self-contained filesystem with its own encryption keys and lockbox.
+2.  **Explicit Initialization:** Roots must be explicitly initialized using the `admin-create-root` command. This ensures that the cluster does not automatically create namespace structures unless directed by an authorized administrator.
+3.  **Client-Side Chroot:** The client library and FUSE mount tool support "chrooting" to any authorized Inode ID. When a client is rooted at a specific Inode, all path resolutions (starting from `/`) are relative to that Inode.
+4.  **Isolation:** A chrooted client has no visibility or access to the original global root or other siblings in the hierarchy, providing a robust mechanism for namespace isolation.
+
 ---
 
 ## 5. Data Layer (Data Roles)

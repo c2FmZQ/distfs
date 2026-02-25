@@ -91,6 +91,12 @@ mkdir ~/my-files
 ```
 If no configuration is found in the default location (`~/.distfs/config.json`), the FUSE tool will automatically initiate the onboarding flow.
 
+**Mounting a Subtree (chroot):**
+To mount the filesystem rooted at a specific Inode ID:
+```bash
+./distfs-fuse -mount ~/my-files -root-id <inode_id>
+```
+
 ### 5.2 POSIX Fidelity
 DistFS supports a subset of POSIX operations optimized for distributed environments:
 *   **Differential Synchronization (Fsync):** `fsync` only re-uploads modified 1MB pages rather than the entire file.
@@ -136,6 +142,16 @@ Access is individually authorized based on the user's registered identity. The f
 *   Anonymized user inventory and storage accounting.
 *   Storage node health and liveness.
 *   Privacy-preserving "Blind Lookup" for user IDs.
+
+**Root Initialization:**
+New clusters require explicit root initialization:
+```bash
+./distfs admin-create-root
+```
+Admins can also create additional roots by providing a custom ID:
+```bash
+./distfs admin-create-root <custom_id>
+```
 
 ---
 

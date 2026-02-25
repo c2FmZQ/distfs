@@ -37,6 +37,7 @@ func main() {
 	tokenEndpoint := flag.String("token-endpoint", "", "The token endpoint")
 	qrCode := flag.Bool("qr", false, "Show a QR code of the verification URL")
 	browser := flag.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
+	rootID := flag.String("root-id", "", "Root inode ID to mount (chroot)")
 
 	flag.Parse()
 	config.UsePinentry = *usePinentry
@@ -72,7 +73,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	c := loadClient(conf)
+	c := loadClient(conf, *rootID)
 
 	conn, err := fuse.Mount(
 		*mountpoint,
@@ -101,7 +102,7 @@ func main() {
 	}
 }
 
-func loadClient(conf *config.Config) *client.Client {
+func loadClient(conf *config.Config, rootID string) *client.Client {
 	c := client.NewClient(conf.ServerURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
@@ -116,8 +117,13 @@ func loadClient(conf *config.Config) *client.Client {
 		log.Fatalf("failed to unmarshal server key: %v", err)
 	}
 
-	return c.WithIdentity(conf.UserID, dk).
+	c = c.WithIdentity(conf.UserID, dk).
 		WithSignKey(sk).
 		WithServerKey(svKey).
 		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion)
+
+	if rootID != "" {
+		c = c.WithRootID(rootID)
+	}
+	return c
 }
