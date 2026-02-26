@@ -4,6 +4,8 @@
 ## 1. Overview
 DistFS is a distributed, end-to-end encrypted file system designed for zero-knowledge privacy. It separates metadata management (strongly consistent via Raft) from data storage (scalable via chunked distribution). The system is designed to provide `fs.FS` compatibility for Go clients while ensuring that the storage providers (nodes) cannot read the user's data or metadata.
 
+> **Technical Specification:** For the exhaustive Client<->Server protocol contract, including cryptographic wire formats and JSON schemas, refer to [SERVER-API.md](SERVER-API.md).
+>
 > **Implementation Plan:** For the detailed, step-by-step execution strategy of this design, refer to [DISTFS-PLAN.md](DISTFS-PLAN.md).
 
 ## 2. Core Architecture
@@ -159,13 +161,9 @@ DistFS follows a strict subset of POSIX permissions designed for Zero-Knowledge 
 Metadata operations in DistFS follow an **Optimistic Concurrency Control (OCC)** model with client-side authority over versioning.
 
 1.  **Strict Sequentiality:** The server enforces that every update to an Inode or Group must increment its `Version` field by exactly one.
-2.  **Client-Side Authority:** The client is responsible for:
-    *   Fetching the latest state from the metadata cluster.
-    *   Applying local mutations (e.g., adding a directory entry or updating a file manifest).
-    *   Incrementing the `Version` field.
-    *   Signing the resulting manifest (including the new version) with its Identity Key.
-3.  **Atomic Merge Pattern:** The client library provides atomic mutation callbacks. During a conflict (HTTP 409), the library automatically re-fetches the latest state and re-applies the user's mutation logic, ensuring that concurrent changes (like multiple users adding files to the same directory) are merged rather than overwritten.
-4.  **Server Validation:** The FSM validates that `submittedVersion == existingVersion + 1` and verifies the `UserSig` against the submitted payload before persisting the state exactly as received.
+2.  **Client-Side Authority:** The client is responsible for fetching the latest state, applying mutations, and signing the new version.
+3.  **Lease Enforcement:** Linearizability is guaranteed via server-side lease enforcement (see Section 5 of [SERVER-API.md](SERVER-API.md)).
+4.  **Atomic Merge Pattern:** The client library provides mutation callbacks that automatically re-fetch and retry on version conflicts (HTTP 409).
 
 ### 4.6 Group Management & Authorization
 To prevent unauthorized hijacking and support collaborative administration, group mutations (updates to membership, keys, or names) are subject to strict cryptographic authorization.
@@ -300,16 +298,9 @@ The client library implements `io.fs.FS` and `io.fs.File`.
     *   `ReadDataFiles(ctx, paths []string, targets []any) error`: Provides a point-in-time consistent snapshot of multiple files by using shared filename-based leases during the path-resolution phase.
 
 ### 6.2 REST API
-Communication uses JSON over HTTP/2 (or gRPC).
+Communication between the Client and Cluster uses JSON over HTTP/2. The Metadata Server requires Layer 7 End-to-End Encryption (Sealing) for all mutations.
 
-*   **Meta API:**
-    *   `POST /v1/meta/inode` (Create/Update Inode)
-    *   `GET /v1/meta/inode/{id}` (Read Metadata)
-    *   `PUT /v1/meta/directory/{id}/entry` (Add/Remove Child)
-    *   `POST /v1/meta/allocate` (Allocate Chunk Targets)
-*   **Data API:**
-    *   `PUT /v1/data/{chunk_id}` (Write Chunk)
-    *   `GET /v1/data/{chunk_id}` (Read Chunk)
+> **Full API Catalog:** For exhaustive documentation of every endpoint, request/response schema, and error code, refer to [SERVER-API.md](SERVER-API.md).
 
 ### 6.3 Identity & Authentication
 *   **Identity Registry:**
