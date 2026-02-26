@@ -114,6 +114,9 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 	if currentInode == nil {
 		rootInode, err := c.getInode(ctx, c.rootID)
 		if err != nil {
+			if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+				return nil, nil, fmt.Errorf("root inode %s not found; has it been initialized with 'admin-create-root'?", c.rootID)
+			}
 			return nil, nil, fmt.Errorf("failed to get root inode %s: %w", c.rootID, err)
 		}
 

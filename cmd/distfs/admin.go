@@ -904,6 +904,9 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 	id := metadata.RootID
 	if len(args) > 0 {
 		id = args[0]
+		if !metadata.IsInodeID(id) {
+			log.Fatalf("invalid inode ID: %s", id)
+		}
 	}
 
 	c := loadClient()
