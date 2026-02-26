@@ -746,3 +746,35 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 40.4: Consistency Verification**
     *   **Action:** **Unit Test:** Verify that `ReadDataFiles` successfully blocks a concurrent `SaveDataFile` (atomic swap) on the same path until the path-resolution phase is complete.
     *   **Action:** **Concurrency Test:** Rapidly swap multiple files (e.g., config and key) and verify that the reader always sees a matched pair (never old config with new key).
+
+---
+
+## Phase 41: SERVER-API.md Alignment & Protocol Hardening
+**Goal:** Align the implementation with the definitive "Source of Truth" specification to ensure cross-language compatibility and protocol stability.
+
+*   **Step 41.1: Cryptographic Wire Format Alignment**
+    *   **Action:** Update `pkg/crypto/sealed.go` to use **Big-Endian** for the 8-byte `Timestamp` in the Sealing protocol.
+    *   **Action:** Align the `ManifestHash` and `Group.Hash` implementations in `pkg/metadata/types.go` to use **Big-Endian** for all binary fields.
+    *   **Action:** Verify byte-perfect segment literals and separators in hashing algorithms against the spec.
+*   **Step 41.2: Structured Error Response Implementation**
+    *   **Action:** Create `APIErrorResponse` struct in `pkg/metadata/types.go`.
+    *   **Action:** Implement `writeError(w, code, message, httpStatus)` helper in `MetadataServer`.
+    *   **Action:** Map all internal errors (Conflict, Exists, NotFound, etc.) to their specific `DISTFS_*` string constants defined in Section 8 of `SERVER-API.md`.
+*   **Step 41.3: Unified Mutation API Consolidation**
+    *   **Action:** Refactor `LogCommand` in `pkg/metadata/fsm.go` to use `json.RawMessage` for the `Data` field to support structured nested JSON.
+    *   **Action:** Update `handleBatch` in `MetadataServer` to parse structured JSON data without base64 decoding.
+    *   **Action:** Remove all standalone mutation endpoints (`POST /v1/meta/inode`, `PUT /v1/group`, `PUT /v1/meta/inode/{id}`, `DELETE /v1/meta/inode/{id}`, `PUT /v1/meta/directory/{id}/entry`, `POST /v1/meta/setattr`).
+    *   **Action:** Refactor the Go client library and the entire test suite to strictly use the `/v1/meta/batch` API for all state-changing operations.
+*   **Step 41.4: Server-Side Lease Enforcement**
+    *   **Action:** Implement mandatory lease verification in the FSM during `executeUpdateInode`, `executeUpdateGroup`, and `applyBatch`.
+    *   **Action:** Reject any mutation if an Exclusive Lease is held by a different `SessionID`.
+*   **Step 41.5: Final Protocol Validation**
+    *   **Action:** Add cross-package unit tests that verify hashing and sealing parity between the Go client and a "blind" implementation based strictly on the spec.
+    *   **Action:** Verify that all E2EE-sealed requests and responses adhere to the exact byte offsets defined in the spec.
+
+### Phase 41 Testing Strategy:
+1.  **Byte-Perfect Hashing Tests:** Create test cases that manually construct manifest hashes using raw binary segments (Big-Endian) to verify cross-language compatibility.
+2.  **Unsealed Path Validation:** Verify that the server returns `403 Forbidden` if a mutation is attempted without L7 Sealing.
+3.  **Strict Endpoint Enforcement:** Verify that deleted standalone endpoints return `404 Not Found` and that no client-side logic still attempts to use them.
+4.  **Structured Error Assertion:** Update all existing error tests to verify the `DISTFS_*` code constants in the JSON response rather than searching for sub-strings in the error message.
+5.  **Lease Contention Integration:** Add a dedicated integration test where two distinct sessions attempt to update the same Inode simultaneously; verify that the FSM rejects the one without the Exclusive Lease with `DISTFS_LEASE_REQUIRED`.
