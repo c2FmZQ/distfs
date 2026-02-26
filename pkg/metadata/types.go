@@ -23,6 +23,24 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
+// APIErrorResponse is the standard structured error response.
+type APIErrorResponse struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+const (
+	ErrCodeNotFound        = "DISTFS_NOT_FOUND"
+	ErrCodeExists          = "DISTFS_EXISTS"
+	ErrCodeVersionConflict = "DISTFS_VERSION_CONFLICT"
+	ErrCodeLeaseRequired   = "DISTFS_LEASE_REQUIRED"
+	ErrCodeQuotaExceeded   = "DISTFS_QUOTA_EXCEEDED"
+	ErrCodeUnauthorized    = "DISTFS_UNAUTHORIZED"
+	ErrCodeForbidden       = "DISTFS_FORBIDDEN"
+	ErrCodeNotLeader       = "DISTFS_NOT_LEADER"
+	ErrCodeInternal        = "DISTFS_INTERNAL_ERROR"
+)
+
 // OIDCConfig represents the subset of OpenID Connect configuration needed by clients.
 type OIDCConfig struct {
 	Issuer                      string `json:"issuer"`
@@ -184,7 +202,7 @@ func (g *Group) Hash() []byte {
 	h.Write([]byte("group-id:" + g.ID + "|"))
 
 	v := make([]byte, 8)
-	binary.LittleEndian.PutUint64(v, g.Version)
+	binary.BigEndian.PutUint64(v, g.Version)
 	h.Write([]byte("v:"))
 	h.Write(v)
 	h.Write([]byte("|"))
@@ -405,13 +423,13 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("id:" + i.ID + "|"))
 
 	v := make([]byte, 8)
-	binary.LittleEndian.PutUint64(v, i.Version)
+	binary.BigEndian.PutUint64(v, i.Version)
 	h.Write([]byte("v:"))
 	h.Write(v)
 	h.Write([]byte("|"))
 
 	m := make([]byte, 4)
-	binary.LittleEndian.PutUint32(m, i.Mode)
+	binary.BigEndian.PutUint32(m, i.Mode)
 	h.Write([]byte("mode:"))
 	h.Write(m)
 	h.Write([]byte("|"))

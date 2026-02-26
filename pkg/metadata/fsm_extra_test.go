@@ -87,14 +87,18 @@ func TestFSM_AddChild_Success(t *testing.T) {
 	cb1, _ := json.Marshal(c1)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: cb1}.Marshal()})
 
-	req := ChildUpdate{ParentID: "p1", Name: "file1", ChildID: "c1"}
-	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAddChild, Data: rb}.Marshal()})
+	p1.NLink = 1
+	p1.Children = map[string]string{"file1": "c1"}
+	p1.Version = 2
+	pb2, _ := json.Marshal(p1)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: pb2}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("p1"))
 		var res Inode
-		json.Unmarshal(v, &res)
+		if err := json.Unmarshal(v, &res); err != nil {
+			return fmt.Errorf("Unmarshal failed: %v, raw=%s", err, string(v))
+		}
 		if res.Children["file1"] != "c1" {
 			return fmt.Errorf("AddChild failed: %+v", res)
 		}
@@ -142,7 +146,7 @@ func TestFSM_SetGroupQuota_Errors(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Malformed
-	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetGroupQuota, Data: []byte("invalid")}.Marshal()})
+	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetGroupQuota, Data: MustMarshalJSON("invalid")}.Marshal()})
 	if _, ok := res.(error); !ok {
 		t.Error("Expected error for malformed SetGroupQuota")
 	}
@@ -186,7 +190,7 @@ func TestFSM_StoreKeySync_Errors(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Malformed
-	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdStoreKeySync, Data: []byte("invalid")}.Marshal()})
+	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdStoreKeySync, Data: MustMarshalJSON("invalid")}.Marshal()})
 	if _, ok := res.(error); !ok {
 		t.Error("Expected error for malformed StoreKeySync")
 	}
@@ -294,8 +298,11 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	ib, _ := json.Marshal(inode)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
-	// 1. enqueueGC (via DeleteInode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdDeleteInode, Data: []byte("00000000000000000000000000000001")}.Marshal()})
+	// 1. enqueueGC (via UpdateInode with NLink=0)
+	inode.NLink = 0
+	inode.Version = 2
+	ib2, _ := json.Marshal(inode)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: ib2}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("garbage_collection"))
@@ -373,13 +380,12 @@ func TestFSM_SetAttr_Extra(t *testing.T) {
 	ib, _ := json.Marshal(inode)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
-	// 2. SetAttr
-	req := SetAttrRequest{
-		InodeID: "00000000000000000000000000000001",
-		Mode:    ptr(uint32(0644)),
-	}
-	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetAttr, Data: rb}.Marshal()})
+	// 2. SetAttr via UpdateInode
+	inode.NLink = 1
+	inode.Mode = 0644
+	inode.Version = 2
+	ib2, _ := json.Marshal(inode)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: ib2}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))

@@ -14,7 +14,7 @@ This document is the authoritative technical specification for the DistFS protoc
 
 ### 1.2 Serialization & Canonicalization
 - **JSON:** All JSON payloads used in signatures or encryption MUST be **minified** (no whitespace) and use **lexicographically sorted keys** (JCS).
-- **Binary:** Multi-byte integers are **Little-Endian** unless specified otherwise.
+- **Binary:** Multi-byte integers are **Big-Endian** by default unless specified otherwise.
 
 ### 1.3 The "Sealing" Protocol (L7 E2EE)
 Provides end-to-end encryption for sensitive Metadata API requests.
@@ -63,10 +63,6 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 | Method | Path | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/meta/inode/{id}` | Session | Fetch an Inode manifest. |
-| `POST` | `/v1/meta/inode` | Session + E2EE | Create a new Inode (signed manifest). |
-| `PUT` | `/v1/meta/inode/{id}` | Session + E2EE | Update an Inode (requires Exclusive Lease). |
-| `DELETE` | `/v1/meta/inode/{id}` | Session + E2EE | Delete an Inode (requires Exclusive Lease). |
-| `POST` | `/v1/meta/inodes` | Session | Batch fetch multiple Inodes by ID. |
 | `POST` | `/v1/meta/batch` | Session + E2EE | Atomic multi-command execution. |
 | `POST` | `/v1/meta/allocate` | Session | Request target Data Nodes for a new chunk. |
 | `POST` | `/v1/meta/token` | Session | Issue Storage Capability Token. |
@@ -153,24 +149,17 @@ Clients MUST use this schema inside the encrypted `client_blob`:
 }
 ```
 
-### 3.5 Signed Capability Token
-```json
-{
-  "payload": "base64_minified_json",
-  "sig": "base64_cluster_sig"
-}
-```
-**Payload Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts}`
-
 ---
 
 ## 4. Manifest Integrity (Hashing Algorithms)
 
+All multi-byte integers in hashes are **Big-Endian**.
+
 ### 4.1 Inode Hash
 The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**:
 1. `[]byte("id:" + id + "|")`
-2. `[]byte("v:")` + `LittleEndian(uint64(version))` + `[]byte("|")`
-3. `[]byte("mode:")` + `LittleEndian(uint32(mode))` + `[]byte("|")`
+2. `[]byte("v:")` + `BigEndian(uint64(version))` + `[]byte("|")`
+3. `[]byte("mode:")` + `BigEndian(uint32(mode))` + `[]byte("|")`
 4. `[]byte("gid_str:" + group_id + "|")`
 5. `[]byte("sys:" + (is_system ? "1" : "0") + "|")`
 6. `[]byte("client_blob:")` + `raw_encrypted_bytes` + `[]byte("|")`
@@ -178,11 +167,25 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 8. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
 9. `[]byte("children:")` + `SortedCSV(nameHMAC:childID)` + `[]byte("|")`
 10. `[]byte("manifest:")` + `CSV(chunk_ids)` + `[]byte("|")`
-11. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
+11. `[]byte("pages:")` + `SortedCSV(chunk_page_ids)` + `[]byte("|")`
+12. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
 
 ### 4.2 Group Hash
 The group `signature` is over the SHA-256 hash of these fields concatenated **exactly**:
-`DistFS-Group-v1|group-id:{id}|v:{LE_u64(version)}|sys:{0|1}|client_blob:{raw_bytes}|owner:{owner}|signer:{signer}|members:{sorted_csv_members}|enc_key:{raw_bytes}|sign_key:{raw_bytes}|enc_sign_key:{raw_bytes}|lockbox:{sorted_csv_box}|registry_lockbox:{sorted_csv_box}|enc_registry:{raw_bytes}|`
+1. `[]byte("DistFS-Group-v1|")`
+2. `[]byte("group-id:" + id + "|")`
+3. `[]byte("v:")` + `BigEndian(uint64(version))` + `[]byte("|")`
+4. `[]byte("sys:" + (is_system ? "1" : "0") + "|")`
+5. `[]byte("client_blob:")` + `client_blob_bytes` + `[]byte("|")`
+6. `[]byte("owner:" + owner_id + "|")`
+7. `[]byte("signer:" + signer_id + "|")`
+8. `[]byte("members:")` + `SortedCSV(member_id:status)` + `[]byte("|")`
+9. `[]byte("enc_key:")` + `enc_key_bytes` + `[]byte("|")`
+10. `[]byte("sign_key:")` + `sign_key_bytes` + `[]byte("|")`
+11. `[]byte("enc_sign_key:")` + `enc_sign_key_bytes` + `[]byte("|")`
+12. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
+13. `[]byte("registry_lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
+14. `[]byte("enc_registry:")` + `enc_registry_bytes` + `[]byte("|")`
 
 ---
 
@@ -193,7 +196,21 @@ To hide filenames from the server, all map keys in `children` and `links` are HM
 
 ---
 
-## 6. Error Code Registry
+## 6. Coordination and Concurrency
+
+### 6.1 Leases (`POST /v1/meta/lease/acquire`)
+- **Request:** `{"inode_ids": ["..."], "type": 1, "duration": ns, "nonce": "..."}`
+- **Types:** `0: Shared`, `1: Exclusive`.
+- **Rule:** Mutations are rejected if an Exclusive lease is held by a different session.
+
+### 6.2 Storage Tokens (`POST /v1/meta/token`)
+- **Request:** `{"inode_id": "...", "chunks": ["hash"], "mode": "R|W|D"}`
+- **Response:** `{"payload": "base64_minified_json", "sig": "base64_cluster_sig"}`
+- **Capability Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts}`
+
+---
+
+## 7. Error Code Registry
 
 | Code | HTTP | Description |
 | :--- | :--- | :--- |
@@ -208,7 +225,7 @@ To hide filenames from the server, all map keys in `children` and `links` are HM
 
 ---
 
-## 7. Header Behaviors
+## 8. Header Behaviors
 
 | Header | Usage | Effect |
 | :--- | :--- | :--- |

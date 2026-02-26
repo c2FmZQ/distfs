@@ -205,7 +205,8 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 
 	// If successfully deleted from all known locations, remove from the persistent GC queue via Raft.
 	if success {
-		g.server.ApplyRaftCommandInternal(CmdGCRemove, []byte(chunkID))
+		data, _ := json.Marshal(chunkID)
+		g.server.ApplyRaftCommandInternal(CmdGCRemove, data, "")
 	}
 }
 

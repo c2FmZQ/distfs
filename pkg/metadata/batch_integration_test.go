@@ -52,7 +52,7 @@ func TestRequestBatching(t *testing.T) {
 			}
 			body, _ := json.Marshal(user)
 
-			_, err := server.ApplyRaftCommandInternal(metadata.CmdCreateUser, body)
+			_, err := server.ApplyRaftCommandInternal(metadata.CmdCreateUser, body, "")
 			if err != nil {
 				errCh <- err
 			}
@@ -159,7 +159,7 @@ func TestBatchAtomicity(t *testing.T) {
 	batchBytes, _ := json.Marshal(batch)
 
 	// Apply batch
-	res, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes)
+	res, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes, "")
 	if err != nil {
 		t.Fatalf("Raft apply failed: %v", err)
 	}

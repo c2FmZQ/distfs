@@ -187,7 +187,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 
 func TestStorageAPI_ReadConsistency(t *testing.T) {
 	// 1. Setup Cluster
-	c, metaNode, _, ts := SetupTestClient(t)
+	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
 	// 2. Prepare two related files (e.g., config and its key)
@@ -210,18 +210,15 @@ func TestStorageAPI_ReadConsistency(t *testing.T) {
 	if _, _, err := c.ResolvePath(t.Context(), path1); err != nil {
 		t.Fatalf("f1 not found after create: %v", err)
 	}
+	if _, _, err := c.ResolvePath(t.Context(), path2); err != nil {
+		t.Fatalf("f2 not found after create: %v", err)
+	}
 
 	// 3. Start background writer doing matched swaps
-	// Use a DIFFERENT client instance to ensure lease conflicts
-	cWriter := createExtraClient(t, ts, metaNode, c)
 	done := make(chan bool)
 	go func() {
 		for i := 2; i < 10; i++ {
-			data1 := testData{Name: "matched", Value: i}
-			data2 := testData{Name: "matched", Value: i}
-			if err := cWriter.SaveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
-				// Conflicts are expected
-			}
+			writeMatched(i)
 			time.Sleep(50 * time.Millisecond)
 		}
 		done <- true

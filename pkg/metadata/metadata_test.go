@@ -102,10 +102,12 @@ func TestMetadataCluster(t *testing.T) {
 		Type:    FileType,
 	}
 	inode.SignInodeForTest("u1", userSignKey)
-	payload, _ := json.Marshal(inode)
+	inodeBytes, _ := json.Marshal(inode)
+	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes}}
+	payload, _ := json.Marshal(batch)
 	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
@@ -113,7 +115,7 @@ func TestMetadataCluster(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
 	}
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Errorf("POST status %d: %s", resp.StatusCode, body)
 	}
@@ -141,9 +143,17 @@ func TestMetadataCluster(t *testing.T) {
 		t.Errorf("GET ID mismatch: %s", got.ID)
 	}
 
-	// Test Delete Inode
+	// Test Delete Inode (Implicit via UpdateInode NLink=0)
+	inode.Version = 2
+	inode.NLink = 0
+	inode.SignInodeForTest("u1", userSignKey)
+	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode)}}
+	payloadD, _ := json.Marshal(batchD)
+	bodyD := sealTestRequest(t, "u1", userSignKey, serverEK, payloadD)
+
 	token = LoginSessionForTest(t, ts, "u1", userSignKey)
-	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/inode-1", nil)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyD))
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -154,7 +164,6 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Verify Deleted
-	token = LoginSessionForTest(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
@@ -191,14 +200,16 @@ func TestSecurity_AccessControl(t *testing.T) {
 	// 2. User 1 creates a private inode (0600)
 	i1 := Inode{ID: "00000000000000000000000000000011", OwnerID: "u1", Mode: 0600}
 	i1.SignInodeForTest("u1", u1Sign)
-	payload, _ := json.Marshal(i1)
+	i1Bytes, _ := json.Marshal(i1)
+	batch := []LogCommand{{Type: CmdCreateInode, Data: i1Bytes}}
+	payload, _ := json.Marshal(batch)
 	body := SealTestRequest(t, "u1", u1Sign, serverEK, payload)
 	token1 := LoginSessionForTest(t, ts, "u1", u1Sign)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token1)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Failed to create inode: %d", resp.StatusCode)
 	}
 
@@ -213,7 +224,12 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 4. User 2 attempts to DELETE User 1's inode (Should fail)
-	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", nil)
+	idBytes, _ := json.Marshal("00000000000000000000000000000011")
+	delBatch := []LogCommand{{Type: CmdDeleteInode, Data: idBytes}}
+	delPayload, _ := json.Marshal(delBatch)
+	delBody := SealTestRequest(t, "u2", u2Sign, serverEK, delPayload)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(delBody))
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusForbidden {
@@ -221,11 +237,12 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
-	i1u := Inode{ID: "00000000000000000000000000000011", Mode: 0777, Version: 1}
+	i1u := Inode{ID: "00000000000000000000000000000011", Mode: 0777, Version: 2, NLink: 1}
 	i1u.SignInodeForTest("u2", u2Sign)
-	payload, _ = json.Marshal(i1u)
-	body = SealTestRequest(t, "u2", u2Sign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", bytes.NewReader(body))
+	batchU := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1u)}}
+	payloadU, _ := json.Marshal(batchU)
+	bodyU := SealTestRequest(t, "u2", u2Sign, serverEK, payloadU)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyU))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
@@ -233,8 +250,14 @@ func TestSecurity_AccessControl(t *testing.T) {
 		t.Errorf("Expected 403 for unauthorized PUT, got %d", resp.StatusCode)
 	}
 
-	// 6. User 1 successfully deletes their own inode
-	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/meta/inode/00000000000000000000000000000011", nil)
+	// 6. User 1 successfully deletes their own inode (Implicit via UpdateInode NLink=0)
+	i1d := Inode{ID: "00000000000000000000000000000011", Mode: 0644, Version: 2, NLink: 0}
+	i1d.SignInodeForTest("u1", u1Sign)
+	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1d)}}
+	payloadD, _ := json.Marshal(batchD)
+	bodyD := SealTestRequest(t, "u1", u1Sign, serverEK, payloadD)
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyD))
+	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token1)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
@@ -309,9 +332,11 @@ func TestIdentityRegistry(t *testing.T) {
 		Version:  1,
 	}
 	group.Signature = userSignKey.Sign(group.Hash())
-	payload, _ := json.Marshal(group)
+	objBytes, _ := json.Marshal(group)
+	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes}}
+	payload, _ := json.Marshal(batch)
 	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
@@ -319,7 +344,7 @@ func TestIdentityRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Group Create failed: %d", resp.StatusCode)
 	}
 
@@ -593,11 +618,13 @@ func TestChunkPagination(t *testing.T) {
 		ChunkManifest: manifest,
 	}
 	inode.SignInodeForTest("u1", userSignKey)
-	payload, _ := json.Marshal(inode)
+	inodeBytes, _ := json.Marshal(inode)
+	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes}}
+	payload, _ := json.Marshal(batch)
 	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
-	// POST /v1/meta/inode
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inode", bytes.NewReader(body))
+	// POST /v1/meta/batch
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
@@ -605,7 +632,7 @@ func TestChunkPagination(t *testing.T) {
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
 	}
-	if resp.StatusCode != http.StatusCreated {
+	if resp.StatusCode != http.StatusOK {
 		t.Errorf("POST status %d", resp.StatusCode)
 	}
 
@@ -717,7 +744,7 @@ func TestAccounting(t *testing.T) {
 	checkUsage(0, 0)
 
 	// 2. Create File
-	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
@@ -749,8 +776,12 @@ func TestAccounting(t *testing.T) {
 
 	checkUsage(1, 250)
 
-	// 4. Delete File
-	cmd = LogCommand{Type: CmdDeleteInode, Data: []byte("0000000000000000000000000000000f")}
+	// 4. Delete File (Implicit via UpdateInode NLink=0)
+	inode.NLink = 0
+	inode.Version = 3
+	inode.SignInodeForTest(userID, sk)
+	inodeBytes, _ = json.Marshal(inode)
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -795,7 +826,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 2. Create File 1 (OK)
-	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100}
+	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
@@ -805,7 +836,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 3. Create File 2 (Fail: Inode Quota)
-	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, Size: 100}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, Size: 100, NLink: 1}
 	inode2.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode2)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
@@ -1043,3 +1074,5 @@ func TestNodeRevocation(t *testing.T) {
 		}
 	}
 }
+
+

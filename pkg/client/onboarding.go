@@ -157,7 +157,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 
 		// Ensure root exists and capture anchor
-		if err := c.EnsureRoot(ctx); err != nil {
+		if err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
 			return fmt.Errorf("failed to ensure root: %w", err)
 		}
 		rid, rowner, rver := c.GetRootAnchor()

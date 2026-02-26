@@ -114,7 +114,11 @@ func (fsm *MetadataFSM) EncryptValue(data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
 	}
-	key, gen := fsm.keyRing.Current()
+	fsm.mu.RLock()
+	kr := fsm.keyRing
+	fsm.mu.RUnlock()
+
+	key, gen := kr.Current()
 	ct, err := crypto.EncryptDEM(key, data)
 	if err != nil {
 		return nil, err
@@ -132,15 +136,30 @@ func (fsm *MetadataFSM) DecryptValue(data []byte) ([]byte, error) {
 		return data, nil
 	}
 	gen := binary.BigEndian.Uint32(data[:4])
-	key, ok := fsm.keyRing.Get(gen)
+
+	fsm.mu.RLock()
+	kr := fsm.keyRing
+	fsm.mu.RUnlock()
+
+	key, ok := kr.Get(gen)
 	if !ok {
 		return nil, fmt.Errorf("fsm key generation %d not found", gen)
 	}
 	return crypto.DecryptDEM(key, data[4:])
 }
 
+func (fsm *MetadataFSM) KeyRing() *crypto.KeyRing {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return fsm.keyRing
+}
+
 func (fsm *MetadataFSM) FSMKey() []byte {
-	k, _ := fsm.keyRing.Current()
+	fsm.mu.RLock()
+	kr := fsm.keyRing
+	fsm.mu.RUnlock()
+
+	k, _ := kr.Current()
 	return k
 }
 
@@ -165,7 +184,8 @@ func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, err
 	if v == nil {
 		return nil, nil
 	}
-	return fsm.DecryptValue(v)
+	dec, err := fsm.DecryptValue(v)
+	return dec, err
 }
 
 func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket []byte, key []byte) error {
@@ -323,8 +343,9 @@ const (
 
 // LogCommand is the structure stored in the Raft log.
 type LogCommand struct {
-	Type CommandType `json:"type"`
-	Data []byte      `json:"data"`
+	Type      CommandType     `json:"type"`
+	Data      json.RawMessage `json:"data"`
+	SessionID string          `json:"session_id,omitempty"`
 }
 
 func (c LogCommand) Marshal() []byte {
@@ -403,58 +424,28 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		return err
 	}
 
-	if cmd.Type == CmdBatch {
-		return fsm.applyBatch(cmd.Data)
-	}
+	log.Printf("FSM: Apply Type=%d Index=%d", cmd.Type, l.Index)
 
-	var result interface{}
+	var results interface{}
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, 0)
-		if err, ok := res.(error); ok {
-			return err
-		}
-		result = res
-		return nil
-	})
-	if err != nil {
-		return err
-	}
-
-	// Success: Sync in-memory KeyRing and disk file
-	if cmd.Type == CmdRotateFSMKey {
-		fsm.db.View(func(tx *bolt.Tx) error {
-			fsm.syncKeyRing(tx)
-			return nil
-		})
-	}
-
-	return result
-}
-
-func (fsm *MetadataFSM) applyBatch(data []byte) interface{} {
-	var cmds []LogCommand
-	if err := json.Unmarshal(data, &cmds); err != nil {
-		return []interface{}{err}
-	}
-
-	var results []interface{}
-	// We use a single transaction for performance and atomicity.
-	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		results = fsm.executeBatchCommands(tx, cmds, 0)
+		results = fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, 0)
 		if fsm.containsError(results) {
-			return fmt.Errorf("batch failure") // Trigger rollback
+			return fmt.Errorf("command failure") // Trigger rollback
 		}
 		return nil
 	})
 	if err != nil {
-		// If the batch failed, we return the results slice anyway so the caller
-		// can see WHICH command failed, but the transaction has been rolled back.
 		return results
 	}
 
-	// Success: Check if any command was a key rotation
-	for _, cmd := range cmds {
-		if cmd.Type == CmdRotateFSMKey {
+	// Post-apply hooks (e.g. key rotation)
+	cmds := []LogCommand{cmd}
+	if cmd.Type == CmdBatch {
+		json.Unmarshal(cmd.Data, &cmds)
+	}
+
+	for _, c := range cmds {
+		if c.Type == CmdRotateFSMKey {
 			fsm.db.View(func(tx *bolt.Tx) error {
 				fsm.syncKeyRing(tx)
 				return nil
@@ -506,21 +497,27 @@ func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, dep
 	}
 	results := make([]interface{}, len(cmds))
 	for i, cmd := range cmds {
-		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, depth)
+		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, depth)
 		results[i] = res
 	}
 	return results
 }
 
-func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, depth int) []interface{} {
+func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, sessionID string, depth int) []interface{} {
 	var cmds []LogCommand
 	if err := json.Unmarshal(data, &cmds); err != nil {
 		return []interface{}{err}
 	}
+	// Propagate sessionID to sub-commands if not set
+	for i := range cmds {
+		if cmds[i].SessionID == "" {
+			cmds[i].SessionID = sessionID
+		}
+	}
 	return fsm.executeBatchCommands(tx, cmds, depth)
 }
 
-func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, depth int) interface{} {
+func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, sessionID string, depth int) interface{} {
 	start := time.Now()
 	defer func() {
 		fsm.metrics.RecordOp(cmdType, time.Since(start))
@@ -530,9 +527,9 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 	case CmdCreateInode:
 		return fsm.executeCreateInode(tx, data)
 	case CmdUpdateInode:
-		return fsm.executeUpdateInode(tx, data)
+		return fsm.executeUpdateInode(tx, data, sessionID)
 	case CmdDeleteInode:
-		return fsm.executeDeleteInode(tx, data)
+		return fsm.executeDeleteInode(tx, data, sessionID)
 	case CmdRegisterNode:
 		return fsm.executeRegisterNode(tx, data)
 	case CmdCreateUser:
@@ -540,13 +537,9 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 	case CmdCreateGroup:
 		return fsm.executeCreateGroup(tx, data)
 	case CmdUpdateGroup:
-		return fsm.executeUpdateGroup(tx, data)
-	case CmdAddChild:
-		return fsm.executeAddChild(tx, data)
+		return fsm.executeUpdateGroup(tx, data, sessionID)
 	case CmdAddChunkReplica:
 		return fsm.executeAddChunkReplica(tx, data)
-	case CmdSetAttr:
-		return fsm.executeSetAttr(tx, data)
 	case CmdGCRemove:
 		return fsm.executeGCRemove(tx, data)
 	case CmdInitSecret:
@@ -566,9 +559,9 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 	case CmdPromoteAdmin:
 		return fsm.executePromoteAdmin(tx, data)
 	case CmdAdminChown:
-		return fsm.executeAdminChown(tx, data)
+		return fsm.executeAdminChown(tx, data, sessionID)
 	case CmdAdminChmod:
-		return fsm.executeAdminChmod(tx, data)
+		return fsm.executeAdminChmod(tx, data, sessionID)
 	case CmdStoreMetrics:
 		return fsm.executeStoreMetrics(tx, data)
 	case CmdSetGroupQuota:
@@ -582,9 +575,22 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 	case CmdReencryptValue:
 		return fsm.executeReencryptValue(tx, data)
 	case CmdBatch:
-		return fsm.applyBatchTx(tx, data, depth+1)
+		return fsm.applyBatchTx(tx, data, sessionID, depth+1)
 	}
 	return fmt.Errorf("unknown command")
+}
+
+func (fsm *MetadataFSM) checkLease(inode *Inode, sessionID string) error {
+	if inode == nil || len(inode.Leases) == 0 {
+		return nil
+	}
+	now := time.Now().UnixNano()
+	for _, l := range inode.Leases {
+		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionID {
+			return fmt.Errorf("exclusive lease held by another session")
+		}
+	}
+	return nil
 }
 
 func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{} {
@@ -605,6 +611,9 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 		}
 	}
 	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
+	if inode.NLink == 0 {
+		inode.NLink = 1
+	}
 	v, err := fsm.Get(tx, []byte("inodes"), []byte(inode.ID))
 	if err != nil {
 		return err
@@ -631,7 +640,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID string) interface{} {
 	var inode Inode
 	if err := json.Unmarshal(data, &inode); err != nil {
 		return err
@@ -644,8 +653,13 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 	if plain == nil {
 		return ErrNotFound
 	}
+
 	var existing Inode
 	if err := json.Unmarshal(plain, &existing); err != nil {
+		return err
+	}
+
+	if err := fsm.checkLease(&existing, sessionID); err != nil {
 		return err
 	}
 
@@ -698,6 +712,11 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 	if !inode.Unlinked {
 		inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	}
+
+	if inode.NLink == 0 {
+		return fsm.deleteInodeInternal(tx, &inode)
+	}
+
 	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 		return err
 	}
@@ -725,8 +744,11 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{} {
-	id := string(data)
+func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+	var id string
+	if err := json.Unmarshal(data, &id); err != nil {
+		id = string(data)
+	}
 	plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
 	if err != nil {
 		return err
@@ -740,6 +762,18 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
+	if err := fsm.checkLease(&inode, sessionID); err != nil {
+		return err
+	}
+
+	if inode.NLink > 0 {
+		return fmt.Errorf("cannot delete inode with active links (nlink=%d)", inode.NLink)
+	}
+
+	return fsm.deleteInodeInternal(tx, &inode)
+}
+
+func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode) error {
 	// Check for active leases
 	now := time.Now().UnixNano()
 	hasActiveLeases := false
@@ -753,15 +787,15 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte) interface{}
 	if hasActiveLeases {
 		// Mark as unlinked and defer deletion
 		inode.Unlinked = true
-		if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
+		if err := fsm.saveInodeWithPages(tx, inode); err != nil {
 			return err
 		}
 		// Add to unlinked_inodes bucket for reaper index
 		ub := tx.Bucket([]byte("unlinked_inodes"))
-		return ub.Put([]byte(id), []byte("true"))
+		return ub.Put([]byte(inode.ID), []byte("true"))
 	}
 
-	return fsm.finalizeDeleteInode(tx, &inode)
+	return fsm.finalizeDeleteInode(tx, inode)
 }
 
 func (fsm *MetadataFSM) finalizeDeleteInode(tx *bolt.Tx, inode *Inode) error {
@@ -814,7 +848,10 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 }
 
 func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} {
-	nodeID := string(data)
+	var nodeID string
+	if err := json.Unmarshal(data, &nodeID); err != nil {
+		nodeID = string(data) // Fallback for non-JSON raw strings if needed during transition
+	}
 	plain, err := fsm.Get(tx, []byte("nodes"), []byte(nodeID))
 	if err != nil {
 		return err
@@ -910,7 +947,10 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 }
 
 func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{} {
-	userID := string(data)
+	var userID string
+	if err := json.Unmarshal(data, &userID); err != nil {
+		userID = string(data) // Fallback for non-JSON raw strings if needed during transition
+	}
 	v, err := fsm.Get(tx, []byte("users"), []byte(userID))
 	if err != nil {
 		return err
@@ -926,7 +966,6 @@ func (fsm *MetadataFSM) IsAdmin(userID string) bool {
 	_ = fsm.db.View(func(tx *bolt.Tx) error {
 		v, err := fsm.Get(tx, []byte("admins"), []byte(userID))
 		if err != nil {
-			log.Printf("FSM: IsAdmin error for %s: %v", userID, err)
 			return err
 		}
 		if v != nil {
@@ -940,7 +979,6 @@ func (fsm *MetadataFSM) IsAdmin(userID string) bool {
 func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{} {
 	var group Group
 	if err := json.Unmarshal(data, &group); err != nil {
-		log.Printf("FSM: executeCreateGroup unmarshal failed: %v", err)
 		return err
 	}
 
@@ -951,8 +989,6 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 	if v != nil {
 		return ErrExists
 	}
-
-	log.Printf("FSM: executeCreateGroup creating group ID=%s GID=%d EncSignKeyLen=%d", group.ID, group.GID, len(group.EncryptedSignKey))
 
 	// Ensure GID is unique
 	existing, err := fsm.Get(tx, []byte("gids"), uint32ToBytes(group.GID))
@@ -986,7 +1022,7 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 	return &group
 }
 
-func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte, sessionID string) interface{} {
 	var group Group
 	if err := json.Unmarshal(data, &group); err != nil {
 		return err
@@ -1089,115 +1125,6 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 	return nil
 }
 
-func (fsm *MetadataFSM) executeSetAttr(tx *bolt.Tx, data []byte) interface{} {
-	var req SetAttrRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
-	if err != nil {
-		return err
-	}
-	if plain == nil {
-		return ErrNotFound
-	}
-	var inode Inode
-	if err := json.Unmarshal(plain, &inode); err != nil {
-		return err
-	}
-
-	if err := fsm.LoadInodeWithPages(tx, &inode); err != nil {
-		return err
-	}
-
-	if req.Mode != nil {
-		inode.Mode = SanitizeMode(*req.Mode, inode.Type)
-	}
-	if req.GroupID != nil && *req.GroupID != inode.GroupID {
-		newGroupID := *req.GroupID
-		// 1. Decrement old group/owner FIRST
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
-			return err
-		}
-		// 2. Check Quota for new group
-		if err := fsm.checkQuota(tx, inode.OwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-		// Update GroupID
-		inode.GroupID = newGroupID
-		// 3. Increment new group/owner
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-	}
-	if req.MTime != nil {
-		inode.SetMTime(*req.MTime)
-	}
-
-	inode.Version++
-	inode.CTime = time.Now().UnixNano()
-	return fsm.saveInodeWithPages(tx, &inode)
-}
-
-func (fsm *MetadataFSM) executeAddChild(tx *bolt.Tx, data []byte) interface{} {
-	var update ChildUpdate
-	if err := json.Unmarshal(data, &update); err != nil {
-		return err
-	}
-
-	var inode Inode
-	v, err := fsm.Get(tx, []byte("inodes"), []byte(update.ParentID))
-	if err != nil {
-		return err
-	}
-	if v == nil {
-		return ErrNotFound
-	}
-
-	if err := json.Unmarshal(v, &inode); err != nil {
-		return err
-	}
-
-	if inode.Type != DirType {
-		return fmt.Errorf("parent not a directory")
-	}
-	if inode.Children == nil {
-		inode.Children = make(map[string]string)
-	}
-
-	if _, exists := inode.Children[update.Name]; exists {
-		return ErrExists
-	}
-
-	inode.Children[update.Name] = update.ChildID
-	inode.Version++
-
-	// Update Child Links
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(update.ChildID))
-	if err != nil {
-		return err
-	}
-	if plain != nil {
-		var child Inode
-		if err := json.Unmarshal(plain, &child); err == nil {
-			if child.Links == nil {
-				child.Links = make(map[string]bool)
-			}
-			child.Links[update.ParentID+":"+update.Name] = true
-			child.Version++
-			if err := fsm.saveInodeWithPages(tx, &child); err != nil {
-				return err
-			}
-		}
-	}
-
-	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
-		return err
-	}
-	return &inode
-}
-
 func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interface{} {
 	var req AddReplicaRequest
 	if err := json.Unmarshal(data, &req); err != nil {
@@ -1252,7 +1179,10 @@ func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interfa
 }
 
 func (fsm *MetadataFSM) executeGCRemove(tx *bolt.Tx, data []byte) interface{} {
-	chunkID := string(data)
+	var chunkID string
+	if err := json.Unmarshal(data, &chunkID); err != nil {
+		chunkID = string(data) // Fallback for non-JSON raw strings if needed during transition
+	}
 	b := tx.Bucket([]byte("garbage_collection"))
 	return b.Delete([]byte(chunkID))
 }
@@ -1265,7 +1195,11 @@ func (fsm *MetadataFSM) executeInitSecret(tx *bolt.Tx, data []byte) interface{} 
 	if v != nil {
 		return ErrExists
 	}
-	if err := fsm.Put(tx, []byte("system"), []byte("cluster_secret"), data); err != nil {
+	var secret []byte
+	if err := json.Unmarshal(data, &secret); err != nil {
+		secret = data // Fallback
+	}
+	if err := fsm.Put(tx, []byte("system"), []byte("cluster_secret"), secret); err != nil {
 		return err
 	}
 	return nil
@@ -1857,7 +1791,6 @@ func (fsm *MetadataFSM) executeInitWorld(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 	if v != nil {
-		log.Printf("FSM: executeInitWorld rejected - identity already exists")
 		return fmt.Errorf("world identity already initialized")
 	}
 	return fsm.Put(tx, []byte("system"), []byte("world_identity"), data)
@@ -1881,7 +1814,6 @@ func (fsm *MetadataFSM) GetWorldIdentity() (*WorldIdentity, error) {
 }
 
 func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
-	log.Printf("FSM: IsUserInGroup checking groupID=%s for userID=%s", groupID, userID)
 	var group Group
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
@@ -1889,13 +1821,11 @@ func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
 			return err
 		}
 		if plain == nil {
-			log.Printf("FSM: IsUserInGroup groupID=%s NOT FOUND", groupID)
 			return ErrNotFound
 		}
 		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
-		log.Printf("FSM: IsUserInGroup groupID=%s error: %v", groupID, err)
 		return false, err
 	}
 	return group.Members[userID] || group.OwnerID == userID, nil
@@ -2251,7 +2181,6 @@ func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
 			if err := json.Unmarshal(v, &n); err == nil {
 				nodes = append(nodes, n)
 			} else {
-				log.Printf("FSM: GetNodes unmarshal failed for key %s: %v", string(k), err)
 			}
 			return nil
 		})
@@ -2259,7 +2188,7 @@ func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
 	return nodes, err
 }
 
-func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID string) interface{} {
 	var req AdminChownRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		return err
@@ -2316,7 +2245,7 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte) interface{} 
 	return fsm.saveInodeWithPages(tx, &inode)
 }
 
-func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, sessionID string) interface{} {
 	var req AdminChmodRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		return err

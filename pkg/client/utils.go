@@ -2,7 +2,11 @@
 package client
 
 import (
+	"errors"
 	"fmt"
+	"net/http"
+
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 // FormatBytes scales bytes to a human-readable string.
@@ -17,4 +21,18 @@ func FormatBytes(bytes int64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
+}
+
+func isNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, metadata.ErrNotFound) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusNotFound
+	}
+	return false
 }

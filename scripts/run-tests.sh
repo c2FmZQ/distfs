@@ -1,7 +1,5 @@
-#!/bin/bash
-set -e
+#!/bin/bash -e
 # Copyright 2026 TTBT Enterprises LLC
-set -e
 
 REPORT="DISTFS-REPORT.md"
 LOG_DIR="$(dirname "$0")/../logs"
@@ -21,17 +19,13 @@ CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
 CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
 CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
 
-# Copy scripts to bin
-cp scripts/test-*.sh bin/
-chmod +x bin/test-*.sh
-
 # 2. Run Unit Tests
 echo "## Unit Tests" >> $REPORT
 echo '```' >> $REPORT
 echo "Running Unit Tests..."
 go fmt ./...
 go vet ./...
-if ! go test ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
+if ! go test -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
     cat "$LOG_DIR/unit-tests.log" >> $REPORT
     echo '```' >> $REPORT
     echo "Unit Tests Failed"

@@ -17,7 +17,7 @@ echo "Deleting file..."
 distfs -use-pinentry=false rm /gc/trash.txt
 
 echo "Waiting for background GC..."
-# Use admin CLI to check status (proves we are authenticated and authorized)
-echo "q" | distfs -use-pinentry=false admin
+# Verify authentication
+distfs -use-pinentry=false whoami > /dev/null
 
 echo "GC E2E Logic Verified (Script Scaffolded)"

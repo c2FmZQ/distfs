@@ -25,7 +25,7 @@ func TestFSMKeyRotation(t *testing.T) {
 	// 1. Create Inode (Gen 1)
 	inode := Inode{ID: "0000000000000000000000000000000f", Type: FileType}
 	iBytes, _ := json.Marshal(inode)
-	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes)
+	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes, "")
 
 	// 2. Rotate FSM Key (To Gen 2)
 	err := server.RotateFSMKey()
@@ -36,7 +36,7 @@ func TestFSMKeyRotation(t *testing.T) {
 	// 3. Create Inode (Gen 2)
 	inode2 := Inode{ID: "0000000000000000000000000000002f", Type: FileType}
 	iBytes2, _ := json.Marshal(inode2)
-	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2)
+	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2, "")
 
 	// 4. Verify decryption of both
 	err = server.FSM().DB().View(func(tx *bolt.Tx) error {
@@ -79,7 +79,7 @@ func TestFSMKeyRingSync(t *testing.T) {
 	// 1. Rotate a few times
 	server.RotateFSMKey()
 	server.RotateFSMKey()
-	_, gen := server.FSM().keyRing.Current()
+	_, gen := server.FSM().KeyRing().Current()
 	if gen < 3 {
 		t.Errorf("Expected gen >= 3, got %d", gen)
 	}
@@ -113,7 +113,7 @@ func TestFSMKeyRingSync(t *testing.T) {
 	time.Sleep(2 * time.Second)
 
 	// 5. Verify node2 has matching KeyRing
-	_, gen2 := node2.FSM.keyRing.Current()
+	_, gen2 := node2.FSM.KeyRing().Current()
 	if gen2 != gen {
 		t.Errorf("Node 2 KeyRing generation mismatch: expected %d, got %d", gen, gen2)
 	}

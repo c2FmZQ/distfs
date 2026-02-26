@@ -158,6 +158,13 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}
 
+	// Bootstrap cluster secret
+	secret, _ := json.Marshal([]byte("test-cluster-secret"))
+	f = node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Bootstrap secret apply failed: %v", err)
+	}
+
 	signKey, _ := crypto.GenerateIdentityKey()
 	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0)
 	ts := httptest.NewServer(server)
@@ -232,4 +239,9 @@ func GetClusterSignKey(fsm *MetadataFSM) ClusterSignKey {
 		log.Printf("GetClusterSignKey failed: %v", err)
 	}
 	return csk
+}
+
+func MustMarshalJSON(v interface{}) []byte {
+	b, _ := json.Marshal(v)
+	return b
 }

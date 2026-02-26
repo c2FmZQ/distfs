@@ -169,7 +169,7 @@ func TestAdminAPI(t *testing.T) {
 
 	// 6. Test Lookup
 	secret := make([]byte, 32)
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: secret}.Marshal(), 5*time.Second).Error(); err != nil {
+	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: metadata.MustMarshalJSON(secret)}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -195,7 +195,7 @@ func TestAdminOverrides(t *testing.T) {
 	uABytes, _ := json.Marshal(uA)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uABytes}.Marshal(), 5*time.Second)
 	// Promote user to admin (the command uses ID, which is already HMAC'd in our metadata.User if using standard flows, but here we provide it directly)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte(uA.ID)}.Marshal(), 5*time.Second)
+	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: metadata.MustMarshalJSON([]byte(uA.ID))}.Marshal(), 5*time.Second)
 	time.Sleep(1 * time.Second)
 
 	// 2. Create User B
@@ -207,7 +207,7 @@ func TestAdminOverrides(t *testing.T) {
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uBBytes}.Marshal(), 5*time.Second)
 
 	// 3. Create a File owned by Admin
-	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600}
+	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600, NLink: 1}
 	inode.SignInodeForTest(adminID, skA)
 	iBytes, _ := json.Marshal(inode)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
@@ -274,3 +274,5 @@ func TestAdminOverrides(t *testing.T) {
 		t.Errorf("Expected mode 0775, got %04o", updated.Mode)
 	}
 }
+
+

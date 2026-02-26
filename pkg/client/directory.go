@@ -34,9 +34,11 @@ import (
 
 // EnsureRoot initializes the root directory inode. It returns an error if it already exists.
 func (c *Client) EnsureRoot(ctx context.Context) error {
-	_, err := c.getInode(ctx, c.rootID)
+	inode, err := c.getInode(ctx, c.rootID)
 	if err == nil {
-		return fmt.Errorf("root inode %s already exists", c.rootID)
+		c.rootOwner = inode.OwnerID
+		c.rootVersion = inode.Version
+		return metadata.ErrExists
 	}
 
 	if c.decKey == nil {
@@ -49,18 +51,19 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 	}
 
 	lb := c.createLockbox(ctx, rootKey, 0755, "")
-	inode := metadata.Inode{
+	newInode := metadata.Inode{
 		ID:       c.rootID,
 		Type:     metadata.DirType,
 		Mode:     0755,
 		Children: make(map[string]string),
 		Lockbox:  lb,
 		OwnerID:  c.userID,
+		NLink:    1,
 	}
-	inode.SetFileKey(rootKey)
-	inode.SetAuthorizedSigners([]string{c.userID})
-	inode.Version = 1
-	_, err = c.createInode(ctx, inode)
+	newInode.SetFileKey(rootKey)
+	newInode.SetAuthorizedSigners([]string{c.userID})
+	newInode.Version = 1
+	_, err = c.createInode(ctx, newInode)
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
 			// Already exists, but we MUST fetch it to capture the anchor (owner/version)
@@ -75,11 +78,32 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 // ResolvePath resolves a string path to an Inode and its FileKey.
 func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	path = "/" + strings.Trim(path, "/")
+
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if attempt > 0 {
+			c.clearPathCache()
+		}
+
+		inode, key, err := c.resolvePathInternal(ctx, path)
+		if err == nil {
+			return inode, key, nil
+		}
+
+		if !isNotFound(err) {
+			return nil, nil, err
+		}
+		lastErr = err
+	}
+	return nil, nil, lastErr
+}
+
+func (c *Client) resolvePathInternal(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	if path == "/" {
 		// Fast path for root
 		inode, err := c.getInode(ctx, c.rootID)
 		if err != nil {
-			if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+			if isNotFound(err) {
 				return nil, nil, fmt.Errorf("root inode %s not found; has it been initialized with 'admin-create-root'?", c.rootID)
 			}
 			return nil, nil, fmt.Errorf("failed to get root inode %s: %w", c.rootID, err)
@@ -102,7 +126,7 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 				var err error
 				inode, err = c.getInode(ctx, entry.inodeID)
 				if err != nil {
-					if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+					if isNotFound(err) {
 						c.invalidatePathCache(prefix)
 					}
 					continue
@@ -131,7 +155,7 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 	// 2. Sequential Resolution from root
 	rootInode, err := c.getInode(ctx, c.rootID)
 	if err != nil {
-		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
+		if isNotFound(err) {
 			return nil, nil, fmt.Errorf("root inode %s not found; has it been initialized with 'admin-create-root'?", c.rootID)
 		}
 		return nil, nil, fmt.Errorf("failed to get root inode %s: %w", c.rootID, err)
@@ -290,7 +314,7 @@ func (c *Client) MkdirAll(ctx context.Context, path string) error {
 
 // CreateFile creates a file with the given content.
 func (c *Client) CreateFile(ctx context.Context, path string, r io.Reader, size int64) error {
-	return c.addEntry(ctx, path, metadata.FileType, r, size, "", 0644)
+	return c.addEntry(ctx, path, metadata.FileType, r, size, "", 0600)
 }
 
 // Symlink creates a symbolic link.
@@ -411,7 +435,7 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 		cmdChild, _ := c.PrepareUpdate(ctx, *child)
 		cmds = append(cmds, cmdChild)
 
-		if err := c.ApplyBatch(ctx, cmds); err != nil {
+		if _, err := c.ApplyBatch(ctx, cmds); err != nil {
 			return err
 		}
 		return nil

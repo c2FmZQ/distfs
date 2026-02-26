@@ -54,20 +54,24 @@ func TestGroupManagementSecurity(t *testing.T) {
 		Lockbox:  crypto.NewLockbox(),
 	}
 	groupA.Signature = uAliceSign.Sign(groupA.Hash())
-	payload, _ := json.Marshal(groupA)
+	objBytes, _ := json.Marshal(groupA)
+	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes}}
+	payload, _ := json.Marshal(batch)
 	body := sealTestRequest(t, "alice", uAliceSign, serverEK, payload)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/group/", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ := http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("Failed to create group A: %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("Failed to create group A: got %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 
 	// Read the group with the generated ID from the response
-	var createdA Group
+	var results []json.RawMessage
 	respBytes, _ := io.ReadAll(resp.Body)
-	json.Unmarshal(respBytes, &createdA)
+	json.Unmarshal(respBytes, &results)
+	var createdA Group
+	json.Unmarshal(results[0], &createdA)
 	resp.Body.Close()
 	groupID := createdA.ID
 
@@ -77,9 +81,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 	hijackA.OwnerID = "mallory"
 	hijackA.SignGroupForTest("mallory", uMallorySign)
 
-	payload, _ = json.Marshal(hijackA)
+	objBytes, _ = json.Marshal(hijackA)
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
+	payload, _ = json.Marshal(batch)
 	body = sealTestRequest(t, "mallory", uMallorySign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/group/"+groupID, bytes.NewReader(body))
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenMallory)
 	resp, _ = http.DefaultClient.Do(req)
@@ -94,9 +100,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 	selfManagedA.Version++ // Must increment version for update
 	selfManagedA.SignGroupForTest("alice", uAliceSign)
 
-	payload, _ = json.Marshal(selfManagedA)
+	objBytes, _ = json.Marshal(selfManagedA)
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
+	payload, _ = json.Marshal(batch)
 	body = sealTestRequest(t, "alice", uAliceSign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/group/"+groupID, bytes.NewReader(body))
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ = http.DefaultClient.Do(req)
@@ -142,9 +150,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 	bobUpdate.Version++
 	bobUpdate.SignGroupForTest("bob", uBobSign)
 
-	payload, _ = json.Marshal(bobUpdate)
+	objBytes, _ = json.Marshal(bobUpdate)
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
+	payload, _ = json.Marshal(batch)
 	body = sealTestRequest(t, "bob", uBobSign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/group/"+groupID, bytes.NewReader(body))
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenBob)
 	resp, _ = http.DefaultClient.Do(req)
@@ -202,9 +212,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 	bobUpdateC.Version++
 	bobUpdateC.SignGroupForTest("bob", uBobSign)
 
-	payload, _ = json.Marshal(bobUpdateC)
+	objBytes, _ = json.Marshal(bobUpdateC)
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
+	payload, _ = json.Marshal(batch)
 	body = sealTestRequest(t, "bob", uBobSign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/group/group-c", bytes.NewReader(body))
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenBob)
 	resp, _ = http.DefaultClient.Do(req)
@@ -217,9 +229,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 	malloryUpdateC.Version++ // Try to bypass version check
 	malloryUpdateC.SignGroupForTest("mallory", uMallorySign)
 
-	payload, _ = json.Marshal(malloryUpdateC)
+	objBytes, _ = json.Marshal(malloryUpdateC)
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
+	payload, _ = json.Marshal(batch)
 	body = sealTestRequest(t, "mallory", uMallorySign, serverEK, payload)
-	req, _ = http.NewRequest("PUT", ts.URL+"/v1/group/group-c", bytes.NewReader(body))
+	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenMallory)
 	resp, _ = http.DefaultClient.Do(req)

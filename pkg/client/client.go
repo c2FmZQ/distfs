@@ -64,8 +64,7 @@ func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		return nil, c.newAPIError(resp, resp.Body)
 	}
 
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
@@ -98,8 +97,7 @@ func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+		return nil, c.newAPIError(resp, resp.Body)
 	}
 
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
@@ -248,6 +246,7 @@ type Client struct {
 	rootID      string
 	rootOwner   string
 	rootVersion uint64
+	rootMu      *sync.RWMutex
 
 	controlSem chan struct{}
 	dataSem    chan struct{}
@@ -286,6 +285,7 @@ func NewClient(serverAddr string) *Client {
 		mutationMu:    &sync.Mutex{},
 		mutationLocks: make(map[string]*sync.Mutex),
 		rootID:        metadata.RootID,
+		rootMu:        &sync.RWMutex{},
 	}
 }
 
@@ -315,6 +315,7 @@ func (c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client {
 // WithRootAnchor returns a new client with the specified root anchoring information.
 func (c *Client) WithRootAnchor(id, owner string, version uint64) *Client {
 	c2 := *c
+	c2.rootMu = &sync.RWMutex{}
 	c2.rootID = id
 	c2.rootOwner = owner
 	c2.rootVersion = version
@@ -327,6 +328,7 @@ func (c *Client) WithRootID(id string) *Client {
 	c2.rootID = id
 	c2.pathCache = make(map[string]pathCacheEntry)
 	c2.pathMu = &sync.RWMutex{}
+	c2.rootMu = &sync.RWMutex{}
 	return &c2
 }
 
@@ -339,6 +341,8 @@ func (c *Client) WithAdmin(admin bool) *Client {
 
 // GetRootAnchor returns the current root anchoring information.
 func (c *Client) GetRootAnchor() (string, string, uint64) {
+	c.rootMu.RLock()
+	defer c.rootMu.RUnlock()
 	return c.rootID, c.rootOwner, c.rootVersion
 }
 
@@ -366,8 +370,7 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, resp.Body)
 	}
 
 	var challengeRes metadata.AuthChallengeResponse
@@ -406,8 +409,7 @@ func (c *Client) Login(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, resp.Body)
 	}
 
 	var res metadata.SessionResponse
@@ -659,7 +661,7 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
-			return &APIError{StatusCode: resp.StatusCode, Message: "metadata server busy"}
+			return c.newAPIError(resp, resp.Body)
 		}
 
 		body, err := c.unsealResponse(ctx, resp)
@@ -669,7 +671,7 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return &APIError{StatusCode: resp.StatusCode}
+			return c.newAPIError(resp, body)
 		}
 		return json.NewDecoder(body).Decode(&nodes)
 	})
@@ -717,8 +719,7 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		respBytes, err := io.ReadAll(body)
@@ -771,8 +772,7 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+			return c.newAPIError(resp, resp.Body)
 		}
 		return nil
 	})
@@ -840,7 +840,7 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				defer resp.Body.Close()
 
 				if resp.StatusCode != http.StatusOK {
-					resCh <- result{err: &APIError{StatusCode: resp.StatusCode, Message: "node error"}}
+					resCh <- result{err: c.newAPIError(resp, resp.Body)}
 					return
 				}
 
@@ -882,11 +882,36 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 
 type APIError struct {
 	StatusCode int
+	Code       string
 	Message    string
 }
 
 func (e *APIError) Error() string {
+	if e.Code != "" {
+		return fmt.Sprintf("api error: %d %s: %s", e.StatusCode, e.Code, e.Message)
+	}
 	return fmt.Sprintf("api error: %d %s", e.StatusCode, e.Message)
+}
+
+func (c *Client) newAPIError(resp *http.Response, body io.Reader) *APIError {
+	ae := &APIError{StatusCode: resp.StatusCode}
+	if body == nil {
+		ae.Message = resp.Status
+		return ae
+	}
+	b, _ := io.ReadAll(body)
+	if len(b) > 0 {
+		var er metadata.APIErrorResponse
+		if err := json.Unmarshal(b, &er); err == nil && er.Code != "" {
+			ae.Code = er.Code
+			ae.Message = er.Message
+		} else {
+			ae.Message = string(b)
+		}
+	} else {
+		ae.Message = resp.Status
+	}
+	return ae
 }
 
 func (e *APIError) ToPOSIX() error {
@@ -932,8 +957,7 @@ func (c *Client) ListGroups(ctx context.Context) ([]metadata.GroupListEntry, err
 		defer body.Close()
 
 		if res.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: res.StatusCode, Message: string(b)}
+	return c.newAPIError(res, body)
 		}
 
 		return json.NewDecoder(body).Decode(&resp)
@@ -986,8 +1010,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&user)
@@ -1059,121 +1082,37 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	return nil
 }
 
+// createInode initializes a new inode.
 func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
-	now := time.Now().UnixNano()
-	if inode.GetMTime() == 0 {
-		inode.SetMTime(now)
-	}
-	if inode.CTime == 0 {
-		inode.CTime = now
-	}
-	if inode.NLink == 0 {
-		inode.NLink = 1
-	}
-	inode.Version = 1
-
-	// Phase 31: Manifest Signing
-	if err := c.signInode(ctx, &inode); err != nil {
-		return nil, err
-	}
-
-	data, err := json.Marshal(inode)
-
+	cmd, err := c.PrepareCreate(ctx, inode)
 	if err != nil {
-
 		return nil, err
+	}
 
+	results, err := c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
+	if err != nil {
+		return nil, err
+	}
+
+	if len(results) == 0 {
+		return nil, fmt.Errorf("empty results from createInode batch")
+	}
+
+	if err := c.isResultError(results[0]); err != nil {
+		return nil, err
 	}
 
 	var created metadata.Inode
-
-	err = c.withRetry(ctx, func() error {
-
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inode", nil)
-
-		if err != nil {
-
-			return err
-
-		}
-
-		if err := c.authenticateRequest(ctx, req); err != nil {
-
-			return err
-
-		}
-
-		if err := c.sealBody(ctx, req, data); err != nil {
-
-			return err
-
-		}
-
-		resp, err := c.httpClient.Do(req)
-
-		if err != nil {
-
-			return err
-
-		}
-
-		body, err := c.unsealResponse(ctx, resp)
-
-		if err != nil {
-
-			return err
-
-		}
-
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-
-			b, _ := io.ReadAll(body)
-
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-
-		}
-
-		if err := json.NewDecoder(body).Decode(&created); err != nil {
-			return err
-		}
-
-		// Phase 31: Verification
-		if key := inode.GetFileKey(); len(key) > 0 {
-			created.SetFileKey(key)
-		}
-		if err := c.VerifyInode(ctx, &created); err != nil {
-			return err
-		}
-
-		// Phase 31: Root Anchoring
-
-		if created.ID == metadata.RootID {
-
-			c.rootOwner = created.OwnerID
-
-			c.rootVersion = created.Version
-
-		}
-
-		return nil
-
-	})
-
-	if err != nil {
-		return nil, err
+	if err := json.Unmarshal(results[0], &created); err != nil {
+		return nil, fmt.Errorf("failed to decode created inode: %w", err)
 	}
 
-	// Phase 31: Verification (Decrypts transient fields)
-	if err := c.VerifyInode(ctx, &created); err != nil {
-		return nil, err
+	// Phase 31: Root Anchoring
+	if created.ID == metadata.RootID {
+		c.rootMu.Lock()
+		c.rootOwner = created.OwnerID
+		c.rootVersion = created.Version
+		c.rootMu.Unlock()
 	}
 
 	return &created, nil
@@ -1188,10 +1127,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 	unlock := c.lockMutation(id)
 	defer unlock()
 
-	var updated metadata.Inode
-	maxRetries := 50
-
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < 50; i++ {
 		// 1. Fetch latest state
 		inode, err := c.getInodeInternal(ctx, id, verify)
 		if err != nil {
@@ -1203,82 +1139,42 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			return nil, err
 		}
 
-		// 3. Local Increment: The client is the authority for the next version.
-		inode.Version++
-
-		// 4. Phase 31: Manifest Signing (signs the new version)
-		if err := c.signInode(ctx, inode); err != nil {
-			return nil, err
-		}
-		data, err := json.Marshal(inode)
+		// Use PrepareUpdate which handles version increment and signing
+		cmd, err := c.PrepareUpdate(ctx, *inode)
 		if err != nil {
 			return nil, err
 		}
 
-		err = c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
+		results, err := c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
+		if err == nil {
+			if len(results) == 0 {
+				return nil, fmt.Errorf("empty results from updateInode batch")
 			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+id, nil)
-			if err != nil {
-				return err
+			if err := c.isResultError(results[0]); err != nil {
+				return nil, err
 			}
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-			if err := c.sealBody(ctx, req, data); err != nil {
-				return err
+			var updated metadata.Inode
+			if err := json.Unmarshal(results[0], &updated); err != nil {
+				return nil, fmt.Errorf("failed to decode updated inode: %w", err)
 			}
 
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode == http.StatusConflict {
-				return metadata.ErrConflict
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				b, _ := io.ReadAll(body)
-				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-			}
-
-			if err := json.NewDecoder(body).Decode(&updated); err != nil {
-				return err
-			}
-
-			// Phase 31: Verification (Decrypts transient fields)
 			// Ensure we keep the file key if we already had it (e.g. placeholder updates)
 			if key := inode.GetFileKey(); len(key) > 0 {
 				updated.SetFileKey(key)
 			}
 
-			if verify {
-				if err := c.VerifyInode(ctx, &updated); err != nil {
-					return err
-				}
-			}
-
 			// Phase 31: Root Anchoring
 			if updated.ID == metadata.RootID {
+				c.rootMu.Lock()
 				c.rootOwner = updated.OwnerID
 				c.rootVersion = updated.Version
+				c.rootMu.Unlock()
 			}
-			return nil
-		})
 
-		if err == nil {
 			c.invalidatePathCacheByID(id)
 			return &updated, nil
 		}
+
 		if err != metadata.ErrConflict {
 			return nil, err
 		}
@@ -1289,13 +1185,14 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 	return nil, metadata.ErrConflict
 }
 
-func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) error {
+func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]json.RawMessage, error) {
 	data, err := json.Marshal(cmds)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return c.withRetry(ctx, func() error {
+	var results []json.RawMessage
+	err = c.withRetry(ctx, func() error {
 		if err := c.acquireControl(ctx); err != nil {
 			return err
 		}
@@ -1327,13 +1224,24 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+			return c.newAPIError(resp, body)
 		}
+
+		if err := json.NewDecoder(body).Decode(&results); err != nil {
+			return err
+		}
+
+		if len(results) > 0 {
+					}
 
 		c.clearPathCache()
 		return nil
 	})
+
+	if err != nil {
+		return nil, err
+	}
+	return results, nil
 }
 
 func (c *Client) PrepareCreate(ctx context.Context, inode metadata.Inode) (metadata.LogCommand, error) {
@@ -1364,32 +1272,12 @@ func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
 }
 
 func (c *Client) DeleteInode(ctx context.Context, id string) error {
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "DELETE", c.serverURL+"/v1/meta/inode/"+id, nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-			b, _ := io.ReadAll(resp.Body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-		return nil
-	})
+	cmd, err := c.PrepareDelete(id)
+	if err != nil {
+		return err
+	}
+	_, err = c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
+	return err
 }
 
 func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, error) {
@@ -1424,8 +1312,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		if err := json.NewDecoder(body).Decode(&inode); err != nil {
@@ -1434,15 +1321,22 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 
 		// Phase 31: Root Anchoring
 		if id == metadata.RootID {
-			if c.rootOwner != "" && inode.OwnerID != c.rootOwner {
-				return fmt.Errorf("ROOT COMPROMISE DETECTED: expected owner %s, got %s", c.rootOwner, inode.OwnerID)
+			c.rootMu.RLock()
+			owner := c.rootOwner
+			version := c.rootVersion
+			c.rootMu.RUnlock()
+
+			if owner != "" && inode.OwnerID != owner {
+				return fmt.Errorf("ROOT COMPROMISE DETECTED: expected owner %s, got %s", owner, inode.OwnerID)
 			}
-			if c.rootVersion > 0 && inode.Version < c.rootVersion {
-				return fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", c.rootVersion, inode.Version)
+			if version > 0 && inode.Version < version {
+				return fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", version, inode.Version)
 			}
 			// Update anchor
+			c.rootMu.Lock()
 			c.rootOwner = inode.OwnerID
 			c.rootVersion = inode.Version
+			c.rootMu.Unlock()
 		}
 
 		return nil
@@ -1500,8 +1394,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return json.NewDecoder(body).Decode(&inodes)
 	})
@@ -2345,7 +2238,7 @@ func (w *FileWriter) Close() error {
 			}
 
 			// Execute Atomic Batch
-			return w.client.ApplyBatch(w.ctx, cmds)
+			_, err = w.client.ApplyBatch(w.ctx, cmds); return err
 		})
 	} else {
 		if w.isNew {
@@ -2845,20 +2738,25 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 			allCmds = append(allCmds, cmdParent)
 		}
 
-		return c.ApplyBatch(ctx, allCmds)
+		_, err := c.ApplyBatch(ctx, allCmds); return err
 	})
 
 	// 3. Post-commit: Cleanup and caching
-	for _, w := range writers {
-		// Mark as closed so Close() doesn't try to commit again
-		w.closed = true
-		w.cancel()
-		w.wg.Wait()
+	if err == nil {
+		c.keyMu.Lock()
+		c.pathMu.Lock()
+		defer c.pathMu.Unlock()
+		defer c.keyMu.Unlock()
 
-		// Release leases
-		c.ReleaseLeases(ctx, []string{w.swapPath}, w.leaseNonce)
+		for _, w := range writers {
+			// Mark as closed so Close() doesn't try to commit again
+			w.closed = true
+			w.cancel()
+			w.wg.Wait()
 
-		if err == nil {
+			// Release leases
+			c.ReleaseLeases(ctx, []string{w.swapPath}, w.leaseNonce)
+
 			// Update caches
 			fm := fileMetadata{
 				key:     w.fileKey,
@@ -2866,18 +2764,22 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 				linkTag: w.parentID + ":" + w.nameHMAC,
 				inlined: w.inode.GetInlineData() != nil,
 			}
-			c.keyMu.Lock()
 			c.keyCache[w.inode.ID] = fm
 			c.keyCache[w.swapPath] = fm
-			c.keyMu.Unlock()
 
-			c.pathMu.Lock()
 			c.pathCache[w.swapPath] = pathCacheEntry{
 				inodeID: w.inode.ID,
 				key:     w.fileKey,
 				linkTag: w.parentID + ":" + w.nameHMAC,
+				inode:   &w.inode,
 			}
-			c.pathMu.Unlock()
+		}
+	} else {
+		for _, w := range writers {
+			w.closed = true
+			w.cancel()
+			w.wg.Wait()
+			c.ReleaseLeases(ctx, []string{w.swapPath}, w.leaseNonce)
 		}
 	}
 
@@ -3604,7 +3506,41 @@ func (c *Client) CreateSystemGroup(ctx context.Context, name string) (*metadata.
 	return c.createGroupInternal(ctx, name, true)
 }
 
+func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
+	var res struct {
+		GID uint32 `json:"gid"`
+	}
+	err := c.withRetry(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/group/gid/allocate", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(ctx, req); err != nil {
+			return err
+		}
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			return c.newAPIError(resp, resp.Body)
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			return err
+		}
+				return nil
+	})
+	return res.GID, err
+}
+
 func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem bool) (*metadata.Group, error) {
+	// Allocate numeric GID
+	gid, err := c.allocateGID(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("GID allocation failed: %w", err)
+	}
+
 	// 1. Generate Encryption Key (ML-KEM)
 	dk, _ := crypto.GenerateEncryptionKey()
 	pk := dk.EncapsulationKey().Bytes()
@@ -3646,16 +3582,6 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 	}
 
 	// Initialize Registry with the owner (if email is known)
-	// We might not know our own email from the config directly, but we can assume it's passed or available.
-	// For now, let's assume we can add our own entry if we have it.
-	// Actually, User struct has no email. The client might have it in memory or we can skip for now.
-	// User said: "actual email of the group members to be visible by the group owner".
-	// During onboarding we might have the email.
-
-	// Let's assume for now we just store the UserID in the registry if email is missing.
-	// Or we can add a way to pass email to CreateGroup.
-	// But let's check how we get email.
-
 	initialMembers := []metadata.MemberEntry{
 		{UserID: c.userID, Info: ""}, // Placeholder for owner info
 	}
@@ -3673,6 +3599,7 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 
 	group := &metadata.Group{
 		ID:                groupID,
+		GID:               gid,
 		OwnerID:           c.userID,
 		Members:           map[string]bool{c.userID: true},
 		EncKey:            pk,
@@ -3697,37 +3624,28 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 		return nil, err
 	}
 
-	data, _ := json.Marshal(group)
-	url := c.serverURL + "/v1/group/"
-	req, err := http.NewRequest("POST", url, bytes.NewReader(data))
+	// Unified Mutation: Use ApplyBatch
+	cmd, err := c.PrepareCreateGroup(ctx, *group)
 	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(ctx, req); err != nil {
-		return nil, err
-	}
-	if err := c.sealBody(ctx, req, data); err != nil {
 		return nil, err
 	}
 
-	resp, err := c.httpClient.Do(req)
+	results, err := c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
 	if err != nil {
 		return nil, err
 	}
-	body, err := c.unsealResponse(ctx, resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
 
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, fmt.Errorf("create group failed: %d %s", resp.StatusCode, string(b))
+	if len(results) == 0 {
+		return nil, fmt.Errorf("empty results from createGroup batch")
+	}
+
+	if err := c.isResultError(results[0]); err != nil {
+		return nil, err
 	}
 
 	var created metadata.Group
-	if err := json.NewDecoder(body).Decode(&created); err != nil {
-		return nil, err
+	if err := json.Unmarshal(results[0], &created); err != nil {
+		return nil, fmt.Errorf("failed to decode created group: %w", err)
 	}
 
 	// Verify the response integrity
@@ -4127,8 +4045,7 @@ func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, e
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(resp.Body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, resp.Body)
 		}
 
 		return json.NewDecoder(resp.Body).Decode(&stats)
@@ -4178,8 +4095,7 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4220,8 +4136,7 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) 
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4255,8 +4170,7 @@ func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&users)
@@ -4292,8 +4206,7 @@ func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) 
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&groups)
@@ -4329,8 +4242,7 @@ func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, err
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&leases)
@@ -4366,8 +4278,7 @@ func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&nodes)
@@ -4403,8 +4314,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&status)
@@ -4448,8 +4358,7 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&result)
@@ -4487,8 +4396,7 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4524,8 +4432,7 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4561,8 +4468,7 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4598,8 +4504,7 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4635,8 +4540,7 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+	return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4733,6 +4637,28 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 	return err
 }
 
+func (c *Client) isResultError(data json.RawMessage) *APIError {
+	var er metadata.APIErrorResponse
+	if err := json.Unmarshal(data, &er); err == nil && er.Code != "" {
+		// It is an error
+		status := http.StatusInternalServerError
+		switch er.Code {
+		case metadata.ErrCodeNotFound:
+			status = http.StatusNotFound
+		case metadata.ErrCodeVersionConflict, metadata.ErrCodeExists:
+			status = http.StatusConflict
+		case metadata.ErrCodeUnauthorized:
+			status = http.StatusUnauthorized
+		case metadata.ErrCodeForbidden:
+			status = http.StatusForbidden
+		case metadata.ErrCodeNotLeader:
+			status = http.StatusServiceUnavailable
+		}
+		return &APIError{StatusCode: status, Code: er.Code, Message: er.Message}
+	}
+	return nil
+}
+
 func (c *Client) signGroup(ctx context.Context, group *metadata.Group, isUpdate bool) error {
 	// Re-encrypt ClientBlob if transient fields are set
 	if name := group.GetName(); name != "" {
@@ -4763,14 +4689,35 @@ func (c *Client) signGroup(ctx context.Context, group *metadata.Group, isUpdate 
 }
 
 // UpdateGroup performs an atomic read-modify-write operation on a group.
+func (c *Client) PrepareCreateGroup(ctx context.Context, group metadata.Group) (metadata.LogCommand, error) {
+	group.Version = 1
+	if err := c.signGroup(ctx, &group, true); err != nil {
+		return metadata.LogCommand{}, err
+	}
+	data, err := json.Marshal(group)
+	if err != nil {
+		return metadata.LogCommand{}, err
+	}
+	return metadata.LogCommand{Type: metadata.CmdCreateGroup, Data: data}, nil
+}
+
+func (c *Client) PrepareUpdateGroup(ctx context.Context, group metadata.Group) (metadata.LogCommand, error) {
+	group.Version++
+	if err := c.signGroup(ctx, &group, true); err != nil {
+		return metadata.LogCommand{}, err
+	}
+	data, err := json.Marshal(group)
+	if err != nil {
+		return metadata.LogCommand{}, err
+	}
+	return metadata.LogCommand{Type: metadata.CmdUpdateGroup, Data: data}, nil
+}
+
 func (c *Client) UpdateGroup(ctx context.Context, id string, fn GroupUpdateFunc) (*metadata.Group, error) {
 	unlock := c.lockMutation(id)
 	defer unlock()
 
-	var updated metadata.Group
-	maxRetries := 50
-
-	for i := 0; i < maxRetries; i++ {
+	for i := 0; i < 50; i++ {
 		// 1. Fetch latest state
 		group, err := c.getGroupInternal(ctx, id, true)
 		if err != nil {
@@ -4782,60 +4729,26 @@ func (c *Client) UpdateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 			return nil, err
 		}
 
-		// 3. Increment Version
-		group.Version++
-
-		// 4. Sign
-		if err := c.signGroup(ctx, group, true); err != nil {
-			return nil, err
-		}
-		data, err := json.Marshal(group)
+		cmd, err := c.PrepareUpdateGroup(ctx, *group)
 		if err != nil {
 			return nil, err
 		}
 
-		err = c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
-			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+id, bytes.NewReader(data))
-			if err != nil {
-				return err
-			}
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-			if err := c.sealBody(ctx, req, data); err != nil {
-				return err
-			}
-
-			resp, err := c.httpClient.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode == http.StatusConflict {
-				return metadata.ErrConflict
-			}
-
-			if resp.StatusCode != http.StatusOK {
-				b, _ := io.ReadAll(body)
-				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-			}
-
-			return json.NewDecoder(body).Decode(&updated)
-		})
-
+		results, err := c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
 		if err == nil {
+			if len(results) == 0 {
+				return nil, fmt.Errorf("empty results from updateGroup batch")
+			}
+			if err := c.isResultError(results[0]); err != nil {
+				return nil, err
+			}
+			var updated metadata.Group
+			if err := json.Unmarshal(results[0], &updated); err != nil {
+				return nil, fmt.Errorf("failed to decode updated group: %w", err)
+			}
 			return &updated, nil
 		}
+
 		if err != metadata.ErrConflict {
 			return nil, err
 		}

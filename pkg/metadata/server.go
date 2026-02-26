@@ -306,7 +306,7 @@ func (s *Server) metricsFlusher() {
 			if s.raft.State() == raft.Leader {
 				snap := s.fsm.metrics.SnapshotAndReset()
 				data, _ := json.Marshal(snap)
-				s.ApplyRaftCommandInternal(CmdStoreMetrics, data)
+				s.ApplyRaftCommandInternal(CmdStoreMetrics, data, "")
 			}
 		case <-s.stopCh:
 			return
@@ -437,7 +437,7 @@ func (s *Server) RotateFSMKey() error {
 	}
 	data, _ := json.Marshal(req)
 
-	_, err := s.ApplyRaftCommandInternal(CmdRotateFSMKey, data)
+	_, err := s.ApplyRaftCommandInternal(CmdRotateFSMKey, data, "")
 	return err
 }
 
@@ -468,17 +468,17 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	if nonceStr != "" && sigStr != "" {
 		nonce, err := hex.DecodeString(nonceStr)
 		if err != nil {
-			http.Error(w, "invalid nonce", http.StatusBadRequest)
+			s.writeError(w, r, ErrCodeInternal, "invalid nonce", http.StatusBadRequest)
 			return
 		}
 		if !s.verifySignature(nonce, "LEADER_PROBE", sigStr) {
-			http.Error(w, "invalid leader signature", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeInternal, "invalid leader signature", http.StatusUnauthorized)
 			return
 		}
 		// Prove knowledge of secret back to leader
 		w.Header().Set(raftResponseHeader, s.signNonce(nonce, "NODE_RESPONSE"))
 	} else if !s.checkRaftSecret(r) {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -551,7 +551,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Only allow Bearer tokens to bypass if the route handles its own JWT auth (keysync)
 		if !isPublic && !s.checkRaftSecret(r) && !(isBearer && r.URL.Path == "/v1/user/keysync") {
-			http.Error(w, err.Error(), http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, err.Error(), http.StatusUnauthorized)
 			return
 		}
 	}
@@ -565,7 +565,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				if errors.As(err, &maxBytesErr) {
 					return
 				} else {
-					http.Error(w, "failed to unseal: "+err.Error(), http.StatusBadRequest)
+					s.writeError(w, r, ErrCodeInternal, "failed to unseal: "+err.Error(), http.StatusBadRequest)
 				}
 				return
 			}
@@ -574,7 +574,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
 			// Enforce E2EE for mutations
 			if r.Header.Get("X-DistFS-Sealed") != "true" {
-				http.Error(w, "E2EE mandatory for this request", http.StatusForbidden)
+				s.writeError(w, r, ErrCodeForbidden, "E2EE mandatory for this request", http.StatusForbidden)
 				return
 			}
 		}
@@ -589,7 +589,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 5. Mutation & Protected Routes
 	if r.URL.Path == "/v1/node" {
 		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if r.Method == http.MethodPost {
@@ -603,7 +603,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.HasPrefix(r.URL.Path, "/v1/node/") {
 		if !s.checkRaftSecret(r) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/v1/node/")
@@ -642,7 +642,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
 		if user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		s.handleGetWorldPrivateKey(w, r)
@@ -656,7 +656,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet {
 		if !s.checkRaftSecret(r) && user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		s.handleGetMetrics(w, r)
@@ -666,15 +666,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Admin Routes (Individual PQC Authorization)
 	if strings.HasPrefix(r.URL.Path, "/v1/admin/") {
 		if user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		if r.Header.Get("X-DistFS-Sealed") != "true" {
-			http.Error(w, "E2EE mandatory for admin operations", http.StatusForbidden)
+			s.writeError(w, r, ErrCodeForbidden, "E2EE mandatory for admin operations", http.StatusForbidden)
 			return
 		}
 		if !s.fsm.IsAdmin(user.ID) {
-			http.Error(w, "forbidden", http.StatusForbidden)
+			s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 			return
 		}
 		s.handleAdmin(w, r)
@@ -683,8 +683,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Authenticated Standard Routes (Inode / User / Group)
 	if strings.HasPrefix(r.URL.Path, "/v1/user/") || strings.HasPrefix(r.URL.Path, "/v1/group/") || strings.HasPrefix(r.URL.Path, "/v1/meta/") {
+		log.Printf("ROUTER: Path=%s Method=%s", r.URL.Path, r.Method)
 		if user == nil {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 
@@ -708,17 +709,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.handleGetInode(w, r, id)
 				return
 			}
-			if r.Method == http.MethodDelete {
-				s.handleDeleteInode(w, r, id)
-				return
-			}
-			if r.Method == http.MethodPut {
-				s.handleUpdateInode(w, r, id)
-				return
-			}
-		} else if r.URL.Path == "/v1/meta/inode" && r.Method == http.MethodPost {
-			s.handleCreateInode(w, r)
-			return
 		} else if r.URL.Path == "/v1/meta/inodes" && r.Method == http.MethodPost {
 			s.handleGetInodes(w, r)
 			return
@@ -728,13 +718,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if r.URL.Path == "/v1/meta/batch" && r.Method == http.MethodPost {
 			s.handleBatch(w, r)
 			return
-		} else if r.URL.Path == "/v1/group/" && r.Method == http.MethodPost {
-			s.handleCreateGroup(w, r)
-			return
 		} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
 			id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
 			if id == "" {
-				http.NotFound(w, r)
+				s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 				return
 			}
 			if strings.HasSuffix(id, "/sign/private") && r.Method == http.MethodGet {
@@ -747,10 +734,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				s.handleGetGroupPrivateKey(w, r, id)
 				return
 			}
-			if r.Method == http.MethodPut {
-				s.handleUpdateGroup(w, r)
-				return
-			}
 			if r.Method == http.MethodGet {
 				s.handleGetGroup(w, r, id)
 				return
@@ -758,26 +741,16 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
 			s.handleAllocateChunk(w, r)
 			return
-		} else if r.URL.Path == "/v1/meta/setattr" && r.Method == http.MethodPost {
-			s.handleSetAttr(w, r)
-			return
 		} else if r.URL.Path == "/v1/meta/lease/acquire" && r.Method == http.MethodPost {
 			s.handleAcquireLeases(w, r)
 			return
 		} else if r.URL.Path == "/v1/meta/lease/release" && r.Method == http.MethodPost {
 			s.handleReleaseLeases(w, r)
 			return
-		} else if strings.HasPrefix(r.URL.Path, "/v1/meta/directory/") && strings.HasSuffix(r.URL.Path, "/entry") {
-			id := strings.TrimPrefix(r.URL.Path, "/v1/meta/directory/")
-			id = strings.TrimSuffix(id, "/entry")
-			if r.Method == http.MethodPut {
-				s.handleAddChild(w, r, id)
-				return
-			}
 		}
 	}
 
-	http.NotFound(w, r)
+	s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 }
 
 func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool {
@@ -787,7 +760,7 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 
 	leaderAddr, _ := s.raft.LeaderWithID()
 	if leaderAddr == "" {
-		http.Error(w, "no leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeInternal, "no leader", http.StatusServiceUnavailable)
 		return true
 	}
 
@@ -813,11 +786,11 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 		})
 
 		if err != nil && err != ErrStopIteration {
-			http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
+			s.writeError(w, r, ErrCodeInternal, "leader address unknown", http.StatusServiceUnavailable)
 			return true
 		}
 		if leaderNode.Address == "" {
-			http.Error(w, "leader address unknown", http.StatusServiceUnavailable)
+			s.writeError(w, r, ErrCodeInternal, "leader address unknown", http.StatusServiceUnavailable)
 			return true
 		}
 
@@ -841,7 +814,7 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 		s.leaderURLMu.Lock()
 		delete(s.leaderURLCache, leaderAddr)
 		s.leaderURLMu.Unlock()
-		http.Error(w, "invalid leader address", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "invalid leader address", http.StatusInternalServerError)
 		return true
 	}
 
@@ -921,13 +894,13 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 	var req AuthChallengeRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	challenge := make([]byte, 32)
 	if _, err := rand.Read(challenge); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "internal error", http.StatusInternalServerError)
 		return
 	}
 
@@ -956,7 +929,7 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var solve AuthChallengeSolve
 	if err := json.NewDecoder(r.Body).Decode(&solve); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -975,7 +948,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	if !ok || entry.UserID != solve.UserID {
 		log.Printf("DEBUG: handleLogin: invalid challenge or user ID mismatch. entryFound=%v, entryUser=%s, solveUser=%s", ok, entry.UserID, solve.UserID)
-		http.Error(w, "invalid or expired challenge", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeInternal, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
 
@@ -993,13 +966,13 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return json.Unmarshal(plain, &user)
 	})
 	if err != nil {
-		http.Error(w, "user not found", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeNotFound, "user not found", http.StatusUnauthorized)
 		return
 	}
 
 	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
 		log.Printf("DEBUG: handleLogin: invalid signature for user %s", solve.UserID)
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeInternal, "invalid signature", http.StatusUnauthorized)
 		return
 	}
 
@@ -1040,7 +1013,7 @@ func (s *Server) handleGetClusterKey(w http.ResponseWriter, r *http.Request) {
 	active, err := s.fsm.GetActiveKey()
 	if err != nil {
 		// If bootstrap hasn't happened or no key, return 503
-		http.Error(w, "cluster key not available", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeInternal, "cluster key not available", http.StatusServiceUnavailable)
 		return
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
@@ -1049,13 +1022,13 @@ func (s *Server) handleGetClusterKey(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	if s.signKey == nil {
-		http.Error(w, "signing key not configured", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "signing key not configured", http.StatusInternalServerError)
 		return
 	}
 
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -1065,7 +1038,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		Mode    string   `json:"mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -1087,7 +1060,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		return s.fsm.LoadInodeWithPages(tx, &inode)
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1112,26 +1085,26 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 					} else {
 						msg := fmt.Sprintf("forbidden: group permission check failed (inode=%s group=%s user=%s mode=%s inode_mode=%o)", req.InodeID, inode.GroupID, user.ID, req.Mode, inode.Mode)
 						log.Printf("ERROR: handleIssueToken: %s", msg)
-						http.Error(w, "forbidden", http.StatusForbidden)
+						s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 						return
 					}
 				} else {
 					msg := fmt.Sprintf("forbidden: user not in group (inode=%s group=%s user=%s)", req.InodeID, inode.GroupID, user.ID)
 					log.Printf("ERROR: handleIssueToken: %s", msg)
-					http.Error(w, "forbidden", http.StatusForbidden)
+					s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 					return
 				}
 			} else {
 				msg := fmt.Sprintf("forbidden: permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
 				log.Printf("ERROR: handleIssueToken: %s", msg)
-				http.Error(w, "forbidden", http.StatusForbidden)
+				s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 				return
 			}
 		}
 	} else {
 		// Inode doesn't exist yet. Only allow "W" mode for creation.
 		if req.Mode != "W" {
-			http.Error(w, "inode not found", http.StatusNotFound)
+			s.writeError(w, r, ErrCodeNotFound, "inode not found", http.StatusNotFound)
 			return
 		}
 	}
@@ -1189,25 +1162,25 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
 	if err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	var cmds []LogCommand
 	if err := json.Unmarshal(body, &cmds); err != nil {
-		http.Error(w, "bad batch format", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad batch format", http.StatusBadRequest)
 		return
 	}
 
@@ -1216,38 +1189,66 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		case CmdUpdateInode:
 			var inode Inode
 			if err := json.Unmarshal(cmd.Data, &inode); err != nil {
-				http.Error(w, "invalid inode data", http.StatusBadRequest)
+				s.writeError(w, r, ErrCodeInternal, "invalid inode data", http.StatusBadRequest)
 				return
 			}
 			if err := s.checkWritePermission(r, user, inode.ID); err != nil {
 				if err != ErrNotFound {
-					http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+					s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
 					return
 				}
 			}
 		case CmdDeleteInode:
-			id := string(cmd.Data)
+			var id string
+			if err := json.Unmarshal(cmd.Data, &id); err != nil {
+				s.writeError(w, r, ErrCodeInternal, "invalid inode id", http.StatusBadRequest)
+				return
+			}
 			if err := s.checkWritePermission(r, user, id); err != nil {
 				if err != ErrNotFound {
-					http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
+					s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
 					return
 				}
 			}
 		case CmdCreateInode:
 			var inode Inode
 			if err := json.Unmarshal(cmd.Data, &inode); err != nil {
-				http.Error(w, "invalid inode data", http.StatusBadRequest)
+				s.writeError(w, r, ErrCodeInternal, "invalid inode data", http.StatusBadRequest)
 				return
 			}
 			bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
 			if !(bypass && s.fsm.IsAdmin(user.ID)) {
 				if inode.OwnerID != user.ID {
-					http.Error(w, "forbidden: cannot create inode for another user", http.StatusForbidden)
+					s.writeError(w, r, ErrCodeForbidden, "cannot create inode for another user", http.StatusForbidden)
 					return
 				}
 			}
+		case CmdCreateGroup:
+			var group Group
+			if err := json.Unmarshal(cmd.Data, &group); err != nil {
+				s.writeError(w, r, ErrCodeInternal, "invalid group data", http.StatusBadRequest)
+				return
+			}
+			if group.OwnerID != user.ID {
+				s.writeError(w, r, ErrCodeForbidden, "cannot create group for another user", http.StatusForbidden)
+				return
+			}
+			if group.IsSystem && !s.fsm.IsAdmin(user.ID) {
+				s.writeError(w, r, ErrCodeForbidden, "only admins can create system groups", http.StatusForbidden)
+				return
+			}
+		case CmdUpdateGroup:
+			var group Group
+			if err := json.Unmarshal(cmd.Data, &group); err != nil {
+				s.writeError(w, r, ErrCodeInternal, "invalid group data", http.StatusBadRequest)
+				return
+			}
+			if err := s.checkGroupWritePermission(r, user, &group); err != nil {
+				s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
+				return
+			}
 		default:
-			http.Error(w, "unsupported batch command", http.StatusBadRequest)
+			s.writeError(w, r, ErrCodeInternal, "unsupported batch command", http.StatusBadRequest)
 			return
 		}
 	}
@@ -1290,19 +1291,19 @@ func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string
 
 func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 
 	var req RegisterUserRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	userID, _, err := s.verifyJWT(r.Context(), req.JWT)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
@@ -1339,7 +1340,7 @@ func (s *Server) handleGetKeySync(w http.ResponseWriter, r *http.Request) {
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
 		log.Printf("handleGetKeySync: missing bearer token")
-		http.Error(w, "missing bearer token", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "missing bearer token", http.StatusUnauthorized)
 		return
 	}
 	jwtStr := strings.TrimPrefix(auth, "Bearer ")
@@ -1347,16 +1348,16 @@ func (s *Server) handleGetKeySync(w http.ResponseWriter, r *http.Request) {
 	userID, _, err := s.verifyJWT(r.Context(), jwtStr)
 	if err != nil {
 		log.Printf("handleGetKeySync: verifyJWT failed: %v", err)
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
 	blob, err := s.fsm.GetKeySyncBlob(userID)
 	if err != nil {
 		if err == ErrNotFound {
-			http.Error(w, "not found", http.StatusNotFound)
+			s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
@@ -1368,19 +1369,19 @@ func (s *Server) handleGetKeySync(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleStoreKeySync(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticate(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
 	// Session Token is present. Now check for sealing (Mandatory).
 	if r.Header.Get("X-DistFS-Sealed") != "true" {
-		http.Error(w, "E2EE mandatory for keysync storage", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeForbidden, "E2EE mandatory for keysync storage", http.StatusForbidden)
 		return
 	}
 
 	var blob KeySyncBlob
 	if err := json.NewDecoder(r.Body).Decode(&blob); err != nil {
-		http.Error(w, "invalid blob format", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "invalid blob format", http.StatusBadRequest)
 		return
 	}
 
@@ -1396,13 +1397,13 @@ func (s *Server) handleStoreKeySync(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	entries, err := s.fsm.GetUserGroups(user.ID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1438,14 +1439,14 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 		return json.Unmarshal(plain, &user)
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
 		return
 	}
 
 	// Redact sensitive info if not self/admin
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -1494,12 +1495,12 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
 	if len(nodes) == 0 {
-		http.Error(w, "no active nodes", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeInternal, "no active nodes", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -1536,25 +1537,25 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id string) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 	if err := s.raft.VerifyLeader().Error(); err != nil {
-		http.Error(w, "lost leadership", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "lost leadership", http.StatusServiceUnavailable)
 		return
 	}
 
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	if err := s.checkReadPermission(r, user, id); err != nil {
 		if err == ErrNotFound {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusForbidden)
+			s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
 		}
 		return
 	}
@@ -1581,14 +1582,14 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	})
 
 	if err != nil {
-		http.NotFound(w, r)
+		s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 		return
 	}
 
 	s.resolveURLs(inode.ChunkManifest)
 	data, err = json.Marshal(inode)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1612,11 +1613,11 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 
 func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 	if err := s.raft.VerifyLeader().Error(); err != nil {
-		http.Error(w, "lost leadership", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "lost leadership", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -1624,18 +1625,18 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 
 	var ids []string
 	if err := json.NewDecoder(r.Body).Decode(&ids); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	if len(ids) > 1000 {
-		http.Error(w, "too many ids", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "too many ids", http.StatusBadRequest)
 		return
 	}
 
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -1660,7 +1661,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1687,96 +1688,11 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
 
-	var inode Inode
-	if err := json.Unmarshal(body, &inode); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
 
-	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-	if !(bypass && s.fsm.IsAdmin(user.ID)) {
-		if inode.OwnerID != user.ID {
-			http.Error(w, "forbidden: cannot create inode for another user", http.StatusForbidden)
-			return
-		}
-	}
 
-	// Verify that the submitter signed this manifest
-	hash := inode.ManifestHash()
-	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
-		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
-		return
-	}
 
-	s.ApplyRaftCommandRaw(w, r, CmdCreateInode, body, http.StatusCreated)
-}
-
-func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id string) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := s.checkWritePermission(r, user, id); err != nil {
-		if err == ErrNotFound {
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
-			http.Error(w, err.Error(), http.StatusForbidden)
-		}
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
-
-	var inode Inode
-	if err := json.Unmarshal(body, &inode); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	// Verify that the submitter signed this manifest
-	hash := inode.ManifestHash()
-	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
-		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
-		return
-	}
-
-	s.ApplyRaftCommandRaw(w, r, CmdUpdateInode, body, http.StatusOK)
-}
-
-func (s *Server) handleDeleteInode(w http.ResponseWriter, r *http.Request, id string) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := s.checkWritePermission(r, user, id); err != nil {
-		if err == ErrNotFound {
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
-			http.Error(w, err.Error(), http.StatusForbidden)
-		}
-		return
-	}
-	s.ApplyRaftCommandRaw(w, r, CmdDeleteInode, []byte(id), http.StatusOK)
-}
 
 func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string) error {
 	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
@@ -1838,7 +1754,7 @@ func (s *Server) handleAllocateGID(w http.ResponseWriter, r *http.Request) {
 		return fmt.Errorf("exhausted GID allocation attempts")
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.writeJSON(w, r, map[string]uint32{"gid": gid}, http.StatusOK)
@@ -1846,7 +1762,7 @@ func (s *Server) handleAllocateGID(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRemoveNode(w http.ResponseWriter, r *http.Request, id string) {
 	if err := s.removeNodeInternal(id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -1865,123 +1781,19 @@ func (s *Server) removeNodeInternal(id string) error {
 	}
 
 	// 2. Remove from FSM (Registry & Trust)
-	_, err := s.ApplyRaftCommandInternal(CmdRemoveNode, []byte(id))
+	data, _ := json.Marshal(id)
+	_, err := s.ApplyRaftCommandInternal(CmdRemoveNode, data, "")
 	return err
 }
 
-func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
-	log.Printf("GROUP: handleCreateGroup ENTERED (Method: %s, Path: %s)", r.Method, r.URL.Path)
-	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
-		return
-	}
 
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		log.Printf("GROUP: handleCreateGroup unauthorized")
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
-	if err != nil {
-		log.Printf("GROUP: handleCreateGroup read failed: %v", err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	var group Group
-	if err := json.Unmarshal(body, &group); err != nil {
-		log.Printf("GROUP: handleCreateGroup decode failed: %v", err)
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	// 1. Enforce IsSystem only for admins
-	if group.IsSystem && !s.fsm.IsAdmin(user.ID) {
-		http.Error(w, "forbidden: only admins can create system groups", http.StatusForbidden)
-		return
-	}
-
-	// 2. Generate unique GID (POSIX) if not provided
-	if group.GID == 0 {
-		var gid uint32
-		err = s.fsm.db.View(func(tx *bolt.Tx) error {
-			for i := 0; i < 1000; i++ {
-				gid = generateID32()
-				if gid < 1000 {
-					continue
-				}
-				v, err := s.fsm.Get(tx, []byte("gids"), uint32ToBytes(gid))
-				if err != nil {
-					return err
-				}
-				if v == nil {
-					return nil
-				}
-			}
-			return fmt.Errorf("exhausted GID allocation attempts")
-		})
-		if err != nil {
-			log.Printf("GROUP: handleCreateGroup GID allocation failed: %v", err)
-			http.Error(w, "failed to allocate GID", http.StatusInternalServerError)
-			return
-		}
-		group.GID = gid
-	}
-
-	// 2. Verify Signer matches Authenticated User
-	if group.SignerID != user.ID {
-		log.Printf("GROUP: handleCreateGroup signer ID mismatch: expected %s, got %s", user.ID, group.SignerID)
-		http.Error(w, "forbidden: signer ID mismatch", http.StatusForbidden)
-		return
-	}
-
-	// 3. Verify Initial Signature
-	hash := group.Hash()
-	if !crypto.VerifySignature(user.SignKey, hash, group.Signature) {
-		http.Error(w, "invalid signature", http.StatusUnauthorized)
-		return
-	}
-
-	// Re-marshal with GID
-	body, _ = json.Marshal(group)
-
-	log.Printf("GROUP: handleCreateGroup creating (ID: %s, GID: %d) for user %s", group.ID, group.GID, user.ID)
-
-	log.Printf("GROUP: handleCreateGroup applying Raft command for ID=%s", group.ID)
-	_, err = s.ApplyRaftCommandInternal(CmdCreateGroup, body)
-	if err != nil {
-		log.Printf("GROUP: handleCreateGroup raft apply failed: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-
-	// E2EE?
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, body)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusCreated)
-			w.Write(sealed)
-			log.Printf("GROUP: handleCreateGroup finished for %s (SEALED)", group.ID)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusCreated)
-	w.Write(body)
-	log.Printf("GROUP: handleCreateGroup finished for %s", group.ID)
-}
 
 func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id string) {
 	log.Printf("GROUP: handleGetGroup(%s) starting", id)
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
 		log.Printf("GROUP: handleGetGroup(%s) unauthorized", id)
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -1999,7 +1811,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	})
 	if err != nil {
 		log.Printf("GROUP: handleGetGroup(%s) retrieval failed: %v", id, err)
-		http.Error(w, err.Error(), http.StatusNotFound)
+		s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
 		return
 	}
 
@@ -2020,7 +1832,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	isAdmin := s.fsm.IsAdmin(user.ID)
 	if !authorized && !isAdmin {
 		log.Printf("GROUP: handleGetGroup(%s) forbidden for user %s", id, user.ID)
-		http.Error(w, "forbidden", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -2043,50 +1855,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	w.Write(data)
 }
 
-func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
-	id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
-	if id == "" {
-		http.NotFound(w, r)
-		return
-	}
 
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 1024*1024))
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
-
-	var group Group
-	if err := json.Unmarshal(body, &group); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	if group.ID != id {
-		http.Error(w, "ID mismatch", http.StatusBadRequest)
-		return
-	}
-
-	if err := s.checkGroupWritePermission(r, user, &group); err != nil {
-		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
-		return
-	}
-
-	// Verify that the submitter signed this group manifest
-	hash := group.Hash()
-	if !crypto.VerifySignature(user.SignKey, hash, group.Signature) {
-		http.Error(w, "invalid group signature for submitter", http.StatusUnauthorized)
-		return
-	}
-
-	s.ApplyRaftCommandRaw(w, r, CmdUpdateGroup, body, http.StatusOK)
-}
 
 func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedGroup *Group) error {
 	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
@@ -2124,67 +1893,20 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
 	return nil
 }
 
-func (s *Server) handleSetAttr(w http.ResponseWriter, r *http.Request) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
 
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 256*1024))
-	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
-		return
-	}
 
-	var req SetAttrRequest
-	if err := json.Unmarshal(body, &req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
 
-	if err := s.checkWritePermission(r, user, req.InodeID); err != nil {
-		http.Error(w, "forbidden: "+err.Error(), http.StatusForbidden)
-		return
-	}
-
-	s.ApplyRaftCommandRaw(w, r, CmdSetAttr, body, http.StatusOK)
-}
-
-func (s *Server) handleAddChild(w http.ResponseWriter, r *http.Request, id string) {
-	user, ok := r.Context().Value(userContextKey).(*User)
-	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-	if err := s.checkWritePermission(r, user, id); err != nil {
-		if err == ErrNotFound {
-			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
-			http.Error(w, err.Error(), http.StatusForbidden)
-		}
-		return
-	}
-	var update ChildUpdate
-	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
-		return
-	}
-	update.ParentID = id
-	body, _ := json.Marshal(update)
-	s.ApplyRaftCommandRaw(w, r, CmdAddChild, body, http.StatusOK)
-}
 
 func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		http.Error(w, "failed to read body", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "failed to read body", http.StatusBadRequest)
 		return
 	}
 
@@ -2192,28 +1914,62 @@ func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdTyp
 }
 
 func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
-	resp, err := s.ApplyRaftCommandInternal(cmdType, data)
+	sessionID := r.Header.Get("Session-Token")
+	resp, err := s.ApplyRaftCommandInternal(cmdType, data, sessionID)
 	if err != nil {
 		if w == nil {
 			return
 		}
 		if err.Error() == "not leader" {
-			http.Error(w, "not leader", http.StatusServiceUnavailable)
+			s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 			return
 		}
 		switch err {
-		case ErrConflict, ErrExists:
-			http.Error(w, err.Error(), http.StatusConflict)
+		case ErrConflict:
+			s.writeError(w, r, ErrCodeVersionConflict, err.Error(), http.StatusConflict)
+		case ErrExists:
+			s.writeError(w, r, ErrCodeExists, err.Error(), http.StatusConflict)
 		case ErrNotFound:
-			http.Error(w, err.Error(), http.StatusNotFound)
+			s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
 		default:
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}
 
 	if w != nil {
 		if resp != nil {
+			if s.fsm.containsError(resp) {
+				// Find the first error to determine status code
+				status := http.StatusInternalServerError
+				var firstErr error
+				if slice, ok := resp.([]interface{}); ok {
+					for _, item := range slice {
+						if e, ok := item.(error); ok {
+							firstErr = e
+							break
+						}
+					}
+				} else if e, ok := resp.(error); ok {
+					firstErr = e
+				}
+
+				switch firstErr {
+				case ErrConflict, ErrExists:
+					status = http.StatusConflict
+				case ErrNotFound:
+					status = http.StatusNotFound
+				}
+
+				resp = s.sanitizeResponse(resp)
+				dataJSON, _ := json.Marshal(resp)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(status)
+				w.Write(dataJSON)
+				return
+			}
+
+			resp = s.sanitizeResponse(resp)
 			dataJSON, _ := json.Marshal(resp)
 			w.Header().Set("Content-Type", "application/json")
 
@@ -2237,13 +1993,13 @@ func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmd
 	}
 }
 
-func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte) (interface{}, error) {
+func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sessionID string) (interface{}, error) {
 	if s.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("not leader")
 	}
 
 	respCh := make(chan interface{}, 1)
-	cmd := &LogCommand{Type: cmdType, Data: data}
+	cmd := &LogCommand{Type: cmdType, Data: data, SessionID: sessionID}
 
 	s.batchMu.Lock()
 	s.batchQueue = append(s.batchQueue, cmd)
@@ -2365,17 +2121,17 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request, id string) {
 	user, err := s.authenticate(r)
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
 	if err != nil {
-		http.Error(w, "group not found", http.StatusNotFound)
+		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
 		return
 	}
 	if !inGroup {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -2391,7 +2147,7 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
-		http.Error(w, "group not found", http.StatusNotFound)
+		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
 		return
 	}
 
@@ -2399,7 +2155,7 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 	entry, ok := group.Lockbox[user.ID]
 	if !ok {
 		// Should not happen if IsUserInGroup returned true, but for safety:
-		http.Error(w, "user not in group lockbox", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "user not in group lockbox", http.StatusInternalServerError)
 		return
 	}
 
@@ -2424,17 +2180,17 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, id string) {
 	user, err := s.authenticate(r)
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
 	if err != nil {
-		http.Error(w, "group not found", http.StatusNotFound)
+		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
 		return
 	}
 	if !inGroup {
-		http.Error(w, "forbidden", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -2450,7 +2206,7 @@ func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, i
 		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
-		http.Error(w, "group not found", http.StatusNotFound)
+		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
 		return
 	}
 
@@ -2458,7 +2214,7 @@ func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, i
 	entry, ok := group.Lockbox[user.ID+":sign"]
 	if !ok {
 		// Old groups might not have this, or user wasn't added with it
-		http.Error(w, "group signing key not available for user", http.StatusNotFound)
+		s.writeError(w, r, ErrCodeInternal, "group signing key not available for user", http.StatusNotFound)
 		return
 	}
 
@@ -2536,14 +2292,45 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 	case path == "quota/group" && r.Method == http.MethodPost:
 		s.handleSetGroupQuota(w, r)
 	default:
-		http.NotFound(w, r)
+		s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 	}
+}
+
+func (s *Server) writeError(w http.ResponseWriter, r *http.Request, code string, message string, status int) {
+	resp := APIErrorResponse{
+		Code:    code,
+		Message: message,
+	}
+	s.writeJSON(w, r, resp, status)
+}
+
+func (s *Server) sanitizeResponse(res interface{}) interface{} {
+	if err, ok := res.(error); ok {
+		code := ErrCodeInternal
+		switch err {
+		case ErrConflict:
+			code = ErrCodeVersionConflict
+		case ErrExists:
+			code = ErrCodeExists
+		case ErrNotFound:
+			code = ErrCodeNotFound
+		}
+		return APIErrorResponse{Code: code, Message: err.Error()}
+	}
+	if slice, ok := res.([]interface{}); ok {
+		sanitized := make([]interface{}, len(slice))
+		for i, item := range slice {
+			sanitized[i] = s.sanitizeResponse(item)
+		}
+		return sanitized
+	}
+	return res
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, successStatus int) {
 	b, err := json.Marshal(data)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -2580,7 +2367,7 @@ func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.writeJSON(w, r, users, http.StatusOK)
@@ -2598,7 +2385,7 @@ func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
 
 	groups, nextCursor, err := s.fsm.GetGroups(cursor, limit)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -2621,7 +2408,7 @@ func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClusterLeases(w http.ResponseWriter, r *http.Request) {
 	leases, err := s.fsm.GetLeases()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.writeJSON(w, r, leases, http.StatusOK)
@@ -2642,7 +2429,7 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		})
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	s.writeJSON(w, r, nodes, http.StatusOK)
@@ -2655,18 +2442,18 @@ func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
 		Reason string `json:"reason"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	if req.Reason == "" {
-		http.Error(w, "reason required for deanonymization lookup", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "reason required for deanonymization lookup", http.StatusBadRequest)
 		return
 	}
 
 	secret, err := s.fsm.GetClusterSecret()
 	if err != nil {
-		http.Error(w, "cluster secret unavailable", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "cluster secret unavailable", http.StatusInternalServerError)
 		return
 	}
 
@@ -2684,12 +2471,12 @@ func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	if err := s.removeNodeInternal(req.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	w.WriteHeader(http.StatusOK)
@@ -2697,7 +2484,7 @@ func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	if s.raft.State() != raft.Leader {
-		http.Error(w, "not leader", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -2705,21 +2492,21 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		Address string `json:"address"` // Node API address (e.g. http://node-2:8080)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
 	// 1. Discover node metadata via internal API with Mutual HMAC Handshake
 	nonce := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "internal error", http.StatusInternalServerError)
 		return
 	}
 
 	infoURL := strings.TrimSuffix(req.Address, "/") + "/v1/node/info"
 	discoveryReq, err := http.NewRequest("GET", infoURL, nil)
 	if err != nil {
-		http.Error(w, "invalid address", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "invalid address", http.StatusBadRequest)
 		return
 	}
 	discoveryReq.Header.Set(raftNonceHeader, hex.EncodeToString(nonce))
@@ -2727,25 +2514,25 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := s.discoveryHTTPClient.Do(discoveryReq)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("discovery failed: %v", err), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("discovery failed: %v", err), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		http.Error(w, "node rejected leader signature (secret mismatch?)", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeInternal, "node rejected leader signature (secret mismatch?)", http.StatusForbidden)
 		return
 	}
 
 	// Verify node response signature
 	nodeSig := resp.Header.Get(raftResponseHeader)
 	if !s.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
-		http.Error(w, "invalid node response signature (secret mismatch?)", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeInternal, "invalid node response signature (secret mismatch?)", http.StatusForbidden)
 		return
 	}
 
 	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
-		http.Error(w, "discovery requires mTLS connection", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "discovery requires mTLS connection", http.StatusInternalServerError)
 		return
 	}
 
@@ -2753,12 +2540,12 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	probedCert := resp.TLS.PeerCertificates[0]
 	probedEdKey, ok := probedCert.PublicKey.(ed25519.PublicKey)
 	if !ok {
-		http.Error(w, "probed peer key is not Ed25519", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "probed peer key is not Ed25519", http.StatusInternalServerError)
 		return
 	}
 
 	if resp.StatusCode != http.StatusOK {
-		http.Error(w, fmt.Sprintf("discovery failed: status %d", resp.StatusCode), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("discovery failed: status %d", resp.StatusCode), http.StatusInternalServerError)
 		return
 	}
 
@@ -2770,20 +2557,20 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		SignKey     []byte `json:"sign_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
-		http.Error(w, "invalid discovery response", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "invalid discovery response", http.StatusInternalServerError)
 		return
 	}
 
 	// Cryptographic TOFU Match: Handshake Key must match reported Key
 	if !bytes.Equal(probedEdKey, info.PublicKey) {
-		http.Error(w, "CRITICAL: TOFU key mismatch (man-in-the-middle detected?)", http.StatusForbidden)
+		s.writeError(w, r, ErrCodeInternal, "CRITICAL: TOFU key mismatch (man-in-the-middle detected?)", http.StatusForbidden)
 		return
 	}
 
 	// 2. Add to Raft
 	f := s.raft.AddVoter(raft.ServerID(info.ID), raft.ServerAddress(info.RaftAddress), 0, 0)
 	if err := f.Error(); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -2817,20 +2604,21 @@ func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {
 		UserID string `json:"user_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
-	s.ApplyRaftCommandRaw(w, r, CmdPromoteAdmin, []byte(req.UserID), http.StatusOK)
+	data, _ := json.Marshal(req.UserID)
+	s.ApplyRaftCommandRaw(w, r, CmdPromoteAdmin, data, http.StatusOK)
 }
 
 func (s *Server) handleSetUserQuota(w http.ResponseWriter, r *http.Request) {
 	var req SetUserQuotaRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "invalid request", http.StatusBadRequest)
 		return
 	}
 	if req.UserID == "" {
-		http.Error(w, "userID required", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "userID required", http.StatusBadRequest)
 		return
 	}
 	data, _ := json.Marshal(req) // Re-marshal to sanitize
@@ -2840,11 +2628,11 @@ func (s *Server) handleSetUserQuota(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSetGroupQuota(w http.ResponseWriter, r *http.Request) {
 	var req SetGroupQuotaRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "invalid request", http.StatusBadRequest)
 		return
 	}
 	if req.GroupID == "" {
-		http.Error(w, "groupID required", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "groupID required", http.StatusBadRequest)
 		return
 	}
 	data, _ := json.Marshal(req) // Re-marshal to sanitize
@@ -2864,7 +2652,7 @@ func (s *Server) handleGetWorldPublicKey(w http.ResponseWriter, r *http.Request)
 			world, err = s.fsm.GetWorldIdentity()
 		}
 		if err != nil {
-			http.Error(w, "world identity not available", http.StatusNotFound)
+			s.writeError(w, r, ErrCodeInternal, "world identity not available", http.StatusNotFound)
 			return
 		}
 	}
@@ -2875,27 +2663,27 @@ func (s *Server) handleGetWorldPublicKey(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request) {
 	user, err := s.authenticate(r)
 	if err != nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	world, err := s.fsm.GetWorldIdentity()
 	if err != nil {
-		http.Error(w, "world identity not initialized", http.StatusNotFound)
+		s.writeError(w, r, ErrCodeInternal, "world identity not initialized", http.StatusNotFound)
 		return
 	}
 
 	// Encapsulate World Private Key using user's Public EncKey
 	userEK, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
 	if err != nil {
-		http.Error(w, "invalid user encryption key", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "invalid user encryption key", http.StatusInternalServerError)
 		return
 	}
 
 	ss, kemCT := crypto.Encapsulate(userEK)
 	demCT, err := crypto.EncryptDEM(ss, world.Private)
 	if err != nil {
-		http.Error(w, "encryption failed", http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, "encryption failed", http.StatusInternalServerError)
 		return
 	}
 
@@ -3096,7 +2884,7 @@ func (s *Server) handleGetAuthConfig(w http.ResponseWriter, r *http.Request) {
 	s.oidcMu.RUnlock()
 
 	if conf == nil {
-		http.Error(w, "OIDC configuration not available", http.StatusServiceUnavailable)
+		s.writeError(w, r, ErrCodeInternal, "OIDC configuration not available", http.StatusServiceUnavailable)
 		return
 	}
 
@@ -3107,7 +2895,7 @@ func (s *Server) handleGetAuthConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.fsm.GetNodes()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	resp := map[string]interface{}{
@@ -3143,12 +2931,12 @@ func (s *Server) resolveURLs(manifest []ChunkEntry) {
 
 func (s *Server) handleGetClusterStats(w http.ResponseWriter, r *http.Request) {
 	if _, ok := r.Context().Value(userContextKey).(*User); !ok {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 	nodes, err := s.fsm.GetNodes()
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -3169,19 +2957,19 @@ func (s *Server) handleGetClusterStats(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	sessionToken := r.Header.Get("Session-Token")
 	if sessionToken == "" {
-		http.Error(w, "missing session token", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "missing session token", http.StatusUnauthorized)
 		return
 	}
 
 	var req LeaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -3199,19 +2987,19 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	sessionToken := r.Header.Get("Session-Token")
 	if sessionToken == "" {
-		http.Error(w, "missing session token", http.StatusUnauthorized)
+		s.writeError(w, r, ErrCodeUnauthorized, "missing session token", http.StatusUnauthorized)
 		return
 	}
 
 	var req LeaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
@@ -3225,7 +3013,7 @@ func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
 	if !s.checkRaftSecret(r) {
 		user, ok := r.Context().Value(userContextKey).(*User)
 		if !ok || user == nil || !s.fsm.IsAdmin(user.ID) {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 	}
@@ -3233,9 +3021,9 @@ func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
 	snap, err := s.fsm.GetLatestMetrics()
 	if err != nil {
 		if err == ErrNotFound {
-			http.Error(w, "no metrics available", http.StatusNotFound)
+			s.writeError(w, r, ErrCodeInternal, "no metrics available", http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		}
 		return
 	}

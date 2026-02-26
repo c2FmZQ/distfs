@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -43,10 +44,13 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode)}.Marshal(), 5*time.Second)
 
 	// 3. Mock Data Node for n1
+	var mu sync.Mutex
 	dataReceived := false
 	n1Mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == "POST" && r.URL.Path == "/v1/data/c1/replicate" {
+			mu.Lock()
 			dataReceived = true
+			mu.Unlock()
 			w.WriteHeader(http.StatusOK)
 		}
 	}))
@@ -65,7 +69,10 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond) // Wait for background repair
 
-	if !dataReceived {
+	mu.Lock()
+	received := dataReceived
+	mu.Unlock()
+	if !received {
 		t.Error("Replication request not received by source node")
 	}
 
@@ -135,17 +142,17 @@ func TestReplication_Scan_Types(t *testing.T) {
 	// 1. Directory (should be skipped)
 	d := Inode{ID: "000000000000000000000000000000d1", Type: DirType, OwnerID: "u1"}
 	db, _ := json.Marshal(d)
-	server.ApplyRaftCommandInternal(CmdCreateInode, db)
+	server.ApplyRaftCommandInternal(CmdCreateInode, db, "")
 
 	// 2. Symlink (should be skipped)
 	s := Inode{ID: "000000000000000000000000000000e1", Type: SymlinkType, OwnerID: "u1"}
 	sb, _ := json.Marshal(s)
-	server.ApplyRaftCommandInternal(CmdCreateInode, sb)
+	server.ApplyRaftCommandInternal(CmdCreateInode, sb, "")
 
 	// 3. Empty file (should be skipped)
 	f := Inode{ID: "000000000000000000000000000000ee", Type: FileType, OwnerID: "u1"}
 	fb, _ := json.Marshal(f)
-	server.ApplyRaftCommandInternal(CmdCreateInode, fb)
+	server.ApplyRaftCommandInternal(CmdCreateInode, fb, "")
 
 	server.replMonitor.Scan()
 }
@@ -185,7 +192,7 @@ func TestGC_DeleteFail(t *testing.T) {
 	// 1. Manually add a fake node that will fail
 	nodeInfo := Node{ID: "fail-node", Address: "http://invalid", Status: NodeStatusActive}
 	nb, _ := json.Marshal(nodeInfo)
-	server.ApplyRaftCommandInternal(CmdRegisterNode, nb)
+	server.ApplyRaftCommandInternal(CmdRegisterNode, nb, "")
 
 	// 2. Trigger processDeletion
 	server.gcWorker.processDeletion("chunk1", []string{"fail-node"})
