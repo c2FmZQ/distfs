@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Multi-client Concurrency Stress Test
 export DISTFS_PASSWORD=testpassword
 

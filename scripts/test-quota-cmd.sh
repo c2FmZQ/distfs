@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+set -e
 
 # Setup Admin
 echo "Global Setup..."

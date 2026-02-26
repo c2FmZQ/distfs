@@ -649,7 +649,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
-	if inode.Version != existing.Version {
+	if inode.Version != existing.Version+1 {
 		return ErrConflict
 	}
 
@@ -686,7 +686,6 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte) interface{}
 		}
 	}
 
-	inode.Version++
 	inode.Unlinked = existing.Unlinked
 	// Deep copy leases map to be safe
 	if existing.Leases != nil {
@@ -1005,7 +1004,7 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
-	if group.Version != existing.Version {
+	if group.Version != existing.Version+1 {
 		return ErrConflict
 	}
 
@@ -1017,7 +1016,6 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte) interface{}
 		}
 	}
 
-	group.Version++
 	encoded, err := json.Marshal(group)
 	if err != nil {
 		return err

@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Group Sharing & Collaboration Test
 set -e
 

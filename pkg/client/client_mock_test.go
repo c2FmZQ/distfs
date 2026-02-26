@@ -48,7 +48,7 @@ func TestClient_MockedErrors(t *testing.T) {
 		t.Error("Expected error from getInode")
 	}
 
-	_, err = c.updateInode(ctx, metadata.Inode{ID: "00000000000000000000000000000001"})
+	_, err = c.UpdateInode(ctx, "00000000000000000000000000000001", func(i *metadata.Inode) error { return nil })
 	if err == nil {
 		t.Error("Expected error from updateInode")
 	}
@@ -131,7 +131,9 @@ func TestClient_MockedConflict(t *testing.T) {
 		},
 	}
 
-	_, err := c.updateInode(ctx, metadata.Inode{ID: "00000000000000000000000000000001"})
+	_, err := c.UpdateInode(ctx, "00000000000000000000000000000001", func(i *metadata.Inode) error {
+		return nil
+	})
 	if err == nil {
 		t.Error("updateInode should have failed after retries")
 	}

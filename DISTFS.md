@@ -155,9 +155,17 @@ DistFS follows a strict subset of POSIX permissions designed for Zero-Knowledge 
 *   **Snapshot Strategy:** Use `MetadataSnapshot` (Streaming BoltDB).
     *   **Fast Startup:** `NoSnapshotRestoreOnStart = true`. MetaNodes rely on disk persistence and only replay trailing logs on startup to ensure fast recovery.
 
-### 4.5 Consistency
-*   All metadata changes (Create, Delete, Share, Append) go through the Raft Leader.
-*   Reads can be served by Followers with `Index` verification (Read-Index) for scalability.
+### 4.5 Consistency & Versioning
+Metadata operations in DistFS follow an **Optimistic Concurrency Control (OCC)** model with client-side authority over versioning.
+
+1.  **Strict Sequentiality:** The server enforces that every update to an Inode or Group must increment its `Version` field by exactly one.
+2.  **Client-Side Authority:** The client is responsible for:
+    *   Fetching the latest state from the metadata cluster.
+    *   Applying local mutations (e.g., adding a directory entry or updating a file manifest).
+    *   Incrementing the `Version` field.
+    *   Signing the resulting manifest (including the new version) with its Identity Key.
+3.  **Atomic Merge Pattern:** The client library provides atomic mutation callbacks. During a conflict (HTTP 409), the library automatically re-fetches the latest state and re-applies the user's mutation logic, ensuring that concurrent changes (like multiple users adding files to the same directory) are merged rather than overwritten.
+4.  **Server Validation:** The FSM validates that `submittedVersion == existingVersion + 1` and verifies the `UserSig` against the submitted payload before persisting the state exactly as received.
 
 ### 4.6 Group Management & Authorization
 To prevent unauthorized hijacking and support collaborative administration, group mutations (updates to membership, keys, or names) are subject to strict cryptographic authorization.
@@ -169,7 +177,7 @@ To prevent unauthorized hijacking and support collaborative administration, grou
 2.  **Member Registry (PII Isolation):** To comply with Zero-Knowledge principles while allowing administrative oversight, member emails are stored in the `EncryptedRegistry`. This blob is encrypted with a unique symmetric key shared only via the `RegistryLockbox`. Regular members who are not authorized managers cannot decrypt this registry and thus cannot see the emails of other members.
 3.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
 4.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
-5.  **Optimistic Concurrency:** Every group update must include the expected current `Version`. The server rejects updates where the version has changed since the client last fetched the metadata.
+5.  **Optimistic Concurrency:** Group updates follow the centralized consistency model described in Section 4.5.
 
 ### 4.7 Group Discovery
 To support collaboration without a central directory, the metadata layer provides authenticated users with a way to discover groups they are involved in.

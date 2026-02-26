@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 # Independent runner for FUSE POSIX Load Test
 set -e
 

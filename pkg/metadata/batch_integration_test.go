@@ -106,6 +106,10 @@ func TestSessionKeyMemoization(t *testing.T) {
 		t.Fatalf("Login failed: %v", err)
 	}
 
+	if err := c.EnsureRoot(t.Context()); err != nil {
+		t.Fatalf("EnsureRoot failed: %v", err)
+	}
+
 	if err := c.Mkdir(t.Context(), "/m1"); err != nil {
 		t.Fatalf("First Mkdir failed: %v", err)
 	}

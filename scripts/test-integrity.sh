@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # E2E Data Integrity & Repair Test
 export DISTFS_PASSWORD=testpassword
 

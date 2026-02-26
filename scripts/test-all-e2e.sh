@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Unified E2E and Benchmark Runner
 REPORT_FILE="/tmp/distfs-e2e-report.txt"
 echo "--- DISTFS E2E REPORT ---" > $REPORT_FILE

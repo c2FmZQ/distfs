@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # E2E Test for Enhanced LS Command
 set -e
 

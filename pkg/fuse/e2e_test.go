@@ -166,12 +166,14 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 		return c
 	}
 
-	// 3. Setup Client and Mount Point
+	// 3. Initialize Root once
+	if err := newClient().EnsureRoot(t.Context()); err != nil {
+		t.Fatalf("Initial EnsureRoot failed: %v", err)
+	}
+
+	// 4. Setup Client and Mount Point
 	mount := func(mountpoint string) (func(), *client.Client) {
 		c := newClient()
-		if err := c.EnsureRoot(t.Context()); err != nil {
-			t.Fatalf("EnsureRoot failed: %v", err)
-		}
 
 		//conn, err := fuse.Mount(mountpoint, fuse.AsyncRead())
 		conn, err := fuse.Mount(mountpoint)

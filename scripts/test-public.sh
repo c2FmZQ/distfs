@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # World-Readable (Public) Sharing Test
 set -e
 

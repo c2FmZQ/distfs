@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # set -e disabled for robustness against transient failures
 export DISTFS_PASSWORD=testpassword
 

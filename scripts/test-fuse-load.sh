@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # FUSE POSIX Load Test
 set -e
 

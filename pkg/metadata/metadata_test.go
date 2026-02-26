@@ -734,7 +734,7 @@ func TestAccounting(t *testing.T) {
 
 	// 3. Update File (Resize)
 	inode.Size = 250
-	inode.Version = 1 // Must match existing version
+	inode.Version = 2 // Client increments
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
 	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
@@ -820,21 +820,22 @@ func TestQuotaEnforcement(t *testing.T) {
 
 	// 4. Update File 1 (Resize to 400 - OK)
 	inode.Size = 400
-	inode.Version = 1
+	inode.Version = 2
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
 	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
 	cmdBytes, _ = json.Marshal(cmd)
-	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
+	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	if err := f.Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := node.Raft.Apply(cmdBytes, 5*time.Second).Response().(error); ok && err != nil {
+	if err, ok := f.Response().(error); ok && err != nil {
 		t.Fatal(err)
 	}
 
 	// 5. Update File 1 (Resize to 600 - Fail: Storage Quota)
 	inode.Size = 600
-	inode.Version = 2
+	inode.Version = 3
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
 	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}

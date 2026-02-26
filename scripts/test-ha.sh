@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # High-Availability Failure Injection Test
 export DISTFS_PASSWORD=testpassword
 

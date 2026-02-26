@@ -1560,6 +1560,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	var data []byte
+	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
 		if err != nil {
@@ -1569,7 +1570,6 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 			return os.ErrNotExist
 		}
 
-		var inode Inode
 		if err := json.Unmarshal(plain, &inode); err != nil {
 			return err
 		}
@@ -1577,14 +1577,18 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 			return err
 		}
 
-		s.resolveURLs(inode.ChunkManifest)
-
-		data, err = json.Marshal(inode)
-		return err
+		return nil
 	})
 
 	if err != nil {
 		http.NotFound(w, r)
+		return
+	}
+
+	s.resolveURLs(inode.ChunkManifest)
+	data, err = json.Marshal(inode)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
@@ -1648,7 +1652,6 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 			var inode Inode
 			if err := json.Unmarshal(plain, &inode); err == nil {
 				if err := s.fsm.LoadInodeWithPages(tx, &inode); err == nil {
-					s.resolveURLs(inode.ChunkManifest)
 					result = append(result, &inode)
 				}
 			}
@@ -1659,6 +1662,10 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	for _, inode := range result {
+		s.resolveURLs(inode.ChunkManifest)
 	}
 
 	data, _ := json.Marshal(result)
@@ -1708,9 +1715,7 @@ func (s *Server) handleCreateInode(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify that the submitter signed this manifest
-	inode.Version++
 	hash := inode.ManifestHash()
-	inode.Version--
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
 		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
 		return
@@ -1747,9 +1752,7 @@ func (s *Server) handleUpdateInode(w http.ResponseWriter, r *http.Request, id st
 	}
 
 	// Verify that the submitter signed this manifest
-	inode.Version++
 	hash := inode.ManifestHash()
-	inode.Version--
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
 		http.Error(w, "invalid manifest signature for submitter", http.StatusUnauthorized)
 		return
@@ -1935,7 +1938,6 @@ func (s *Server) handleCreateGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// 3. Verify Initial Signature
-	// Note: Version should be 1 for a new group
 	hash := group.Hash()
 	if !crypto.VerifySignature(user.SignKey, hash, group.Signature) {
 		http.Error(w, "invalid signature", http.StatusUnauthorized)
@@ -2076,6 +2078,13 @@ func (s *Server) handleUpdateGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Verify that the submitter signed this group manifest
+	hash := group.Hash()
+	if !crypto.VerifySignature(user.SignKey, hash, group.Signature) {
+		http.Error(w, "invalid group signature for submitter", http.StatusUnauthorized)
+		return
+	}
+
 	s.ApplyRaftCommandRaw(w, r, CmdUpdateGroup, body, http.StatusOK)
 }
 
@@ -2110,21 +2119,6 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
 	// 2.1 Enforce IsSystem modification only for admins
 	if updatedGroup.IsSystem != existing.IsSystem && !s.fsm.IsAdmin(user.ID) {
 		return fmt.Errorf("only admins can modify system status")
-	}
-
-	// 3. Verify Signature
-	if len(updatedGroup.Signature) == 0 {
-		return fmt.Errorf("missing signature")
-	}
-	if updatedGroup.SignerID != user.ID {
-		return fmt.Errorf("signer ID mismatch")
-	}
-
-	updatedGroup.Version++ // Sign the version that will be stored on the server
-	hash := updatedGroup.Hash()
-	updatedGroup.Version-- // Restore for the server's conflict check
-	if !crypto.VerifySignature(user.SignKey, hash, updatedGroup.Signature) {
-		return fmt.Errorf("invalid signature")
 	}
 
 	return nil

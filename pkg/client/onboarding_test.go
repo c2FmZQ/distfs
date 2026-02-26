@@ -65,12 +65,16 @@ func TestPerformUnifiedOnboarding_NewAccount(t *testing.T) {
 		case "/v1/login":
 			json.NewEncoder(w).Encode(metadata.SessionResponse{Token: "mock-session"})
 		case "/v1/meta/inode/" + metadata.RootID:
-			inode := metadata.Inode{
-				ID:      metadata.RootID,
-				OwnerID: "user-123",
-				Version: 1,
+			if r.Method == http.MethodGet {
+				w.WriteHeader(http.StatusNotFound)
+			} else {
+				inode := metadata.Inode{
+					ID:      metadata.RootID,
+					OwnerID: "user-123",
+					Version: 1,
+				}
+				json.NewEncoder(w).Encode(inode)
 			}
-			json.NewEncoder(w).Encode(inode)
 		case "/v1/meta/inode":
 			if r.Method == http.MethodPost {
 				w.WriteHeader(http.StatusCreated)

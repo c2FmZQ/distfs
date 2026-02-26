@@ -121,7 +121,8 @@ func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, 
 type pathCacheEntry struct {
 	inodeID string
 	key     []byte
-	linkTag string // "ParentID:NameHMAC"
+	linkTag string          // "ParentID:NameHMAC"
+	inode   *metadata.Inode // Optional: Cached full inode
 }
 
 type fileMetadata struct {
@@ -205,6 +206,12 @@ func (c *Client) ParseContactString(s string) (*ContactInfo, error) {
 
 	return &info, nil
 }
+
+// InodeUpdateFunc is a callback used to modify an inode during an atomic update.
+type InodeUpdateFunc func(*metadata.Inode) error
+
+// GroupUpdateFunc is a callback used to modify a group during an atomic update.
+type GroupUpdateFunc func(*metadata.Group) error
 
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
@@ -433,6 +440,22 @@ func (c *Client) invalidatePathCache(path string) {
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
 	delete(c.pathCache, path)
+}
+
+func (c *Client) invalidatePathCacheByID(id string) {
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	for path, entry := range c.pathCache {
+		if entry.inodeID == id {
+			delete(c.pathCache, path)
+		}
+	}
+}
+
+func (c *Client) clearPathCache() {
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	clear(c.pathCache)
 }
 
 func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) error {
@@ -1023,7 +1046,6 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	}
 
 	inode.Mode = metadata.SanitizeMode(inode.Mode, inode.Type)
-	inode.Version++ // Sign the version that will be stored on the server
 	hash := inode.ManifestHash()
 	inode.UserSig = c.signKey.Sign(hash)
 
@@ -1034,7 +1056,6 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 			inode.GroupSig = gsk.Sign(hash)
 		}
 	}
-	inode.Version-- // Restore for the server's conflict check
 	return nil
 }
 
@@ -1049,6 +1070,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	if inode.NLink == 0 {
 		inode.NLink = 1
 	}
+	inode.Version = 1
 
 	// Phase 31: Manifest Signing
 	if err := c.signInode(ctx, &inode); err != nil {
@@ -1157,38 +1179,35 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	return &created, nil
 }
 
-func (c *Client) updateInode(ctx context.Context, inode metadata.Inode) (*metadata.Inode, error) {
-	return c.updateInodeInternal(ctx, inode, true)
+// UpdateInode performs an atomic read-modify-write operation on an inode.
+func (c *Client) UpdateInode(ctx context.Context, id string, fn InodeUpdateFunc) (*metadata.Inode, error) {
+	return c.updateInodeInternal(ctx, id, fn, true)
 }
 
-func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, verify bool) (*metadata.Inode, error) {
-	unlock := c.lockMutation(inode.ID)
+func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpdateFunc, verify bool) (*metadata.Inode, error) {
+	unlock := c.lockMutation(id)
 	defer unlock()
 
 	var updated metadata.Inode
 	maxRetries := 50
 
 	for i := 0; i < maxRetries; i++ {
-		// Phase 31: Manifest Signing
-		// We must re-fetch and re-sign if we are retrying a conflict
-		if i > 0 {
-			latest, err := c.getInodeInternal(ctx, inode.ID, verify)
-			if err != nil {
-				return nil, err
-			}
-			// Transfer updated fields to latest
-			latest.Size = inode.Size
-			latest.Mode = inode.Mode
-			latest.GroupID = inode.GroupID
-			latest.ChunkManifest = inode.ChunkManifest
-			latest.ChunkPages = inode.ChunkPages
-			latest.Children = inode.Children
-			latest.Lockbox = inode.Lockbox
-			latest.SetAuthorizedSigners(inode.GetAuthorizedSigners())
-			inode = *latest
+		// 1. Fetch latest state
+		inode, err := c.getInodeInternal(ctx, id, verify)
+		if err != nil {
+			return nil, err
 		}
 
-		if err := c.signInode(ctx, &inode); err != nil {
+		// 2. Apply mutation
+		if err := fn(inode); err != nil {
+			return nil, err
+		}
+
+		// 3. Local Increment: The client is the authority for the next version.
+		inode.Version++
+
+		// 4. Phase 31: Manifest Signing (signs the new version)
+		if err := c.signInode(ctx, inode); err != nil {
 			return nil, err
 		}
 		data, err := json.Marshal(inode)
@@ -1202,7 +1221,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 			}
 			defer c.releaseControl()
 
-			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+inode.ID, nil)
+			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/meta/inode/"+id, nil)
 			if err != nil {
 				return err
 			}
@@ -1257,6 +1276,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, inode metadata.Inode, 
 		})
 
 		if err == nil {
+			c.invalidatePathCacheByID(id)
 			return &updated, nil
 		}
 		if err != metadata.ErrConflict {
@@ -1302,10 +1322,16 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) err
 		}
 		defer body.Close()
 
+		if resp.StatusCode == http.StatusConflict {
+			return metadata.ErrConflict
+		}
+
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(body)
 			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
 		}
+
+		c.clearPathCache()
 		return nil
 	})
 }
@@ -1322,6 +1348,7 @@ func (c *Client) PrepareCreate(ctx context.Context, inode metadata.Inode) (metad
 }
 
 func (c *Client) PrepareUpdate(ctx context.Context, inode metadata.Inode) (metadata.LogCommand, error) {
+	inode.Version++ // Increment before signing
 	if err := c.signInode(ctx, &inode); err != nil {
 		return metadata.LogCommand{}, err
 	}
@@ -1550,6 +1577,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 			Lockbox:       lb,
 			OwnerID:       c.userID,
 			GroupID:       groupID,
+			Version:       1,
 		}
 		if name != "" {
 			inode.SetName(name)
@@ -1570,21 +1598,17 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		return err
 	}
 
-	// 1. Inline Path
+	// 1. Handle Content
+	var inlineData []byte
+	var chunkEntries []metadata.ChunkEntry
+
 	if iType == metadata.FileType && size <= metadata.InlineLimit {
-		data, err := io.ReadAll(r)
+		inlineData, err = io.ReadAll(r)
 		if err != nil {
 			return err
 		}
-		// Set transient field, signInode will pack it into ClientBlob
-		inode.SetInlineData(data)
-		inode.ChunkManifest = nil
-		inode.ChunkPages = nil
-		inode.Size = uint64(len(data))
-	} else {
+	} else if iType == metadata.FileType {
 		// 2. Chunk Path
-		inode.SetInlineData(nil)
-		var chunkEntries []metadata.ChunkEntry
 		buf := make([]byte, crypto.ChunkSize)
 		var chunkIndex uint64
 
@@ -1623,19 +1647,25 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 				return err
 			}
 		}
-		inode.ChunkManifest = chunkEntries
-		inode.Size = uint64(size)
 	}
 
-	// Final update using updateInode (uses version check)
-	_, err = c.updateInode(ctx, inode)
+	// 3. Atomic Inode Update
+	updated, err := c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+		i.SetInlineData(inlineData)
+		i.ChunkManifest = chunkEntries
+		i.Size = uint64(size)
+		if size == 0 {
+			i.Size = uint64(len(inlineData))
+		}
+		return nil
+	})
 	if err == nil {
 		c.keyMu.Lock()
 		c.keyCache[id] = fileMetadata{
 			key:     fileKey,
 			groupID: groupID,
 			linkTag: parentID + ":" + nameHMAC,
-			inlined: inode.GetInlineData() != nil,
+			inlined: updated.GetInlineData() != nil,
 		}
 		c.keyMu.Unlock()
 	}
@@ -2139,7 +2169,9 @@ func (c *Client) OpenBlobWrite(ctx context.Context, path string) (io.WriteCloser
 		// Links will be updated during commit
 		Links:   map[string]bool{parentID + ":" + nameHMAC: true},
 		Lockbox: c.createLockbox(ctx, fileKey, 0600, groupID),
+		Version: 1,
 	}
+	inode.SetName(fileName)
 	inode.SetFileKey(fileKey)
 
 	lctx, cancel := context.WithCancel(context.Background())
@@ -2326,17 +2358,21 @@ func (w *FileWriter) Close() error {
 				return err
 			}
 			// 2. Link to Parent
-			parent, gerr := w.client.getInode(w.ctx, w.parentID)
-			if gerr != nil {
-				return fmt.Errorf("failed to get parent for link: %w", gerr)
-			}
-			if parent.Children == nil {
-				parent.Children = make(map[string]string)
-			}
-			parent.Children[w.nameHMAC] = w.inode.ID
-			_, err = w.client.updateInode(w.ctx, *parent)
+			_, err = w.client.UpdateInode(w.ctx, w.parentID, func(p *metadata.Inode) error {
+				if p.Children == nil {
+					p.Children = make(map[string]string)
+				}
+				// MERGE: Only add our entry
+				p.Children[w.nameHMAC] = w.inode.ID
+				return nil
+			})
 		} else {
-			_, err = w.client.updateInode(w.ctx, w.inode)
+			_, err = w.client.UpdateInode(w.ctx, w.inode.ID, func(i *metadata.Inode) error {
+				i.ChunkManifest = w.inode.ChunkManifest
+				i.Size = w.inode.Size
+				i.SetInlineData(nil)
+				return nil
+			})
 		}
 	}
 
@@ -2483,14 +2519,12 @@ func (c *Client) UploadChunkData(ctx context.Context, id string, key []byte, chu
 }
 
 func (c *Client) CommitInodeManifest(ctx context.Context, id string, manifest []metadata.ChunkEntry, size uint64) (*metadata.Inode, error) {
-	inode, err := c.getInode(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	inode.ChunkManifest = manifest
-	inode.Size = size
-	inode.SetInlineData(nil) // Ensure we are not inline if we have chunks
-	return c.updateInode(ctx, *inode)
+	return c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+		i.ChunkManifest = manifest
+		i.Size = size
+		i.SetInlineData(nil) // Ensure we are not inline if we have chunks
+		return nil
+	})
 }
 
 func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) (*metadata.Inode, error) {
@@ -2511,11 +2545,13 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 		if _, err := r.ReadAt(buf, 0); err != nil && err != io.EOF {
 			return nil, err
 		}
-		inode.SetInlineData(buf)
-		inode.ChunkManifest = nil
-		inode.ChunkPages = nil
-		inode.Size = uint64(size)
-		return c.updateInode(ctx, *inode)
+		return c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+			i.SetInlineData(buf)
+			i.ChunkManifest = nil
+			i.ChunkPages = nil
+			i.Size = uint64(size)
+			return nil
+		})
 	}
 
 	// 3. Handle Chunked File (Differential Update)
@@ -2607,9 +2643,12 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 		}
 	}
 
-	inode.ChunkManifest = newManifest
-	inode.Size = uint64(size)
-	return c.updateInode(ctx, *inode)
+	return c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+		i.ChunkManifest = newManifest
+		i.Size = uint64(size)
+		i.SetInlineData(nil)
+		return nil
+	})
 }
 
 func (c *Client) ReadDataFile(ctx context.Context, name string, data any) error {
@@ -3724,7 +3763,7 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 		}
 	}
 
-	_, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
+	_, err := c.UpdateGroup(ctx, groupID, func(group *metadata.Group) error {
 		// 1. Update Group Private Keys (Lockbox)
 		gk, err := c.GetGroupPrivateKey(ctx, groupID)
 		if err != nil {
@@ -3784,7 +3823,7 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 
 // RemoveUserFromGroup removes a member from an existing group.
 func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error {
-	_, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
+	_, err := c.UpdateGroup(ctx, groupID, func(group *metadata.Group) error {
 		// 1. Remove from Members map
 		if group.Members != nil {
 			delete(group.Members, userID)
@@ -3837,54 +3876,54 @@ func (c *Client) SetAttr(ctx context.Context, path string, attr metadata.SetAttr
 // SetAttrByID updates the attributes of an inode by ID.
 // SetAttrByID updates the attributes of an inode by ID.
 func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
-	// 1. Update local fields
-	if attr.Mode != nil {
-		inode.Mode = *attr.Mode
-	}
-	if attr.GroupID != nil {
-		inode.GroupID = *attr.GroupID
-	}
-	if attr.Size != nil {
-		inode.Size = *attr.Size
-	}
-	if attr.MTime != nil {
-		inode.SetMTime(*attr.MTime)
-	}
-
-	// 2. Handle Lockbox updates (World & Group)
-	worldRead := (inode.Mode & 0004) != 0
-	groupRW := (inode.Mode & 0060) != 0
-
-	// 2.1 World Access
-	_, worldInLockbox := inode.Lockbox[metadata.WorldID]
-	if worldRead && !worldInLockbox {
-		wpk, err := c.GetWorldPublicKey(ctx)
-
-		if err == nil {
-			inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
+	updated, err := c.UpdateInode(ctx, inode.ID, func(i *metadata.Inode) error {
+		// 1. Update local fields
+		if attr.Mode != nil {
+			i.Mode = *attr.Mode
 		}
-	} else if !worldRead && worldInLockbox {
-		delete(inode.Lockbox, metadata.WorldID)
-	}
+		if attr.GroupID != nil {
+			i.GroupID = *attr.GroupID
+		}
+		if attr.Size != nil {
+			i.Size = *attr.Size
+		}
+		if attr.MTime != nil {
+			i.SetMTime(*attr.MTime)
+		}
 
-	// 2.2 Group Access
-	if inode.GroupID != "" {
-		_, groupInLockbox := inode.Lockbox[inode.GroupID]
-		if groupRW && !groupInLockbox {
-			group, err := c.GetGroup(ctx, inode.GroupID)
+		// 2. Handle Lockbox updates (World & Group)
+		worldRead := (i.Mode & 0004) != 0
+		groupRW := (i.Mode & 0060) != 0
+
+		// 2.1 World Access
+		_, worldInLockbox := i.Lockbox[metadata.WorldID]
+		if worldRead && !worldInLockbox {
+			wpk, err := c.GetWorldPublicKey(ctx)
 			if err == nil {
-				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				if err == nil {
-					inode.Lockbox.AddRecipient(inode.GroupID, gpk, key)
-				}
+				i.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
 			}
-		} else if !groupRW && groupInLockbox {
-			delete(inode.Lockbox, inode.GroupID)
+		} else if !worldRead && worldInLockbox {
+			delete(i.Lockbox, metadata.WorldID)
 		}
-	}
 
-	// 3. Final Metadata Update (Signs everything)
-	updated, err := c.updateInode(ctx, *inode)
+		// 2.2 Group Access
+		if i.GroupID != "" {
+			_, groupInLockbox := i.Lockbox[i.GroupID]
+			if groupRW && !groupInLockbox {
+				group, err := c.GetGroup(ctx, i.GroupID)
+				if err == nil {
+					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+					if err == nil {
+						i.Lockbox.AddRecipient(i.GroupID, gpk, key)
+					}
+				}
+			} else if !groupRW && groupInLockbox {
+				delete(i.Lockbox, i.GroupID)
+			}
+		}
+		return nil
+	})
+
 	if err == nil {
 		*inode = *updated
 	}
@@ -4037,7 +4076,7 @@ func (c *Client) isRetryable(err error) bool {
 
 func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 	backoff := 50 * time.Millisecond
-	maxBackoff := 5 * time.Second
+	maxBackoff := 1 * time.Second
 
 	for i := 0; i < 20; i++ {
 		err := op()
@@ -4604,93 +4643,93 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 }
 
 func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
+	// Try to unlock so we can re-key for the new owner/group
 	inode, err := c.getInodeInternal(ctx, inodeID, false)
 	if err != nil {
 		return err
 	}
-
-	// Try to unlock so we can re-key for the new owner/group
 	key, unlockErr := c.UnlockInode(ctx, inode)
 
-	if req.OwnerID != nil {
-		inode.OwnerID = *req.OwnerID
-		// Reset authorized signers to just the new owner to ensure clean hand-off
-		inode.SetAuthorizedSigners([]string{inode.OwnerID})
+	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
+		if req.OwnerID != nil {
+			i.OwnerID = *req.OwnerID
+			// Reset authorized signers to just the new owner to ensure clean hand-off
+			i.SetAuthorizedSigners([]string{i.OwnerID})
 
-		// If we have the key, add the new owner to the lockbox
-		if unlockErr == nil {
-			newUser, err := c.GetUser(ctx, inode.OwnerID)
-			if err == nil {
-				pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
+			// If we have the key, add the new owner to the lockbox
+			if unlockErr == nil {
+				newUser, err := c.GetUser(ctx, i.OwnerID)
 				if err == nil {
-					inode.Lockbox.AddRecipient(inode.OwnerID, pubKey, key)
+					pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
+					if err == nil {
+						i.Lockbox.AddRecipient(i.OwnerID, pubKey, key)
+					}
 				}
 			}
 		}
-	}
-	if req.GroupID != nil {
-		inode.GroupID = *req.GroupID
-		// If we have the key, add the new group to the lockbox
-		if unlockErr == nil && inode.GroupID != "" {
-			group, err := c.GetGroup(ctx, inode.GroupID)
-			if err == nil {
-				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+		if req.GroupID != nil {
+			i.GroupID = *req.GroupID
+			// If we have the key, add the new group to the lockbox
+			if unlockErr == nil && i.GroupID != "" {
+				group, err := c.GetGroup(ctx, i.GroupID)
 				if err == nil {
-					inode.Lockbox.AddRecipient(inode.GroupID, gpk, key)
+					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+					if err == nil {
+						i.Lockbox.AddRecipient(i.GroupID, gpk, key)
+					}
 				}
 			}
 		}
-	}
-
-	_, err = c.updateInodeInternal(ctx, *inode, false)
+		return nil
+	})
 	return err
 }
 
 func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) error {
+	// 1. Try to unlock so we can re-key for group/world if bits changed
 	inode, err := c.getInodeInternal(ctx, inodeID, false)
 	if err != nil {
 		return err
 	}
-
-	// 1. Try to unlock so we can re-key for group/world if bits changed
 	key, unlockErr := c.UnlockInode(ctx, inode)
 
-	inode.Mode = mode
+	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
+		i.Mode = mode
 
-	// 2. Handle Lockbox updates (World & Group)
-	if unlockErr == nil {
-		worldRead := (inode.Mode & 0004) != 0
-		groupRW := (inode.Mode & 0060) != 0
+		// 2. Handle Lockbox updates (World & Group)
+		if unlockErr == nil {
+			worldRead := (i.Mode & 0004) != 0
+			groupRW := (i.Mode & 0060) != 0
 
-		// 2.1 World Access
-		_, worldInLockbox := inode.Lockbox[metadata.WorldID]
-		if worldRead && !worldInLockbox {
-			wpk, err := c.GetWorldPublicKey(ctx)
-			if err == nil {
-				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
-			}
-		} else if !worldRead && worldInLockbox {
-			delete(inode.Lockbox, metadata.WorldID)
-		}
-
-		// 2.2 Group Access
-		if inode.GroupID != "" {
-			_, groupInLockbox := inode.Lockbox[inode.GroupID]
-			if groupRW && !groupInLockbox {
-				group, err := c.GetGroup(ctx, inode.GroupID)
+			// 2.1 World Access
+			_, worldInLockbox := i.Lockbox[metadata.WorldID]
+			if worldRead && !worldInLockbox {
+				wpk, err := c.GetWorldPublicKey(ctx)
 				if err == nil {
-					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-					if err == nil {
-						inode.Lockbox.AddRecipient(inode.GroupID, gpk, key)
-					}
+					i.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
 				}
-			} else if !groupRW && groupInLockbox {
-				delete(inode.Lockbox, inode.GroupID)
+			} else if !worldRead && worldInLockbox {
+				delete(i.Lockbox, metadata.WorldID)
+			}
+
+			// 2.2 Group Access
+			if i.GroupID != "" {
+				_, groupInLockbox := i.Lockbox[i.GroupID]
+				if groupRW && !groupInLockbox {
+					group, err := c.GetGroup(ctx, i.GroupID)
+					if err == nil {
+						gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+						if err == nil {
+							i.Lockbox.AddRecipient(i.GroupID, gpk, key)
+						}
+					}
+				} else if !groupRW && groupInLockbox {
+					delete(i.Lockbox, i.GroupID)
+				}
 			}
 		}
-	}
-
-	_, err = c.updateInodeInternal(ctx, *inode, false)
+		return nil
+	})
 	return err
 }
 
@@ -4718,92 +4757,93 @@ func (c *Client) signGroup(ctx context.Context, group *metadata.Group, isUpdate 
 	}
 
 	group.SignerID = c.userID
-	if isUpdate {
-		group.Version++
-	}
 	hash := group.Hash()
 	group.Signature = c.signKey.Sign(hash)
-	if isUpdate {
-		group.Version--
-	}
 	return nil
 }
 
-func (c *Client) updateGroupInternal(ctx context.Context, group *metadata.Group) (*metadata.Group, error) {
-	var updated metadata.Group
-	if err := c.signGroup(ctx, group, true); err != nil {
-		return nil, err
-	}
-	data, err := json.Marshal(group)
-	if err != nil {
-		return nil, err
-	}
-
-	err = c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+group.ID, bytes.NewReader(data))
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode == http.StatusConflict {
-			return metadata.ErrConflict
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			b, _ := io.ReadAll(body)
-			return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
-		}
-
-		return json.NewDecoder(body).Decode(&updated)
-	})
-
-	if err == nil {
-		return &updated, nil
-	}
-	return nil, err
-}
-
-// updateGroup handles optimistic concurrency and client-side serialization for group updates.
-func (c *Client) updateGroup(ctx context.Context, id string, modifier func(*metadata.Group) error) (*metadata.Group, error) {
+// UpdateGroup performs an atomic read-modify-write operation on a group.
+func (c *Client) UpdateGroup(ctx context.Context, id string, fn GroupUpdateFunc) (*metadata.Group, error) {
 	unlock := c.lockMutation(id)
 	defer unlock()
 
-	var updated *metadata.Group
-	err := c.withConflictRetry(ctx, func() error {
-		latest, err := c.getGroupInternal(ctx, id, true)
+	var updated metadata.Group
+	maxRetries := 50
+
+	for i := 0; i < maxRetries; i++ {
+		// 1. Fetch latest state
+		group, err := c.getGroupInternal(ctx, id, true)
 		if err != nil {
-			return err
+			return nil, err
 		}
 
-		if err := modifier(latest); err != nil {
-			return err
+		// 2. Apply mutation
+		if err := fn(group); err != nil {
+			return nil, err
 		}
 
-		updated, err = c.updateGroupInternal(ctx, latest)
-		return err
-	})
-	return updated, err
+		// 3. Increment Version
+		group.Version++
+
+		// 4. Sign
+		if err := c.signGroup(ctx, group, true); err != nil {
+			return nil, err
+		}
+		data, err := json.Marshal(group)
+		if err != nil {
+			return nil, err
+		}
+
+		err = c.withRetry(ctx, func() error {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
+
+			req, err := http.NewRequestWithContext(ctx, "PUT", c.serverURL+"/v1/group/"+id, bytes.NewReader(data))
+			if err != nil {
+				return err
+			}
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
+			if err := c.sealBody(ctx, req, data); err != nil {
+				return err
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(ctx, resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if resp.StatusCode == http.StatusConflict {
+				return metadata.ErrConflict
+			}
+
+			if resp.StatusCode != http.StatusOK {
+				b, _ := io.ReadAll(body)
+				return &APIError{StatusCode: resp.StatusCode, Message: string(b)}
+			}
+
+			return json.NewDecoder(body).Decode(&updated)
+		})
+
+		if err == nil {
+			return &updated, nil
+		}
+		if err != metadata.ErrConflict {
+			return nil, err
+		}
+		// On conflict, wait a bit and retry
+		time.Sleep(time.Duration(i*50) * time.Millisecond)
+	}
+
+	return nil, metadata.ErrConflict
 }
 
 // GetGroupMembers retrieves the list of members for a group.
@@ -4843,7 +4883,7 @@ func (c *Client) GroupChown(ctx context.Context, groupID, newOwnerID string) err
 		}
 	}
 
-	_, err = c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
+	_, err = c.UpdateGroup(ctx, groupID, func(group *metadata.Group) error {
 		// 1. Update RegistryLockbox (if we are a manager)
 		rk, err := c.getGroupRegistryKey(ctx, group)
 		if err == nil && newOwnerEK != nil {

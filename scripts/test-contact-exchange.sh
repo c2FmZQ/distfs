@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Contact Exchange E2E Test
 set -e
 

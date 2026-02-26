@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Group Quota E2E Test
 set -e
 

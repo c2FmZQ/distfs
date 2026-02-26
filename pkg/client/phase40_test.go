@@ -18,7 +18,6 @@ func TestClient_ReadDataFiles_Consistency(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// 1. Prepare two files that must be read consistently
 	type Config struct {
@@ -85,7 +84,6 @@ func TestClient_ReadDataFiles_BlocksExclusive(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	path := "/locked.json"
 	c.SaveDataFile(ctx, path, map[string]string{"data": "initial"})

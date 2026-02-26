@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+set -e
 
 # DistFS KeySync E2E Test (Docker Compose version)
 # This script verifies that a user can push their keys from one config

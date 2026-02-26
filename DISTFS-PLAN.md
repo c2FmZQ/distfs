@@ -520,7 +520,8 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Add `AuthorizedSigners` list to Inodes (Owner by default).
 *   **Step 31.3: Client-side Dual Signing**
     *   **Action:** Implement `ChunkManifest` hashing.
-    *   **Action:** Update `UpdateInode` to sign the hash with the User's Identity Key.
+    *   **Action:** [Done] Implement `Client.UpdateInode` and `Client.UpdateGroup` using the atomic mutation callback pattern.
+    *   **Action:** [Done] Migrate `AddEntry`, `RemoveEntry`, and `Link` to use client-side signed versioning with server-side sequence validation.
     *   **Action:** If in a group context, also sign with the Group Signing Key.
 *   **Step 31.4: Client-side Verification**
     *   **Action:** Update `UnlockInode` or `Open` to verify both signatures against the manifest.

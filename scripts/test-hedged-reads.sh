@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Hedged Reads & Failover Performance Test
 set -e
 

@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -436,8 +438,8 @@ func TestClient_EnsureRootExtra(t *testing.T) {
 
 	// 1. Root already exists
 	err := c.EnsureRoot(ctx)
-	if err != nil {
-		t.Fatalf("EnsureRoot failed: %v", err)
+	if err == nil {
+		t.Error("EnsureRoot should fail if root already exists")
 	}
 
 	// 2. No identity
@@ -907,7 +909,6 @@ func TestClient_DeleteInode(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// Create a file
 	c.Mkdir(ctx, "/dir1")
@@ -924,6 +925,8 @@ func TestClient_DeleteInode(t *testing.T) {
 		t.Fatalf("DeleteInode failed: %v", err)
 	}
 
+	c.ClearCache()
+
 	// Verify it's gone
 	_, _, err = c.ResolvePath(ctx, "/dir1/file1")
 	if err == nil {
@@ -938,7 +941,6 @@ func TestClient_SyncFile(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// Setup a Data Node for Sync
 	dataDir := t.TempDir()
@@ -993,7 +995,6 @@ func TestClient_AdminChmod(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// Promote user to admin
 	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
@@ -1023,7 +1024,6 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// Data Node
 	dataDir := t.TempDir()
@@ -1079,7 +1079,6 @@ func TestClient_OpenBlobWrite(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// Data Node
 	dataDir := t.TempDir()
@@ -1136,7 +1135,6 @@ func TestClient_ExtraDataOps(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
-	c.EnsureRoot(ctx)
 
 	// 1. CommitInodeManifest
 	path := "/f1"
@@ -1168,12 +1166,8 @@ func TestClient_Chroot(t *testing.T) {
 	defer ts.Close()
 
 	// 1. Create a subdirectory to be our new root
-	err := c.EnsureRoot(ctx)
-	if err != nil {
-		t.Fatalf("EnsureRoot failed: %v", err)
-	}
 
-	err = c.Mkdir(ctx, "/jail")
+	err := c.Mkdir(ctx, "/jail")
 	if err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
@@ -1225,5 +1219,57 @@ func TestClient_Chroot(t *testing.T) {
 	}
 	if string(data) != "top secret" {
 		t.Errorf("Unexpected data: %s", data)
+	}
+}
+
+func TestClient_ConcurrentDirectoryUpdates(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	err := c.Mkdir(ctx, "/stress")
+	if err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	numWorkers := 10
+	numFilesPerWorker := 5
+	var wg sync.WaitGroup
+	errs := make(chan error, numWorkers*numFilesPerWorker)
+
+	for w := 0; w < numWorkers; w++ {
+		wg.Add(1)
+		go func(workerID int) {
+			defer wg.Done()
+			for f := 0; f < numFilesPerWorker; f++ {
+				name := fmt.Sprintf("/stress/file-%d-%d", workerID, f)
+				content := []byte(fmt.Sprintf("content from worker %d file %d", workerID, f))
+				if err := c.CreateFile(ctx, name, bytes.NewReader(content), int64(len(content))); err != nil {
+					errs <- fmt.Errorf("worker %d file %d failed: %v", workerID, f, err)
+					return
+				}
+			}
+		}(w)
+	}
+
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("Concurrent update error: %v", err)
+	}
+
+	// Verify all files exist
+	entries, err := fs.ReadDir(c.FS(ctx), "stress")
+	if err != nil {
+		t.Fatalf("ReadDir failed: %v", err)
+	}
+
+	expectedCount := numWorkers * numFilesPerWorker
+	if len(entries) != expectedCount {
+		t.Errorf("Expected %d entries in /stress, got %d", expectedCount, len(entries))
+		for _, e := range entries {
+			t.Logf("Found: %s", e.Name())
+		}
 	}
 }

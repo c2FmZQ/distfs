@@ -285,12 +285,8 @@ func iif(cond bool, t, f string) string {
 // SignGroupForTest signs a group using a provided identity key.
 func (g *Group) SignGroupForTest(signerID string, key *crypto.IdentityKey) {
 	g.SignerID = signerID
-	// Note: FSM increments version during apply
-	orig := g.Version
-	g.Version++
 	hash := g.Hash()
 	g.Signature = key.Sign(hash)
-	g.Version = orig
 }
 
 // NodeStatus indicates the health/lifecycle state of a storage node.
@@ -516,12 +512,8 @@ func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
 	}
 	i.ClientBlob, _ = json.Marshal(blob)
 
-	// Note: We use Version+1 because FSM increments version during apply
-	orig := i.Version
-	i.Version++
 	hash := i.ManifestHash()
 	i.UserSig = key.Sign(hash)
-	i.Version = orig
 }
 
 // AuthChallengeRequest initiates the login flow.

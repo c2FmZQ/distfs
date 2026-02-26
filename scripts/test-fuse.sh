@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # FUSE POSIX Compliance Test
 export DISTFS_PASSWORD=testpassword
 

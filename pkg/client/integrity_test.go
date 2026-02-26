@@ -191,6 +191,7 @@ func TestManifestIntegrity(t *testing.T) {
 	}
 
 	// 7.3 User B (Member) modifies the group file
+	clientB.ClearCache()
 	if err := clientB.CreateFile(t.Context(), groupFile, bytes.NewReader([]byte("member updated")), 14); err != nil {
 		t.Fatalf("Member update failed: %v", err)
 	}

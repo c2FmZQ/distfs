@@ -1,4 +1,5 @@
 #!/bin/bash
+set -e
 # Copyright 2026 TTBT Enterprises LLC
 set -e
 

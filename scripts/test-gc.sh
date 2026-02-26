@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # Garbage Collection E2E Test
 export DISTFS_PASSWORD=testpassword
 

@@ -15,7 +15,6 @@
 package crypto
 
 import (
-	"crypto"
 	"crypto/rand"
 	"fmt"
 
@@ -42,8 +41,7 @@ func GenerateIdentityKey() (*IdentityKey, error) {
 
 // Sign signs the message.
 func (k *IdentityKey) Sign(msg []byte) []byte {
-	// mldsa65.PrivateKey.Sign implements crypto.Signer
-	sig, _ := k.priv.Sign(rand.Reader, msg, crypto.Hash(0))
+	sig, _ := k.priv.Sign(rand.Reader, msg, nil)
 	return sig
 }
 

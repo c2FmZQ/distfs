@@ -130,7 +130,7 @@ func TestPathCache(t *testing.T) {
 	}
 
 	// 4. Second Resolution (Cached)
-	// Expect exactly 1 Inode fetch (f.txt) because of the cache hit + validation.
+	// Expect exactly 0 Inode fetches (f.txt) because of the cache hit + validation.
 	atomic.StoreUint64(&getInodeCount, 0)
 	t.Log("Starting second resolution (cached)...")
 	_, _, err = c.ResolvePath(t.Context(), "/a/b/c/f.txt")
@@ -140,8 +140,8 @@ func TestPathCache(t *testing.T) {
 	count2 := atomic.LoadUint64(&getInodeCount)
 	t.Logf("Second resolution took %d Inode fetches", count2)
 
-	if count2 != 1 {
-		t.Errorf("Expected 1 Inode fetch for cached resolution, got %d", count2)
+	if count2 != 0 {
+		t.Errorf("Expected 0 Inode fetches for cached resolution, got %d", count2)
 	}
 
 	// 5. Invalidation on Remove

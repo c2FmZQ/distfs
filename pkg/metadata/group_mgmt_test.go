@@ -91,6 +91,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	// Alice makes Group A self-managed (OwnerID = GroupID)
 	selfManagedA := createdA
 	selfManagedA.OwnerID = groupID
+	selfManagedA.Version++ // Must increment version for update
 	selfManagedA.SignGroupForTest("alice", uAliceSign)
 
 	payload, _ = json.Marshal(selfManagedA)
@@ -138,6 +139,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 		bobUpdate.Members = make(map[string]bool)
 	}
 	bobUpdate.Members["carol"] = true // Bob adds Carol
+	bobUpdate.Version++
 	bobUpdate.SignGroupForTest("bob", uBobSign)
 
 	payload, _ = json.Marshal(bobUpdate)
@@ -197,6 +199,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 
 	bobUpdateC := gC
 	bobUpdateC.GID = 10099 // Bob changes GID
+	bobUpdateC.Version++
 	bobUpdateC.SignGroupForTest("bob", uBobSign)
 
 	payload, _ = json.Marshal(bobUpdateC)

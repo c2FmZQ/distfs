@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # System Performance Benchmark
 set -e
 

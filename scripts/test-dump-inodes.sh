@@ -1,4 +1,5 @@
 #!/bin/sh
+set -e
 # E2E Test for dump-inodes command
 export DISTFS_PASSWORD=testpassword
 
