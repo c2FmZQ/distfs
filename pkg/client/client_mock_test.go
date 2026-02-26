@@ -38,7 +38,7 @@ func TestClient_MockedErrors(t *testing.T) {
 		},
 	}
 
-	err := c.ApplyBatch(ctx, []metadata.LogCommand{{Type: metadata.CmdCreateInode}})
+	_, err := c.ApplyBatch(ctx, []metadata.LogCommand{{Type: metadata.CmdCreateInode}})
 	if err == nil {
 		t.Error("Expected error from ApplyBatch")
 	}

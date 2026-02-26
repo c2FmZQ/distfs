@@ -1268,15 +1268,15 @@ func (c *Client) PrepareUpdate(ctx context.Context, inode metadata.Inode) (metad
 }
 
 func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
-	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: []byte(id)}, nil
+	data, _ := json.Marshal(id)
+	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: data}, nil
 }
 
 func (c *Client) DeleteInode(ctx context.Context, id string) error {
-	cmd, err := c.PrepareDelete(id)
-	if err != nil {
-		return err
-	}
-	_, err = c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
+	_, err := c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+		i.NLink = 0
+		return nil
+	})
 	return err
 }
 

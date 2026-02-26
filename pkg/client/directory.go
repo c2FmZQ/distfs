@@ -394,19 +394,11 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 				}
 				delete(existing.Links, newParentID+":"+encNewName)
 
-				if existing.NLink == 0 {
-					cmd, err := c.PrepareDelete(existing.ID)
-					if err != nil {
-						return err
-					}
-					cmds = append(cmds, cmd)
-				} else {
-					cmd, err := c.PrepareUpdate(ctx, *existing)
-					if err != nil {
-						return err
-					}
-					cmds = append(cmds, cmd)
+				cmd, err := c.PrepareUpdate(ctx, *existing)
+				if err != nil {
+					return err
 				}
+				cmds = append(cmds, cmd)
 			}
 		}
 
@@ -527,12 +519,6 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 	})
 	if err != nil {
 		return err
-	}
-
-	// 4. Final Delete if NLink == 0
-	child, err := c.getInode(ctx, childID)
-	if err == nil && child.NLink == 0 {
-		return c.DeleteInode(ctx, childID)
 	}
 
 	return nil

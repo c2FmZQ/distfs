@@ -67,18 +67,14 @@ func TestPerformUnifiedOnboarding_NewAccount(t *testing.T) {
 		case "/v1/meta/inode/" + metadata.RootID:
 			if r.Method == http.MethodGet {
 				w.WriteHeader(http.StatusNotFound)
-			} else {
-				inode := metadata.Inode{
-					ID:      metadata.RootID,
-					OwnerID: "user-123",
-					Version: 1,
-				}
-				json.NewEncoder(w).Encode(inode)
 			}
-		case "/v1/meta/inode":
+		case "/v1/meta/batch":
 			if r.Method == http.MethodPost {
-				w.WriteHeader(http.StatusCreated)
-				json.NewEncoder(w).Encode(metadata.Inode{ID: metadata.RootID, OwnerID: "user-123", Version: 1})
+				// We expect a create root command
+				res := []interface{}{
+					metadata.Inode{ID: metadata.RootID, OwnerID: "user-123", Version: 1, NLink: 1},
+				}
+				json.NewEncoder(w).Encode(res)
 			}
 		default:
 			w.WriteHeader(http.StatusNotFound)
