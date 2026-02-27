@@ -84,9 +84,10 @@ func TestClientSessionManagement(t *testing.T) {
 	c.sessionMu.Unlock()
 
 	time.Sleep(2 * time.Second)
-	_, err = c.ListGroups(t.Context())
-	if err != nil {
-		t.Fatalf("Third request failed: %v", err)
+	for _, err := range c.ListGroups(t.Context()) {
+		if err != nil {
+			t.Fatalf("Third request failed: %v", err)
+		}
 	}
 
 	c.sessionMu.RLock()

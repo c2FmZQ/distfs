@@ -938,8 +938,6 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	}
 }
 
-
-
 func ptr[T any](v T) *T {
 	return &v
 }

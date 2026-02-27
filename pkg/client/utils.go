@@ -36,3 +36,7 @@ func isNotFound(err error) bool {
 	}
 	return false
 }
+
+func ptr[T any](v T) *T {
+	return &v
+}

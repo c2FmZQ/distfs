@@ -93,13 +93,13 @@ func TestPathCache(t *testing.T) {
 	}
 
 	// 2. Create deep hierarchy
-	if err := c.Mkdir(t.Context(), "/a"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a", 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Mkdir(t.Context(), "/a/b"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a/b", 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := c.Mkdir(t.Context(), "/a/b/c"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a/b/c", 0755); err != nil {
 		t.Fatal(err)
 	}
 	content := []byte("cached-data")

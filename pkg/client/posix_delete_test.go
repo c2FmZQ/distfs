@@ -13,7 +13,7 @@ func TestPOSIX_DeleteWhileOpen(t *testing.T) {
 	c, metaNode, _, tsMeta := SetupTestClient(t)
 	defer tsMeta.Close()
 
-	if err := c.Mkdir(t.Context(), "/dir"); err != nil {
+	if err := c.Mkdir(t.Context(), "/dir", 0755); err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
 

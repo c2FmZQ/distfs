@@ -398,12 +398,12 @@ func TestDirectories(t *testing.T) {
 	}
 
 	// Mkdir /a
-	if err := c.Mkdir(t.Context(), "/a"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a", 0755); err != nil {
 		t.Fatalf("Mkdir /a failed: %v", err)
 	}
 
 	// Mkdir /a/b
-	if err := c.Mkdir(t.Context(), "/a/b"); err != nil {
+	if err := c.Mkdir(t.Context(), "/a/b", 0755); err != nil {
 		t.Fatalf("Mkdir /a/b failed: %v", err)
 	}
 
@@ -808,9 +808,9 @@ func TestResolvePathComplex(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c.Mkdir(t.Context(), "/a")
-	c.Mkdir(t.Context(), "/a/b")
-	c.Mkdir(t.Context(), "/a/b/c")
+	c.Mkdir(t.Context(), "/a", 0755)
+	c.Mkdir(t.Context(), "/a/b", 0755)
+	c.Mkdir(t.Context(), "/a/b/c", 0755)
 	content := []byte("data")
 	c.CreateFile(t.Context(), "/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
 

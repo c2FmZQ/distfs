@@ -163,7 +163,7 @@ func main() {
 
 	// Create bench root
 	benchDir := fmt.Sprintf("/bench-%d", time.Now().UnixNano())
-	if err := c.Mkdir(ctx, benchDir); err != nil {
+	if err := c.Mkdir(ctx, benchDir, 0700); err != nil {
 		log.Fatalf("failed to create bench dir: %v", err)
 	}
 	defer func() {
@@ -199,7 +199,7 @@ func main() {
 
 			// Create worker sub-directory to avoid parent contention
 			workerDir := fmt.Sprintf("%s/worker-%d", benchDir, workerID)
-			if err := c.Mkdir(ctx, workerDir); err != nil {
+			if err := c.Mkdir(ctx, workerDir, 0700); err != nil {
 				log.Printf("Worker %d failed to create subdir: %v", workerID, err)
 				return
 			}
@@ -212,7 +212,7 @@ func main() {
 				switch *mode {
 				case "mkdir":
 					path := fmt.Sprintf("%s/dir-%d-%d", workerDir, workerID, time.Now().UnixNano())
-					err = c.Mkdir(ctx, path)
+					err = c.Mkdir(ctx, path, 0700)
 				case "put":
 					path := fmt.Sprintf("%s/file-%d-%d", workerDir, workerID, time.Now().UnixNano())
 					// Stream data to avoid OOM

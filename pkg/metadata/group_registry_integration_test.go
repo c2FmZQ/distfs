@@ -53,13 +53,11 @@ func TestGroupMemberRegistry(t *testing.T) {
 	}
 
 	// 4. Alice (Owner) views members - should see Bob's info
-	members, err := clientAlice.GetGroupMembers(t.Context(), groupID)
-	if err != nil {
-		t.Fatalf("GetGroupMembers Alice failed: %v", err)
-	}
-
 	foundBob := false
-	for _, m := range members {
+	for m, err := range clientAlice.GetGroupMembers(t.Context(), groupID) {
+		if err != nil {
+			t.Fatalf("GetGroupMembers Alice failed: %v", err)
+		}
 		if m.UserID == "bob" {
 			if m.Info != "bob@example.com (Staff)" {
 				t.Errorf("Alice saw wrong info for Bob: %s", m.Info)
@@ -79,12 +77,10 @@ func TestGroupMemberRegistry(t *testing.T) {
 		t.Fatalf("Bob login failed: %v", err)
 	}
 
-	membersBob, err := clientBob.GetGroupMembers(t.Context(), groupID)
-	if err != nil {
-		t.Fatalf("GetGroupMembers Bob failed: %v", err)
-	}
-
-	for _, m := range membersBob {
+	for m, err := range clientBob.GetGroupMembers(t.Context(), groupID) {
+		if err != nil {
+			t.Fatalf("GetGroupMembers Bob failed: %v", err)
+		}
 		if m.Info != "[HIDDEN]" && m.UserID != "alice" {
 			t.Errorf("Bob saw info for %s: %s", m.UserID, m.Info)
 		}

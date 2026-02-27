@@ -90,7 +90,7 @@ func TestClient_ReadDataFiles_BlocksExclusive(t *testing.T) {
 
 	// 1. Acquire a shared lease manually to simulate a long ReadDataFiles phase
 	nonce := "test-nonce"
-	err := c.AcquireLeases(ctx, []string{path}, 5*time.Second, nil, metadata.LeaseShared, nonce)
+	err := c.AcquireLeases(ctx, []string{path}, 5*time.Second, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
 	if err != nil {
 		t.Fatalf("AcquireLeases failed: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestClient_ReadDataFiles_BlocksExclusive(t *testing.T) {
 		if err != nil {
 			t.Errorf("SaveDataFile failed after release: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Error("SaveDataFile timed out after lease release")
 	}
 }

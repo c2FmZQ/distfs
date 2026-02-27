@@ -62,9 +62,12 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 5. Verify Redaction in ListUsers
-	users, err := c.AdminListUsers(t.Context())
-	if err != nil {
-		t.Fatalf("AdminListUsers failed: %v", err)
+	var users []*metadata.User
+	for u, err := range c.AdminListUsers(t.Context()) {
+		if err != nil {
+			t.Fatalf("AdminListUsers failed: %v", err)
+		}
+		users = append(users, u)
 	}
 	if len(users) == 0 {
 		t.Fatal("No users returned")
@@ -76,9 +79,9 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 6. Verify Redaction in ListNodes
-	nodes, err := c.AdminListNodes(t.Context())
-	if err != nil {
-		t.Fatalf("AdminListNodes failed: %v", err)
+	var nodes []*metadata.Node
+	for n := range c.AdminListNodes(t.Context()) {
+		nodes = append(nodes, n)
 	}
 	if len(nodes) == 0 {
 		t.Fatal("No nodes returned")
@@ -90,9 +93,12 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 7. Verify Redaction in ListGroups
-	groups, err := c.AdminListGroups(t.Context())
-	if err != nil {
-		t.Fatalf("AdminListGroups failed: %v", err)
+	var groups []*metadata.Group
+	for g, err := range c.AdminListGroups(t.Context()) {
+		if err != nil {
+			t.Fatalf("AdminListGroups failed: %v", err)
+		}
+		groups = append(groups, g)
 	}
 	if len(groups) == 0 {
 		t.Fatal("No groups returned")

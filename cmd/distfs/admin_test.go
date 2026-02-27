@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"iter"
 	"strings"
 	"testing"
 	"time"
@@ -15,27 +16,51 @@ import (
 
 type mockAdminClient struct {
 	status map[string]interface{}
-	users  []metadata.User
-	groups []metadata.Group
-	leases []metadata.LeaseInfo
-	nodes  []metadata.Node
+	users  []*metadata.User
+	groups []*metadata.Group
+	leases []*metadata.LeaseInfo
+	nodes  []*metadata.Node
 	err    error
 }
 
 func (m *mockAdminClient) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
 	return m.status, m.err
 }
-func (m *mockAdminClient) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
-	return m.users, m.err
+func (m *mockAdminClient) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error] {
+	return func(yield func(*metadata.User, error) bool) {
+		for _, u := range m.users {
+			if !yield(u, m.err) {
+				return
+			}
+		}
+	}
 }
-func (m *mockAdminClient) AdminListGroups(ctx context.Context) ([]metadata.Group, error) {
-	return m.groups, m.err
+func (m *mockAdminClient) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error] {
+	return func(yield func(*metadata.Group, error) bool) {
+		for _, g := range m.groups {
+			if !yield(g, m.err) {
+				return
+			}
+		}
+	}
 }
-func (m *mockAdminClient) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error) {
-	return m.leases, m.err
+func (m *mockAdminClient) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error] {
+	return func(yield func(*metadata.LeaseInfo, error) bool) {
+		for _, l := range m.leases {
+			if !yield(l, m.err) {
+				return
+			}
+		}
+	}
 }
-func (m *mockAdminClient) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
-	return m.nodes, m.err
+func (m *mockAdminClient) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
+	return func(yield func(*metadata.Node) bool) {
+		for _, n := range m.nodes {
+			if !yield(n) {
+				return
+			}
+		}
+	}
 }
 func (m *mockAdminClient) AdminLookup(ctx context.Context, email, reason string) (string, error) {
 	return "user-id-123", m.err
@@ -145,7 +170,7 @@ func TestAdminConsole_DataRendering(t *testing.T) {
 			"state":  "Leader",
 			"leader": "127.0.0.1:8080",
 		},
-		users: []metadata.User{
+		users: []*metadata.User{
 			{ID: "user1", Usage: metadata.UserUsage{InodeCount: 5}},
 		},
 	}
@@ -207,10 +232,10 @@ func TestAdminConsole_ModalSubmission(t *testing.T) {
 func TestAdminConsole_AllTabs(t *testing.T) {
 	client := &mockAdminClient{
 		status: map[string]interface{}{"state": "Leader"},
-		users:  []metadata.User{{ID: "u1"}},
-		groups: []metadata.Group{{ID: "g1"}},
-		leases: []metadata.LeaseInfo{{InodeID: "00000000000000000000000000000001"}},
-		nodes:  []metadata.Node{{ID: "n1"}},
+		users:  []*metadata.User{{ID: "u1"}},
+		groups: []*metadata.Group{{ID: "g1"}},
+		leases: []*metadata.LeaseInfo{{InodeID: "00000000000000000000000000000001"}},
+		nodes:  []*metadata.Node{{ID: "n1"}},
 	}
 	m := model{
 		client: client,

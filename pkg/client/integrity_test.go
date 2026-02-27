@@ -169,7 +169,7 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// 7.2 Admin creates a file in the group
 	groupPath := "/group-shared"
-	if err := clientA.Mkdir(t.Context(), groupPath); err != nil {
+	if err := clientA.Mkdir(t.Context(), groupPath, 0755); err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
 	if err := clientA.SetAttr(t.Context(), groupPath, metadata.SetAttrRequest{GroupID: &group.ID}); err != nil {

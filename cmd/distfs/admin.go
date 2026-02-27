@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"iter"
 	"log"
 	"strconv"
 	"strings"
@@ -55,10 +56,10 @@ var (
 
 type AdminClient interface {
 	AdminClusterStatus(ctx context.Context) (map[string]interface{}, error)
-	AdminListUsers(ctx context.Context) ([]metadata.User, error)
-	AdminListGroups(ctx context.Context) ([]metadata.Group, error)
-	AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error)
-	AdminListNodes(ctx context.Context) ([]metadata.Node, error)
+	AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error]
+	AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error]
+	AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error]
+	AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node]
 	AdminLookup(ctx context.Context, email, reason string) (string, error)
 	AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error
 	AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error
@@ -78,10 +79,10 @@ type model struct {
 
 	// Data
 	status map[string]interface{}
-	users  []metadata.User
-	groups []metadata.Group
-	leases []metadata.LeaseInfo
-	nodes  []metadata.Node
+	users  []*metadata.User
+	groups []*metadata.Group
+	leases []*metadata.LeaseInfo
+	nodes  []*metadata.Node
 
 	// Tables
 	userTable  table.Model
@@ -105,10 +106,10 @@ type model struct {
 }
 
 type statusMsg map[string]interface{}
-type usersMsg []metadata.User
-type groupsMsg []metadata.Group
-type leasesMsg []metadata.LeaseInfo
-type nodesMsg []metadata.Node
+type usersMsg []*metadata.User
+type groupsMsg []*metadata.Group
+type leasesMsg []*metadata.LeaseInfo
+type nodesMsg []*metadata.Node
 type lookupMsg string
 type errMsg error
 
@@ -136,33 +137,42 @@ func (m model) fetchStatus() tea.Msg {
 }
 
 func (m model) fetchUsers() tea.Msg {
-	users, err := m.client.AdminListUsers(m.ctx)
-	if err != nil {
-		return errMsg(err)
+	var users []*metadata.User
+	for u, err := range m.client.AdminListUsers(m.ctx) {
+		if err != nil {
+			return errMsg(err)
+		}
+		users = append(users, u)
 	}
 	return usersMsg(users)
 }
 
 func (m model) fetchGroups() tea.Msg {
-	groups, err := m.client.AdminListGroups(m.ctx)
-	if err != nil {
-		return errMsg(err)
+	var groups []*metadata.Group
+	for g, err := range m.client.AdminListGroups(m.ctx) {
+		if err != nil {
+			return errMsg(err)
+		}
+		groups = append(groups, g)
 	}
 	return groupsMsg(groups)
 }
 
 func (m model) fetchLeases() tea.Msg {
-	leases, err := m.client.AdminListLeases(m.ctx)
-	if err != nil {
-		return errMsg(err)
+	var leases []*metadata.LeaseInfo
+	for l, err := range m.client.AdminListLeases(m.ctx) {
+		if err != nil {
+			return errMsg(err)
+		}
+		leases = append(leases, l)
 	}
 	return leasesMsg(leases)
 }
 
 func (m model) fetchNodes() tea.Msg {
-	nodes, err := m.client.AdminListNodes(m.ctx)
-	if err != nil {
-		return errMsg(err)
+	var nodes []*metadata.Node
+	for n := range m.client.AdminListNodes(m.ctx) {
+		nodes = append(nodes, n)
 	}
 	return nodesMsg(nodes)
 }

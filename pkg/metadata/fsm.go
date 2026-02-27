@@ -175,6 +175,14 @@ func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket []byte, key []byte, value []byte
 	return b.Put(key, enc)
 }
 
+func (fsm *MetadataFSM) PutPlain(tx *bolt.Tx, bucket []byte, key []byte, value []byte) error {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	return b.Put(key, value)
+}
+
 func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, error) {
 	b := tx.Bucket(bucket)
 	if b == nil {
@@ -186,6 +194,15 @@ func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, err
 	}
 	dec, err := fsm.DecryptValue(v)
 	return dec, err
+}
+
+func (fsm *MetadataFSM) GetPlain(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, error) {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return nil, fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	v := b.Get(key)
+	return v, nil
 }
 
 func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket []byte, key []byte) error {
@@ -208,6 +225,14 @@ func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte)
 		}
 		return fn(k, plain)
 	})
+}
+
+func (fsm *MetadataFSM) ForEachPlain(tx *bolt.Tx, bucket []byte, fn func(k, v []byte) error) error {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
+	}
+	return b.ForEach(fn)
 }
 
 // Close closes the underlying BoltDB.
@@ -458,7 +483,7 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 }
 
 func (fsm *MetadataFSM) syncKeyRing(tx *bolt.Tx) {
-	krData, err := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
+	krData, err := fsm.GetPlain(tx, []byte("system"), []byte("fsm_keyring"))
 	if err != nil || krData == nil {
 		return
 	}
@@ -588,6 +613,36 @@ func (fsm *MetadataFSM) checkLease(inode *Inode, sessionID string) error {
 	for _, l := range inode.Leases {
 		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionID {
 			return fmt.Errorf("exclusive lease held by another session")
+		}
+	}
+	return nil
+}
+
+func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path string, sessionID string) error {
+	if path == "" {
+		return nil
+	}
+	if !strings.HasPrefix(path, "path:") {
+		path = "path:" + path
+	}
+
+	plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(path))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
+		return nil
+	}
+
+	var leases map[string]LeaseInfo
+	if err := json.Unmarshal(plain, &leases); err != nil {
+		return err
+	}
+
+	now := time.Now().UnixNano()
+	for _, l := range leases {
+		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionID {
+			return ErrConflict // Lease Required / Conflict
 		}
 	}
 	return nil
@@ -1188,7 +1243,7 @@ func (fsm *MetadataFSM) executeGCRemove(tx *bolt.Tx, data []byte) interface{} {
 }
 
 func (fsm *MetadataFSM) executeInitSecret(tx *bolt.Tx, data []byte) interface{} {
-	v, err := fsm.Get(tx, []byte("system"), []byte("cluster_secret"))
+	v, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_secret"))
 	if err != nil {
 		return err
 	}
@@ -1199,23 +1254,23 @@ func (fsm *MetadataFSM) executeInitSecret(tx *bolt.Tx, data []byte) interface{} 
 	if err := json.Unmarshal(data, &secret); err != nil {
 		secret = data // Fallback
 	}
-	if err := fsm.Put(tx, []byte("system"), []byte("cluster_secret"), secret); err != nil {
+	if err := fsm.PutPlain(tx, []byte("system"), []byte("cluster_secret"), secret); err != nil {
 		return err
 	}
 	return nil
 }
 
 func (fsm *MetadataFSM) executeSetClusterSignKey(tx *bolt.Tx, data []byte) interface{} {
-	if existing, _ := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key")); existing != nil {
+	if existing, _ := fsm.GetPlain(tx, []byte("system"), []byte("cluster_sign_key")); existing != nil {
 		return fmt.Errorf("cluster signing key already initialized")
 	}
-	return fsm.Put(tx, []byte("system"), []byte("cluster_sign_key"), data)
+	return fsm.PutPlain(tx, []byte("system"), []byte("cluster_sign_key"), data)
 }
 
 func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
 	var pub []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+		plain, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_sign_key"))
 		if err != nil {
 			return err
 		}
@@ -1235,7 +1290,7 @@ func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
 func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
 	var priv []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+		plain, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_sign_key"))
 		if err != nil {
 			return err
 		}
@@ -1255,7 +1310,7 @@ func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
 func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
 	var secret []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_secret"))
+		plain, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_secret"))
 		if err != nil {
 			return err
 		}
@@ -1722,18 +1777,18 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 
-	if err := fsm.Put(tx, []byte("system"), []byte("epoch_key_"+key.ID), data); err != nil {
+	if err := fsm.PutPlain(tx, []byte("system"), []byte("epoch_key_"+key.ID), data); err != nil {
 		return err
 	}
 
-	if err := fsm.Put(tx, []byte("system"), []byte("active_epoch_key"), []byte(key.ID)); err != nil {
+	if err := fsm.PutPlain(tx, []byte("system"), []byte("active_epoch_key"), []byte(key.ID)); err != nil {
 		return err
 	}
 
 	// Prune
 	var keys []ClusterKey
 	prefix := "epoch_key_"
-	err := fsm.ForEach(tx, []byte("system"), func(k, v []byte) error {
+	err := fsm.ForEachPlain(tx, []byte("system"), func(k, v []byte) error {
 		if strings.HasPrefix(string(k), prefix) {
 			var kStruct ClusterKey
 			if err := json.Unmarshal(v, &kStruct); err == nil {
@@ -1765,11 +1820,13 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	var key ClusterKey
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		id, err := fsm.Get(tx, []byte("system"), []byte("active_epoch_key"))
+		id, err := fsm.GetPlain(tx, []byte("system"), []byte("active_epoch_key"))
 		if err != nil || id == nil {
 			return ErrNotFound
 		}
-		v, err := fsm.Get(tx, []byte("system"), []byte("epoch_key_"+string(id)))
+
+		v, err := fsm.GetPlain(tx, []byte("system"), []byte("epoch_key_"+string(id)))
+
 		if err != nil || v == nil {
 			return ErrNotFound
 		}
@@ -1948,7 +2005,8 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	// 1. Validation Phase
 	inodes := make([]*Inode, len(req.InodeIDs))
 	for i, id := range req.InodeIDs {
-		if IsInodeID(id) {
+		isPath := strings.HasPrefix(id, "path:")
+		if !isPath && IsInodeID(id) {
 			plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
 			if err != nil {
 				return err
@@ -1970,12 +2028,12 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 				if req.Type == LeaseExclusive {
 					// Exclusive conflicts with ANY lease from another session
 					if l.SessionID != req.SessionID {
-						return ErrConflict
+						return fmt.Errorf("%w: inode %s: held by session %s", ErrConflict, id, l.SessionID)
 					}
 				} else {
 					// Shared only conflicts with EXCLUSIVE leases from another session
 					if l.Type == LeaseExclusive && l.SessionID != req.SessionID {
-						return ErrConflict
+						return fmt.Errorf("%w: inode %s: exclusive lease held by session %s", ErrConflict, id, l.SessionID)
 					}
 				}
 			}
@@ -1993,14 +2051,13 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 							continue
 						}
 						if req.Type == LeaseExclusive {
-							// Exclusive conflicts with ANY lease from another session
 							if l.SessionID != req.SessionID {
-								return ErrConflict
+								return fmt.Errorf("%w: path %s: held by session %s", ErrConflict, id, l.SessionID)
 							}
 						} else {
-							// Shared only conflicts with EXCLUSIVE leases from another session
+							// Shared lease request: conflicts ONLY if there is an existing EXCLUSIVE lease from another session
 							if l.Type == LeaseExclusive && l.SessionID != req.SessionID {
-								return ErrConflict
+								return fmt.Errorf("%w: path %s: exclusive lease held by session %s", ErrConflict, id, l.SessionID)
 							}
 						}
 					}
@@ -2011,6 +2068,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 
 	// 2. Grant Phase
 	for i, id := range req.InodeIDs {
+		isPath := strings.HasPrefix(id, "path:")
 		info := LeaseInfo{
 			InodeID:   id,
 			SessionID: req.SessionID,
@@ -2019,7 +2077,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 			Type:      req.Type,
 		}
 
-		if IsInodeID(id) {
+		if !isPath && IsInodeID(id) {
 			inode := inodes[i]
 			if inode == nil {
 				inode = &Inode{
@@ -2083,7 +2141,8 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 	now := time.Now().UnixNano()
 
 	for _, id := range req.InodeIDs {
-		if !IsInodeID(id) {
+		isPath := strings.HasPrefix(id, "path:")
+		if isPath || !IsInodeID(id) {
 			// Filename Lease
 			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
 			if err != nil {
@@ -2096,11 +2155,20 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 				}
 				nonce := req.Nonce
 				if nonce == "" {
-					// Robustness: find any lease belonging to this session
+					// Robustness: find any lease belonging to this session matching requested type
 					for n, l := range leases {
-						if l.SessionID == req.SessionID {
+						if l.SessionID == req.SessionID && l.Type == req.Type {
 							nonce = n
 							break
+						}
+					}
+					if nonce == "" {
+						// Last resort: any from this session
+						for n, l := range leases {
+							if l.SessionID == req.SessionID {
+								nonce = n
+								break
+							}
 						}
 					}
 				}
@@ -2114,7 +2182,12 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface
 					}
 				}
 			}
-			continue
+			// Important: if it looks like a path but IS also a valid InodeID (unlikely but possible),
+			// we should ALSO try to remove it from the inode bucket if it was an Inode-level lease.
+			// But if it has "path:" prefix, it's definitely NOT an InodeID in the database.
+			if isPath {
+				continue
+			}
 		}
 
 		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))

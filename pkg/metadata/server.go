@@ -1277,9 +1277,25 @@ func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string
 		return "", "", fmt.Errorf("jwt missing email")
 	}
 
-	secret, err := s.fsm.GetClusterSecret()
-	if err != nil {
-		return "", "", fmt.Errorf("cluster secret not available: %w", err)
+	var secret []byte
+	for i := 0; i < 30; i++ {
+		secret, err = s.fsm.GetClusterSecret()
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, ErrNotFound) {
+			return "", "", fmt.Errorf("cluster secret error: %w", err)
+		}
+		// Wait for FSM to apply bootstrap
+		select {
+		case <-ctx.Done():
+			return "", "", ctx.Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+
+	if secret == nil {
+		return "", "", fmt.Errorf("cluster secret not available: %w", ErrNotFound)
 	}
 
 	mac := hmac.New(sha256.New, secret)
@@ -1688,12 +1704,6 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
-
-
-
-
-
-
 func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string) error {
 	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
 	if bypass && s.fsm.IsAdmin(user.ID) {
@@ -1786,8 +1796,6 @@ func (s *Server) removeNodeInternal(id string) error {
 	return err
 }
 
-
-
 func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id string) {
 	log.Printf("GROUP: handleGetGroup(%s) starting", id)
 	user, ok := r.Context().Value(userContextKey).(*User)
@@ -1855,8 +1863,6 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	w.Write(data)
 }
 
-
-
 func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedGroup *Group) error {
 	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
 	if bypass && s.fsm.IsAdmin(user.ID) {
@@ -1892,10 +1898,6 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
 
 	return nil
 }
-
-
-
-
 
 func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
 	if s.raft.State() != raft.Leader {
@@ -1954,39 +1956,19 @@ func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmd
 					firstErr = e
 				}
 
-				switch firstErr {
-				case ErrConflict, ErrExists:
+				if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) {
 					status = http.StatusConflict
-				case ErrNotFound:
+				} else if errors.Is(firstErr, ErrNotFound) {
 					status = http.StatusNotFound
 				}
 
 				resp = s.sanitizeResponse(resp)
-				dataJSON, _ := json.Marshal(resp)
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(status)
-				w.Write(dataJSON)
+				s.writeJSON(w, r, resp, status)
 				return
 			}
 
 			resp = s.sanitizeResponse(resp)
-			dataJSON, _ := json.Marshal(resp)
-			w.Header().Set("Content-Type", "application/json")
-
-			// E2EE?
-			user, _ := r.Context().Value(userContextKey).(*User)
-			if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-				sealed, err := s.sealResponse(user, dataJSON)
-				if err == nil {
-					w.Header().Set("X-DistFS-Sealed", "true")
-					w.WriteHeader(successCode)
-					w.Write(sealed)
-					return
-				}
-			}
-
-			w.WriteHeader(successCode)
-			w.Write(dataJSON)
+			s.writeJSON(w, r, resp, successCode)
 			return
 		}
 		w.WriteHeader(successCode)
@@ -2307,12 +2289,11 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, code string,
 func (s *Server) sanitizeResponse(res interface{}) interface{} {
 	if err, ok := res.(error); ok {
 		code := ErrCodeInternal
-		switch err {
-		case ErrConflict:
+		if errors.Is(err, ErrConflict) {
 			code = ErrCodeVersionConflict
-		case ErrExists:
+		} else if errors.Is(err, ErrExists) {
 			code = ErrCodeExists
-		case ErrNotFound:
+		} else if errors.Is(err, ErrNotFound) {
 			code = ErrCodeNotFound
 		}
 		return APIErrorResponse{Code: code, Message: err.Error()}
@@ -2327,7 +2308,7 @@ func (s *Server) sanitizeResponse(res interface{}) interface{} {
 	return res
 }
 
-func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, successStatus int) {
+func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, status int) {
 	b, err := json.Marshal(data)
 	if err != nil {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
@@ -2336,19 +2317,24 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 
 	w.Header().Set("Content-Type", "application/json")
 
+	if status == 0 {
+		status = http.StatusOK
+	}
+
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
 		sealed, err := s.sealResponse(ctxUser, b)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(successStatus)
+			w.WriteHeader(status)
 			w.Write(sealed)
 			return
 		}
+		// If sealing fails, we still want to return the error/data with original status
 	}
 
-	w.WriteHeader(successStatus)
+	w.WriteHeader(status)
 	w.Write(b)
 }
 

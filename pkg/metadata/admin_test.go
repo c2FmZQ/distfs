@@ -63,14 +63,20 @@ func TestAdminCUI(t *testing.T) {
 		}
 
 		if path == "users" {
-			_, err := c.AdminListUsers(t.Context())
-			if err != nil {
-				if apiErr, ok := err.(*client.APIError); ok {
-					return apiErr.StatusCode
+			found := false
+			for _, err := range c.AdminListUsers(t.Context()) {
+				if err != nil {
+					if apiErr, ok := err.(*client.APIError); ok {
+						return apiErr.StatusCode
+					}
+					return 500
 				}
-				return 500
+				found = true
 			}
-			return 200
+			if found {
+				return 200
+			}
+			return 200 // Even if empty
 		}
 		return 0
 	}
@@ -136,9 +142,12 @@ func TestAdminAPI(t *testing.T) {
 	}
 
 	// 3. Fetch Users
-	users, err := c.AdminListUsers(t.Context())
-	if err != nil {
-		t.Fatalf("AdminListUsers failed: %v", err)
+	var users []*metadata.User
+	for u, err := range c.AdminListUsers(t.Context()) {
+		if err != nil {
+			t.Fatalf("AdminListUsers failed: %v", err)
+		}
+		users = append(users, u)
 	}
 	if len(users) != 1 || users[0].ID != userID {
 		t.Errorf("Unexpected users list: %v", users)
@@ -159,9 +168,9 @@ func TestAdminAPI(t *testing.T) {
 	}
 
 	// 5. Fetch Nodes via Admin API
-	nodes, err := c.AdminListNodes(t.Context())
-	if err != nil {
-		t.Fatalf("AdminListNodes failed: %v", err)
+	var nodes []*metadata.Node
+	for n := range c.AdminListNodes(t.Context()) {
+		nodes = append(nodes, n)
 	}
 	if len(nodes) < 1 {
 		t.Error("No nodes returned")
@@ -274,5 +283,3 @@ func TestAdminOverrides(t *testing.T) {
 		t.Errorf("Expected mode 0775, got %04o", updated.Mode)
 	}
 }
-
-

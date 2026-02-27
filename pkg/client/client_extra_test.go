@@ -27,7 +27,7 @@ func TestClient_ExtraFS(t *testing.T) {
 	defer ts.Close()
 
 	// 1. Mkdir
-	err := c.Mkdir(ctx, "/testdir")
+	err := c.Mkdir(ctx, "/testdir", 0755)
 	if err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestClient_Links(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	err := c.Mkdir(ctx, "/dir")
+	err := c.Mkdir(ctx, "/dir", 0755)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,9 +187,9 @@ func TestClient_SubFS(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	c.Mkdir(ctx, "/a")
-	c.Mkdir(ctx, "/a/b")
-	c.Mkdir(ctx, "/a/b/c")
+	c.Mkdir(ctx, "/a", 0755)
+	c.Mkdir(ctx, "/a/b", 0755)
+	c.Mkdir(ctx, "/a/b/c", 0755)
 	content := []byte("sub data")
 	c.CreateFile(ctx, "/a/b/c/f1", bytes.NewReader(content), int64(len(content)))
 
@@ -212,8 +212,8 @@ func TestClient_ReadDirRecursive(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	c.Mkdir(ctx, "/dir1")
-	c.Mkdir(ctx, "/dir1/subdir")
+	c.Mkdir(ctx, "/dir1", 0755)
+	c.Mkdir(ctx, "/dir1/subdir", 0755)
 	content1 := []byte("1")
 	c.CreateFile(ctx, "/dir1/f1", bytes.NewReader(content1), int64(len(content1)))
 	content2 := []byte("2")
@@ -234,6 +234,9 @@ func TestClient_AdminMethods(t *testing.T) {
 	c, node, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
+	var err error
+	var count int
+
 	// Promote user to admin in FSM directly
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
 
@@ -245,26 +248,30 @@ func TestClient_AdminMethods(t *testing.T) {
 	time.Sleep(100 * time.Millisecond) // Wait for apply
 
 	// 1. AdminListUsers
-	users, err := c.WithAdmin(true).AdminListUsers(ctx)
-	if err != nil {
-		t.Fatalf("AdminListUsers failed: %v", err)
+	count = 0
+	for _, err = range c.WithAdmin(true).AdminListUsers(ctx) {
+		if err != nil {
+			t.Fatalf("AdminListUsers failed: %v", err)
+		}
+		count++
 	}
-	if len(users) == 0 {
+	if count == 0 {
 		t.Error("Expected at least one user")
 	}
 
 	// 2. AdminListGroups
-	_, err = c.WithAdmin(true).AdminListGroups(ctx)
-	if err != nil {
-		t.Fatalf("AdminListGroups failed: %v", err)
+	for _, err = range c.WithAdmin(true).AdminListGroups(ctx) {
+		if err != nil {
+			t.Fatalf("AdminListGroups failed: %v", err)
+		}
 	}
 
 	// 3. AdminListNodes
-	nodes, err := c.WithAdmin(true).AdminListNodes(ctx)
-	if err != nil {
-		t.Fatalf("AdminListNodes failed: %v", err)
+	count = 0
+	for range c.WithAdmin(true).AdminListNodes(ctx) {
+		count++
 	}
-	if len(nodes) == 0 {
+	if count == 0 {
 		t.Error("Expected at least one node")
 	}
 
@@ -275,7 +282,8 @@ func TestClient_AdminMethods(t *testing.T) {
 	}
 
 	// 5. AdminLookup
-	uID, err := c.WithAdmin(true).AdminLookup(ctx, "user1@example.com", "Test")
+	var uID string
+	uID, err = c.WithAdmin(true).AdminLookup(ctx, "user1@example.com", "Test")
 	if err != nil {
 		// Might fail if cluster secret not set in a way HMAC matches, but handler should be hit
 	} else if uID == "" {
@@ -304,10 +312,10 @@ func TestClient_AdminMethods(t *testing.T) {
 
 	// 8. AdminChown
 	u2 := "u2"
-	c.Mkdir(ctx, "/testdir")
-	inode, _, err := c.ResolvePath(ctx, "/testdir")
-	if err != nil {
-		t.Fatalf("ResolvePath failed: %v", err)
+	c.Mkdir(ctx, "/testdir", 0755)
+	inode, _, err2 := c.ResolvePath(ctx, "/testdir")
+	if err2 != nil {
+		t.Fatalf("ResolvePath failed: %v", err2)
 	}
 	err = c.WithAdmin(true).AdminChown(ctx, inode.ID, metadata.AdminChownRequest{
 		OwnerID: &u2,
@@ -388,8 +396,8 @@ func TestClient_RenameExtra(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	c.Mkdir(ctx, "/dir1")
-	c.Mkdir(ctx, "/dir2")
+	c.Mkdir(ctx, "/dir1", 0755)
+	c.Mkdir(ctx, "/dir2", 0755)
 	content := []byte("data")
 	c.CreateFile(ctx, "/dir1/f1", bytes.NewReader(content), int64(len(content)))
 
@@ -421,7 +429,7 @@ func TestClient_RemoveExtraError(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	c.Mkdir(ctx, "/dir")
+	c.Mkdir(ctx, "/dir", 0755)
 	c.CreateFile(ctx, "/dir/f1", bytes.NewReader([]byte("1")), 1)
 
 	// 1. Remove non-empty directory
@@ -632,7 +640,7 @@ func TestClient_ResolvePath_InvalidCache(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	c.Mkdir(ctx, "/dir")
+	c.Mkdir(ctx, "/dir", 0755)
 	c.CreateFile(ctx, "/dir/f1", bytes.NewReader([]byte("data")), 4)
 
 	// 1. Manually poison cache
@@ -697,7 +705,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 
 	// 3. Create File f1 with Group access
-	err = c1.Mkdir(ctx, "/shared")
+	err = c1.Mkdir(ctx, "/shared", 0755)
 	if err != nil {
 		t.Fatalf("Mkdir /shared failed: %v", err)
 	}
@@ -730,7 +738,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	rc.Close()
 
 	// 5. Create File f2 with World access
-	c1.Mkdir(ctx, "/public")
+	c1.Mkdir(ctx, "/public", 0755)
 	c1.SetAttr(ctx, "/public", metadata.SetAttrRequest{Mode: ptr(uint32(0777))})
 	c1.CreateFile(ctx, "/public/f2", bytes.NewReader([]byte("public")), 6)
 	c1.SetAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: ptr(uint32(0664))})
@@ -788,23 +796,29 @@ func TestClient_Groups_SystemAndMembers(t *testing.T) {
 	}
 
 	// 2. DecryptGroupName
-	gl, _ := c.ListGroups(ctx)
-	if len(gl) > 0 {
-		name, err := c.DecryptGroupName(ctx, gl[0])
+	for g, err := range c.ListGroups(ctx) {
+		if err != nil {
+			t.Fatalf("ListGroups failed: %v", err)
+		}
+		name, err := c.DecryptGroupName(ctx, g)
 		if err != nil {
 			t.Errorf("DecryptGroupName failed: %v", err)
 		}
 		if name != "sysgroup" {
 			t.Errorf("Expected sysgroup, got %s", name)
 		}
+		break // Test one is enough
 	}
 
 	// 3. GetGroupMembers
-	members, err := c.GetGroupMembers(ctx, group.ID)
-	if err != nil {
-		t.Fatalf("GetGroupMembers failed: %v", err)
+	count := 0
+	for _, err := range c.GetGroupMembers(ctx, group.ID) {
+		if err != nil {
+			t.Fatalf("GetGroupMembers failed: %v", err)
+		}
+		count++
 	}
-	if len(members) == 0 {
+	if count == 0 {
 		t.Error("Expected at least owner in members")
 	}
 }
@@ -814,7 +828,7 @@ func TestClient_FS_Extra(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	c.Mkdir(ctx, "/fs")
+	c.Mkdir(ctx, "/fs", 0755)
 	c.CreateFile(ctx, "/fs/f1", bytes.NewReader([]byte("data")), 4)
 
 	distFS := c.FS(ctx)
@@ -898,10 +912,6 @@ func TestClient_SyncFile_More(t *testing.T) {
 	c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
 }
 
-func ptr[T any](v T) *T {
-	return &v
-}
-
 func TestClient_DeleteInode(t *testing.T) {
 	c, metaNode, metaServer, ts := SetupTestClient(t)
 	defer metaNode.Shutdown()
@@ -911,7 +921,7 @@ func TestClient_DeleteInode(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a file
-	c.Mkdir(ctx, "/dir1")
+	c.Mkdir(ctx, "/dir1", 0755)
 	err := c.CreateFile(ctx, "/dir1/file1", bytes.NewReader([]byte("hello")), 5)
 	if err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
@@ -1167,7 +1177,7 @@ func TestClient_Chroot(t *testing.T) {
 
 	// 1. Create a subdirectory to be our new root
 
-	err := c.Mkdir(ctx, "/jail")
+	err := c.Mkdir(ctx, "/jail", 0755)
 	if err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
@@ -1227,7 +1237,7 @@ func TestClient_ConcurrentDirectoryUpdates(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	err := c.Mkdir(ctx, "/stress")
+	err := c.Mkdir(ctx, "/stress", 0755)
 	if err != nil {
 		t.Fatalf("Mkdir failed: %v", err)
 	}

@@ -63,6 +63,7 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 | Method | Path | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/meta/inode/{id}` | Session | Fetch an Inode manifest. |
+| `POST` | `/v1/meta/inodes` | Session | Batch fetch Inode manifests by ID. |
 | `POST` | `/v1/meta/batch` | Session + E2EE | Atomic multi-command execution. |
 | `POST` | `/v1/meta/allocate` | Session | Request target Data Nodes for a new chunk. |
 | `POST` | `/v1/meta/token` | Session | Issue Storage Capability Token. |

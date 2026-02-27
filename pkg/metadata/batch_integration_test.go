@@ -110,7 +110,7 @@ func TestSessionKeyMemoization(t *testing.T) {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
-	if err := c.Mkdir(t.Context(), "/m1"); err != nil {
+	if err := c.Mkdir(t.Context(), "/m1", 0755); err != nil {
 		t.Fatalf("First Mkdir failed: %v", err)
 	}
 
@@ -118,7 +118,7 @@ func TestSessionKeyMemoization(t *testing.T) {
 		t.Errorf("Expected 1 session key in cache, got %d", server.SessionKeyCacheSize())
 	}
 
-	if err := c.Mkdir(t.Context(), "/m2"); err != nil {
+	if err := c.Mkdir(t.Context(), "/m2", 0755); err != nil {
 		t.Fatalf("Second Mkdir failed: %v", err)
 	}
 }

@@ -67,9 +67,12 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 5. Verify Alice's Discovery
-	groupsA, err := clientAlice.ListGroups(t.Context())
-	if err != nil {
-		t.Fatalf("ListGroups Alice failed: %v", err)
+	var groupsA []metadata.GroupListEntry
+	for g, err := range clientAlice.ListGroups(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListGroups Alice failed: %v", err)
+		}
+		groupsA = append(groupsA, g)
 	}
 
 	if len(groupsA) != 2 {
@@ -89,9 +92,12 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 6. Verify Bob's Discovery
-	groupsB, err := clientBob.ListGroups(t.Context())
-	if err != nil {
-		t.Fatalf("ListGroups Bob failed: %v", err)
+	var groupsB []metadata.GroupListEntry
+	for g, err := range clientBob.ListGroups(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListGroups Bob failed: %v", err)
+		}
+		groupsB = append(groupsB, g)
 	}
 
 	if len(groupsB) != 2 {
@@ -112,12 +118,11 @@ func TestGroupDiscovery(t *testing.T) {
 
 	// 7. Verify Delegated Registry Access (Fix #1)
 	// Bob is a member of A, and A owns B. Bob should be able to see B's members (PII).
-	membersB, err := clientBob.GetGroupMembers(t.Context(), groupB.ID)
-	if err != nil {
-		t.Fatalf("Bob GetGroupMembers B failed: %v", err)
-	}
 	foundAlice := false
-	for _, m := range membersB {
+	for m, err := range clientBob.GetGroupMembers(t.Context(), groupB.ID) {
+		if err != nil {
+			t.Fatalf("Bob GetGroupMembers B failed: %v", err)
+		}
 		if m.UserID == "alice" && m.Info != "[HIDDEN]" {
 			foundAlice = true
 		}

@@ -648,6 +648,7 @@ func SanitizeMode(mode uint32, itype InodeType) uint32 {
 type SetAttrRequest struct {
 	InodeID string  `json:"inode_id"`
 	Mode    *uint32 `json:"mode,omitempty"`
+	OwnerID *string `json:"owner_id,omitempty"`
 	GroupID *string `json:"group_id,omitempty"`
 	Size    *uint64 `json:"size,omitempty"`
 	MTime   *int64  `json:"mtime,omitempty"`

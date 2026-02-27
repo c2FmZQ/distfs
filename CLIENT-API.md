@@ -61,7 +61,7 @@ These methods provide standard filesystem operations mimicking Go standard libra
 - `(c *Client) Remove(ctx context.Context, path string) error`
 - `(c *Client) Rename(ctx context.Context, oldPath, newPath string) error`
 - `(c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error`
-- `(c *Client) Chown(ctx context.Context, path string, uid, gid uint32) error`
+- `(c *Client) Chown(ctx context.Context, path string, ownerID, groupID string) error`
 - `(c *Client) Symlink(ctx context.Context, target, linkPath string) error`
 - `(c *Client) Link(ctx context.Context, targetPath, linkPath string) error`
 

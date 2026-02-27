@@ -67,13 +67,11 @@ func TestSystemGroups(t *testing.T) {
 	}
 
 	// 4. Verify labeling in list
-	groups, err := cAdmin.ListGroups(t.Context())
-	if err != nil {
-		t.Fatalf("ListGroups failed: %v", err)
-	}
-
 	found := false
-	for _, g := range groups {
+	for g, err := range cAdmin.ListGroups(t.Context()) {
+		if err != nil {
+			t.Fatalf("ListGroups failed: %v", err)
+		}
 		if g.ID == sysGroup.ID {
 			found = true
 			if !g.IsSystem {

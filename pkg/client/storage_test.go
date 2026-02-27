@@ -71,7 +71,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 	}
 
 	// 2. Create files
-	if err := c.Mkdir(t.Context(), "/dir"); err != nil {
+	if err := c.Mkdir(t.Context(), "/dir", 0755); err != nil {
 		t.Fatal(err)
 	}
 	f1 := "/dir/f1"
@@ -86,7 +86,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 
 	// 3. Test Atomic Acquire
 	paths := []string{f1, f2}
-	if err := c.AcquireLeases(t.Context(), paths, 10*time.Second, nil, metadata.LeaseExclusive, ""); err != nil {
+	if err := c.AcquireLeases(t.Context(), paths, 10*time.Second, LeaseOptions{Type: metadata.LeaseExclusive}); err != nil {
 		t.Fatalf("AcquireLeases failed: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil, metadata.LeaseExclusive, "")
+	err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, LeaseOptions{Type: metadata.LeaseExclusive})
 	if err == nil {
 		t.Error("Expected conflict error for leased file, got nil")
 	}
@@ -112,7 +112,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 		t.Fatalf("ReleaseLeases failed: %v", err)
 	}
 
-	if err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, nil, metadata.LeaseExclusive, ""); err != nil {
+	if err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, LeaseOptions{Type: metadata.LeaseExclusive}); err != nil {
 		t.Fatalf("c2 failed to acquire released lease: %v", err)
 	}
 }

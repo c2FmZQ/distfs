@@ -96,7 +96,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	// /dir1
 	// /dir1/file1
 	// /dir1/file2
-	c.Mkdir(t.Context(), "/dir1")
+	c.Mkdir(t.Context(), "/dir1", 0755)
 	c.CreateFile(t.Context(), "/dir1/file1", bytes.NewReader([]byte("content")), 7)
 	c.CreateFile(t.Context(), "/dir1/file2", bytes.NewReader([]byte("content")), 7)
 

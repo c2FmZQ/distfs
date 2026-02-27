@@ -25,7 +25,7 @@ echo '```' >> $REPORT
 echo "Running Unit Tests..."
 go fmt ./...
 go vet ./...
-if ! go test -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
+if ! go test -race -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
     cat "$LOG_DIR/unit-tests.log" >> $REPORT
     echo '```' >> $REPORT
     echo "Unit Tests Failed"

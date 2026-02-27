@@ -749,28 +749,58 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 41: SERVER-API.md Alignment & Protocol Hardening
+## Phase 41: SERVER-API.md Alignment & Protocol Hardening [COMPLETED]
 **Goal:** Align the implementation with the definitive "Source of Truth" specification to ensure cross-language compatibility and protocol stability.
 
 *   **Step 41.1: Cryptographic Wire Format Alignment**
-    *   **Action:** Update `pkg/crypto/sealed.go` to use **Big-Endian** for the 8-byte `Timestamp` in the Sealing protocol.
-    *   **Action:** Align the `ManifestHash` and `Group.Hash` implementations in `pkg/metadata/types.go` to use **Big-Endian** for all binary fields.
-    *   **Action:** Verify byte-perfect segment literals and separators in hashing algorithms against the spec.
+    *   **Action:** [Done] Update `pkg/crypto/sealed.go` to use **Big-Endian** for the 8-byte `Timestamp` in the Sealing protocol.
+    *   **Action:** [Done] Align the `ManifestHash` and `Group.Hash` implementations in `pkg/metadata/types.go` to use **Big-Endian** for all binary fields.
+    *   **Action:** [Done] Verify byte-perfect segment literals and separators in hashing algorithms against the spec.
 *   **Step 41.2: Structured Error Response Implementation**
-    *   **Action:** Create `APIErrorResponse` struct in `pkg/metadata/types.go`.
-    *   **Action:** Implement `writeError(w, code, message, httpStatus)` helper in `MetadataServer`.
-    *   **Action:** Map all internal errors (Conflict, Exists, NotFound, etc.) to their specific `DISTFS_*` string constants defined in Section 8 of `SERVER-API.md`.
+    *   **Action:** [Done] Create `APIErrorResponse` struct in `pkg/metadata/types.go`.
+    *   **Action:** [Done] Implement `writeError(w, code, message, httpStatus)` helper in `MetadataServer`.
+    *   **Action:** [Done] Map all internal errors (Conflict, Exists, NotFound, etc.) to their specific `DISTFS_*` string constants defined in Section 8 of `SERVER-API.md`.
 *   **Step 41.3: Unified Mutation API Consolidation**
-    *   **Action:** Refactor `LogCommand` in `pkg/metadata/fsm.go` to use `json.RawMessage` for the `Data` field to support structured nested JSON.
-    *   **Action:** Update `handleBatch` in `MetadataServer` to parse structured JSON data without base64 decoding.
-    *   **Action:** Remove all standalone mutation endpoints (`POST /v1/meta/inode`, `PUT /v1/group`, `PUT /v1/meta/inode/{id}`, `DELETE /v1/meta/inode/{id}`, `PUT /v1/meta/directory/{id}/entry`, `POST /v1/meta/setattr`).
-    *   **Action:** Refactor the Go client library and the entire test suite to strictly use the `/v1/meta/batch` API for all state-changing operations.
+    *   **Action:** [Done] Refactor `LogCommand` in `pkg/metadata/fsm.go` to use `json.RawMessage` for the `Data` field to support structured nested JSON.
+    *   **Action:** [Done] Update `handleBatch` in `MetadataServer` to parse structured JSON data without base64 decoding.
+    *   **Action:** [Done] Remove all standalone mutation endpoints (`POST /v1/meta/inode`, `PUT /v1/group`, `PUT /v1/meta/inode/{id}`, `DELETE /v1/meta/inode/{id}`, `PUT /v1/meta/directory/{id}/entry`, `POST /v1/meta/setattr`).
+    *   **Action:** [Done] Refactor the Go client library and the entire test suite to strictly use the `/v1/meta/batch` API for all state-changing operations.
 *   **Step 41.4: Server-Side Lease Enforcement**
-    *   **Action:** Implement mandatory lease verification in the FSM during `executeUpdateInode`, `executeUpdateGroup`, and `applyBatch`.
-    *   **Action:** Reject any mutation if an Exclusive Lease is held by a different `SessionID`.
+    *   **Action:** [Done] Implement mandatory lease verification in the FSM during `executeUpdateInode`, `executeUpdateGroup`, and `applyBatch`.
+    *   **Action:** [Done] Reject any mutation if an Exclusive Lease is held by a different `SessionID`.
 *   **Step 41.5: Final Protocol Validation**
-    *   **Action:** Add cross-package unit tests that verify hashing and sealing parity between the Go client and a "blind" implementation based strictly on the spec.
-    *   **Action:** Verify that all E2EE-sealed requests and responses adhere to the exact byte offsets defined in the spec.
+    *   **Action:** [Done] Add cross-package unit tests that verify hashing and sealing parity between the Go client and a "blind" implementation based strictly on the spec.
+    *   **Action:** [Done] Verify that all E2EE-sealed requests and responses adhere to the exact byte offsets defined in the spec.
+*   **Step 41.6: CLIENT-API.md Alignment (Go Library)**
+    *   **Action:** [Done] Refactor `AcquireLeases` to use `LeaseOptions` struct, including the `OnExpired` callback logic in the background renewal loop.
+    *   **Action:** [Done] Implement Go 1.23 Iterators (`iter.Seq` and `iter.Seq2`) for all administrative and group listing functions (`AdminListUsers`, `ListGroups`, etc.).
+    *   **Action:** [Done] Standardize the POSIX-like interface in `pkg/client` to use standard Go signatures `(ctx, path, ...)` and return concrete exported types (`*DistFile`, `*DistFileInfo`, `[]*DistDirEntry`).
+    *   **Action:** [Done] Ensure all iterator implementations respect `context.Context` cancellation and terminate immediately on the first error.
+*   **Step 41.7: Atomic Multi-File Read Implementation**
+    *   **Action:** [Done] Implement `NewReaders(ctx, paths []string) ([]*FileReader, error)` in `pkg/client/client.go` using the "Snapshot Protocol" (Shared Filename Leases -> Batch Inode Fetch -> Inode Leases).
+    *   **Action:** [Done] Implement `ReadDataFiles(ctx, paths []string, targets []any) error` to provide consistent point-in-time reads across multiple files.
+    *   **Action:** [Done] Add integration tests verifying that `ReadDataFiles` provides a consistent view even when files are being swapped by concurrent `SaveDataFile` operations.
+
+---
+
+## Phase 42: ClusterSecret Root of Trust Implementation
+**Goal:** Implement a two-tiered trust model to resolve bootstrapping deadlocks and ensure Raft snapshot portability.
+
+*   **Step 42.1: Tier 1 Vault Implementation**
+    *   **Action:** Implement `NodeVault` logic in `pkg/metadata/vault.go` to manage local storage of `ClusterSecret` via `st.ReadDataFile`/`st.SaveDataFile`.
+*   **Step 42.2: FSM Encryption Refactoring**
+    *   **Action:** Update `NewMetadataFSM` to accept `ClusterSecret` and remove legacy `fsm.key` loading.
+    *   **Action:** Refactor `fsm.Get` and `fsm.Put` to use `ClusterSecret` for the `system` bucket.
+    *   **Action:** Update `syncKeyRing` and `executeRotateFSMKey` to use the new tiered encryption model.
+*   **Step 42.3: Join Handshake Evolution**
+    *   **Action:** Update `handleClusterJoin` to encapsulate the `ClusterSecret` for the joining node.
+    *   **Action:** Update `AdminJoinNode` or the corresponding internal logic to handle secret retrieval and persistence.
+*   **Step 42.4: storage-node Alignment**
+    *   **Action:** Update `main.go` to load/generate `ClusterSecret` before FSM initialization.
+    *   **Action:** Simplify `verifyJWT` to use the memory-resident `ClusterSecret`.
+*   **Step 42.5: Verification & Cleanup**
+    *   **Action:** Verify that joining nodes can successfully restore snapshots and bootstrap their KeyRings.
+    *   **Action:** Remove all remaining plaintext `cluster_secret` logic from the FSM.
 
 ### Phase 41 Testing Strategy:
 1.  **Byte-Perfect Hashing Tests:** Create test cases that manually construct manifest hashes using raw binary segments (Big-Endian) to verify cross-language compatibility.

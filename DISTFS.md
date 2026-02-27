@@ -40,10 +40,12 @@ The system is designed to scale horizontally, with the following soft limits:
 *   **Node Security:** Leveraging `github.com/c2FmZQ/storage`, all data stored on MetaNodes and DataNodes (Raft logs, snapshots, chunk files, keys) is encrypted *at rest*.
     *   **Root Secret:** A `DISTFS_MASTER_KEY` environment variable provides the master passphrase.
     *   **Master Key:** A `crypto.MasterKey` is derived from this passphrase to decrypt the node-local key store (`data/master.key`).
+    *   **ClusterSecret Vault:** Each node maintains a local encrypted vault containing the shared **ClusterSecret**. This vault is protected by the node's unique Master Key.
     *   **Isolation:** Encryption keys are node-local and never shared across the network.
 *   **Key Rotation:** 
     *   **Raft Logs:** The encryption key for Raft logs MUST be rotated after every snapshot.
-    *   **FSM Metadata:** Metadata values in BoltDB are encrypted using a cluster-wide **FSM KeyRing**. The active key is used for new writes, while old keys are retained for decryption. A background worker periodically re-encrypts old records with the active key to provide forward secrecy.
+    *   **FSM Metadata:** Metadata values in BoltDB are encrypted using a cluster-wide **FSM KeyRing**. The active key is used for new writes, while old keys are retained for decryption.
+    *   **Root of Trust (FSM):** Critical metadata anchors (the `FSM KeyRing` and `ClusterSignKey`) are stored in the BoltDB `system` bucket, **encrypted with a key derived from the ClusterSecret**. This ensures that the rotating KeyRing can be safely stored within the FSM itself.
 
 ### 3.2 Key Hierarchy & Cryptography
 Users control their identity via an asymmetric key pair using **Post-Quantum Cryptography (PQC)** algorithms (e.g., CRYSTALS-Kyber for encapsulation, CRYSTALS-Dilithium for signatures) to future-proof against quantum threats.
@@ -375,3 +377,18 @@ DistFS provides a comprehensive administrative interface for cluster operators. 
 ### 7.5 Request Forwarding
 *   Write requests sent to Follower nodes are automatically forwarded to the Leader via the Internal Cluster API.
 *   Read requests can be served locally by Followers (using Read-Index for consistency).
+
+### 7.6 Cluster Bootstrapping and Snapshot Transfer
+DistFS utilizes a two-tiered trust model to resolve the circular dependency between FSM encryption and node bootstrapping.
+
+1.  **Tier 1: Local Node Vault:**
+    *   On initial bootstrap, the Leader generates a high-entropy **ClusterSecret** and stores it in its local node-local encrypted vault (protected by the node's unique `MasterKey`).
+    *   During the `Join` handshake, the Leader retrieves the `ClusterSecret` and encapsulates it for the joining node's Public Encryption Key.
+    *   The joining node decrypts and persists the `ClusterSecret` in its own local Tier 1 vault.
+2.  **Tier 2: Cluster Root of Trust (FSM):**
+    *   The BoltDB `system` bucket contains the cluster-wide root metadata, including the **FSM KeyRing**.
+    *   Values in the `system` bucket are encrypted using a key derived from the `ClusterSecret`.
+    *   All other buckets (Inodes, Users, Groups) are encrypted using the rotating `FSM KeyRing`.
+3.  **Snapshot Portability:**
+    *   When a Raft snapshot is transferred to a Follower, the `system` bucket remains encrypted with the `ClusterSecret`.
+    *   Since every authorized Follower has the `ClusterSecret` in its local Tier 1 vault, it can immediately decrypt the root anchors and bootstrap its local FSM state.

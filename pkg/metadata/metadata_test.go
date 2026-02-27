@@ -1074,5 +1074,3 @@ func TestNodeRevocation(t *testing.T) {
 		}
 	}
 }
-
-

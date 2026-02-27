@@ -290,8 +290,8 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 }
 
 // Mkdir creates a directory.
-func (c *Client) Mkdir(ctx context.Context, path string) error {
-	return c.addEntry(ctx, path, metadata.DirType, nil, 0, "", 0755)
+func (c *Client) Mkdir(ctx context.Context, path string, perm fs.FileMode) error {
+	return c.addEntry(ctx, path, metadata.DirType, nil, 0, "", uint32(perm))
 }
 
 // MkdirAll creates a directory and all parent directories.
@@ -304,7 +304,7 @@ func (c *Client) MkdirAll(ctx context.Context, path string) error {
 			continue
 		}
 		current = filepath.Join(current, part)
-		err := c.Mkdir(ctx, current)
+		err := c.Mkdir(ctx, current, 0755)
 		if err != nil && err != metadata.ErrExists {
 			return err
 		}
@@ -315,6 +315,21 @@ func (c *Client) MkdirAll(ctx context.Context, path string) error {
 // CreateFile creates a file with the given content.
 func (c *Client) CreateFile(ctx context.Context, path string, r io.Reader, size int64) error {
 	return c.addEntry(ctx, path, metadata.FileType, r, size, "", 0600)
+}
+
+// Chmod changes the mode of a file or directory.
+func (c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error {
+	return c.SetAttr(ctx, path, metadata.SetAttrRequest{
+		Mode: ptr(uint32(mode)),
+	})
+}
+
+// Chown changes the owner and group of a file or directory.
+func (c *Client) Chown(ctx context.Context, path string, ownerID, groupID string) error {
+	return c.SetAttr(ctx, path, metadata.SetAttrRequest{
+		OwnerID: &ownerID,
+		GroupID: &groupID,
+	})
 }
 
 // Symlink creates a symbolic link.
@@ -522,6 +537,50 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 	}
 
 	return nil
+}
+
+// Stat returns file info for the given path.
+func (c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error) {
+	inode, _, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	_, fileName := filepath.Split(path)
+	if fileName == "" && path == "/" {
+		fileName = "/"
+	}
+	return &DistFileInfo{inode: inode, name: fileName}, nil
+}
+
+// Lstat returns file info for the given path, without following the final symlink.
+func (c *Client) Lstat(ctx context.Context, path string) (*DistFileInfo, error) {
+	// Our ResolvePath currently follows all symlinks.
+	// TODO: Support Lstat properly by adding a 'followFinal' flag to ResolvePath.
+	return c.Stat(ctx, path)
+}
+
+// ReadDir returns a list of directory entries for the given path.
+func (c *Client) ReadDir(ctx context.Context, path string) ([]*DistDirEntry, error) {
+	return c.ReadDirExtended(ctx, path)
+}
+
+// Open opens a file or directory for reading.
+func (c *Client) Open(ctx context.Context, path string, flag int, perm fs.FileMode) (*DistFile, error) {
+	inode, key, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+
+	if inode.Type == metadata.DirType {
+		return nil, fmt.Errorf("is a directory") // CLIENT-API says *DistFile, but maybe we should support DistDir too
+	}
+
+	reader, err := c.NewReader(ctx, inode.ID, key)
+	if err != nil {
+		return nil, err
+	}
+
+	return &DistFile{reader: reader}, nil
 }
 
 // Link creates a hard link.

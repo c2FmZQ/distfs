@@ -87,13 +87,11 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 	}
 
 	// Verify Registry (Fix #2 ensures merge)
-	members, err := clientAlice.GetGroupMembers(t.Context(), group.ID)
-	if err != nil {
-		t.Fatalf("GetGroupMembers failed: %v", err)
-	}
-
 	found1, found2 := false, false
-	for _, m := range members {
+	for m, err := range clientAlice.GetGroupMembers(t.Context(), group.ID) {
+		if err != nil {
+			t.Fatalf("GetGroupMembers failed: %v", err)
+		}
 		if m.UserID == "user1" {
 			found1 = true
 		}

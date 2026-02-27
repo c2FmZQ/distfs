@@ -451,7 +451,7 @@ func cmdMkdir(ctx context.Context, args []string) {
 	}
 	path := args[0]
 	c := loadClient()
-	if err := c.Mkdir(ctx, path); err != nil {
+	if err := c.Mkdir(ctx, path, 0700); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Directory %s created.\n", path)
@@ -574,15 +574,14 @@ func cmdGroupMembers(ctx context.Context, args []string) {
 	}
 	groupID := args[0]
 	c := loadClient()
-	members, err := c.GetGroupMembers(ctx, groupID)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	fmt.Printf("Members of group %s:\n", groupID)
 	fmt.Printf("%-64s %s\n", "User ID", "User Info")
 	fmt.Println(strings.Repeat("-", 80))
-	for _, m := range members {
+	for m, err := range c.GetGroupMembers(ctx, groupID) {
+		if err != nil {
+			log.Fatal(err)
+		}
 		fmt.Printf("%-64s %s\n", m.UserID, m.Info)
 	}
 }
@@ -601,14 +600,13 @@ func cmdGroupRemove(ctx context.Context, args []string) {
 
 func cmdGroupList(ctx context.Context, args []string) {
 	c := loadClient()
-	entries, err := c.ListGroups(ctx)
-	if err != nil {
-		log.Fatal(err)
-	}
 
 	fmt.Printf("%-32s %-20s %s\n", "Group ID", "Name", "Role")
 	fmt.Println(strings.Repeat("-", 80))
-	for _, e := range entries {
+	for e, err := range c.ListGroups(ctx) {
+		if err != nil {
+			log.Fatal(err)
+		}
 		name := "[HIDDEN]"
 		if decrypted, err := c.DecryptGroupName(ctx, e); err == nil {
 			name = decrypted
@@ -694,14 +692,12 @@ func cmdQuota(ctx context.Context, args []string) {
 	fmt.Printf("Personal Usage for %s:\n", c.UserID())
 	displayUsage(user.Usage, user.Quota)
 
-	groups, err := c.ListGroups(ctx)
-	if err != nil {
-		fmt.Printf("\nFailed to fetch group info: %v\n", err)
-		return
-	}
-
 	managedGroups := 0
-	for _, g := range groups {
+	for g, err := range c.ListGroups(ctx) {
+		if err != nil {
+			fmt.Printf("\nFailed to fetch group info: %v\n", err)
+			return
+		}
 		if g.Role == metadata.RoleOwner || g.Role == metadata.RoleManager {
 			if managedGroups == 0 {
 				fmt.Println("Managed Group Quotas:")

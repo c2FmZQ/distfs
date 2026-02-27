@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"log"
 	mrand "math/rand"
 	"net/http"
@@ -255,6 +256,8 @@ type Client struct {
 
 	mutationMu    *sync.Mutex
 	mutationLocks map[string]*sync.Mutex
+
+	onLeaseExpired func(id string, err error)
 }
 
 // NewClient creates a new DistFS client.
@@ -339,6 +342,12 @@ func (c *Client) WithAdmin(admin bool) *Client {
 	return &c2
 }
 
+func (c *Client) WithLeaseExpiredCallback(fn func(id string, err error)) *Client {
+	c2 := *c
+	c2.onLeaseExpired = fn
+	return &c2
+}
+
 // GetRootAnchor returns the current root anchoring information.
 func (c *Client) GetRootAnchor() (string, string, uint64) {
 	c.rootMu.RLock()
@@ -370,7 +379,7 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, resp.Body)
+		return c.newAPIError(resp, resp.Body)
 	}
 
 	var challengeRes metadata.AuthChallengeResponse
@@ -409,7 +418,7 @@ func (c *Client) Login(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, resp.Body)
+		return c.newAPIError(resp, resp.Body)
 	}
 
 	var res metadata.SessionResponse
@@ -719,7 +728,7 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 
 		respBytes, err := io.ReadAll(body)
@@ -930,43 +939,51 @@ func (e *APIError) ToPOSIX() error {
 }
 
 // ListGroups retrieves all groups associated with the current user.
-func (c *Client) ListGroups(ctx context.Context) ([]metadata.GroupListEntry, error) {
-	var resp metadata.GroupListResponse
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
+func (c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEntry, error] {
+	return func(yield func(metadata.GroupListEntry, error) bool) {
+		var resp metadata.GroupListResponse
+		err := c.withRetry(ctx, func() error {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
 
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/user/groups", nil)
+			req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/user/groups", nil)
+			if err != nil {
+				return err
+			}
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
+
+			res, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(ctx, res)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if res.StatusCode != http.StatusOK {
+				return c.newAPIError(res, body)
+			}
+
+			return json.NewDecoder(body).Decode(&resp)
+		})
+
 		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
+			yield(metadata.GroupListEntry{}, err)
+			return
 		}
 
-		res, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
+		for _, g := range resp.Groups {
+			if !yield(g, nil) {
+				return
+			}
 		}
-		body, err := c.unsealResponse(ctx, res)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if res.StatusCode != http.StatusOK {
-	return c.newAPIError(res, body)
-		}
-
-		return json.NewDecoder(body).Decode(&resp)
-	})
-
-	if err != nil {
-		return nil, err
 	}
-	return resp.Groups, nil
 }
 
 func (c *Client) GetUser(ctx context.Context, id string) (*metadata.User, error) {
@@ -1010,7 +1027,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&user)
@@ -1232,7 +1249,7 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 		}
 
 		if len(results) > 0 {
-					}
+		}
 
 		c.clearPathCache()
 		return nil
@@ -1312,7 +1329,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 
 		if err := json.NewDecoder(body).Decode(&inode); err != nil {
@@ -1394,7 +1411,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return json.NewDecoder(body).Decode(&inodes)
 	})
@@ -1641,6 +1658,8 @@ type FileReader struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	onExpired func(id string, err error)
 }
 
 // NewReader creates a new FileReader for the given inode.
@@ -1650,7 +1669,13 @@ func (c *Client) NewReader(ctx context.Context, id string, fileKey []byte) (*Fil
 	if err != nil {
 		return nil, err
 	}
+	return c.NewReaderWithInode(ctx, inode, fileKey, "")
+}
 
+// NewReaderWithInode creates a new FileReader from an already fetched Inode.
+// If leaseNonce is empty, it will acquire a new shared usage lease.
+func (c *Client) NewReaderWithInode(ctx context.Context, inode *metadata.Inode, fileKey []byte, leaseNonce string) (*FileReader, error) {
+	id := inode.ID
 	if fileKey == nil {
 		c.keyMu.RLock()
 		meta, ok := c.keyCache[id]
@@ -1687,10 +1712,13 @@ func (c *Client) NewReader(ctx context.Context, id string, fileKey []byte) (*Fil
 	}
 
 	token, _ := c.issueToken(ctx, id, nil, "R")
-	nonce := generateID()
 
-	// POSIX compliance: acquire shared usage lease
-	_ = c.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil, metadata.LeaseShared, nonce)
+	nonce := leaseNonce
+	if nonce == "" {
+		nonce = generateID()
+		// POSIX compliance: acquire shared usage lease
+		_ = c.AcquireLeases(ctx, []string{id}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
+	}
 
 	lctx, cancel := context.WithCancel(context.Background())
 	r := &FileReader{
@@ -1704,6 +1732,7 @@ func (c *Client) NewReader(ctx context.Context, id string, fileKey []byte) (*Fil
 		readAhead:       make(map[int64]*readAheadResult),
 		ctx:             lctx,
 		cancel:          cancel,
+		onExpired:       c.onLeaseExpired,
 	}
 
 	r.wg.Add(1)
@@ -1727,14 +1756,28 @@ func (r *FileReader) leaseRenewalLoop(id string, lType metadata.LeaseType) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
+	lastSuccess := time.Now()
+	leaseDuration := 2 * time.Minute
+
 	for {
 		select {
 		case <-r.ctx.Done():
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = r.client.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil, lType, r.leaseNonce)
+			err := r.client.AcquireLeases(ctx, []string{id}, leaseDuration, LeaseOptions{Type: lType, Nonce: r.leaseNonce})
 			cancel()
+
+			if err == nil {
+				lastSuccess = time.Now()
+			} else {
+				if time.Since(lastSuccess) > leaseDuration {
+					if r.onExpired != nil {
+						r.onExpired(id, err)
+					}
+					return // Stop renewal if expired
+				}
+			}
 		}
 	}
 }
@@ -2009,13 +2052,22 @@ func (c *Client) OpenBlobRead(ctx context.Context, path string) (io.ReadCloser, 
 }
 
 func (c *Client) OpenBlobWrite(ctx context.Context, path string) (io.WriteCloser, error) {
+	return c.OpenBlobWriteWithLease(ctx, path, "")
+}
+
+// OpenBlobWriteWithLease creates a writer for a blob.
+// If leaseNonce is empty, it will acquire a new exclusive path lease.
+func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseNonce string) (io.WriteCloser, error) {
 	// Acquire lease first to prevent concurrent writers.
-	nonce := generateID()
-	err := c.withConflictRetry(ctx, func() error {
-		return c.AcquireLeases(ctx, []string{path}, 2*time.Minute, nil, metadata.LeaseExclusive, nonce)
-	})
-	if err != nil {
-		return nil, err
+	nonce := leaseNonce
+	if nonce == "" {
+		nonce = generateID()
+		err := c.withConflictRetry(ctx, func() error {
+			return c.AcquireLeases(ctx, []string{path}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
+		})
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// 1. Try to resolve as Path
@@ -2081,6 +2133,7 @@ func (c *Client) OpenBlobWrite(ctx context.Context, path string) (io.WriteCloser
 		swapPath:   path,
 		oldInodeID: oldInodeID,
 		isNew:      true, // It's "new" because it's a new InodeID
+		onExpired:  c.onLeaseExpired,
 	}
 
 	w.wg.Add(1)
@@ -2110,6 +2163,8 @@ type FileWriter struct {
 	swapMode   bool
 	swapPath   string
 	oldInodeID string
+
+	onExpired func(id string, err error)
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
@@ -2238,7 +2293,8 @@ func (w *FileWriter) Close() error {
 			}
 
 			// Execute Atomic Batch
-			_, err = w.client.ApplyBatch(w.ctx, cmds); return err
+			_, err = w.client.ApplyBatch(w.ctx, cmds)
+			return err
 		})
 	} else {
 		if w.isNew {
@@ -2330,14 +2386,28 @@ func (w *FileWriter) leaseRenewalLoop(id string, lType metadata.LeaseType) {
 	ticker := time.NewTicker(60 * time.Second)
 	defer ticker.Stop()
 
+	lastSuccess := time.Now()
+	leaseDuration := 2 * time.Minute
+
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
 		case <-ticker.C:
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			_ = w.client.AcquireLeases(ctx, []string{id}, 2*time.Minute, nil, lType, w.leaseNonce)
+			err := w.client.AcquireLeases(ctx, []string{id}, leaseDuration, LeaseOptions{Type: lType, Nonce: w.leaseNonce})
 			cancel()
+
+			if err == nil {
+				lastSuccess = time.Now()
+			} else {
+				if time.Since(lastSuccess) > leaseDuration {
+					if w.onExpired != nil {
+						w.onExpired(id, err)
+					}
+					return
+				}
+			}
 		}
 	}
 }
@@ -2561,7 +2631,9 @@ func (c *Client) ReadDataFiles(ctx context.Context, names []string, targets []an
 	}
 	defer func() {
 		for _, r := range readers {
-			r.Close()
+			if r != nil {
+				r.Close()
+			}
 		}
 	}()
 
@@ -2594,9 +2666,11 @@ func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader,
 
 	// 1. Acquire shared filename leases for all paths to "freeze" the namespace.
 	nonce := generateID()
-	err := c.withConflictRetry(ctx, func() error {
-		return c.AcquireLeases(ctx, paths, 2*time.Minute, nil, metadata.LeaseShared, nonce)
+	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
+	err := c.withConflictRetry(lctx, func() error {
+		return c.AcquireLeases(lctx, paths, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
 	})
+	lcancel()
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire namespace snapshot: %w", err)
 	}
@@ -2605,25 +2679,59 @@ func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader,
 	// Clear cache to ensure we see the state as of when leases were acquired
 	c.ClearCache()
 
-	// 2. Resolve all paths and initialize readers.
-	// Since we hold the filename leases, concurrent atomic swaps won't change what these paths point to.
-	readers := make([]*FileReader, len(paths))
+	// 2. Resolve all paths sequentially.
+	ids := make([]string, len(paths))
+	keys := make([][]byte, len(paths))
 	for i, path := range paths {
-		inode, key, err := c.ResolvePath(ctx, path)
+		_, key, err := c.ResolvePath(ctx, path)
 		if err != nil {
-			// Cleanup previously opened readers
-			for j := 0; j < i; j++ {
-				readers[j].Close()
-			}
 			return nil, fmt.Errorf("failed to resolve %s: %w", path, err)
 		}
+		entry, _ := c.getPathCache(path)
+		ids[i] = entry.inodeID
+		keys[i] = key
+	}
 
-		r, err := c.NewReader(ctx, inode.ID, key)
-		if err != nil {
+	// 3. Batch fetch all Inodes
+	inodes, err := c.getInodes(ctx, ids)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch inodes: %w", err)
+	}
+
+	// Create a map for quick lookup
+	inodeMap := make(map[string]*metadata.Inode)
+	for _, inode := range inodes {
+		inodeMap[inode.ID] = inode
+	}
+
+	// 4. Acquire shared Inode leases in one batch
+	inodeNonce := generateID()
+	err = c.AcquireLeases(ctx, ids, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: inodeNonce})
+	if err != nil {
+		return nil, fmt.Errorf("failed to acquire inode leases: %w", err)
+	}
+
+	// 5. Initialize readers
+	readers := make([]*FileReader, len(paths))
+	for i, id := range ids {
+		inode, ok := inodeMap[id]
+		if !ok {
+			// Cleanup
 			for j := 0; j < i; j++ {
 				readers[j].Close()
 			}
-			return nil, fmt.Errorf("failed to open %s: %w", path, err)
+			c.ReleaseLeases(ctx, ids, inodeNonce)
+			return nil, fmt.Errorf("inode %s not found in batch fetch", id)
+		}
+
+		r, err := c.NewReaderWithInode(ctx, inode, keys[i], inodeNonce)
+		if err != nil {
+			// Cleanup
+			for j := 0; j < i; j++ {
+				readers[j].Close()
+			}
+			c.ReleaseLeases(ctx, ids, inodeNonce)
+			return nil, fmt.Errorf("failed to open %s: %w", paths[i], err)
 		}
 		readers[i] = r
 	}
@@ -2641,6 +2749,18 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 		return fmt.Errorf("names and data length mismatch")
 	}
 
+	// Phase 41: Batch acquire all path leases first to prevent livelock with readers.
+	nonce := generateID()
+	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
+	err := c.withConflictRetry(lctx, func() error {
+		return c.AcquireLeases(lctx, names, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
+	})
+	lcancel()
+	if err != nil {
+		return err
+	}
+	defer c.ReleaseLeases(ctx, names, nonce)
+
 	// 1. Prepare all writers
 	writers := make([]*FileWriter, len(names))
 	for i, name := range names {
@@ -2651,7 +2771,7 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 			}
 			return err
 		}
-		wc, err := c.OpenBlobWrite(ctx, name)
+		wc, err := c.OpenBlobWriteWithLease(ctx, name, nonce)
 		if err != nil {
 			for j := 0; j < i; j++ {
 				writers[j].Abort()
@@ -2690,7 +2810,7 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 	// 2. Perform Atomic Commit for all writers together
 	// Each writer is in swapMode, so they have prepared their new inodes.
 	// We need to collect all their commands and apply them in one batch.
-	err := c.withConflictRetry(ctx, func() error {
+	err = c.withConflictRetry(ctx, func() error {
 		var allCmds []metadata.LogCommand
 		parents := make(map[string]*metadata.Inode)
 
@@ -2719,9 +2839,16 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 				parent.Children[w.nameHMAC] = w.inode.ID
 			}
 
-			// Delete Old
+			// Delete Old via NLink decrement
 			if w.oldInodeID != "" && w.oldInodeID != w.inode.ID {
-				cmdOld, err := c.PrepareDelete(w.oldInodeID)
+				oldInode, err := c.getInode(ctx, w.oldInodeID)
+				if err != nil {
+					return err
+				}
+				if oldInode.NLink > 0 {
+					oldInode.NLink--
+				}
+				cmdOld, err := c.PrepareUpdate(ctx, *oldInode)
 				if err != nil {
 					return err
 				}
@@ -2738,52 +2865,48 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 			allCmds = append(allCmds, cmdParent)
 		}
 
-		_, err := c.ApplyBatch(ctx, allCmds); return err
+		_, err := c.ApplyBatch(ctx, allCmds)
+		return err
 	})
 
-	// 3. Post-commit: Cleanup and caching
-	if err == nil {
-		c.keyMu.Lock()
-		c.pathMu.Lock()
-		defer c.pathMu.Unlock()
-		defer c.keyMu.Unlock()
-
+	if err != nil {
 		for _, w := range writers {
-			// Mark as closed so Close() doesn't try to commit again
-			w.closed = true
-			w.cancel()
-			w.wg.Wait()
-
-			// Release leases
-			c.ReleaseLeases(ctx, []string{w.swapPath}, w.leaseNonce)
-
-			// Update caches
-			fm := fileMetadata{
-				key:     w.fileKey,
-				groupID: w.inode.GroupID,
-				linkTag: w.parentID + ":" + w.nameHMAC,
-				inlined: w.inode.GetInlineData() != nil,
-			}
-			c.keyCache[w.inode.ID] = fm
-			c.keyCache[w.swapPath] = fm
-
-			c.pathCache[w.swapPath] = pathCacheEntry{
-				inodeID: w.inode.ID,
-				key:     w.fileKey,
-				linkTag: w.parentID + ":" + w.nameHMAC,
-				inode:   &w.inode,
-			}
+			w.Abort()
 		}
-	} else {
-		for _, w := range writers {
-			w.closed = true
-			w.cancel()
-			w.wg.Wait()
-			c.ReleaseLeases(ctx, []string{w.swapPath}, w.leaseNonce)
+		return err
+	}
+
+	// 3. Post-commit: Cleanup and caching
+	c.keyMu.Lock()
+	c.pathMu.Lock()
+	defer c.pathMu.Unlock()
+	defer c.keyMu.Unlock()
+
+	for _, w := range writers {
+		// Mark as closed so Close() doesn't try to commit again
+		w.closed = true
+		w.cancel()
+		w.wg.Wait()
+
+		// Update caches
+		fm := fileMetadata{
+			key:     w.fileKey,
+			groupID: w.inode.GroupID,
+			linkTag: w.parentID + ":" + w.nameHMAC,
+			inlined: w.inode.GetInlineData() != nil,
+		}
+		c.keyCache[w.inode.ID] = fm
+		c.keyCache[w.swapPath] = fm
+
+		c.pathCache[w.swapPath] = pathCacheEntry{
+			inodeID: w.inode.ID,
+			key:     w.fileKey,
+			linkTag: w.parentID + ":" + w.nameHMAC,
+			inode:   &w.inode,
 		}
 	}
 
-	return err
+	return nil
 }
 
 func (c *Client) OpenForUpdate(ctx context.Context, name string, data any) (func(bool), error) {
@@ -2797,7 +2920,7 @@ func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []a
 
 	// 1. Acquire path-based exclusive leases for all files
 	nonce := generateID()
-	if err := c.AcquireLeases(ctx, names, 2*time.Minute, nil, metadata.LeaseExclusive, nonce); err != nil {
+	if err := c.AcquireLeases(ctx, names, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce}); err != nil {
 		return nil, err
 	}
 
@@ -3529,7 +3652,7 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 			return err
 		}
-				return nil
+		return nil
 	})
 	return res.GID, err
 }
@@ -3799,6 +3922,9 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		if attr.Mode != nil {
 			i.Mode = *attr.Mode
 		}
+		if attr.OwnerID != nil {
+			i.OwnerID = *attr.OwnerID
+		}
 		if attr.GroupID != nil {
 			i.GroupID = *attr.GroupID
 		}
@@ -3809,7 +3935,18 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 			i.SetMTime(*attr.MTime)
 		}
 
-		// 2. Handle Lockbox updates (World & Group)
+		// 2. Handle Lockbox updates (Owner, World & Group)
+		// Ensure new owner has access
+		if attr.OwnerID != nil {
+			u, err := c.GetUser(ctx, *attr.OwnerID)
+			if err == nil {
+				pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey)
+				if err == nil {
+					i.Lockbox.AddRecipient(*attr.OwnerID, pk, key)
+				}
+			}
+		}
+
 		worldRead := (i.Mode & 0004) != 0
 		groupRW := (i.Mode & 0060) != 0
 
@@ -3919,6 +4056,35 @@ func (c *Client) acquireControl(ctx context.Context) error {
 	}
 }
 
+func (c *Client) leaseRenewalLoop(ctx context.Context, wg *sync.WaitGroup, ids []string, lType metadata.LeaseType, nonce string) {
+	defer wg.Done()
+	ticker := time.NewTicker(60 * time.Second)
+	defer ticker.Stop()
+
+	lastSuccess := time.Now()
+	leaseDuration := 2 * time.Minute
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			err := c.AcquireLeases(rctx, ids, leaseDuration, LeaseOptions{Type: lType, Nonce: nonce})
+			cancel()
+
+			if err == nil {
+				lastSuccess = time.Now()
+			} else {
+				if time.Since(lastSuccess) > leaseDuration {
+					log.Printf("LEASE EXPIRED: failed to renew %v: %v", ids, err)
+					return
+				}
+			}
+		}
+	}
+}
+
 func (c *Client) releaseControl() {
 	<-c.controlSem
 }
@@ -3994,17 +4160,26 @@ func (c *Client) isRetryable(err error) bool {
 
 func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 	backoff := 50 * time.Millisecond
-	maxBackoff := 1 * time.Second
+	maxBackoff := 5 * time.Second
 
-	for i := 0; i < 20; i++ {
+	for {
 		err := op()
 		if err == nil {
 			return nil
 		}
 		var apiErr *APIError
-		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) || errors.Is(err, metadata.ErrConflict)
+		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) ||
+			errors.Is(err, metadata.ErrConflict) ||
+			(apiErr != nil && apiErr.Code == metadata.ErrCodeVersionConflict) ||
+			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired)
 
 		if isConflict {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
 			jitter := time.Duration(mrand.Int63n(int64(backoff/2) + 1))
 			select {
 			case <-ctx.Done():
@@ -4019,7 +4194,6 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 		}
 		return err
 	}
-	return metadata.ErrConflict
 }
 
 func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, error) {
@@ -4045,7 +4219,7 @@ func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, e
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, resp.Body)
+			return c.newAPIError(resp, resp.Body)
 		}
 
 		return json.NewDecoder(resp.Body).Decode(&stats)
@@ -4057,13 +4231,32 @@ func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, e
 	return &stats, nil
 }
 
-func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration, lb crypto.Lockbox, lType metadata.LeaseType, nonce string) error {
+type LeaseOptions struct {
+	Type    metadata.LeaseType
+	Nonce   string
+	Lockbox crypto.Lockbox
+	// OnExpired is called if the background renewal loop fails (e.g., network partition)
+	// and the lease actually expires on the server.
+	OnExpired func(id string, err error)
+}
+
+// AcquireLeases acquires distributed leases for multiple identifiers.
+func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration, opts LeaseOptions) error {
+	leaseIDs := make([]string, len(ids))
+	for i, id := range ids {
+		if !metadata.IsInodeID(id) && !strings.HasPrefix(id, "path:") {
+			leaseIDs[i] = "path:" + id
+		} else {
+			leaseIDs[i] = id
+		}
+	}
+
 	req := metadata.LeaseRequest{
-		InodeIDs: ids,
+		InodeIDs: leaseIDs,
 		Duration: int64(duration),
-		Lockbox:  lb,
-		Type:     lType,
-		Nonce:    nonce,
+		Lockbox:  opts.Lockbox,
+		Type:     opts.Type,
+		Nonce:    opts.Nonce,
 	}
 	data, _ := json.Marshal(req)
 
@@ -4095,15 +4288,24 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
 }
 
 func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) error {
+	leaseIDs := make([]string, len(ids))
+	for i, id := range ids {
+		if !metadata.IsInodeID(id) && !strings.HasPrefix(id, "path:") {
+			leaseIDs[i] = "path:" + id
+		} else {
+			leaseIDs[i] = id
+		}
+	}
+
 	req := metadata.LeaseRequest{
-		InodeIDs: ids,
+		InodeIDs: leaseIDs,
 		Nonce:    nonce,
 	}
 	data, _ := json.Marshal(req)
@@ -4136,154 +4338,211 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) 
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
 }
 
-func (c *Client) AdminListUsers(ctx context.Context) ([]metadata.User, error) {
-	var users []metadata.User
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
+func (c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error] {
+	return func(yield func(*metadata.User, error) bool) {
+		var users []metadata.User
+		err := c.withRetry(ctx, func() error {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
 
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/users", nil)
+			req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/users", nil)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("X-DistFS-Sealed", "true")
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(ctx, resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return c.newAPIError(resp, body)
+			}
+
+			return json.NewDecoder(body).Decode(&users)
+		})
+
 		if err != nil {
-			return err
-		}
-		req.Header.Set("X-DistFS-Sealed", "true") // Required
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
+			yield(nil, err)
+			return
 		}
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
+		for i := range users {
+			if !yield(&users[i], nil) {
+				return
+			}
 		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
-		}
-
-		return json.NewDecoder(body).Decode(&users)
-	})
-	return users, err
+	}
 }
 
-func (c *Client) AdminListGroups(ctx context.Context) ([]metadata.Group, error) {
-	var groups []metadata.Group
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
+func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error] {
+	return func(yield func(*metadata.Group, error) bool) {
+		cursor := ""
+		for {
+			var groups []metadata.Group
+			var nextCursor string
 
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/groups", nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("X-DistFS-Sealed", "true")
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
+			err := c.withRetry(ctx, func() error {
+				if err := c.acquireControl(ctx); err != nil {
+					return err
+				}
+				defer c.releaseControl()
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
+				u := c.serverURL + "/v1/admin/groups"
+				if cursor != "" {
+					u += "?cursor=" + cursor
+				}
+				req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
+				if err != nil {
+					return err
+				}
+				req.Header.Set("X-DistFS-Sealed", "true")
+				if err := c.authenticateRequest(ctx, req); err != nil {
+					return err
+				}
 
-		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
-		}
+				resp, err := c.httpClient.Do(req)
+				if err != nil {
+					return err
+				}
+				body, err := c.unsealResponse(ctx, resp)
+				if err != nil {
+					return err
+				}
+				defer body.Close()
 
-		return json.NewDecoder(body).Decode(&groups)
-	})
-	return groups, err
+				if resp.StatusCode != http.StatusOK {
+					return c.newAPIError(resp, body)
+				}
+
+				nextCursor = resp.Header.Get("X-DistFS-Next-Cursor")
+				return json.NewDecoder(body).Decode(&groups)
+			})
+
+			if err != nil {
+				yield(nil, err)
+				return
+			}
+
+			for i := range groups {
+				if !yield(&groups[i], nil) {
+					return
+				}
+			}
+
+			if nextCursor == "" {
+				break
+			}
+			cursor = nextCursor
+		}
+	}
 }
 
-func (c *Client) AdminListLeases(ctx context.Context) ([]metadata.LeaseInfo, error) {
-	var leases []metadata.LeaseInfo
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
+func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error] {
+	return func(yield func(*metadata.LeaseInfo, error) bool) {
+		var leases []metadata.LeaseInfo
+		err := c.withRetry(ctx, func() error {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
 
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/leases", nil)
+			req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/leases", nil)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("X-DistFS-Sealed", "true")
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(ctx, resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return c.newAPIError(resp, body)
+			}
+
+			return json.NewDecoder(body).Decode(&leases)
+		})
+
 		if err != nil {
-			return err
-		}
-		req.Header.Set("X-DistFS-Sealed", "true")
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
+			yield(nil, err)
+			return
 		}
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
+		for i := range leases {
+			if !yield(&leases[i], nil) {
+				return
+			}
 		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
-		}
-
-		return json.NewDecoder(body).Decode(&leases)
-	})
-	return leases, err
+	}
 }
+func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
+	return func(yield func(*metadata.Node) bool) {
+		var nodes []metadata.Node
+		_ = c.withRetry(ctx, func() error {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
 
-func (c *Client) AdminListNodes(ctx context.Context) ([]metadata.Node, error) {
-	var nodes []metadata.Node
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
+			req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/nodes", nil)
+			if err != nil {
+				return err
+			}
+			req.Header.Set("X-DistFS-Sealed", "true")
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
 
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/nodes", nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("X-DistFS-Sealed", "true") // Required
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(ctx, resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
 
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
+			if resp.StatusCode != http.StatusOK {
+				return c.newAPIError(resp, body)
+			}
 
-		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
-		}
+			return json.NewDecoder(body).Decode(&nodes)
+		})
 
-		return json.NewDecoder(body).Decode(&nodes)
-	})
-	return nodes, err
+		for i := range nodes {
+			if !yield(&nodes[i]) {
+				return
+			}
+		}
+	}
 }
 
 func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
@@ -4314,7 +4573,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&status)
@@ -4358,7 +4617,7 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(body).Decode(&result)
@@ -4396,7 +4655,7 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4432,7 +4691,7 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4468,7 +4727,7 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4504,7 +4763,7 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4540,7 +4799,7 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-	return c.newAPIError(resp, body)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -4761,24 +5020,36 @@ func (c *Client) UpdateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 
 // GetGroupMembers retrieves the list of members for a group.
 // If the requester is an authorized manager, it returns emails. Otherwise, only UserIDs.
-func (c *Client) GetGroupMembers(ctx context.Context, groupID string) ([]metadata.MemberEntry, error) {
-	group, err := c.GetGroup(ctx, groupID)
-	if err != nil {
-		return nil, err
-	}
+func (c *Client) GetGroupMembers(ctx context.Context, groupID string) iter.Seq2[metadata.MemberEntry, error] {
+	return func(yield func(metadata.MemberEntry, error) bool) {
+		group, err := c.GetGroup(ctx, groupID)
+		if err != nil {
+			yield(metadata.MemberEntry{}, err)
+			return
+		}
 
-	// Try to decrypt registry
-	rk, err := c.getGroupRegistryKey(ctx, group)
-	if err == nil {
-		return c.decryptRegistry(rk, group.EncryptedRegistry)
-	}
+		var members []metadata.MemberEntry
+		// Try to decrypt registry
+		rk, err := c.getGroupRegistryKey(ctx, group)
+		if err == nil {
+			members, err = c.decryptRegistry(rk, group.EncryptedRegistry)
+			if err != nil {
+				yield(metadata.MemberEntry{}, err)
+				return
+			}
+		} else {
+			// Not a manager, return public member list (IDs only)
+			for id := range group.Members {
+				members = append(members, metadata.MemberEntry{UserID: id, Info: "[HIDDEN]"})
+			}
+		}
 
-	// Not a manager, return public member list (IDs only)
-	var members []metadata.MemberEntry
-	for id := range group.Members {
-		members = append(members, metadata.MemberEntry{UserID: id, Info: "[HIDDEN]"})
+		for _, m := range members {
+			if !yield(m, nil) {
+				return
+			}
+		}
 	}
-	return members, nil
 }
 
 // GroupChown changes the owner of a group.
