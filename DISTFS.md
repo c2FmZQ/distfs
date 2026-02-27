@@ -4,7 +4,7 @@
 ## 1. Overview
 DistFS is a distributed, end-to-end encrypted file system designed for zero-knowledge privacy. It separates metadata management (strongly consistent via Raft) from data storage (scalable via chunked distribution). The system is designed to provide `fs.FS` compatibility for Go clients while ensuring that the storage providers (nodes) cannot read the user's data or metadata.
 
-> **Technical Specification:** For the exhaustive Client<->Server protocol contract, including cryptographic wire formats and JSON schemas, refer to [SERVER-API.md](SERVER-API.md).
+> **Technical Specification:** For the exhaustive Client<->Server protocol contract, refer to [SERVER-API.md](SERVER-API.md). For the high-level Go Client API, refer to [CLIENT-API.md](CLIENT-API.md).
 >
 > **Implementation Plan:** For the detailed, step-by-step execution strategy of this design, refer to [DISTFS-PLAN.md](DISTFS-PLAN.md).
 
