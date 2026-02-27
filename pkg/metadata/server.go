@@ -19,6 +19,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/hmac"
+	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
@@ -111,6 +112,9 @@ type Server struct {
 	oidcMu     sync.RWMutex
 	oidcConfig *OIDCConfig
 	stopCh     chan struct{}
+
+	vault  *NodeVault
+	decKey *mlkem.DecapsulationKey768
 }
 
 type batchRequest struct {
@@ -129,7 +133,7 @@ type challengeEntry struct {
 }
 
 // NewServer creates a new Metadata Server.
-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -177,6 +181,8 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		batchQueue:     make([]*LogCommand, 0),
 		batchResps:     make([]chan interface{}, 0),
 		batchApplyCh:   make(chan batchRequest, 1000),
+		vault:          vault,
+		decKey:         decKey,
 	}
 	if oidcDiscoveryURL != "" {
 		go s.discoverOIDC(oidcDiscoveryURL)
@@ -193,9 +199,14 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	s.keyWorker = NewKeyRotationWorker(s)
 	s.keyWorker.Start()
 
+	s.loadClusterSignKey()
 	go s.clusterKeyLoader()
 
 	return s
+}
+
+func (s *Server) GetClusterSignKey() *crypto.IdentityKey {
+	return s.getClusterSignKey()
 }
 
 func (s *Server) getClusterSignKey() *crypto.IdentityKey {
@@ -237,11 +248,35 @@ func (s *Server) loadClusterSignKey() {
 		return
 	}
 
-	encPriv, err := s.fsm.GetClusterSignPrivateKey()
-	if err != nil {
-		if err != ErrNotFound {
-			log.Printf("ERROR: Failed to fetch cluster sign key from FSM: %v", err)
+	var encPriv []byte
+	var err error
+	for i := 0; i < 30; i++ {
+		err = s.fsm.db.View(func(tx *bolt.Tx) error {
+			plain, err := s.fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+			if err != nil {
+				return err
+			}
+			if plain == nil {
+				return ErrNotFound
+			}
+			var key ClusterSignKey
+			if err := json.Unmarshal(plain, &key); err != nil {
+				return err
+			}
+			encPriv = key.EncryptedPrivate
+			return nil
+		})
+		if err == nil {
+			break
 		}
+		if !errors.Is(err, ErrNotFound) {
+			log.Printf("ERROR: Failed to fetch cluster sign key from FSM: %v", err)
+			return
+		}
+		time.Sleep(1 * time.Second)
+	}
+
+	if encPriv == nil {
 		return
 	}
 
@@ -326,7 +361,11 @@ func (s *Server) applyBatch(req batchRequest) {
 	}
 
 	// 2. Apply single Raft log
-	cmd := LogCommand{Type: CmdBatch, Data: data}
+	cmd := LogCommand{
+		Type:   CmdBatch,
+		Data:   data,
+		Atomic: false, // Server-aggregated batches are NOT atomic
+	}
 	f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
 		for _, ch := range req.resps {
@@ -654,6 +693,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if r.URL.Path == "/v1/system/bootstrap" && r.Method == http.MethodPost {
+		s.handleSystemBootstrap(w, r)
+		return
+	}
+
 	if r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet {
 		if !s.checkRaftSecret(r) && user == nil {
 			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
@@ -827,6 +871,42 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+func (s *Server) handleSystemBootstrap(w http.ResponseWriter, r *http.Request) {
+	// Only allowed if we don't have a secret yet.
+	if s.vault.HasClusterSecret() {
+		s.writeError(w, r, ErrCodeForbidden, "node already bootstrapped", http.StatusForbidden)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	// Unseal using our node identity.
+	// OpenRequest returns (timestamp, clientPK, payload, error).
+	_, _, secret, err := crypto.OpenRequest(s.decKey, nil, body)
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to unseal cluster secret: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Persist to local vault
+	if err := s.vault.SaveClusterSecret(secret); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to save cluster secret: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	// Update memory FSM
+	s.fsm.mu.Lock()
+	s.fsm.clusterSecret = secret
+	s.fsm.mu.Unlock()
+
+	log.Printf("SUCCESS: Node bootstrapped with ClusterSecret")
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
@@ -1130,7 +1210,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	signerID := s.nodeID
 	if csk != nil {
 		sig = csk.Sign(payload)
-		signerID = "" // Distinguish as Cluster-wide
+		signerID = "" // Distinguish as Cluster-wide (expected by tests)
 	} else {
 		sig = s.signKey.Sign(payload)
 	}
@@ -1253,7 +1333,45 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.ApplyRaftCommandRaw(w, r, CmdBatch, body, http.StatusOK)
+	sessionToken := r.Header.Get("Session-Token")
+
+	// Phase 41/42: Client-submitted batches are always atomic.
+	logCmd := LogCommand{
+		Type:      CmdBatch,
+		Data:      body,
+		Atomic:    true,
+		SessionID: sessionToken,
+	}
+
+	f := s.raft.Apply(logCmd.Marshal(), 10*time.Second)
+	if err := f.Error(); err != nil {
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	resp := f.Response()
+	if s.fsm.containsError(resp) {
+		status := http.StatusInternalServerError
+		var firstErr error
+		if slice, ok := resp.([]interface{}); ok {
+			for _, item := range slice {
+				if e, ok := item.(error); ok {
+					firstErr = e
+					break
+				}
+			}
+		}
+		if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) {
+			status = http.StatusConflict
+		} else if errors.Is(firstErr, ErrNotFound) {
+			status = http.StatusNotFound
+		}
+		resp = s.sanitizeResponse(resp)
+		s.writeJSON(w, r, resp, status)
+		return
+	}
+
+	s.writeJSON(w, r, s.sanitizeResponse(resp), http.StatusOK)
 }
 
 func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string, error) {
@@ -1277,25 +1395,9 @@ func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string
 		return "", "", fmt.Errorf("jwt missing email")
 	}
 
-	var secret []byte
-	for i := 0; i < 30; i++ {
-		secret, err = s.fsm.GetClusterSecret()
-		if err == nil {
-			break
-		}
-		if !errors.Is(err, ErrNotFound) {
-			return "", "", fmt.Errorf("cluster secret error: %w", err)
-		}
-		// Wait for FSM to apply bootstrap
-		select {
-		case <-ctx.Done():
-			return "", "", ctx.Err()
-		case <-time.After(1 * time.Second):
-		}
-	}
-
+	secret := s.fsm.clusterSecret
 	if secret == nil {
-		return "", "", fmt.Errorf("cluster secret not available: %w", ErrNotFound)
+		return "", "", fmt.Errorf("cluster secret not initialized")
 	}
 
 	mac := hmac.New(sha256.New, secret)
@@ -1916,6 +2018,10 @@ func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdTyp
 }
 
 func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
+	s.ApplyRaftCommandWithHook(w, r, cmdType, data, successCode, nil)
+}
+
+func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int, hook func(interface{}) interface{}) {
 	sessionID := r.Header.Get("Session-Token")
 	resp, err := s.ApplyRaftCommandInternal(cmdType, data, sessionID)
 	if err != nil {
@@ -1926,14 +2032,11 @@ func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmd
 			s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
 			return
 		}
-		switch err {
-		case ErrConflict:
+		if errors.Is(err, ErrConflict) || errors.Is(err, ErrExists) {
 			s.writeError(w, r, ErrCodeVersionConflict, err.Error(), http.StatusConflict)
-		case ErrExists:
-			s.writeError(w, r, ErrCodeExists, err.Error(), http.StatusConflict)
-		case ErrNotFound:
+		} else if errors.Is(err, ErrNotFound) {
 			s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
-		default:
+		} else {
 			s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		}
 		return
@@ -1967,10 +2070,19 @@ func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmd
 				return
 			}
 
+			if hook != nil {
+				resp = hook(resp)
+			}
+
 			resp = s.sanitizeResponse(resp)
 			s.writeJSON(w, r, resp, successCode)
 			return
 		}
+
+		if hook != nil {
+			resp = hook(nil)
+		}
+
 		w.WriteHeader(successCode)
 	}
 }
@@ -1981,7 +2093,12 @@ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sess
 	}
 
 	respCh := make(chan interface{}, 1)
-	cmd := &LogCommand{Type: cmdType, Data: data, SessionID: sessionID}
+	cmd := &LogCommand{
+		Type:      cmdType,
+		Data:      data,
+		SessionID: sessionID,
+		Atomic:    cmdType == CmdBatch,
+	}
 
 	s.batchMu.Lock()
 	s.batchQueue = append(s.batchQueue, cmd)
@@ -2578,11 +2695,50 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	node.Address = info.APIURL
 	node.ClusterAddress = req.Address
 	node.RaftAddress = info.RaftAddress
-	node.PublicKey = info.PublicKey
-	node.SignKey = info.SignKey
-
 	data, _ := json.Marshal(node)
-	s.ApplyRaftCommandRaw(w, r, CmdRegisterNode, data, http.StatusOK)
+	s.ApplyRaftCommandWithHook(w, r, CmdRegisterNode, data, http.StatusOK, func(resp interface{}) interface{} {
+		// 4. Push ClusterSecret to the new node via internal mTLS
+		secret, err := s.fsm.GetClusterSecret()
+		if err != nil {
+			log.Printf("ERROR: ClusterSecret not available for push: %v", err)
+			return err
+		}
+
+		probedKEM, err := crypto.UnmarshalEncapsulationKey(info.PublicKey)
+		if err != nil {
+			return err
+		}
+
+		encSecret, err := crypto.SealRequest(probedKEM, s.signKey, secret)
+		if err != nil {
+			return err
+		}
+
+		// Direct push to the joining node's internal address
+		go func(addr string, sealed []byte) {
+			bootstrapURL := strings.TrimSuffix(addr, "/") + "/v1/system/bootstrap"
+			req, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(sealed))
+			if err != nil {
+				log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
+				return
+			}
+			req.Header.Set("Content-Type", "application/octet-stream")
+
+			resp, err := s.httpClient.Do(req)
+			if err != nil {
+				log.Printf("ERROR: Failed to push ClusterSecret to %s: %v", addr, err)
+				return
+			}
+			defer resp.Body.Close()
+			if resp.StatusCode != http.StatusOK {
+				log.Printf("ERROR: Node %s rejected ClusterSecret push: status %d", addr, resp.StatusCode)
+			} else {
+				log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", addr)
+			}
+		}(req.Address, encSecret)
+
+		return map[string]string{"status": "ok"}
+	})
 }
 
 func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {

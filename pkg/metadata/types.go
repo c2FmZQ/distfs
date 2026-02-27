@@ -23,6 +23,11 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
+// KeyData is a wrapper for serializing keys to disk.
+type KeyData struct {
+	Bytes []byte `json:"bytes"`
+}
+
 // APIErrorResponse is the standard structured error response.
 type APIErrorResponse struct {
 	Code    string `json:"code"`

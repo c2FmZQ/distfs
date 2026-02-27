@@ -29,6 +29,7 @@ import (
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	bolt "go.etcd.io/bbolt"
 )
 
 // Validator validates if a replication target is valid.
@@ -130,14 +131,22 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 	s.cacheMu.RUnlock()
 
 	if pubKey == nil {
-		pubKey = s.metaPubKey
 		if s.fsm != nil {
-			if pub, err := s.fsm.GetClusterSignPublicKey(); err == nil {
-				pubKey = pub
-				s.cacheMu.Lock()
-				s.cachedMetaPubKey = pub
-				s.cacheMu.Unlock()
-			}
+			s.fsm.DB().View(func(tx *bolt.Tx) error {
+				if plain, err := s.fsm.Get(tx, []byte("system"), []byte("cluster_sign_key")); err == nil && plain != nil {
+					var key metadata.ClusterSignKey
+					if err := json.Unmarshal(plain, &key); err == nil {
+						pubKey = key.Public
+						s.cacheMu.Lock()
+						s.cachedMetaPubKey = pubKey
+						s.cacheMu.Unlock()
+					}
+				}
+				return nil
+			})
+		}
+		if pubKey == nil {
+			pubKey = s.metaPubKey
 		}
 	}
 
@@ -162,6 +171,7 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 	}
 
 	if !crypto.VerifySignature(pubKey, signed.Payload, signed.Signature) {
+		log.Printf("DEBUG: Data Auth Failed! pubKey=%x, payload=%s, sig=%x", pubKey[:16], string(signed.Payload), signed.Signature[:16])
 		return fmt.Errorf("invalid signature")
 	}
 

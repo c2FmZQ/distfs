@@ -1,9 +1,7 @@
 package metadata_test
 
 import (
-	"crypto/rand"
 	"testing"
-	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -14,11 +12,6 @@ func TestGroupMemberRegistry(t *testing.T) {
 	node, ts, _, serverEK, _ := metadata.SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
-
-	// Initialize Cluster Secret
-	secret := make([]byte, 32)
-	rand.Read(secret)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
 
 	// 1. Setup Alice (Owner) and Bob (Member)
 	uAliceSign, _ := crypto.GenerateIdentityKey()

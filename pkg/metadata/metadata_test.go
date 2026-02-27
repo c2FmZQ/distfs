@@ -38,8 +38,6 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
-	"github.com/c2FmZQ/storage"
-	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -293,14 +291,6 @@ func TestIdentityRegistry(t *testing.T) {
 	defer node.Shutdown()
 	defer ts.Close()
 
-	// Initialize Cluster Secret (needed for Group ID hashing)
-	secret := make([]byte, 32)
-	rand.Read(secret)
-	fSecret := node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
-	if err := fSecret.Error(); err != nil {
-		t.Fatalf("Failed to init secret: %v", err)
-	}
-
 	// Create User (via Raft directly, since /v1/user is removed)
 	userDecKey, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
@@ -408,21 +398,9 @@ func TestKeySync(t *testing.T) {
 	// Update srv to use mock JWKS
 	srv.jwks.SetIssuers([]jwks.Issuer{{Issuer: "test-auth-server", JWKSURI: jwksServer.URL + "/jwks.json"}})
 
-	// Initialize Cluster Secret
-	var secret []byte
-	secret, _ = node.FSM.GetClusterSecret()
-	if secret == nil {
-		secret = make([]byte, 32)
-		rand.Read(secret)
-		f := node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
-		if err := f.Error(); err != nil {
-			t.Fatalf("Failed to init secret: %v", err)
-		}
-	}
-
 	// 2. Setup User
 	email := "sync@example.com"
-	secret, _ = node.FSM.GetClusterSecret()
+	secret, _ := node.FSM.GetClusterSecret()
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte(email))
 	userID := hex.EncodeToString(mac.Sum(nil))
@@ -490,11 +468,9 @@ func TestKeySync(t *testing.T) {
 
 func TestFSMRestore(t *testing.T) {
 	tmpDir := t.TempDir()
-	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
-	st := storage.New(tmpDir, mk)
 
 	dbPath := filepath.Join(tmpDir, "fsm.bolt")
-	fsm, err := NewMetadataFSM(dbPath, st)
+	fsm, err := NewMetadataFSM(dbPath, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,8 +498,7 @@ func TestFSMRestore(t *testing.T) {
 
 	// New FSM
 	tmpDir2 := t.TempDir()
-	st2 := storage.New(tmpDir2, mk) // different dir
-	fsm2, err := NewMetadataFSM(filepath.Join(tmpDir2, "fsm2.bolt"), st2)
+	fsm2, err := NewMetadataFSM(filepath.Join(tmpDir2, "fsm2.bolt"), []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -552,10 +527,8 @@ func TestFSMRestore(t *testing.T) {
 
 func TestFSM_Errors(t *testing.T) {
 	tmpDir := t.TempDir()
-	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
-	st := storage.New(tmpDir, mk)
 
-	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"), st)
+	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"), []byte("test-cluster-secret"))
 	defer fsm.Close()
 
 	// Invalid JSON

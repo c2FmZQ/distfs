@@ -22,7 +22,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	metaSt := storage.New(metaDir, mk)
 
 	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
-	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
+	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
@@ -53,7 +53,8 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	}
 
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
 	ts := httptest.NewServer(metaServer)
 
 	// User
@@ -71,8 +72,11 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	dataSt := storage.New(dataDir, mk)
 	dataStore, _ := data.NewDiskStore(dataSt)
 
-	metaSignPK, _ := metaNode.FSM.GetClusterSignPublicKey()
-	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
+	metaSignPK, err := metaNode.FSM.GetClusterSignPublicKey()
+	if err != nil {
+		t.Fatalf("failed to fetch cluster sign pk: %v", err)
+	}
+	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{})
 	dataTS := httptest.NewServer(dataServer)
 
 	// Register real data node

@@ -15,8 +15,11 @@
 package metadata
 
 import (
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,7 +31,6 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
-	"github.com/c2FmZQ/storage"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -38,6 +40,7 @@ var (
 	ErrNotFound      = errors.New("not found")
 	ErrConflict      = errors.New("version conflict")
 	ErrStopIteration = errors.New("iteration stopped")
+	ErrAtomicRollback = errors.New("atomic transaction failure")
 )
 
 // MetadataFSM implements the Raft Finite State Machine for the metadata layer.
@@ -47,16 +50,16 @@ type MetadataFSM struct {
 	path       string
 	OnSnapshot func() error
 
-	st      *storage.Storage
-	keyRing *crypto.KeyRing
-	trusted map[string]bool // PubKey(bytes) -> true
-	mu      sync.RWMutex
+	clusterSecret []byte
+	keyRing       *crypto.KeyRing
+	trusted       map[string]bool // PubKey(bytes) -> true
+	mu            sync.RWMutex
 
 	metrics *MetricsCollector
 }
 
 // NewMetadataFSM creates a new FSM backed by a BoltDB file at the given path.
-func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
+func NewMetadataFSM(path string, clusterSecret []byte) (*MetadataFSM, error) {
 	db, err := bolt.Open(path, 0600, nil)
 	if err != nil {
 		return nil, err
@@ -76,47 +79,78 @@ func NewMetadataFSM(path string, st *storage.Storage) (*MetadataFSM, error) {
 		return nil, err
 	}
 
-	// Load or Initialize FSM KeyRing
-	var keyData KeyData
-	var kr *crypto.KeyRing
-	if err := st.ReadDataFile("fsm.key", &keyData); err == nil {
-		kr, _ = crypto.UnmarshalKeyRing(keyData.Bytes)
-	}
-
-	if kr == nil {
-		// Initialize new KeyRing
-		k := make([]byte, 32)
-		if _, err := io.ReadFull(rand.Reader, k); err != nil {
-			db.Close()
-			return nil, err
-		}
-		kr = crypto.NewKeyRing(k)
-		keyData.Bytes = kr.Marshal()
-		if err := st.SaveDataFile("fsm.key", keyData); err != nil {
-			db.Close()
-			return nil, err
-		}
-	}
-
 	fsm := &MetadataFSM{
-		db:      db,
-		path:    path,
-		st:      st,
-		keyRing: kr,
-		trusted: make(map[string]bool),
-		metrics: NewMetricsCollector(),
+		db:            db,
+		path:          path,
+		clusterSecret: clusterSecret,
+		trusted:       make(map[string]bool),
+		metrics:       NewMetricsCollector(),
 	}
+
+	// Load KeyRing from BoltDB system bucket (Tier 2)
+	err = db.Update(func(tx *bolt.Tx) error {
+		krData, err := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
+		if err == nil && krData != nil {
+			fsm.keyRing, _ = crypto.UnmarshalKeyRing(krData)
+		}
+
+		if fsm.keyRing == nil {
+			// Initialize new cluster KeyRing if this is a fresh FSM
+			k := make([]byte, 32)
+			if _, err := io.ReadFull(rand.Reader, k); err != nil {
+				return err
+			}
+			fsm.keyRing = crypto.NewKeyRing(k)
+			// Persist it immediately to the system bucket
+			krData := fsm.keyRing.Marshal()
+			if err := fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+
 	fsm.loadTrustState()
 	return fsm, nil
 }
 
-func (fsm *MetadataFSM) EncryptValue(data []byte) ([]byte, error) {
+func (fsm *MetadataFSM) systemKey() []byte {
+	// Derive a static key from the ClusterSecret for Tier 2 root anchor encryption
+	mac := hmac.New(sha256.New, fsm.clusterSecret)
+	mac.Write([]byte("FSM_SYSTEM_V1"))
+	return mac.Sum(nil)
+}
+
+func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error) {
 	if len(data) == 0 {
 		return data, nil
 	}
+
+	if string(bucket) == "system" {
+		// Tier 2: Use ClusterSecret for root anchors
+		ct, err := crypto.EncryptDEM(fsm.systemKey(), data)
+		if err != nil {
+			return nil, err
+		}
+		// Prefix with 0 to indicate system encryption
+		out := make([]byte, 4+len(ct))
+		binary.BigEndian.PutUint32(out[:4], 0)
+		copy(out[4:], ct)
+		return out, nil
+	}
+
+	// Tier 3: Use rotating KeyRing for application data
 	fsm.mu.RLock()
 	kr := fsm.keyRing
 	fsm.mu.RUnlock()
+
+	if kr == nil {
+		return nil, fmt.Errorf("FSM keyring not initialized")
+	}
 
 	key, gen := kr.Current()
 	ct, err := crypto.EncryptDEM(key, data)
@@ -131,15 +165,32 @@ func (fsm *MetadataFSM) EncryptValue(data []byte) ([]byte, error) {
 	return out, nil
 }
 
-func (fsm *MetadataFSM) DecryptValue(data []byte) ([]byte, error) {
+func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error) {
 	if len(data) < 4 {
 		return data, nil
 	}
 	gen := binary.BigEndian.Uint32(data[:4])
 
+	if string(bucket) == "system" {
+		if gen != 0 {
+			return nil, fmt.Errorf("invalid encryption for system bucket: expected gen 0, got %d", gen)
+		}
+		// Tier 2: System encryption
+		return crypto.DecryptDEM(fsm.systemKey(), data[4:])
+	}
+
+	// Tier 3: Application encryption
+	if gen == 0 {
+		return nil, fmt.Errorf("invalid encryption for non-system bucket: gen 0 reserved for system")
+	}
+
 	fsm.mu.RLock()
 	kr := fsm.keyRing
 	fsm.mu.RUnlock()
+
+	if kr == nil {
+		return nil, fmt.Errorf("FSM keyring not initialized")
+	}
 
 	key, ok := kr.Get(gen)
 	if !ok {
@@ -168,19 +219,11 @@ func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket []byte, key []byte, value []byte
 	if b == nil {
 		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
 	}
-	enc, err := fsm.EncryptValue(value)
+	enc, err := fsm.EncryptValue(bucket, value)
 	if err != nil {
 		return err
 	}
 	return b.Put(key, enc)
-}
-
-func (fsm *MetadataFSM) PutPlain(tx *bolt.Tx, bucket []byte, key []byte, value []byte) error {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	return b.Put(key, value)
 }
 
 func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, error) {
@@ -192,17 +235,8 @@ func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, err
 	if v == nil {
 		return nil, nil
 	}
-	dec, err := fsm.DecryptValue(v)
+	dec, err := fsm.DecryptValue(bucket, v)
 	return dec, err
-}
-
-func (fsm *MetadataFSM) GetPlain(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, error) {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return nil, fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	v := b.Get(key)
-	return v, nil
 }
 
 func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket []byte, key []byte) error {
@@ -219,20 +253,12 @@ func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte)
 		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
 	}
 	return b.ForEach(func(k, v []byte) error {
-		plain, err := fsm.DecryptValue(v)
+		dec, err := fsm.DecryptValue(bucket, v)
 		if err != nil {
 			return err
 		}
-		return fn(k, plain)
+		return fn(k, dec)
 	})
-}
-
-func (fsm *MetadataFSM) ForEachPlain(tx *bolt.Tx, bucket []byte, fn func(k, v []byte) error) error {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	return b.ForEach(fn)
 }
 
 // Close closes the underlying BoltDB.
@@ -243,37 +269,28 @@ func (fsm *MetadataFSM) Close() error {
 	return nil
 }
 
-type TrustData struct {
-	Keys []string `json:"keys"` // Hex encoded pub keys
-}
-
 func (fsm *MetadataFSM) loadTrustState() {
-	if fsm.st == nil {
-		return
-	}
-	var td TrustData
-	if err := fsm.st.ReadDataFile("trust.bin", &td); err == nil {
-		fsm.mu.Lock()
-		for _, k := range td.Keys {
-			fsm.trusted[k] = true
+	fsm.db.View(func(tx *bolt.Tx) error {
+		// Trust state is already indexed by register node commands into the 'nodes' bucket.
+		// We'll load the initial set of public keys into memory for quick MTLS validation.
+		b := tx.Bucket([]byte("nodes"))
+		if b == nil {
+			return nil
 		}
-		fsm.mu.Unlock()
-	}
-}
-
-func (fsm *MetadataFSM) saveTrustState() error {
-	if fsm.st == nil {
-		return nil
-	}
-	fsm.mu.RLock()
-	var keys []string
-	for k := range fsm.trusted {
-		keys = append(keys, k)
-	}
-	fsm.mu.RUnlock()
-
-	td := TrustData{Keys: keys}
-	return fsm.st.SaveDataFile("trust.bin", td)
+		return b.ForEach(func(k, v []byte) error {
+			plain, err := fsm.DecryptValue([]byte("nodes"), v)
+			if err != nil {
+				return nil
+			}
+			var n Node
+			if err := json.Unmarshal(plain, &n); err == nil {
+				fsm.mu.Lock()
+				fsm.trusted[hex.EncodeToString(n.PublicKey)] = true
+				fsm.mu.Unlock()
+			}
+			return nil
+		})
+	})
 }
 
 func (fsm *MetadataFSM) IsInitialized() bool {
@@ -312,7 +329,7 @@ func (fsm *MetadataFSM) GetNodeByRaftAddress(raftAddr string) (*Node, error) {
 		b := tx.Bucket([]byte("nodes"))
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
-			plain, err := fsm.DecryptValue(v)
+			plain, err := fsm.DecryptValue([]byte("nodes"), v)
 			if err != nil {
 				continue
 			}
@@ -347,7 +364,6 @@ const (
 	CmdAddChunkReplica   CommandType = 11
 	CmdSetAttr           CommandType = 13
 	CmdGCRemove          CommandType = 15
-	CmdInitSecret        CommandType = 16
 	CmdSetUserQuota      CommandType = 17
 	CmdRotateKey         CommandType = 18
 	CmdInitWorld         CommandType = 19
@@ -368,9 +384,11 @@ const (
 
 // LogCommand is the structure stored in the Raft log.
 type LogCommand struct {
-	Type      CommandType     `json:"type"`
-	Data      json.RawMessage `json:"data"`
-	SessionID string          `json:"session_id,omitempty"`
+	Type          CommandType       `json:"type"`
+	Data          json.RawMessage   `json:"data"`
+	SessionID     string            `json:"session_id,omitempty"`
+	LeaseBindings map[string]string `json:"lease_bindings,omitempty"` // nameHMAC -> pathID
+	Atomic        bool              `json:"atomic,omitempty"`         // Roll back entire transaction on any sub-command error
 }
 
 func (c LogCommand) Marshal() []byte {
@@ -453,8 +471,13 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 
 	var results interface{}
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		results = fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, 0)
-		if fsm.containsError(results) {
+		results = fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, cmd.LeaseBindings, 0)
+		shouldRollback := cmd.Atomic && fsm.containsError(results)
+		if !shouldRollback && fsm.containsRollbackError(results) {
+			shouldRollback = true
+		}
+
+		if shouldRollback {
 			return fmt.Errorf("command failure") // Trigger rollback
 		}
 		return nil
@@ -483,7 +506,7 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 }
 
 func (fsm *MetadataFSM) syncKeyRing(tx *bolt.Tx) {
-	krData, err := fsm.GetPlain(tx, []byte("system"), []byte("fsm_keyring"))
+	krData, err := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
 	if err != nil || krData == nil {
 		return
 	}
@@ -496,10 +519,6 @@ func (fsm *MetadataFSM) syncKeyRing(tx *bolt.Tx) {
 	fsm.mu.Lock()
 	fsm.keyRing = kr
 	fsm.mu.Unlock()
-
-	if fsm.st != nil {
-		fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: krData})
-	}
 }
 
 func (fsm *MetadataFSM) containsError(res interface{}) bool {
@@ -516,14 +535,32 @@ func (fsm *MetadataFSM) containsError(res interface{}) bool {
 	return false
 }
 
+func (fsm *MetadataFSM) containsRollbackError(res interface{}) bool {
+	if err, ok := res.(error); ok {
+		return errors.Is(err, ErrAtomicRollback)
+	}
+	if slice, ok := res.([]interface{}); ok {
+		for _, item := range slice {
+			if fsm.containsRollbackError(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int) []interface{} {
 	if depth > 4 {
 		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
 	}
 	results := make([]interface{}, len(cmds))
 	for i, cmd := range cmds {
-		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, depth)
+		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, cmd.LeaseBindings, depth)
 		results[i] = res
+		if cmd.Atomic && fsm.containsError(res) {
+			// Replace result with explicit rollback error to ensure top-level Apply rolls back
+			results[i] = fmt.Errorf("%w: sub-command %d failed", ErrAtomicRollback, i)
+		}
 	}
 	return results
 }
@@ -542,7 +579,7 @@ func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, sessionID string,
 	return fsm.executeBatchCommands(tx, cmds, depth)
 }
 
-func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, sessionID string, depth int) interface{} {
+func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, sessionID string, leaseBindings map[string]string, depth int) interface{} {
 	start := time.Now()
 	defer func() {
 		fsm.metrics.RecordOp(cmdType, time.Since(start))
@@ -552,7 +589,7 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 	case CmdCreateInode:
 		return fsm.executeCreateInode(tx, data)
 	case CmdUpdateInode:
-		return fsm.executeUpdateInode(tx, data, sessionID)
+		return fsm.executeUpdateInode(tx, data, sessionID, leaseBindings)
 	case CmdDeleteInode:
 		return fsm.executeDeleteInode(tx, data, sessionID)
 	case CmdRegisterNode:
@@ -567,8 +604,6 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []
 		return fsm.executeAddChunkReplica(tx, data)
 	case CmdGCRemove:
 		return fsm.executeGCRemove(tx, data)
-	case CmdInitSecret:
-		return fsm.executeInitSecret(tx, data)
 	case CmdSetUserQuota:
 		return fsm.executeSetUserQuota(tx, data)
 	case CmdRotateKey:
@@ -641,8 +676,14 @@ func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path string, sessionID strin
 
 	now := time.Now().UnixNano()
 	for _, l := range leases {
-		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionID {
-			return ErrConflict // Lease Required / Conflict
+		if l.Expiry <= now {
+			continue
+		}
+		// During MUTATION (e.g. rename/link/unlink), ANY lease from another session
+		// acts as a conflict. Even a SHARED lease from another session prevents us
+		// from swapping the path out from under them.
+		if l.SessionID != sessionID {
+			return fmt.Errorf("%w: path %s: lease held by session %s", ErrConflict, path, l.SessionID)
 		}
 	}
 	return nil
@@ -695,7 +736,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID string, leaseBindings map[string]string) interface{} {
 	var inode Inode
 	if err := json.Unmarshal(data, &inode); err != nil {
 		return err
@@ -716,6 +757,31 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 
 	if err := fsm.checkLease(&existing, sessionID); err != nil {
 		return err
+	}
+
+	// Phase 41/42: Check individual path leases if this is a directory update (atomic swap or move).
+	if existing.Type == DirType && leaseBindings != nil {
+		// 1. Check for removed or changed entries
+		for nameHMAC, existingID := range existing.Children {
+			newID, stillExists := inode.Children[nameHMAC]
+			if !stillExists || newID != existingID {
+				if pathID, ok := leaseBindings[nameHMAC]; ok && pathID != "" {
+					if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		// 2. Check for newly added entries
+		for nameHMAC := range inode.Children {
+			if _, wasPresent := existing.Children[nameHMAC]; !wasPresent {
+				if pathID, ok := leaseBindings[nameHMAC]; ok && pathID != "" {
+					if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
+						return err
+					}
+				}
+			}
+		}
 	}
 
 	if inode.Version != existing.Version+1 {
@@ -889,12 +955,6 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 	}
 	fsm.mu.Unlock()
 
-	if len(node.PublicKey) > 0 || len(node.SignKey) > 0 {
-		if err := fsm.saveTrustState(); err != nil {
-			return err
-		}
-	}
-
 	encoded, err := json.Marshal(node)
 	if err != nil {
 		return err
@@ -923,14 +983,12 @@ func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} 
 	// Remove from in-memory trust cache
 	fsm.mu.Lock()
 	delete(fsm.trusted, string(node.PublicKey))
-	delete(fsm.trusted, string(node.SignKey))
-	fsm.mu.Unlock()
-	if err := fsm.saveTrustState(); err != nil {
-		return err
+		delete(fsm.trusted, string(node.SignKey))
+		fsm.mu.Unlock()
+	
+		return fsm.Delete(tx, []byte("nodes"), []byte(nodeID))
 	}
-
-	return fsm.Delete(tx, []byte("nodes"), []byte(nodeID))
-}
+	
 
 func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} {
 	var user User
@@ -1126,7 +1184,7 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 	mb := tx.Bucket([]byte("user_memberships"))
 	ob := tx.Bucket([]byte("owner_groups"))
 
-	encOne, _ := fsm.EncryptValue([]byte("1"))
+	encOne, _ := fsm.EncryptValue([]byte("user_memberships"), []byte("1"))
 
 	// 1. Membership Updates
 	if existing == nil {
@@ -1242,35 +1300,17 @@ func (fsm *MetadataFSM) executeGCRemove(tx *bolt.Tx, data []byte) interface{} {
 	return b.Delete([]byte(chunkID))
 }
 
-func (fsm *MetadataFSM) executeInitSecret(tx *bolt.Tx, data []byte) interface{} {
-	v, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_secret"))
-	if err != nil {
-		return err
-	}
-	if v != nil {
-		return ErrExists
-	}
-	var secret []byte
-	if err := json.Unmarshal(data, &secret); err != nil {
-		secret = data // Fallback
-	}
-	if err := fsm.PutPlain(tx, []byte("system"), []byte("cluster_secret"), secret); err != nil {
-		return err
-	}
-	return nil
-}
-
 func (fsm *MetadataFSM) executeSetClusterSignKey(tx *bolt.Tx, data []byte) interface{} {
-	if existing, _ := fsm.GetPlain(tx, []byte("system"), []byte("cluster_sign_key")); existing != nil {
+	if existing, _ := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key")); existing != nil {
 		return fmt.Errorf("cluster signing key already initialized")
 	}
-	return fsm.PutPlain(tx, []byte("system"), []byte("cluster_sign_key"), data)
+	return fsm.Put(tx, []byte("system"), []byte("cluster_sign_key"), data)
 }
 
 func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
 	var pub []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_sign_key"))
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
 		if err != nil {
 			return err
 		}
@@ -1290,7 +1330,7 @@ func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
 func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
 	var priv []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_sign_key"))
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
 		if err != nil {
 			return err
 		}
@@ -1308,19 +1348,12 @@ func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
 }
 
 func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
-	var secret []byte
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.GetPlain(tx, []byte("system"), []byte("cluster_secret"))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		secret = plain
-		return nil
-	})
-	return secret, err
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	if fsm.clusterSecret == nil {
+		return nil, ErrNotFound
+	}
+	return fsm.clusterSecret, nil
 }
 
 // Snapshot returns a snapshot of the current state.
@@ -1409,16 +1442,14 @@ func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 		return err
 	}
 
-	// 3. Update and Save FSM Key only after successful DB restore
-	if fsm.st != nil {
-		if err := fsm.st.SaveDataFile("fsm.key", KeyData{Bytes: krData}); err != nil {
-			return fmt.Errorf("save fsm key: %w", err)
-		}
-	}
+	// 3. Update memory state
+	fsm.mu.Lock()
 	fsm.keyRing = kr
+	fsm.mu.Unlock()
 
-	// Rebuild the in-memory trust cache and persist it to trust.bin after restoring from snapshot.
-	return fsm.rebuildTrustCache()
+	// 4. Rebuild the in-memory trust cache after restoring from snapshot.
+	fsm.loadTrustState()
+	return nil
 }
 
 func (fsm *MetadataFSM) reopen() error {
@@ -1427,35 +1458,6 @@ func (fsm *MetadataFSM) reopen() error {
 		return err
 	}
 	fsm.db = db
-	return nil
-}
-
-func (fsm *MetadataFSM) rebuildTrustCache() error {
-	fsm.mu.Lock()
-	defer fsm.mu.Unlock()
-	fsm.trusted = make(map[string]bool)
-
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
-				fsm.trusted[string(n.PublicKey)] = true
-			}
-			return nil
-		})
-	})
-	if err != nil {
-		return err
-	}
-
-	// We should also persist it to trust.bin to match
-	keys := make([]string, 0, len(fsm.trusted))
-	for k := range fsm.trusted {
-		keys = append(keys, k)
-	}
-	if fsm.st != nil {
-		return fsm.st.SaveDataFile("trust.bin", TrustData{Keys: keys})
-	}
 	return nil
 }
 
@@ -1586,7 +1588,7 @@ func (fsm *MetadataFSM) enqueueGC(tx *bolt.Tx, inode *Inode) error {
 		nodesJSON, _ := json.Marshal(chunk.Nodes)
 		// GC bucket might not need encryption if chunkIDs are anonymous,
 		// but let's be consistent and encrypt values.
-		enc, _ := fsm.EncryptValue(nodesJSON)
+		enc, _ := fsm.EncryptValue([]byte("garbage_collection"), nodesJSON)
 		if err := b.Put([]byte(chunk.ID), enc); err != nil {
 			return err
 		}
@@ -1777,18 +1779,18 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 
-	if err := fsm.PutPlain(tx, []byte("system"), []byte("epoch_key_"+key.ID), data); err != nil {
+	if err := fsm.Put(tx, []byte("system"), []byte("epoch_key_"+key.ID), data); err != nil {
 		return err
 	}
 
-	if err := fsm.PutPlain(tx, []byte("system"), []byte("active_epoch_key"), []byte(key.ID)); err != nil {
+	if err := fsm.Put(tx, []byte("system"), []byte("active_epoch_key"), []byte(key.ID)); err != nil {
 		return err
 	}
 
 	// Prune
 	var keys []ClusterKey
 	prefix := "epoch_key_"
-	err := fsm.ForEachPlain(tx, []byte("system"), func(k, v []byte) error {
+	err := fsm.ForEach(tx, []byte("system"), func(k, v []byte) error {
 		if strings.HasPrefix(string(k), prefix) {
 			var kStruct ClusterKey
 			if err := json.Unmarshal(v, &kStruct); err == nil {
@@ -1820,12 +1822,12 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	var key ClusterKey
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		id, err := fsm.GetPlain(tx, []byte("system"), []byte("active_epoch_key"))
+		id, err := fsm.Get(tx, []byte("system"), []byte("active_epoch_key"))
 		if err != nil || id == nil {
 			return ErrNotFound
 		}
 
-		v, err := fsm.GetPlain(tx, []byte("system"), []byte("epoch_key_"+string(id)))
+		v, err := fsm.Get(tx, []byte("system"), []byte("epoch_key_"+string(id)))
 
 		if err != nil || v == nil {
 			return ErrNotFound
@@ -1960,7 +1962,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	c := lb.Cursor()
 	purged := 0
 	for k, v := c.First(); k != nil && purged < 10; k, v = c.Next() {
-		plain, err := fsm.DecryptValue(v)
+		plain, err := fsm.DecryptValue([]byte("leases"), v)
 		if err != nil {
 			continue
 		}
@@ -1977,7 +1979,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	fc := fb.Cursor()
 	purged = 0
 	for k, v := fc.First(); k != nil && purged < 10; k, v = fc.Next() {
-		plain, err := fsm.DecryptValue(v)
+		plain, err := fsm.DecryptValue([]byte("filename_leases"), v)
 		if err != nil {
 			continue
 		}
@@ -2422,7 +2424,7 @@ func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
 		if k == nil {
 			return ErrNotFound
 		}
-		plain, err := fsm.DecryptValue(v)
+		plain, err := fsm.DecryptValue([]byte("metrics"), v)
 		if err != nil {
 			return err
 		}
@@ -2554,7 +2556,7 @@ func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, er
 		}
 
 		for count := 0; k != nil && (limit <= 0 || count < limit); k, v = c.Next() {
-			plain, err := fsm.DecryptValue(v)
+			plain, err := fsm.DecryptValue([]byte("groups"), v)
 			if err != nil {
 				return err
 			}

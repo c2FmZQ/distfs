@@ -901,7 +901,10 @@ func TestClient_SyncFile_More(t *testing.T) {
 	// 1. Inline Sync
 	c.CreateFile(ctx, "/inline", bytes.NewReader([]byte("init")), 4)
 	inode, _, _ := c.ResolvePath(ctx, "/inline")
-	c.SyncFile(ctx, inode.ID, strings.NewReader("new content"), 11, nil)
+	_, err := c.SyncFile(ctx, inode.ID, strings.NewReader("new content"), 11, nil)
+	if err != nil {
+		t.Fatalf("Inline SyncFile failed: %v", err)
+	}
 
 	// 2. Growing file (Chunked)
 	large := make([]byte, crypto.ChunkSize+100)
@@ -909,7 +912,10 @@ func TestClient_SyncFile_More(t *testing.T) {
 	inodeL, _, _ := c.ResolvePath(ctx, "/large")
 
 	grown := make([]byte, 2*crypto.ChunkSize+100)
-	c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
+	_, err = c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
+	if err != nil {
+		t.Fatalf("SyncFile failed: %v", err)
+	}
 }
 
 func TestClient_DeleteInode(t *testing.T) {
@@ -959,7 +965,7 @@ func TestClient_SyncFile(t *testing.T) {
 
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
 
-	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -1042,7 +1048,7 @@ func TestClient_ChunkDataOps(t *testing.T) {
 
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
 
-	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -1095,7 +1101,7 @@ func TestClient_OpenBlobWrite(t *testing.T) {
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
-	dataServer := data.NewServer(dataStore, csk.Public, nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -1255,7 +1261,7 @@ func TestClient_ConcurrentDirectoryUpdates(t *testing.T) {
 				name := fmt.Sprintf("/stress/file-%d-%d", workerID, f)
 				content := []byte(fmt.Sprintf("content from worker %d file %d", workerID, f))
 				if err := c.CreateFile(ctx, name, bytes.NewReader(content), int64(len(content))); err != nil {
-					errs <- fmt.Errorf("worker %d file %d failed: %v", workerID, f, err)
+					errs <- fmt.Errorf("worker %d file %d failed: %+v", workerID, f, err)
 					return
 				}
 			}

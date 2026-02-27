@@ -96,7 +96,8 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	}
 	nodeID := NodeIDFromKey(nodeKey)
 
-	node, err := NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
+	node, err := NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey, clusterSecret)
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -158,16 +159,11 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}
 
-	// Bootstrap cluster secret
-	secret, _ := json.Marshal([]byte("test-cluster-secret"))
-	f = node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Bootstrap secret apply failed: %v", err)
-	}
-
 	signKey, _ := crypto.GenerateIdentityKey()
-	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey)
 	ts := httptest.NewServer(server)
+
 	return node, ts, signKey, ek.Bytes(), server
 }
 

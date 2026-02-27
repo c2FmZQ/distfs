@@ -22,11 +22,6 @@ import (
 	"github.com/c2FmZQ/storage"
 )
 
-// KeyData is a wrapper for serializing keys to disk.
-type KeyData struct {
-	Bytes []byte `json:"bytes"`
-}
-
 // NodeKey represents an Ed25519 key pair used for mTLS and Raft identity.
 type NodeKey struct {
 	Priv ed25519.PrivateKey

@@ -177,11 +177,6 @@ func TestAdminAPI(t *testing.T) {
 	}
 
 	// 6. Test Lookup
-	secret := make([]byte, 32)
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: metadata.MustMarshalJSON(secret)}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatal(err)
-	}
-
 	id, err := c.AdminLookup(t.Context(), "alice@example.com", "Test Lookup")
 	if err != nil {
 		t.Fatalf("AdminLookup failed: %v", err)

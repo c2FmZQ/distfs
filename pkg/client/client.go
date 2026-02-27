@@ -1578,8 +1578,9 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 			inlined: updated.GetInlineData() != nil,
 		}
 		c.keyMu.Unlock()
+		return nil
 	}
-	return err
+	return fmt.Errorf("writeInodeContent UpdateInode failed for %s: %w", id, err)
 }
 
 // WriteFile writes a file. Returns the FileKey used.
@@ -2058,24 +2059,15 @@ func (c *Client) OpenBlobWrite(ctx context.Context, path string) (io.WriteCloser
 // OpenBlobWriteWithLease creates a writer for a blob.
 // If leaseNonce is empty, it will acquire a new exclusive path lease.
 func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseNonce string) (io.WriteCloser, error) {
-	// Acquire lease first to prevent concurrent writers.
-	nonce := leaseNonce
-	if nonce == "" {
-		nonce = generateID()
-		err := c.withConflictRetry(ctx, func() error {
-			return c.AcquireLeases(ctx, []string{path}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
-		})
-		if err != nil {
-			return nil, err
-		}
+	// 1. Resolve Path and compute PathID
+	dir, fileName := filepath.Split(strings.TrimRight(path, "/"))
+	if dir == "" {
+		dir = "/"
 	}
 
-	// 1. Try to resolve as Path
-	dir, fileName := filepath.Split(path)
 	pInode, pKey, err := c.ResolvePath(ctx, dir)
 	if err != nil {
-		c.ReleaseLeases(ctx, []string{path}, nonce)
-		return nil, err
+		return nil, fmt.Errorf("failed to resolve parent dir: %w", err)
 	}
 
 	mac := hmac.New(sha256.New, pKey)
@@ -2083,6 +2075,23 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	nameHMAC := hex.EncodeToString(mac.Sum(nil))
 	parentID := pInode.ID
 	groupID := pInode.GroupID
+
+	pathID := "path:" + parentID + ":" + nameHMAC
+	if path == "/" {
+		pathID = "path:root:" + c.rootID
+	}
+
+	// Acquire lease first to prevent concurrent writers.
+	nonce := leaseNonce
+	if nonce == "" {
+		nonce = generateID()
+		err := c.withConflictRetry(ctx, func() error {
+			return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	var fileKey []byte
 	var oldInodeID string
@@ -2131,13 +2140,14 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		nameHMAC:   nameHMAC,
 		swapMode:   true,
 		swapPath:   path,
+		pathID:     pathID,
 		oldInodeID: oldInodeID,
 		isNew:      true, // It's "new" because it's a new InodeID
 		onExpired:  c.onLeaseExpired,
 	}
 
 	w.wg.Add(1)
-	go w.leaseRenewalLoop(path, metadata.LeaseExclusive)
+	go w.leaseRenewalLoop(pathID, metadata.LeaseExclusive)
 
 	return w, nil
 }
@@ -2162,6 +2172,7 @@ type FileWriter struct {
 	isNew      bool
 	swapMode   bool
 	swapPath   string
+	pathID     string
 	oldInodeID string
 
 	onExpired func(id string, err error)
@@ -2328,7 +2339,7 @@ func (w *FileWriter) Close() error {
 	// Release Lease
 	leaseTarget := w.inode.ID
 	if w.swapMode {
-		leaseTarget = w.swapPath
+		leaseTarget = w.pathID
 	}
 	if releaseErr := w.client.ReleaseLeases(w.ctx, []string{leaseTarget}, w.leaseNonce); releaseErr != nil {
 		log.Printf("Warning: Failed to release lease for %s: %v", leaseTarget, releaseErr)
@@ -2376,7 +2387,7 @@ func (w *FileWriter) Abort() {
 
 	leaseTarget := w.inode.ID
 	if w.swapMode {
-		leaseTarget = w.swapPath
+		leaseTarget = w.pathID
 	}
 	w.client.ReleaseLeases(w.ctx, []string{leaseTarget}, w.leaseNonce)
 }
@@ -2535,7 +2546,7 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 	for i := int64(0); i < numChunks; i++ {
 		// Determine if we need to upload this chunk
 		needUpload := false
-		if dirtyChunks[i] {
+		if dirtyChunks != nil && dirtyChunks[i] {
 			needUpload = true
 		} else if i >= int64(len(inode.ChunkManifest)) {
 			// New chunk (file grew)
@@ -2664,17 +2675,26 @@ func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader,
 		return nil, nil
 	}
 
-	// 1. Acquire shared filename leases for all paths to "freeze" the namespace.
+	pathIDs := make([]string, len(paths))
+	for i, path := range paths {
+		pid, err := c.GetPathID(ctx, path)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate path ID for %s: %w", path, err)
+		}
+		pathIDs[i] = pid
+	}
+
+	// 1. Acquire shared filename leases for all path IDs to "freeze" the namespace.
 	nonce := generateID()
 	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
 	err := c.withConflictRetry(lctx, func() error {
-		return c.AcquireLeases(lctx, paths, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
+		return c.AcquireLeases(lctx, pathIDs, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
 	})
 	lcancel()
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire namespace snapshot: %w", err)
 	}
-	defer c.ReleaseLeases(ctx, paths, nonce)
+	defer c.ReleaseLeases(ctx, pathIDs, nonce)
 
 	// Clear cache to ensure we see the state as of when leases were acquired
 	c.ClearCache()
@@ -2749,17 +2769,26 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 		return fmt.Errorf("names and data length mismatch")
 	}
 
+	pathIDs := make([]string, len(names))
+	for i, name := range names {
+		pid, err := c.GetPathID(ctx, name)
+		if err != nil {
+			return fmt.Errorf("failed to calculate path ID for %s: %w", name, err)
+		}
+		pathIDs[i] = pid
+	}
+
 	// Phase 41: Batch acquire all path leases first to prevent livelock with readers.
 	nonce := generateID()
 	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
 	err := c.withConflictRetry(lctx, func() error {
-		return c.AcquireLeases(lctx, names, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
+		return c.AcquireLeases(lctx, pathIDs, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
 	})
 	lcancel()
 	if err != nil {
 		return err
 	}
-	defer c.ReleaseLeases(ctx, names, nonce)
+	defer c.ReleaseLeases(ctx, pathIDs, nonce)
 
 	// 1. Prepare all writers
 	writers := make([]*FileWriter, len(names))
@@ -2813,6 +2842,7 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 	err = c.withConflictRetry(ctx, func() error {
 		var allCmds []metadata.LogCommand
 		parents := make(map[string]*metadata.Inode)
+		parentBindings := make(map[string]map[string]string)
 
 		for _, w := range writers {
 			// Phase 31: Prepare New Inode
@@ -2837,6 +2867,14 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 					parent.Children = make(map[string]string)
 				}
 				parent.Children[w.nameHMAC] = w.inode.ID
+
+				// Track lease binding for this parent
+				bindings, ok := parentBindings[w.parentID]
+				if !ok {
+					bindings = make(map[string]string)
+					parentBindings[w.parentID] = bindings
+				}
+				bindings[w.nameHMAC] = w.pathID
 			}
 
 			// Delete Old via NLink decrement
@@ -2857,11 +2895,12 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 		}
 
 		// Add all parent updates to the batch
-		for _, parent := range parents {
+		for pid, parent := range parents {
 			cmdParent, err := c.PrepareUpdate(ctx, *parent)
 			if err != nil {
 				return err
 			}
+			cmdParent.LeaseBindings = parentBindings[pid]
 			allCmds = append(allCmds, cmdParent)
 		}
 
@@ -2918,16 +2957,25 @@ func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []a
 		return nil, fmt.Errorf("names and data length mismatch")
 	}
 
+	pathIDs := make([]string, len(names))
+	for i, name := range names {
+		pid, err := c.GetPathID(ctx, name)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate path ID for %s: %w", name, err)
+		}
+		pathIDs[i] = pid
+	}
+
 	// 1. Acquire path-based exclusive leases for all files
 	nonce := generateID()
-	if err := c.AcquireLeases(ctx, names, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce}); err != nil {
+	if err := c.AcquireLeases(ctx, pathIDs, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce}); err != nil {
 		return nil, err
 	}
 
 	// 2. Read all files
 	for i, name := range names {
 		if err := c.ReadDataFile(ctx, name, data[i]); err != nil {
-			c.ReleaseLeases(ctx, names, nonce)
+			c.ReleaseLeases(ctx, pathIDs, nonce)
 			return nil, err
 		}
 	}
@@ -2939,7 +2987,7 @@ func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []a
 				log.Printf("Failed to save files during transactional update: %v", err)
 			}
 		}
-		c.ReleaseLeases(ctx, names, nonce)
+		c.ReleaseLeases(ctx, pathIDs, nonce)
 	}, nil
 }
 

@@ -34,7 +34,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
+	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,7 +46,8 @@ func TestDistFS_ReadDir(t *testing.T) {
 
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -70,7 +71,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, metaSignPK, nil, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{})
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 

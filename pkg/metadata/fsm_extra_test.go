@@ -29,8 +29,7 @@ import (
 
 func createTestFSM(t *testing.T) *MetadataFSM {
 	tmpDir, _ := os.MkdirTemp("", "fsm_test")
-	st, _ := createTestStorage(t, tmpDir)
-	fsm, err := NewMetadataFSM(tmpDir+"/fsm.db", st)
+	fsm, err := NewMetadataFSM(tmpDir+"/fsm.db", []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -427,8 +426,7 @@ func TestFSM_Restore_Full(t *testing.T) {
 
 	// 3. Restore into new FSM
 	tmpDir2, _ := os.MkdirTemp("", "fsm_test_restore")
-	st2, _ := createTestStorage(t, tmpDir2)
-	fsm2, _ := NewMetadataFSM(tmpDir2+"/fsm.db", st2)
+	fsm2, _ := NewMetadataFSM(tmpDir2+"/fsm.db", []byte("test-cluster-secret"))
 	defer fsm2.Close()
 
 	err := fsm2.Restore(io.NopCloser(bytes.NewReader(buf.Bytes())))

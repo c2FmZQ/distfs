@@ -16,6 +16,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/mlkem"
 	"crypto/rand"
 	"encoding/json"
 	"flag"
@@ -38,6 +39,55 @@ import (
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
 )
+
+func loadOrGenerateClusterSecret(st *storage.Storage, bootstrap bool) ([]byte, error) {
+	vault := metadata.NewNodeVault(st)
+	if vault.HasClusterSecret() {
+		return vault.LoadClusterSecret()
+	}
+
+	if !bootstrap {
+		// Non-bootstrap nodes must receive the secret from the leader during join.
+		// We'll return nil for now and let the join process handle it.
+		return nil, nil
+	}
+
+	// Generate new secret for initial bootstrap
+	secret := make([]byte, 32)
+	if _, err := io.ReadFull(rand.Reader, secret); err != nil {
+		return nil, err
+	}
+
+	if err := vault.SaveClusterSecret(secret); err != nil {
+		return nil, err
+	}
+
+	return secret, nil
+}
+
+func loadOrGenerateEncryptionKey(st *storage.Storage) (*mlkem.DecapsulationKey768, error) {
+	encKeyName := "enc.key"
+	var encData KeyData
+	if err := st.ReadDataFile(encKeyName, &encData); err == nil {
+		return mlkem.NewDecapsulationKey768(encData.Bytes)
+	}
+
+	dk, err := mlkem.GenerateKey768()
+	if err != nil {
+		return nil, err
+	}
+
+	encData.Bytes = dk.Bytes()
+	if err := st.SaveDataFile(encKeyName, encData); err != nil {
+		return nil, err
+	}
+
+	return dk, nil
+}
+
+type KeyData struct {
+	Bytes []byte `json:"bytes"`
+}
 
 func main() {
 	var (
@@ -130,6 +180,18 @@ func main() {
 		log.Fatalf("failed to init keys: %v", err)
 	}
 
+	// 1.2 Load Encryption Key (PQC)
+	decKey, err := loadOrGenerateEncryptionKey(st)
+	if err != nil {
+		log.Fatalf("failed to init encryption key: %v", err)
+	}
+
+	// 1.3 Load Cluster Secret (Root of Trust)
+	clusterSecret, err := loadOrGenerateClusterSecret(st, *bootstrap)
+	if err != nil {
+		log.Fatalf("failed to load cluster secret: %v", err)
+	}
+
 	// Finalize ID
 	derivedID := metadata.NodeIDFromKey(raftKey)
 	if *nodeID != "" && *nodeID != derivedID {
@@ -142,7 +204,7 @@ func main() {
 	}
 
 	// 2. Initialize Metadata Role (Raft)
-	rn, err := metadata.NewRaftNode(*nodeID, *raftBind, *raftAdvertise, baseDir, st, raftKey)
+	rn, err := metadata.NewRaftNode(*nodeID, *raftBind, *raftAdvertise, baseDir, st, raftKey, clusterSecret)
 	if err != nil {
 		log.Fatalf("failed to init raft node: %v", err)
 	}
@@ -161,36 +223,21 @@ func main() {
 			log.Fatalf("bootstrap failed: %v", err)
 		}
 
-		// Initialize Cluster Secret
+		// Initialize Cluster Anchors (Signing Key)
 		// Wait for leader election to finalize
 		timeout := time.After(30 * time.Second)
 		ticker := time.NewTicker(500 * time.Millisecond)
 		defer ticker.Stop()
 
-	SecretInitLoop:
+	AnchorInitLoop:
 		for {
 			select {
 			case <-timeout:
-				log.Println("Warning: Timed out waiting for leader state during bootstrap; skipping secret init.")
-				break SecretInitLoop
+				log.Println("Warning: Timed out waiting for leader state during bootstrap; skipping anchor init.")
+				break AnchorInitLoop
 			case <-ticker.C:
 				if rn.Raft.State() == raft.Leader {
-					// 1. Initialize Secret if needed
-					_, err := rn.FSM.GetClusterSecret()
-					if err != nil {
-						log.Println("Initializing Cluster Secret...")
-						secret := make([]byte, 32)
-						if _, err := io.ReadFull(rand.Reader, secret); err != nil {
-							log.Fatalf("failed to generate secret: %v", err)
-						}
-						cmd := metadata.LogCommand{Type: metadata.CmdInitSecret, Data: secret}
-						b, _ := json.Marshal(cmd)
-						if err := rn.Raft.Apply(b, 5*time.Second).Error(); err != nil {
-							log.Fatalf("failed to apply secret: %v", err)
-						}
-					}
-
-					// 1.1. Initialize Cluster Signing Key if needed
+					// 1. Initialize Cluster Signing Key if needed
 					if _, err := rn.FSM.GetClusterSignPublicKey(); err != nil {
 						log.Println("Initializing Cluster Signing Key...")
 						csk, err := crypto.GenerateIdentityKey()
@@ -225,14 +272,14 @@ func main() {
 						log.Fatalf("failed to register bootstrap node: %v", err)
 					}
 
-					break SecretInitLoop
+					break AnchorInitLoop
 				}
 			}
 		}
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour)
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey)
 	metaServer.SetRaftAddress(*raftAdvertise)
 	metaServer.SetAPIURL(*apiURL)
 	metaServer.SetTLSPublicKey(raftKey.Public())
@@ -289,6 +336,7 @@ func main() {
 	clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
 	clusterMux.Handle("/v1/auth/", metaServer)
 	clusterMux.Handle("/v1/login", metaServer)
+	clusterMux.Handle("/v1/system/bootstrap", metaServer)
 	clusterMux.Handle("/api/debug/", metaServer)
 
 	// 7. Registration & Heartbeat
@@ -299,7 +347,7 @@ func main() {
 			ClusterAddress: *clusterAdvertise,
 			RaftAddress:    *raftAdvertise, // Raft address
 			Status:         metadata.NodeStatusActive,
-			PublicKey:      raftKey.Public(),
+			PublicKey:      decKey.EncapsulationKey().Bytes(),
 			SignKey:        signKey.Public(),
 		}
 
@@ -416,8 +464,4 @@ func loadOrGenerateSignKey(st *storage.Storage) (*crypto.IdentityKey, error) {
 	}
 
 	return signKey, nil
-}
-
-type KeyData struct {
-	Bytes []byte `json:"bytes"`
 }

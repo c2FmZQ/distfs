@@ -33,7 +33,7 @@ func TestRaftNode_KeyRing(t *testing.T) {
 	nodeKey := &NodeKey{Pub: pub, Priv: priv}
 
 	// 1. Create RaftNode
-	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestRaftNode_KeyRing(t *testing.T) {
 	}
 
 	// 3. Re-open
-	node2, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	node2, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}

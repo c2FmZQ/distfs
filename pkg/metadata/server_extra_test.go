@@ -504,11 +504,12 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st := storage.New(tmpDir, mk)
 	nodeKey, _ := LoadOrGenerateNodeKey(st, "node.key")
-	node2, _ := NewRaftNode("node2", "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	node2, _ := NewRaftNode("node2", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	defer node2.Shutdown()
 
 	signKey, _ := crypto.GenerateIdentityKey()
-	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey)
 
 	// node2 has no leader
 	req, _ := http.NewRequest("GET", "/v1/meta/batch/root", nil)
@@ -1071,7 +1072,7 @@ func TestServer_Forwarding(t *testing.T) {
 	st2, _ := createTestStorage(t, tmpDir2)
 	nodeKey2, _ := LoadOrGenerateNodeKey(st2, "node.key")
 	nodeID2 := NodeIDFromKey(nodeKey2)
-	n2, _ := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2)
+	n2, _ := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2, []byte("test-cluster-secret"))
 	defer n2.Shutdown()
 
 	// Add n2 to n1 cluster
@@ -1109,7 +1110,8 @@ func TestServer_Forwarding(t *testing.T) {
 	n1b, _ := json.Marshal(node1)
 	s1.ApplyRaftCommandInternal(CmdRegisterNode, n1b, "")
 
-	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0)
+	nodeDecKey2, _ := crypto.GenerateEncryptionKey()
+	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2)
 	ts2 := httptest.NewServer(s2)
 	defer ts2.Close()
 

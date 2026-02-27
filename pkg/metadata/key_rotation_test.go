@@ -97,7 +97,7 @@ func TestFSMKeyRingSync(t *testing.T) {
 	nodeKey2 := &NodeKey{Pub: pub2, Priv: priv2}
 	nodeID2 := NodeIDFromKey(nodeKey2)
 
-	node2, err := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2)
+	node2, err := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -134,7 +134,7 @@ func TestKeyRotation(t *testing.T) {
 	nodeKey := &NodeKey{Pub: pub, Priv: priv}
 
 	// 1. Start Node
-	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -209,7 +209,7 @@ func TestKeyRotation(t *testing.T) {
 	// We can reuse `st` if it wasn't closed (it doesn't have Close).
 	// NewRaftNode takes `st`.
 
-	node2, err := NewRaftNode("node1", string(node.Transport.LocalAddr()), "", tmpDir, st, nodeKey)
+	node2, err := NewRaftNode("node1", string(node.Transport.LocalAddr()), "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatalf("Restart failed: %v", err)
 	}

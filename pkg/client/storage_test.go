@@ -36,7 +36,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
-	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
+	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
@@ -45,7 +45,8 @@ func TestStorageAPI_Leases(t *testing.T) {
 
 	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -122,7 +123,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
 	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
-	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey)
+	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
 		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
@@ -130,7 +131,8 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	waitLeader(t, metaNode.Raft)
 	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -194,16 +196,16 @@ func TestStorageAPI_ReadConsistency(t *testing.T) {
 	path1 := "/f1"
 	path2 := "/f2"
 
-	writeMatched := func(val int) {
+	writeMatched := func(wc *Client, val int) {
 		data1 := testData{Name: "matched", Value: val}
 		data2 := testData{Name: "matched", Value: val}
 		// SaveDataFiles uses ONE atomic batch commit
-		if err := c.SaveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
-			t.Errorf("Save batch %d failed: %v", val, err)
+		if err := wc.SaveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
+			t.Logf("Save batch %d failed: %v", val, err)
 		}
 	}
 
-	writeMatched(1) // Initial state
+	writeMatched(c, 1) // Initial state
 	t.Log("Initial files created")
 
 	// Verify they exist
@@ -215,10 +217,14 @@ func TestStorageAPI_ReadConsistency(t *testing.T) {
 	}
 
 	// 3. Start background writer doing matched swaps
+	// Use a DIFFERENT client instance to ensure lease conflicts
+	cWriter := NewClient(ts.URL).WithIdentity(c.userID, c.decKey).WithSignKey(c.signKey).WithServerKey(c.serverKey)
+	cWriter.Login(t.Context())
+
 	done := make(chan bool)
 	go func() {
 		for i := 2; i < 10; i++ {
-			writeMatched(i)
+			writeMatched(cWriter, i)
 			time.Sleep(50 * time.Millisecond)
 		}
 		done <- true

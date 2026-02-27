@@ -21,7 +21,7 @@ func TestManifestIntegrity(t *testing.T) {
 	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key")
 	nodeID := "node1"
 
-	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -34,14 +34,10 @@ func TestManifestIntegrity(t *testing.T) {
 	waitLeader(t, raftNode.Raft)
 	ek, _ := bootstrapCluster(t, raftNode)
 
-	// Phase 31: Initialize Cluster Secret (required for Group creation)
-	clusterSecret := make([]byte, 32)
-	crypto.NewHash().Write([]byte("testsecret"))
-	raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: clusterSecret}.Marshal(), 5*time.Second)
-
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	raftSecret := "supersecret"
-	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0, metadata.NewNodeVault(st), nodeDecKey)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -242,7 +238,7 @@ func TestGroupIntegrity(t *testing.T) {
 	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key")
 	nodeID := "node1"
 
-	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey)
+	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatalf("NewRaftNode failed: %v", err)
 	}
@@ -255,12 +251,9 @@ func TestGroupIntegrity(t *testing.T) {
 	waitLeader(t, raftNode.Raft)
 	ek, _ := bootstrapCluster(t, raftNode)
 
-	// Phase 31: Initialize Cluster Secret
-	clusterSecret := make([]byte, 32)
-	raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdInitSecret, Data: clusterSecret}.Marshal(), 5*time.Second)
-
 	serverSignKey, _ := crypto.GenerateIdentityKey()
-	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0)
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0, metadata.NewNodeVault(st), nodeDecKey)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -304,7 +297,7 @@ func TestGroupIntegrity(t *testing.T) {
 		b := tx.Bucket([]byte("groups"))
 		v := b.Get([]byte(group.ID))
 		var g metadata.Group
-		plain, err := raftNode.FSM.DecryptValue(v)
+		plain, err := raftNode.FSM.DecryptValue([]byte("inodes"), v)
 		if err != nil {
 			return err
 		}
@@ -312,7 +305,7 @@ func TestGroupIntegrity(t *testing.T) {
 		g.OwnerID = "malicious-user" // TAMPERED metadata
 		// We DO NOT update the Signature here.
 		data, _ := json.Marshal(g)
-		enc, _ := raftNode.FSM.EncryptValue(data)
+		enc, _ := raftNode.FSM.EncryptValue([]byte("inodes"), data)
 		return b.Put([]byte(group.ID), enc)
 	})
 	if err != nil {

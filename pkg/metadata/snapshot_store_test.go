@@ -89,7 +89,7 @@ func TestSnapshotEncryption(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	mk1, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st1 := storage.New(tmpDir1, mk1)
-	fsm1, _ := NewMetadataFSM(tmpDir1+"/fsm.bolt", st1)
+	fsm1, _ := NewMetadataFSM(tmpDir1+"/fsm.bolt", []byte("test-cluster-secret"))
 	defer fsm1.Close()
 
 	// Add data
@@ -107,9 +107,7 @@ func TestSnapshotEncryption(t *testing.T) {
 
 	// 3. Setup Target FSM (Clean state)
 	tmpDir2 := t.TempDir()
-	mk2, _ := storage_crypto.CreateAESMasterKeyForTest()
-	st2 := storage.New(tmpDir2, mk2)
-	fsm2, _ := NewMetadataFSM(tmpDir2+"/fsm.bolt", st2) // Has random key initially
+	fsm2, _ := NewMetadataFSM(tmpDir2+"/fsm.bolt", []byte("test-cluster-secret")) // Has random key initially
 	defer fsm2.Close()
 
 	// 4. Restore Snapshot
@@ -134,14 +132,5 @@ func TestSnapshotEncryption(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatal(err)
-	}
-
-	// 6. Verify Key persisted in Storage
-	var keyData KeyData
-	if err := st2.ReadDataFile("fsm.key", &keyData); err != nil {
-		t.Fatal("fsm.key not saved")
-	}
-	if string(keyData.Bytes) != string(fsm1.keyRing.Marshal()) {
-		t.Error("fsm.key mismatch")
 	}
 }

@@ -76,6 +76,29 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 }
 
 // ResolvePath resolves a string path to an Inode and its FileKey.
+// GetPathID computes the opaque identifier used for filename leases (ParentID:nameHMAC).
+func (c *Client) GetPathID(ctx context.Context, path string) (string, error) {
+	if path == "/" {
+		return "path:root:" + c.rootID, nil
+	}
+
+	dir, name := filepath.Split(strings.TrimRight(path, "/"))
+	if dir == "" {
+		dir = "/"
+	}
+
+	parentInode, parentKey, err := c.ResolvePath(ctx, dir)
+	if err != nil {
+		return "", fmt.Errorf("failed to resolve parent directory %s: %w", dir, err)
+	}
+
+	mac := hmac.New(sha256.New, parentKey)
+	mac.Write([]byte(name))
+	nameHMAC := hex.EncodeToString(mac.Sum(nil))
+
+	return "path:" + parentInode.ID + ":" + nameHMAC, nil
+}
+
 func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	path = "/" + strings.Trim(path, "/")
 
@@ -273,13 +296,26 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 	}
 
 	// 3. ATOMIC MERGE PARENT
-	_, err = c.UpdateInode(ctx, parentID, func(p *metadata.Inode) error {
-		p.SetFileKey(parentKey)
-		if p.Children == nil {
-			p.Children = make(map[string]string)
+	err = c.withConflictRetry(ctx, func() error {
+		parent, err := c.getInode(ctx, parentID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch parent: %w", err)
 		}
-		// MERGE: Only add our specific new entry
-		p.Children[encName] = newID
+		parent.SetFileKey(parentKey)
+		if parent.Children == nil {
+			parent.Children = make(map[string]string)
+		}
+		parent.Children[encName] = newID
+
+		cmdParent, err := c.PrepareUpdate(ctx, *parent)
+		if err != nil {
+			return fmt.Errorf("failed to prepare parent update: %w", err)
+		}
+		cmdParent.LeaseBindings = map[string]string{encName: parentID + ":" + encName}
+
+		if _, err := c.ApplyBatch(ctx, []metadata.LogCommand{cmdParent}); err != nil {
+			return err
+		}
 		return nil
 	})
 	if err != nil {
@@ -424,12 +460,19 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 		newParent.Children[encNewName] = childID
 
 		// Build batch
+		var cmd1, cmd2 metadata.LogCommand
 		if oldParentID != newParentID {
-			cmd1, _ := c.PrepareUpdate(ctx, *oldParent)
-			cmd2, _ := c.PrepareUpdate(ctx, *newParent)
+			cmd1, _ = c.PrepareUpdate(ctx, *oldParent)
+			cmd1.LeaseBindings = map[string]string{encOldName: oldParentID + ":" + encOldName}
+			cmd2, _ = c.PrepareUpdate(ctx, *newParent)
+			cmd2.LeaseBindings = map[string]string{encNewName: newParentID + ":" + encNewName}
 			cmds = append(cmds, cmd1, cmd2)
 		} else {
-			cmd1, _ := c.PrepareUpdate(ctx, *oldParent)
+			cmd1, _ = c.PrepareUpdate(ctx, *oldParent)
+			cmd1.LeaseBindings = map[string]string{
+				encOldName: oldParentID + ":" + encOldName,
+				encNewName: newParentID + ":" + encNewName,
+			}
 			cmds = append(cmds, cmd1)
 		}
 
@@ -510,29 +553,39 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 		return nil // Already gone
 	}
 
-	// 2. Atomic Merge Removal from Parent
-	_, err = c.UpdateInode(ctx, parentID, func(p *metadata.Inode) error {
-		delete(p.Children, encName)
-		return nil
-	})
+	// 2. Prepare Updates
+	var cmds []metadata.LogCommand
+
+	// Remove from Parent
+	delete(parent.Children, encName)
+	cmdParent, err := c.PrepareUpdate(ctx, *parent)
 	if err != nil {
 		return err
 	}
+	cmdParent.LeaseBindings = map[string]string{encName: parentID + ":" + encName}
+	cmds = append(cmds, cmdParent)
 
-	// 3. Decrement NLink / Delete Child
-	_, err = c.UpdateInode(ctx, childID, func(child *metadata.Inode) error {
-		if child.Type == metadata.DirType && len(child.Children) > 0 {
-			return fmt.Errorf("directory not empty")
-		}
-		if child.NLink > 0 {
-			child.NLink--
-		}
-		if child.Links != nil {
-			delete(child.Links, parentID+":"+encName)
-		}
-		return nil
-	})
+	// Decrement NLink / Update Child Links
+	child, err := c.getInode(ctx, childID)
 	if err != nil {
+		return err
+	}
+	if child.Type == metadata.DirType && len(child.Children) > 0 {
+		return fmt.Errorf("directory not empty")
+	}
+	if child.NLink > 0 {
+		child.NLink--
+	}
+	if child.Links != nil {
+		delete(child.Links, parentID+":"+encName)
+	}
+	cmdChild, err := c.PrepareUpdate(ctx, *child)
+	if err != nil {
+		return err
+	}
+	cmds = append(cmds, cmdChild)
+
+	if _, err := c.ApplyBatch(ctx, cmds); err != nil {
 		return err
 	}
 
@@ -624,30 +677,43 @@ func (c *Client) LinkRaw(ctx context.Context, parentID string, parentKey []byte,
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	// 1. Update Target (Link Count)
-	_, err := c.UpdateInode(ctx, targetID, func(t *metadata.Inode) error {
-		t.NLink++
-		if t.Links == nil {
-			t.Links = make(map[string]bool)
-		}
-		// MERGE: Add our specific new link
-		t.Links[parentID+":"+encName] = true
-		return nil
-	})
+	// 1. Get Inodes
+	target, err := c.getInode(ctx, targetID)
 	if err != nil {
-		return fmt.Errorf("failed to update target for link: %w", err)
+		return err
+	}
+	parent, err := c.getInode(ctx, parentID)
+	if err != nil {
+		return err
 	}
 
-	// 2. Atomic Merge Parent
-	_, err = c.UpdateInode(ctx, parentID, func(p *metadata.Inode) error {
-		if p.Children == nil {
-			p.Children = make(map[string]string)
-		}
-		p.Children[encName] = targetID
-		return nil
-	})
+	// 2. Prepare Updates
+	var cmds []metadata.LogCommand
+
+	target.NLink++
+	if target.Links == nil {
+		target.Links = make(map[string]bool)
+	}
+	target.Links[parentID+":"+encName] = true
+	cmdTarget, err := c.PrepareUpdate(ctx, *target)
 	if err != nil {
-		return fmt.Errorf("failed to update parent for link: %w", err)
+		return err
+	}
+	cmds = append(cmds, cmdTarget)
+
+	if parent.Children == nil {
+		parent.Children = make(map[string]string)
+	}
+	parent.Children[encName] = targetID
+	cmdParent, err := c.PrepareUpdate(ctx, *parent)
+	if err != nil {
+		return err
+	}
+	cmdParent.LeaseBindings = map[string]string{encName: parentID + ":" + encName}
+	cmds = append(cmds, cmdParent)
+
+	if _, err := c.ApplyBatch(ctx, cmds); err != nil {
+		return fmt.Errorf("failed to link: %w", err)
 	}
 
 	return nil
@@ -663,7 +729,7 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 
 	parentInode, parentKey, err := c.ResolvePath(ctx, dir)
 	if err != nil {
-		return err
+		return fmt.Errorf("addEntry ResolvePath failed for dir %s: %w", dir, err)
 	}
 
 	if parentInode.Type != metadata.DirType {
@@ -678,13 +744,20 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	if existingID, ok := parentInode.Children[encName]; ok {
 		if iType == metadata.FileType {
 			// Update existing file content
-			return c.writeInodeContent(ctx, existingID, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0)
+			err := c.writeInodeContent(ctx, existingID, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0)
+			if err != nil {
+				return fmt.Errorf("addEntry writeInodeContent (existing) failed: %w", err)
+			}
+			return nil
 		}
 		return metadata.ErrExists
 	}
 
 	_, _, err = c.AddEntry(ctx, parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID, 0, 0)
-	return err
+	if err != nil {
+		return fmt.Errorf("addEntry AddEntry failed: %w", err)
+	}
+	return nil
 }
 
 func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, groupID string) crypto.Lockbox {

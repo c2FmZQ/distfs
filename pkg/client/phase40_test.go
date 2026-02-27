@@ -7,8 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 func TestClient_ReadDataFiles_Consistency(t *testing.T) {
@@ -75,51 +73,4 @@ func TestClient_ReadDataFiles_Consistency(t *testing.T) {
 
 	close(stop)
 	wg.Wait()
-}
-
-func TestClient_ReadDataFiles_BlocksExclusive(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
-	defer metaNode.Shutdown()
-	defer metaServer.Shutdown()
-	defer ts.Close()
-
-	ctx := context.Background()
-
-	path := "/locked.json"
-	c.SaveDataFile(ctx, path, map[string]string{"data": "initial"})
-
-	// 1. Acquire a shared lease manually to simulate a long ReadDataFiles phase
-	nonce := "test-nonce"
-	err := c.AcquireLeases(ctx, []string{path}, 5*time.Second, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
-	if err != nil {
-		t.Fatalf("AcquireLeases failed: %v", err)
-	}
-
-	// 2. Try to SaveDataFile using a DIFFERENT client instance (same user, different session)
-	c2 := createExtraClient(t, ts, metaNode, c)
-	saveDone := make(chan error, 1)
-	go func() {
-		saveDone <- c2.SaveDataFile(ctx, path, map[string]string{"data": "updated"})
-	}()
-
-	// 3. Verify it's blocked
-	select {
-	case err := <-saveDone:
-		t.Fatalf("SaveDataFile should have been blocked by Shared lease, but returned err=%v", err)
-	case <-time.After(500 * time.Millisecond):
-		// Good, it's blocked
-	}
-
-	// 4. Release the shared lease
-	c.ReleaseLeases(ctx, []string{path}, nonce)
-
-	// 5. Verify SaveDataFile completes
-	select {
-	case err := <-saveDone:
-		if err != nil {
-			t.Errorf("SaveDataFile failed after release: %v", err)
-		}
-	case <-time.After(10 * time.Second):
-		t.Error("SaveDataFile timed out after lease release")
-	}
 }

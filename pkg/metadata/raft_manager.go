@@ -49,7 +49,7 @@ type RaftNode struct {
 }
 
 // NewRaftNode creates and bootstraps a new Raft node with mTLS and encryption.
-func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *NodeKey) (*RaftNode, error) {
+func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *NodeKey, clusterSecret []byte) (*RaftNode, error) {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(nodeID)
 	// NoSnapshotRestoreOnStart default is false.
@@ -66,7 +66,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	}
 	dbPath := filepath.Join(baseDir, "fsm.bolt")
 	os.Remove(dbPath)
-	fsm, err := NewMetadataFSM(dbPath, st)
+	fsm, err := NewMetadataFSM(dbPath, clusterSecret)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fsm initialization: %w", err)
 	}
@@ -181,12 +181,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 
 	fsm.OnSnapshot = func() error {
 		kr.Rotate()
-		if err := st.SaveDataFile(keyRingName, KeyRingData{Bytes: kr.Marshal()}); err != nil {
-			return err
-		}
-		// Note: Trust state is persisted only during snapshots to optimize I/O performance.
-		// Newly registered nodes are trusted in-memory until then.
-		return fsm.saveTrustState()
+		return st.SaveDataFile(keyRingName, KeyRingData{Bytes: kr.Marshal()})
 	}
 
 	r, err = raft.NewRaft(config, fsm, logStore, stableStore, snapStore, transport)

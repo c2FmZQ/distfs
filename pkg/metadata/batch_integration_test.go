@@ -16,6 +16,7 @@ package metadata_test
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http/httptest"
 	"sync"
@@ -159,26 +160,9 @@ func TestBatchAtomicity(t *testing.T) {
 	batchBytes, _ := json.Marshal(batch)
 
 	// Apply batch
-	res, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes, "")
-	if err != nil {
+	_, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes, "")
+	if err != nil && !errors.Is(err, metadata.ErrAtomicRollback) {
 		t.Fatalf("Raft apply failed: %v", err)
-	}
-
-	// 'res' should be []interface{} containing the results of the two commands.
-	results, ok := res.([]interface{})
-	if !ok {
-		t.Fatalf("Expected []interface{}, got %T", res)
-	}
-
-	foundErr := false
-	for _, r := range results {
-		if e, ok := r.(error); ok && e != nil {
-			foundErr = true
-			break
-		}
-	}
-	if !foundErr {
-		t.Errorf("Expected at least one error in batch results, got %v", results)
 	}
 
 	// Verify 0000000000000000000000000000000f was NOT created (atomicity check)

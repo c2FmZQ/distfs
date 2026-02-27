@@ -2,7 +2,6 @@ package metadata
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -17,14 +16,6 @@ func TestGroupManagementSecurity(t *testing.T) {
 	node, ts, _, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
-
-	// Initialize Cluster Secret (needed for Group ID hashing)
-	secret := make([]byte, 32)
-	rand.Read(secret)
-	fSecret := node.Raft.Apply(LogCommand{Type: CmdInitSecret, Data: secret}.Marshal(), 5*time.Second)
-	if err := fSecret.Error(); err != nil {
-		t.Fatalf("Failed to init secret: %v", err)
-	}
 
 	// 1. Setup Users
 	// Alice (Victim/Owner)
