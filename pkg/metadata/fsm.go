@@ -564,7 +564,11 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 				subCmds[i].SessionID = cmd.SessionID
 			}
 		}
-		return fsm.executeBatchCommands(tx, subCmds, depth+1)
+		res := fsm.executeBatchCommands(tx, subCmds, depth+1)
+		if cmd.Atomic && fsm.containsError(res) {
+			return fmt.Errorf("%w: sub-batch failure", ErrAtomicRollback)
+		}
+		return res
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -845,7 +849,10 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 	}
 
 	ub := tx.Bucket([]byte("users"))
-	isFirst := ub.Stats().KeyN == 0
+	isFirst := true
+	if k, _ := ub.Cursor().First(); k != nil {
+		isFirst = false
+	}
 
 	encoded, _ := json.Marshal(user)
 	fsm.Put(tx, []byte("users"), []byte(user.ID), encoded)
@@ -1227,26 +1234,6 @@ func (fsm *MetadataFSM) LoadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 }
 
 func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
-	// If it belongs to a group, only check group quota
-	if groupID != "" {
-		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
-		if err != nil {
-			return err
-		}
-		if plain != nil {
-			var g Group
-			json.Unmarshal(plain, &g)
-			if g.Quota.MaxInodes > 0 && g.Usage.InodeCount+inodes > g.Quota.MaxInodes {
-				return fmt.Errorf("group inode quota exceeded")
-			}
-			if g.Quota.MaxBytes > 0 && g.Usage.TotalBytes+bytes > g.Quota.MaxBytes {
-				return fmt.Errorf("group storage quota exceeded")
-			}
-		}
-		return nil
-	}
-
-	// Otherwise, check user quota
 	if userID != "" {
 		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
 		if err != nil {
@@ -1263,10 +1250,6 @@ func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, inodes, 
 			}
 		}
 	}
-	return nil
-}
-
-func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
 	if groupID != "" {
 		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
 		if err != nil {
@@ -1275,14 +1258,18 @@ func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes,
 		if plain != nil {
 			var g Group
 			json.Unmarshal(plain, &g)
-			g.Usage.InodeCount += inodes
-			g.Usage.TotalBytes += bytes
-			data, _ := json.Marshal(g)
-			fsm.Put(tx, []byte("groups"), []byte(groupID), data)
+			if g.Quota.MaxInodes > 0 && g.Usage.InodeCount+inodes > g.Quota.MaxInodes {
+				return fmt.Errorf("group inode quota exceeded")
+			}
+			if g.Quota.MaxBytes > 0 && g.Usage.TotalBytes+bytes > g.Quota.MaxBytes {
+				return fmt.Errorf("group storage quota exceeded")
+			}
 		}
-		return nil
 	}
+	return nil
+}
 
+func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
 	if userID != "" {
 		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
 		if err != nil {
@@ -1295,6 +1282,20 @@ func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes,
 			u.Usage.TotalBytes += bytes
 			data, _ := json.Marshal(u)
 			fsm.Put(tx, []byte("users"), []byte(userID), data)
+		}
+	}
+	if groupID != "" {
+		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
+		if err != nil {
+			return err
+		}
+		if plain != nil {
+			var g Group
+			json.Unmarshal(plain, &g)
+			g.Usage.InodeCount += inodes
+			g.Usage.TotalBytes += bytes
+			data, _ := json.Marshal(g)
+			fsm.Put(tx, []byte("groups"), []byte(groupID), data)
 		}
 	}
 	return nil

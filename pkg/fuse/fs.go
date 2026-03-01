@@ -673,16 +673,19 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 	h.file.mu.Lock()
 	if h.file.inode.Unlinked {
 		if updated, err := h.file.fs.client.GetInode(ctx, h.file.inode.ID); err == nil {
-			*h.file.inode = *updated
+			h.file.inode = updated
 		}
 	}
+	inodeID := h.file.inode.ID
+	fileKey := h.file.key
+	currentInodeSize := h.file.inode.Size
 	h.reader.SetInode(h.file.inode)
 	h.file.mu.Unlock()
 
 	const chunkSize = 1024 * 1024
 	totalSize := int64(h.size)
 	if h.pages == nil {
-		totalSize = int64(h.file.inode.Size)
+		totalSize = int64(currentInodeSize)
 	}
 
 	readOffset := req.Offset
@@ -724,7 +727,7 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 		if h.stagingManifest != nil {
 			if entry, ok := h.stagingManifest[pageIdx]; ok {
 				// Evicted but uncommitted chunk
-				page, err := h.file.fs.client.DownloadChunkData(ctx, h.file.inode.ID, entry.ID, entry.URLs, h.file.key)
+				page, err := h.file.fs.client.DownloadChunkData(ctx, inodeID, entry.ID, entry.URLs, fileKey)
 				if err != nil {
 					return mapError(err)
 				}
@@ -773,6 +776,8 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 
 	// Ensure we have the latest size (may have been truncated via Setattr on the File)
 	h.file.mu.Lock()
+	inodeID := h.file.inode.ID
+	fileKey := h.file.key
 	if h.file.inode.Size < h.size {
 		h.size = h.file.inode.Size
 	}
@@ -799,14 +804,14 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 			// Check staging first (evicted page)
 			if entry, staged := h.stagingManifest[pageIdx]; staged {
 				// Fetch back for modification (Read-Modify-Write)
-				data, err := h.file.fs.client.DownloadChunkData(ctx, h.file.inode.ID, entry.ID, entry.URLs, h.file.key)
+				data, err := h.file.fs.client.DownloadChunkData(ctx, inodeID, entry.ID, entry.URLs, fileKey)
 				if err != nil {
 					return mapError(err)
 				}
 				page = data
 			} else if pageIdx < int64(len(h.file.inode.ChunkManifest)) {
 				// Fetch from server if it exists committed
-				data, err := h.file.fs.client.FetchChunk(ctx, h.file.inode.ID, h.file.key, pageIdx)
+				data, err := h.file.fs.client.FetchChunk(ctx, inodeID, fileKey, pageIdx)
 				if err != nil {
 					return mapError(err)
 				}

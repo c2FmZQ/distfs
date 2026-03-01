@@ -364,7 +364,7 @@ func (s *Server) applyBatch(req batchRequest) {
 	cmd := LogCommand{
 		Type:   CmdBatch,
 		Data:   data,
-		Atomic: true, // Aggregated batches are atomic to preserve sub-batch integrity
+		Atomic: false, // Server-aggregated batches MUST NOT be atomic to avoid cross-user interference
 	}
 	f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
