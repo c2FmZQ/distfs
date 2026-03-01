@@ -1475,18 +1475,22 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		lb := c.createLockbox(ctx, fileKey, mode, groupID)
 
 		// Assume not found, create new
+		links := make(map[string]bool)
+		if parentID != "" {
+			links[parentID+":"+nameHMAC] = true
+		}
 		inode = metadata.Inode{
-			ID:   id,
-			Type: iType,
-			Links: map[string]bool{
-				parentID + ":" + nameHMAC: true,
-			},
+			ID:            id,
+			Type:          iType,
+			Links:         links,
 			Mode:          mode,
 			Size:          uint64(size),
 			ChunkManifest: nil,
 			Lockbox:       lb,
 			OwnerID:       c.userID,
 			GroupID:       groupID,
+			CTime:         time.Now().UnixNano(),
+			NLink:         1,
 			Version:       1,
 		}
 		if name != "" {
@@ -1494,6 +1498,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		}
 		inode.SetUID(uid)
 		inode.SetGID(gid)
+		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 		created, err := c.createInode(ctx, inode)
 		if err != nil {
@@ -1509,54 +1514,9 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 	}
 
 	// 1. Handle Content
-	var inlineData []byte
-	var chunkEntries []metadata.ChunkEntry
-
-	if iType == metadata.FileType && size <= metadata.InlineLimit {
-		inlineData, err = io.ReadAll(r)
-		if err != nil {
-			return err
-		}
-	} else if iType == metadata.FileType {
-		// 2. Chunk Path
-		buf := make([]byte, crypto.ChunkSize)
-		var chunkIndex uint64
-
-		for {
-			n, err := io.ReadFull(r, buf)
-			if n > 0 {
-				chunkData := buf[:n]
-				cid, ct, err := crypto.EncryptChunk(fileKey, chunkData, chunkIndex)
-				if err != nil {
-					return err
-				}
-				chunkIndex++
-
-				token, err := c.issueToken(ctx, id, []string{cid}, "W")
-				if err != nil {
-					return fmt.Errorf("token issue failed: %w", err)
-				}
-				nodes, err := c.allocateNodes(ctx)
-				if err != nil {
-					return fmt.Errorf("allocation failed: %w", err)
-				}
-				if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
-					return err
-				}
-
-				var nodeIDs []string
-				for _, node := range nodes {
-					nodeIDs = append(nodeIDs, node.ID)
-				}
-				chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
-			}
-			if err == io.EOF || err == io.ErrUnexpectedEOF {
-				break
-			}
-			if err != nil {
-				return err
-			}
-		}
+	inlineData, chunkEntries, err := c.uploadDataInternal(ctx, id, fileKey, r, size)
+	if err != nil {
+		return err
 	}
 
 	// 3. Atomic Inode Update
@@ -1581,6 +1541,60 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		return nil
 	}
 	return fmt.Errorf("writeInodeContent UpdateInode failed for %s: %w", id, err)
+}
+
+func (c *Client) uploadDataInternal(ctx context.Context, id string, fileKey []byte, r io.Reader, size int64) ([]byte, []metadata.ChunkEntry, error) {
+	var inlineData []byte
+	var chunkEntries []metadata.ChunkEntry
+
+	if size <= metadata.InlineLimit {
+		var err error
+		inlineData, err = io.ReadAll(r)
+		if err != nil {
+			return nil, nil, err
+		}
+	} else {
+		// Chunk Path
+		buf := make([]byte, crypto.ChunkSize)
+		var chunkIndex uint64
+
+		for {
+			n, err := io.ReadFull(r, buf)
+			if n > 0 {
+				chunkData := buf[:n]
+				cid, ct, err := crypto.EncryptChunk(fileKey, chunkData, chunkIndex)
+				if err != nil {
+					return nil, nil, err
+				}
+				chunkIndex++
+
+				token, err := c.issueToken(ctx, id, []string{cid}, "W")
+				if err != nil {
+					return nil, nil, fmt.Errorf("token issue failed: %w", err)
+				}
+				nodes, err := c.allocateNodes(ctx)
+				if err != nil {
+					return nil, nil, fmt.Errorf("allocation failed: %w", err)
+				}
+				if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
+					return nil, nil, err
+				}
+
+				var nodeIDs []string
+				for _, node := range nodes {
+					nodeIDs = append(nodeIDs, node.ID)
+				}
+				chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
+			}
+			if err == io.EOF || err == io.ErrUnexpectedEOF {
+				break
+			}
+			if err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	return inlineData, chunkEntries, nil
 }
 
 // WriteFile writes a file. Returns the FileKey used.
@@ -1718,7 +1732,10 @@ func (c *Client) NewReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 	if nonce == "" {
 		nonce = generateID()
 		// POSIX compliance: acquire shared usage lease
-		_ = c.AcquireLeases(ctx, []string{id}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
+		err := c.AcquireLeases(ctx, []string{id}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
+		if err != nil {
+			return nil, fmt.Errorf("failed to acquire shared lease: %w", err)
+		}
 	}
 
 	lctx, cancel := context.WithCancel(context.Background())
@@ -2291,6 +2308,7 @@ func (w *FileWriter) Close() error {
 				if err != nil {
 					return err
 				}
+				cmdParent.LeaseBindings = map[string]string{w.nameHMAC: w.pathID}
 				cmds = append(cmds, cmdParent)
 			}
 
@@ -3959,12 +3977,12 @@ func (c *Client) SetAttr(ctx context.Context, path string, attr metadata.SetAttr
 	if err != nil {
 		return err
 	}
-	return c.SetAttrByID(ctx, inode, key, attr)
+	_, err = c.SetAttrByID(ctx, inode, key, attr)
+	return err
 }
 
-// SetAttrByID updates the attributes of an inode by ID.
-// SetAttrByID updates the attributes of an inode by ID.
-func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) error {
+// SetAttrByID updates the attributes of an inode by ID. Returns the updated inode.
+func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) (*metadata.Inode, error) {
 	updated, err := c.UpdateInode(ctx, inode.ID, func(i *metadata.Inode) error {
 		// 1. Update local fields
 		if attr.Mode != nil {
@@ -4027,10 +4045,7 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		return nil
 	})
 
-	if err == nil {
-		*inode = *updated
-	}
-	return err
+	return updated, err
 }
 
 // Remove deletes an inode at the given path.
@@ -4219,7 +4234,8 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) ||
 			errors.Is(err, metadata.ErrConflict) ||
 			(apiErr != nil && apiErr.Code == metadata.ErrCodeVersionConflict) ||
-			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired)
+			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired) ||
+			(apiErr != nil && strings.Contains(apiErr.Message, "atomic transaction failure"))
 
 		if isConflict {
 			select {
@@ -4290,6 +4306,10 @@ type LeaseOptions struct {
 
 // AcquireLeases acquires distributed leases for multiple identifiers.
 func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.Duration, opts LeaseOptions) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
 	leaseIDs := make([]string, len(ids))
 	for i, id := range ids {
 		if !metadata.IsInodeID(id) && !strings.HasPrefix(id, "path:") {

@@ -368,7 +368,7 @@ type InodeClientBlob struct {
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID            string               `json:"id"`
-	Links         map[string]bool      `json:"links,omitempty"` // Set of "ParentID:NameHMAC"
+	Links         map[string]bool      `json:"links"` // Set of "ParentID:NameHMAC"
 	Type          InodeType            `json:"type"`
 	OwnerID       string               `json:"owner_id"` // DistFS User ID
 	GroupID       string               `json:"group_id"` // DistFS Group ID
@@ -377,8 +377,8 @@ type Inode struct {
 	CTime         int64                `json:"ctime"`
 	NLink         uint32               `json:"nlink"`
 	ClientBlob    []byte               `json:"client_blob,omitempty"`
-	Children      map[string]string    `json:"children,omitempty"`
-	ChunkManifest []ChunkEntry         `json:"manifest,omitempty"`
+	Children      map[string]string    `json:"children"`
+	ChunkManifest []ChunkEntry         `json:"manifest"`
 	ChunkPages    []string             `json:"chunk_pages,omitempty"`
 	Lockbox       crypto.Lockbox       `json:"lockbox"`
 	Version       uint64               `json:"version"`
@@ -453,6 +453,12 @@ func (i *Inode) ManifestHash() []byte {
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
 
+	t := make([]byte, 4)
+	binary.BigEndian.PutUint32(t, uint32(i.Type))
+	h.Write([]byte("type:"))
+	h.Write(t)
+	h.Write([]byte("|"))
+
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
 		h.Write([]byte("links:"))
@@ -482,7 +488,15 @@ func (i *Inode) ManifestHash() []byte {
 	// Write ChunkManifest
 	h.Write([]byte("manifest:"))
 	for _, entry := range i.ChunkManifest {
-		h.Write([]byte(entry.ID + ","))
+		h.Write([]byte(entry.ID + "("))
+		// Include nodes in hash
+		for j, nodeID := range entry.Nodes {
+			if j > 0 {
+				h.Write([]byte(","))
+			}
+			h.Write([]byte(nodeID))
+		}
+		h.Write([]byte("),"))
 	}
 	h.Write([]byte("|"))
 

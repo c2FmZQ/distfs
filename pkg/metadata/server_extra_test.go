@@ -245,7 +245,7 @@ func TestServer_AdminHandlers(t *testing.T) {
 	}
 
 	// handleSetUserQuota
-	quotaReq := SetUserQuotaRequest{UserID: u1, MaxInodes: ptr(int64(100))}
+	quotaReq := SetUserQuotaRequest{UserID: u1, MaxInodes: ptr(uint64(100))}
 	qrb, _ := json.Marshal(quotaReq)
 	sealedQ := SealTestRequest(t, u1, usk, ek, qrb)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/quota/user", bytes.NewReader(sealedQ))
@@ -267,7 +267,8 @@ func TestServer_AdminHandlers(t *testing.T) {
 	}
 
 	// 12. handleSetGroupQuota
-	groupQuotaReq := SetGroupQuotaRequest{GroupID: "g1", MaxInodes: ptr(int64(50))}
+	groupQuotaReq := SetGroupQuotaRequest{GroupID: "g1", MaxInodes: ptr(uint64(50))}
+
 	gqrb, _ := json.Marshal(groupQuotaReq)
 	sealedGQ := SealTestRequest(t, u1, usk, ek, gqrb)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/quota/group", bytes.NewReader(sealedGQ))
@@ -667,7 +668,7 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
-	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: []byte(u1)}.Marshal()})
+	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()})
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Invalid address
@@ -707,7 +708,7 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
-	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: []byte(u1)}.Marshal()})
+	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()})
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// Mock node WITHOUT TLS
@@ -774,7 +775,20 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	dir.Children = map[string]string{"0000000000000000000000000000000f": "file1"}
 	dir.Version = 2
 	dir.SignInodeForTest(u1, usk)
-	batchA := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(dir)}}
+
+	file.Links = map[string]bool{"dir1:0000000000000000000000000000000f": true}
+	file.NLink = 2
+	file.Version = 2
+	file.SignInodeForTest(u1, usk)
+
+	batchA := []LogCommand{
+		{
+			Type:          CmdUpdateInode,
+			Data:          MustMarshalJSON(dir),
+			LeaseBindings: map[string]string{"0000000000000000000000000000000f": ""},
+		},
+		{Type: CmdUpdateInode, Data: MustMarshalJSON(file)},
+	}
 	bbA, _ := json.Marshal(batchA)
 	sealedA := SealTestRequest(t, u1, usk, ek, bbA)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealedA))

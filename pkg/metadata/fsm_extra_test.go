@@ -29,7 +29,7 @@ import (
 
 func createTestFSM(t *testing.T) *MetadataFSM {
 	tmpDir, _ := os.MkdirTemp("", "fsm_test")
-	fsm, err := NewMetadataFSM(tmpDir+"/fsm.db", []byte("test-cluster-secret"))
+	fsm, err := NewMetadataFSM("node1", tmpDir+"/fsm.db", []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,11 +86,39 @@ func TestFSM_AddChild_Success(t *testing.T) {
 	cb1, _ := json.Marshal(c1)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: cb1}.Marshal()})
 
+	// Add path lease for file1
+	lReq := LeaseRequest{
+		InodeIDs:  []string{"path:p1:file1"},
+		Duration:  int64(time.Hour),
+		SessionID: "s1",
+		Type:      LeaseExclusive,
+	}
+	lb, _ := json.Marshal(lReq)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: lb}.Marshal()})
+
 	p1.NLink = 1
 	p1.Children = map[string]string{"file1": "c1"}
 	p1.Version = 2
 	pb2, _ := json.Marshal(p1)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: pb2}.Marshal()})
+
+	c1.NLink = 2
+	c1.Links = map[string]bool{"p1:file1": true}
+	c1.Version = 2
+	cb2, _ := json.Marshal(c1)
+
+	cmds := []LogCommand{
+		{Type: CmdUpdateInode, Data: cb2, SessionID: "s1"},
+		{Type: CmdUpdateInode, Data: pb2, SessionID: "s1", LeaseBindings: map[string]string{"file1": "path:p1:file1"}},
+	}
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdBatch, Data: json.RawMessage(LogCommand{Type: CmdBatch}.Marshal())}.Marshal()}) // Wait, recursive batching?
+	// Actually, just execute them manually via applyBatchTx or similar.
+	// But let's use the simplest way: fsm.Apply with a batch command.
+	batch := LogCommand{
+		Type:   CmdBatch,
+		Data:   json.RawMessage(mustMarshal(cmds)),
+		Atomic: true,
+	}
+	fsm.Apply(&raft.Log{Data: batch.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("p1"))
@@ -120,8 +148,8 @@ func TestFSM_SetGroupQuota_Success(t *testing.T) {
 	// 2. Set Quota
 	req := SetGroupQuotaRequest{
 		GroupID:   "g1",
-		MaxInodes: ptr(int64(100)),
-		MaxBytes:  ptr(int64(1000)),
+		MaxInodes: ptr(uint64(100)),
+		MaxBytes:  ptr(uint64(1000)),
 	}
 	rb, _ := json.Marshal(req)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetGroupQuota, Data: rb}.Marshal()})
@@ -297,11 +325,34 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	ib, _ := json.Marshal(inode)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
 
+	// Acquire exclusive lease for update
+	lReq := LeaseRequest{
+		InodeIDs:  []string{inode.ID},
+		Duration:  int64(time.Hour),
+		SessionID: "s1",
+		Type:      LeaseExclusive,
+	}
+	lb, _ := json.Marshal(lReq)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: lb}.Marshal()})
+
 	// 1. enqueueGC (via UpdateInode with NLink=0)
 	inode.NLink = 0
 	inode.Version = 2
 	ib2, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: ib2}.Marshal()})
+	cmdUpdate := LogCommand{
+		Type:      CmdUpdateInode,
+		Data:      ib2,
+		SessionID: "s1",
+	}
+	fsm.Apply(&raft.Log{Data: cmdUpdate.Marshal()})
+
+	// 2. Release lease to trigger final deletion
+	relReq := LeaseRequest{
+		InodeIDs:  []string{inode.ID},
+		SessionID: "s1",
+	}
+	relB, _ := json.Marshal(relReq)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReleaseLeases, Data: relB}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("garbage_collection"))
@@ -426,7 +477,7 @@ func TestFSM_Restore_Full(t *testing.T) {
 
 	// 3. Restore into new FSM
 	tmpDir2, _ := os.MkdirTemp("", "fsm_test_restore")
-	fsm2, _ := NewMetadataFSM(tmpDir2+"/fsm.db", []byte("test-cluster-secret"))
+	fsm2, _ := NewMetadataFSM("node2", tmpDir2+"/fsm.db", []byte("test-cluster-secret"))
 	defer fsm2.Close()
 
 	err := fsm2.Restore(io.NopCloser(bytes.NewReader(buf.Bytes())))

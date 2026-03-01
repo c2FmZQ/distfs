@@ -3,6 +3,9 @@ set -e
 # FUSE POSIX Compliance Test
 export DISTFS_PASSWORD=testpassword
 
+# Trap to print logs on error
+trap 'echo "--- FUSE LOGS ---"; cat /tmp/fuse.log || true' EXIT
+
 echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
@@ -35,13 +38,8 @@ while [ $MAX_WAIT -gt 0 ]; do
         echo "FUSE mounted according to mountpoint."
         break
     fi
-    # Also try simple ls
-    if ls /mnt/distfs > /dev/null 2>&1; then
-        echo "FUSE mounted according to ls."
-        break
-    fi
     sleep 1
-    MAX_WAIT=$((MAX_WAIT - 1))
+    MAX_WAIT=$((MAX_WAIT-1))
 done
 
 if [ $MAX_WAIT -eq 0 ]; then
@@ -110,11 +108,17 @@ else
 fi
 
 echo "TEST 6: Deletion & NLink decrement"
-rm $MNT/f1
-if [ ! -f $MNT/f1 ]; then
-    echo "PASS: TEST 6"
+if rm $MNT/f1; then
+    if [ ! -f $MNT/f1 ]; then
+        echo "PASS: TEST 6"
+    else
+        echo "FAIL: TEST 6 (File still exists after rm)"
+        cat /tmp/fuse.log
+        exit 1
+    fi
 else
-    echo "FAIL: TEST 6"
+    echo "FAIL: TEST 6 (rm failed)"
+    cat /tmp/fuse.log
     exit 1
 fi
 

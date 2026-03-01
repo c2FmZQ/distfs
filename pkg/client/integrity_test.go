@@ -49,7 +49,8 @@ func TestManifestIntegrity(t *testing.T) {
 	uA := metadata.User{ID: adminID, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
 	createUser(t, raftNode, uA)
 	// Promote to Admin
-	raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte(adminID)}.Marshal(), 5*time.Second)
+	uAIDBytes, _ := json.Marshal(adminID)
+	raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes}.Marshal(), 5*time.Second)
 
 	// 2.2 User B
 	userID := "user-b"
@@ -89,9 +90,9 @@ func TestManifestIntegrity(t *testing.T) {
 	if len(inode.UserSig) == 0 {
 		t.Error("Missing UserSig on inode")
 	}
-	// Version 2 because: createInode(1) -> updateInodeContent(2)
-	if inode.Version != 2 {
-		t.Errorf("Expected version 2, got %d", inode.Version)
+	// Version 1 because of atomic creation in Phase 43
+	if inode.Version != 1 {
+		t.Errorf("Expected version 1, got %d", inode.Version)
 	}
 
 	// 5. Admin Operations (Client-side Signing)
@@ -113,6 +114,10 @@ func TestManifestIntegrity(t *testing.T) {
 	}
 	if inode2.OwnerID != userID {
 		t.Errorf("Expected owner %s, got %s", userID, inode2.OwnerID)
+	}
+	// Version 2 after AdminChown
+	if inode2.Version != 2 {
+		t.Errorf("Expected version 2 after chown, got %d", inode2.Version)
 	}
 
 	// Note: Admin cannot verify signerID or AuthorizedSigners after chown
@@ -211,13 +216,15 @@ func TestManifestIntegrity(t *testing.T) {
 	// Get current state
 	currentVersion := inodeG.Version
 	err = raftNode.FSM.DB().Update(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("inodes"))
-		v := b.Get([]byte(inodeG.ID))
+		v, err := raftNode.FSM.Get(tx, []byte("inodes"), []byte(inodeG.ID))
+		if err != nil {
+			return err
+		}
 		var i metadata.Inode
 		json.Unmarshal(v, &i)
 		i.Version = currentVersion - 1 // ROLLBACK
 		data, _ := json.Marshal(i)
-		return b.Put([]byte(inodeG.ID), data)
+		return raftNode.FSM.Put(tx, []byte("inodes"), []byte(inodeG.ID), data)
 	})
 	if err != nil {
 		t.Fatalf("DB rollback failed: %v", err)

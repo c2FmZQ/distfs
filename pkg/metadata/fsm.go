@@ -36,320 +36,15 @@ import (
 )
 
 var (
-	ErrExists        = errors.New("already exists")
-	ErrNotFound      = errors.New("not found")
-	ErrConflict      = errors.New("version conflict")
-	ErrStopIteration = errors.New("iteration stopped")
-	ErrAtomicRollback = errors.New("atomic transaction failure")
+	ErrExists                  = errors.New("already exists")
+	ErrNotFound                = errors.New("not found")
+	ErrConflict                = errors.New("version conflict")
+	ErrStopIteration           = errors.New("iteration stopped")
+	ErrAtomicRollback          = errors.New("atomic transaction failure")
+	ErrLeaseRequired           = errors.New("lease required")
+	ErrStructuralInconsistency = errors.New("structural inconsistency detected")
 )
 
-// MetadataFSM implements the Raft Finite State Machine for the metadata layer.
-// It manages the Inode table, User registry, and other cluster state using BoltDB.
-type MetadataFSM struct {
-	db         *bolt.DB
-	path       string
-	OnSnapshot func() error
-
-	clusterSecret []byte
-	keyRing       *crypto.KeyRing
-	trusted       map[string]bool // PubKey(bytes) -> true
-	mu            sync.RWMutex
-
-	metrics *MetricsCollector
-}
-
-// NewMetadataFSM creates a new FSM backed by a BoltDB file at the given path.
-func NewMetadataFSM(path string, clusterSecret []byte) (*MetadataFSM, error) {
-	db, err := bolt.Open(path, 0600, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases"}
-		for _, bucket := range buckets {
-			if _, err := tx.CreateBucketIfNotExists([]byte(bucket)); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	fsm := &MetadataFSM{
-		db:            db,
-		path:          path,
-		clusterSecret: clusterSecret,
-		trusted:       make(map[string]bool),
-		metrics:       NewMetricsCollector(),
-	}
-
-	// Load KeyRing from BoltDB system bucket (Tier 2)
-	err = db.Update(func(tx *bolt.Tx) error {
-		krData, err := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
-		if err == nil && krData != nil {
-			fsm.keyRing, _ = crypto.UnmarshalKeyRing(krData)
-		}
-
-		if fsm.keyRing == nil {
-			// Initialize new cluster KeyRing if this is a fresh FSM
-			k := make([]byte, 32)
-			if _, err := io.ReadFull(rand.Reader, k); err != nil {
-				return err
-			}
-			fsm.keyRing = crypto.NewKeyRing(k)
-			// Persist it immediately to the system bucket
-			krData := fsm.keyRing.Marshal()
-			if err := fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
-	if err != nil {
-		db.Close()
-		return nil, err
-	}
-
-	fsm.loadTrustState()
-	return fsm, nil
-}
-
-func (fsm *MetadataFSM) systemKey() []byte {
-	// Derive a static key from the ClusterSecret for Tier 2 root anchor encryption
-	mac := hmac.New(sha256.New, fsm.clusterSecret)
-	mac.Write([]byte("FSM_SYSTEM_V1"))
-	return mac.Sum(nil)
-}
-
-func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error) {
-	if len(data) == 0 {
-		return data, nil
-	}
-
-	if string(bucket) == "system" {
-		// Tier 2: Use ClusterSecret for root anchors
-		ct, err := crypto.EncryptDEM(fsm.systemKey(), data)
-		if err != nil {
-			return nil, err
-		}
-		// Prefix with 0 to indicate system encryption
-		out := make([]byte, 4+len(ct))
-		binary.BigEndian.PutUint32(out[:4], 0)
-		copy(out[4:], ct)
-		return out, nil
-	}
-
-	// Tier 3: Use rotating KeyRing for application data
-	fsm.mu.RLock()
-	kr := fsm.keyRing
-	fsm.mu.RUnlock()
-
-	if kr == nil {
-		return nil, fmt.Errorf("FSM keyring not initialized")
-	}
-
-	key, gen := kr.Current()
-	ct, err := crypto.EncryptDEM(key, data)
-	if err != nil {
-		return nil, err
-	}
-
-	// Result: [Gen(4)][Ciphertext]
-	out := make([]byte, 4+len(ct))
-	binary.BigEndian.PutUint32(out[:4], gen)
-	copy(out[4:], ct)
-	return out, nil
-}
-
-func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error) {
-	if len(data) < 4 {
-		return data, nil
-	}
-	gen := binary.BigEndian.Uint32(data[:4])
-
-	if string(bucket) == "system" {
-		if gen != 0 {
-			return nil, fmt.Errorf("invalid encryption for system bucket: expected gen 0, got %d", gen)
-		}
-		// Tier 2: System encryption
-		return crypto.DecryptDEM(fsm.systemKey(), data[4:])
-	}
-
-	// Tier 3: Application encryption
-	if gen == 0 {
-		return nil, fmt.Errorf("invalid encryption for non-system bucket: gen 0 reserved for system")
-	}
-
-	fsm.mu.RLock()
-	kr := fsm.keyRing
-	fsm.mu.RUnlock()
-
-	if kr == nil {
-		return nil, fmt.Errorf("FSM keyring not initialized")
-	}
-
-	key, ok := kr.Get(gen)
-	if !ok {
-		return nil, fmt.Errorf("fsm key generation %d not found", gen)
-	}
-	return crypto.DecryptDEM(key, data[4:])
-}
-
-func (fsm *MetadataFSM) KeyRing() *crypto.KeyRing {
-	fsm.mu.RLock()
-	defer fsm.mu.RUnlock()
-	return fsm.keyRing
-}
-
-func (fsm *MetadataFSM) FSMKey() []byte {
-	fsm.mu.RLock()
-	kr := fsm.keyRing
-	fsm.mu.RUnlock()
-
-	k, _ := kr.Current()
-	return k
-}
-
-func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket []byte, key []byte, value []byte) error {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	enc, err := fsm.EncryptValue(bucket, value)
-	if err != nil {
-		return err
-	}
-	return b.Put(key, enc)
-}
-
-func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket []byte, key []byte) ([]byte, error) {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return nil, fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	v := b.Get(key)
-	if v == nil {
-		return nil, nil
-	}
-	dec, err := fsm.DecryptValue(bucket, v)
-	return dec, err
-}
-
-func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket []byte, key []byte) error {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	return b.Delete(key)
-}
-
-func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte) error) error {
-	b := tx.Bucket(bucket)
-	if b == nil {
-		return fmt.Errorf("internal error: bucket %s missing", string(bucket))
-	}
-	return b.ForEach(func(k, v []byte) error {
-		dec, err := fsm.DecryptValue(bucket, v)
-		if err != nil {
-			return err
-		}
-		return fn(k, dec)
-	})
-}
-
-// Close closes the underlying BoltDB.
-func (fsm *MetadataFSM) Close() error {
-	if fsm.db != nil {
-		return fsm.db.Close()
-	}
-	return nil
-}
-
-func (fsm *MetadataFSM) loadTrustState() {
-	fsm.db.View(func(tx *bolt.Tx) error {
-		// Trust state is already indexed by register node commands into the 'nodes' bucket.
-		// We'll load the initial set of public keys into memory for quick MTLS validation.
-		b := tx.Bucket([]byte("nodes"))
-		if b == nil {
-			return nil
-		}
-		return b.ForEach(func(k, v []byte) error {
-			plain, err := fsm.DecryptValue([]byte("nodes"), v)
-			if err != nil {
-				return nil
-			}
-			var n Node
-			if err := json.Unmarshal(plain, &n); err == nil {
-				fsm.mu.Lock()
-				fsm.trusted[hex.EncodeToString(n.PublicKey)] = true
-				fsm.mu.Unlock()
-			}
-			return nil
-		})
-	})
-}
-
-func (fsm *MetadataFSM) IsInitialized() bool {
-	fsm.mu.RLock()
-	defer fsm.mu.RUnlock()
-	return len(fsm.trusted) > 0
-}
-
-func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
-	fsm.mu.RLock()
-	defer fsm.mu.RUnlock()
-	return fsm.trusted[string(pubKey)]
-}
-
-func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
-	var node Node
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("nodes"), []byte(id))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(plain, &node)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &node, nil
-}
-
-func (fsm *MetadataFSM) GetNodeByRaftAddress(raftAddr string) (*Node, error) {
-	var node Node
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("nodes"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			plain, err := fsm.DecryptValue([]byte("nodes"), v)
-			if err != nil {
-				continue
-			}
-			var n Node
-			if err := json.Unmarshal(plain, &n); err == nil {
-				if n.RaftAddress == raftAddr {
-					node = n
-					return nil
-				}
-			}
-		}
-		return ErrNotFound
-	})
-	if err != nil {
-		return nil, err
-	}
-	return &node, nil
-}
-
-// CommandType identifies the type of operation in the Raft log.
 type CommandType uint8
 
 const (
@@ -382,7 +77,6 @@ const (
 	CmdReencryptValue    CommandType = 32
 )
 
-// LogCommand is the structure stored in the Raft log.
 type LogCommand struct {
 	Type          CommandType       `json:"type"`
 	Data          json.RawMessage   `json:"data"`
@@ -405,16 +99,40 @@ type LeaseRequest struct {
 	InodeIDs  []string       `json:"inode_ids"`
 	SessionID string         `json:"session_id"`
 	Nonce     string         `json:"nonce,omitempty"`
-	UserID    string         `json:"user_id"` // Actual User ID for placeholders
-	Type      LeaseType      `json:"type"`
+	Duration  int64          `json:"duration"`
+	UserID    string         `json:"user_id,omitempty"`
+	Type      LeaseType      `json:"type,omitempty"`
 	Lockbox   crypto.Lockbox `json:"lockbox,omitempty"`
-	Duration  int64          `json:"duration"` // Nanoseconds
 }
 
-type ChildUpdate struct {
-	ParentID string `json:"parent_id"`
-	Name     string `json:"name"`
-	ChildID  string `json:"child_id"`
+type SetUserQuotaRequest struct {
+	UserID    string  `json:"user_id"`
+	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
+	MaxInodes *uint64 `json:"max_inodes,omitempty"`
+}
+
+type SetGroupQuotaRequest struct {
+	GroupID   string  `json:"group_id"`
+	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
+	MaxInodes *uint64 `json:"max_inodes,omitempty"`
+}
+
+type RotateKeyRequest struct {
+	Gen uint32 `json:"gen"`
+	Key []byte `json:"key"`
+}
+
+type RotateFSMKeyRequest struct {
+	Gen    uint32 `json:"gen"`
+	NewKey []byte `json:"new_key"`
+}
+
+type ClusterKey struct {
+	ID        string `json:"id"`
+	CreatedAt int64  `json:"created_at"`
+	Key       []byte `json:"key"`
+	EncKey    []byte `json:"enc_key,omitempty"`
+	DecKey    []byte `json:"dec_key,omitempty"`
 }
 
 type AddReplicaRequest struct {
@@ -423,102 +141,204 @@ type AddReplicaRequest struct {
 	NodeIDs []string `json:"node_ids"`
 }
 
-type RenameRequest struct {
-	OldParentID string `json:"old_parent_id"`
-	OldName     string `json:"old_name"`
-	NewParentID string `json:"new_parent_id"`
-	NewName     string `json:"new_name"`
+type MetadataSnapshot struct {
+	db      *bolt.DB
+	keyRing *crypto.KeyRing
 }
 
-type LinkRequest struct {
-	ParentID string `json:"parent_id"`
-	Name     string `json:"name"`
-	TargetID string `json:"target_id"`
-}
-
-type RotateFSMKeyRequest struct {
-	NewKey []byte `json:"new_key"`
-	Gen    uint32 `json:"gen"`
-}
-
-type SetUserQuotaRequest struct {
-	UserID    string `json:"user_id"`
-	MaxBytes  *int64 `json:"max_bytes,omitempty"`
-	MaxInodes *int64 `json:"max_inodes,omitempty"`
-}
-
-type SetGroupQuotaRequest struct {
-	GroupID   string `json:"group_id"`
-	MaxBytes  *int64 `json:"max_bytes,omitempty"`
-	MaxInodes *int64 `json:"max_inodes,omitempty"`
-}
-
-type ClusterKey struct {
-	ID        string `json:"id"`
-	EncKey    []byte `json:"enc_key"` // Public
-	DecKey    []byte `json:"dec_key"` // Private
-	CreatedAt int64  `json:"created_at"`
-}
-
-// Apply applies a Raft log entry to the FSM.
-func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
-	var cmd LogCommand
-	if err := json.Unmarshal(l.Data, &cmd); err != nil {
+func (s *MetadataSnapshot) Persist(sink raft.SnapshotSink) error {
+	krData := s.keyRing.Marshal()
+	lBuf := make([]byte, 4)
+	binary.BigEndian.PutUint32(lBuf, uint32(len(krData)))
+	if _, err := sink.Write(lBuf); err != nil {
+		sink.Cancel()
 		return err
 	}
+	if _, err := sink.Write(krData); err != nil {
+		sink.Cancel()
+		return err
+	}
+	err := s.db.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(sink)
+		return err
+	})
+	if err != nil {
+		sink.Cancel()
+		return err
+	}
+	return sink.Close()
+}
 
-	log.Printf("FSM: Apply Type=%d Index=%d", cmd.Type, l.Index)
+func (s *MetadataSnapshot) Release() {}
 
-	var results interface{}
-	err := fsm.db.Update(func(tx *bolt.Tx) error {
-		results = fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, cmd.LeaseBindings, 0)
-		shouldRollback := cmd.Atomic && fsm.containsError(results)
-		if !shouldRollback && fsm.containsRollbackError(results) {
-			shouldRollback = true
-		}
+type MetadataFSM struct {
+	nodeID     string
+	db         *bolt.DB
+	path       string
+	OnSnapshot func() error
 
-		if shouldRollback {
-			return fmt.Errorf("command failure") // Trigger rollback
+	clusterSecret []byte
+	keyRing       *crypto.KeyRing
+	trusted       map[string]bool
+	mu            sync.RWMutex
+
+	metrics *MetricsCollector
+}
+
+func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*MetadataFSM, error) {
+	db, err := bolt.Open(path, 0600, nil)
+	if err != nil {
+		return nil, err
+	}
+	err = db.Update(func(tx *bolt.Tx) error {
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases"}
+		for _, b := range buckets {
+			tx.CreateBucketIfNotExists([]byte(b))
 		}
 		return nil
 	})
 	if err != nil {
-		return results
+		db.Close()
+		return nil, err
 	}
-
-	// Post-apply hooks (e.g. key rotation)
-	cmds := []LogCommand{cmd}
-	if cmd.Type == CmdBatch {
-		json.Unmarshal(cmd.Data, &cmds)
+	fsm := &MetadataFSM{
+		nodeID:        nodeID,
+		db:            db,
+		path:          path,
+		clusterSecret: clusterSecret,
+		trusted:       make(map[string]bool),
+		metrics:       NewMetricsCollector(),
 	}
-
-	for _, c := range cmds {
-		if c.Type == CmdRotateFSMKey {
-			fsm.db.View(func(tx *bolt.Tx) error {
-				fsm.syncKeyRing(tx)
-				return nil
-			})
-			break
+	db.Update(func(tx *bolt.Tx) error {
+		krData, _ := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
+		if krData != nil {
+			fsm.keyRing, _ = crypto.UnmarshalKeyRing(krData)
 		}
-	}
-
-	return results
+		if fsm.keyRing == nil {
+			k := make([]byte, 32)
+			rand.Read(k)
+			fsm.keyRing = crypto.NewKeyRing(k)
+			fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), fsm.keyRing.Marshal())
+		}
+		return nil
+	})
+	fsm.loadTrustState()
+	return fsm, nil
 }
 
-func (fsm *MetadataFSM) syncKeyRing(tx *bolt.Tx) {
-	krData, err := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
-	if err != nil || krData == nil {
-		return
-	}
+func (fsm *MetadataFSM) systemKey() []byte {
+	mac := hmac.New(sha256.New, fsm.clusterSecret)
+	mac.Write([]byte("FSM_SYSTEM_V1"))
+	return mac.Sum(nil)
+}
 
-	kr, err := crypto.UnmarshalKeyRing(krData)
+func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error) {
+	if len(data) == 0 {
+		return data, nil
+	}
+	if string(bucket) == "system" {
+		ct, err := crypto.EncryptDEM(fsm.systemKey(), data)
+		if err != nil {
+			return nil, err
+		}
+		out := make([]byte, 4+len(ct))
+		binary.BigEndian.PutUint32(out[:4], 0)
+		copy(out[4:], ct)
+		return out, nil
+	}
+	fsm.mu.RLock()
+	kr := fsm.keyRing
+	fsm.mu.RUnlock()
+	key, gen := kr.Current()
+	ct, err := crypto.EncryptDEM(key, data)
 	if err != nil {
-		return
+		return nil, err
 	}
+	out := make([]byte, 4+len(ct))
+	binary.BigEndian.PutUint32(out[:4], gen)
+	copy(out[4:], ct)
+	return out, nil
+}
 
-	fsm.mu.Lock()
-	fsm.keyRing = kr
-	fsm.mu.Unlock()
+func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error) {
+	if len(data) < 4 {
+		return data, nil
+	}
+	gen := binary.BigEndian.Uint32(data[:4])
+	if gen == 0 {
+		return crypto.DecryptDEM(fsm.systemKey(), data[4:])
+	}
+	fsm.mu.RLock()
+	kr := fsm.keyRing
+	fsm.mu.RUnlock()
+	key, ok := kr.Get(gen)
+	if !ok {
+		return nil, fmt.Errorf("fsm key gen %d not found (bucket=%s)", gen, string(bucket))
+	}
+	return crypto.DecryptDEM(key, data[4:])
+}
+
+func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket, key, value []byte) error {
+	enc, err := fsm.EncryptValue(bucket, value)
+	if err != nil {
+		return err
+	}
+	return tx.Bucket(bucket).Put(key, enc)
+}
+
+func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket, key []byte) ([]byte, error) {
+	v := tx.Bucket(bucket).Get(key)
+	if v == nil {
+		return nil, nil
+	}
+	return fsm.DecryptValue(bucket, v)
+}
+
+func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket, key []byte) error {
+	return tx.Bucket(bucket).Delete(key)
+}
+
+func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte) error) error {
+	return tx.Bucket(bucket).ForEach(func(k, v []byte) error {
+		plain, err := fsm.DecryptValue(bucket, v)
+		if err != nil {
+			return err
+		}
+		return fn(k, plain)
+	})
+}
+
+func (fsm *MetadataFSM) Close() error {
+	if fsm.db == nil {
+		return nil
+	}
+	return fsm.db.Close()
+}
+
+func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
+	var cmd LogCommand
+	if err := json.Unmarshal(l.Data, &cmd); err != nil {
+		log.Printf("ERROR FSM Apply: failed to unmarshal command: %v (data=%s)", err, string(l.Data))
+		return err
+	}
+	var results interface{}
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		results = fsm.executeCommand(tx, cmd, 0)
+		if cmd.Atomic && fsm.containsError(results) {
+			log.Printf("DEBUG FSM Apply [%s]: Triggering rollback due to atomic failure", fsm.nodeID)
+			return fmt.Errorf("rollback")
+		}
+		return nil
+	})
+	if err != nil {
+		log.Printf("DEBUG FSM Apply [%s]: db.Update returned error: %v", fsm.nodeID, err)
+	}
+	log.Printf("DEBUG FSM Apply [%s]: Type=%d Result=%+v", fsm.nodeID, cmd.Type, results)
+	fsm.db.View(func(tx *bolt.Tx) error {
+		fsm.DumpInodes(tx)
+		return nil
+	})
+	return results
 }
 
 func (fsm *MetadataFSM) containsError(res interface{}) bool {
@@ -535,107 +355,216 @@ func (fsm *MetadataFSM) containsError(res interface{}) bool {
 	return false
 }
 
-func (fsm *MetadataFSM) containsRollbackError(res interface{}) bool {
-	if err, ok := res.(error); ok {
-		return errors.Is(err, ErrAtomicRollback)
+func (fsm *MetadataFSM) isPresent(data []byte, key string) bool {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return false
 	}
-	if slice, ok := res.([]interface{}); ok {
-		for _, item := range slice {
-			if fsm.containsRollbackError(item) {
-				return true
-			}
-		}
-	}
-	return false
+	_, ok := raw[key]
+	return ok
 }
 
 func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int) []interface{} {
 	if depth > 4 {
 		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
 	}
+	preInodes := make(map[string]*Inode)
+	getOriginal := func(id string) *Inode {
+		if i, ok := preInodes[id]; ok {
+			return i
+		}
+		plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))
+		if plain == nil {
+			preInodes[id] = nil
+			return nil
+		}
+		var inode Inode
+		json.Unmarshal(plain, &inode)
+		preInodes[id] = &inode
+		return &inode
+	}
 	results := make([]interface{}, len(cmds))
+	modifiedIDs := make(map[string]bool)
 	for i, cmd := range cmds {
-		res := fsm.executeCommand(tx, cmd.Type, cmd.Data, cmd.SessionID, cmd.LeaseBindings, depth)
+		var id string
+		switch cmd.Type {
+		case CmdCreateInode, CmdUpdateInode:
+			var inode Inode
+			json.Unmarshal(cmd.Data, &inode)
+			id = inode.ID
+		case CmdDeleteInode:
+			json.Unmarshal(cmd.Data, &id)
+			if id == "" {
+				id = string(cmd.Data)
+			}
+		}
+		if id != "" {
+			getOriginal(id)
+			modifiedIDs[id] = true
+		}
+		res := fsm.executeCommand(tx, cmd, depth)
 		results[i] = res
+		// If the OUTER command (from Apply) is non-atomic, we still want to support
+		// sub-batches being atomic. But BoltDB has no nested transactions.
+		// So if any sub-command has cmd.Atomic=true AND fails, we should stop and return results.
 		if cmd.Atomic && fsm.containsError(res) {
-			// Replace result with explicit rollback error to ensure top-level Apply rolls back
-			results[i] = fmt.Errorf("%w: sub-command %d failed", ErrAtomicRollback, i)
+			return results
+		}
+	}
+	if err := fsm.validateStructuralConsistency(tx, modifiedIDs, preInodes); err != nil {
+		if len(results) > 0 {
+			results[len(results)-1] = fmt.Errorf("%w: %w", ErrAtomicRollback, err)
+		} else {
+			return []interface{}{fmt.Errorf("%w: %w", ErrAtomicRollback, err)}
 		}
 	}
 	return results
 }
 
-func (fsm *MetadataFSM) applyBatchTx(tx *bolt.Tx, data []byte, sessionID string, depth int) []interface{} {
-	var cmds []LogCommand
-	if err := json.Unmarshal(data, &cmds); err != nil {
-		return []interface{}{err}
-	}
-	// Propagate sessionID to sub-commands if not set
-	for i := range cmds {
-		if cmds[i].SessionID == "" {
-			cmds[i].SessionID = sessionID
+func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs map[string]bool, preInodes map[string]*Inode) error {
+	expectedDeltas := make(map[string]int)
+	for id := range modifiedIDs {
+		plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))
+		if plain == nil {
+			continue
+		}
+		var post Inode
+		json.Unmarshal(plain, &post)
+		pre := preInodes[id]
+
+		if post.Type == DirType {
+			preChildren := make(map[string]string)
+			if pre != nil {
+				preChildren = pre.Children
+			}
+
+			for nameHMAC, childID := range post.Children {
+				if oldID, wasPresent := preChildren[nameHMAC]; !wasPresent || oldID != childID {
+					expectedDeltas[childID]++
+					childPlain, _ := fsm.Get(tx, []byte("inodes"), []byte(childID))
+					if childPlain != nil {
+						var child Inode
+						json.Unmarshal(childPlain, &child)
+						linkKey := id + ":" + nameHMAC
+						if child.Links == nil || !child.Links[linkKey] {
+							return fmt.Errorf("%w: child %s missing reciprocal link to %s", ErrStructuralInconsistency, childID, linkKey)
+						}
+					}
+				}
+			}
+			for nameHMAC, childID := range preChildren {
+				newID, stillPresent := post.Children[nameHMAC]
+				if !stillPresent || newID != childID {
+					expectedDeltas[childID]--
+				}
+			}
+		} else {
+			if len(post.Children) > 0 {
+				return fmt.Errorf("%w: non-directory %s has children", ErrStructuralInconsistency, id)
+			}
 		}
 	}
-	return fsm.executeBatchCommands(tx, cmds, depth)
+	for id := range modifiedIDs {
+		pre := preInodes[id]
+		plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))
+		if plain == nil {
+			continue
+		}
+		var post Inode
+		json.Unmarshal(plain, &post)
+		delta := expectedDeltas[id]
+		preN := nlinkVal(pre)
+
+		expectedN := int64(preN) + int64(delta)
+		// Special Case: New Inode with NLink=1 and no parent links (Initial Root or Orphan)
+		if preN == 0 && post.NLink == 1 && len(post.Links) == 0 {
+			expectedN = 1
+		}
+
+		if int64(post.NLink) != expectedN {
+			return fmt.Errorf("%w: inode %s nlink mismatch: expected %d, got %d", ErrStructuralInconsistency, id, expectedN, post.NLink)
+		}
+		if post.Type == DirType && post.NLink > 1 {
+			return fmt.Errorf("%w: directory %s has nlink > 1 (%d)", ErrStructuralInconsistency, id, post.NLink)
+		}
+		if post.NLink > 0 && len(post.Links) == 0 && post.ID != RootID && !post.IsSystem {
+			if post.NLink != 1 {
+				return fmt.Errorf("%w: non-root inode %s has no parent links", ErrStructuralInconsistency, id)
+			}
+		}
+		if len(post.Links) == 0 && post.NLink == 0 && id == RootID {
+			return fmt.Errorf("%w: cannot unlink root inode %s", ErrStructuralInconsistency, id)
+		}
+	}
+	return nil
 }
 
-func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmdType CommandType, data []byte, sessionID string, leaseBindings map[string]string, depth int) interface{} {
-	start := time.Now()
-	defer func() {
-		fsm.metrics.RecordOp(cmdType, time.Since(start))
-	}()
+func nlinkVal(i *Inode) uint32 {
+	if i == nil {
+		return 0
+	}
+	return i.NLink
+}
 
-	switch cmdType {
+func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) interface{} {
+	switch cmd.Type {
 	case CmdCreateInode:
-		return fsm.executeCreateInode(tx, data)
+		return fsm.executeCreateInode(tx, cmd.Data)
 	case CmdUpdateInode:
-		return fsm.executeUpdateInode(tx, data, sessionID, leaseBindings)
+		return fsm.executeUpdateInode(tx, cmd.Data, cmd.SessionID, cmd.LeaseBindings)
 	case CmdDeleteInode:
-		return fsm.executeDeleteInode(tx, data, sessionID)
+		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionID)
 	case CmdRegisterNode:
-		return fsm.executeRegisterNode(tx, data)
+		return fsm.executeRegisterNode(tx, cmd.Data)
 	case CmdCreateUser:
-		return fsm.executeCreateUser(tx, data)
+		return fsm.executeCreateUser(tx, cmd.Data)
 	case CmdCreateGroup:
-		return fsm.executeCreateGroup(tx, data)
+		return fsm.executeCreateGroup(tx, cmd.Data)
 	case CmdUpdateGroup:
-		return fsm.executeUpdateGroup(tx, data, sessionID)
+		return fsm.executeUpdateGroup(tx, cmd.Data, cmd.SessionID)
 	case CmdAddChunkReplica:
-		return fsm.executeAddChunkReplica(tx, data)
+		return fsm.executeAddChunkReplica(tx, cmd.Data)
 	case CmdGCRemove:
-		return fsm.executeGCRemove(tx, data)
+		return fsm.executeGCRemove(tx, cmd.Data)
 	case CmdSetUserQuota:
-		return fsm.executeSetUserQuota(tx, data)
+		return fsm.executeSetUserQuota(tx, cmd.Data)
 	case CmdRotateKey:
-		return fsm.executeRotateKey(tx, data)
+		return fsm.executeRotateKey(tx, cmd.Data)
 	case CmdInitWorld:
-		return fsm.executeInitWorld(tx, data)
+		return fsm.executeInitWorld(tx, cmd.Data)
 	case CmdStoreKeySync:
-		return fsm.executeStoreKeySync(tx, data)
+		return fsm.executeStoreKeySync(tx, cmd.Data)
 	case CmdAcquireLeases:
-		return fsm.executeAcquireLeases(tx, data)
+		return fsm.executeAcquireLeases(tx, cmd.Data)
 	case CmdReleaseLeases:
-		return fsm.executeReleaseLeases(tx, data)
+		return fsm.executeReleaseLeases(tx, cmd.Data)
 	case CmdPromoteAdmin:
-		return fsm.executePromoteAdmin(tx, data)
+		return fsm.executePromoteAdmin(tx, cmd.Data)
 	case CmdAdminChown:
-		return fsm.executeAdminChown(tx, data, sessionID)
+		return fsm.executeAdminChown(tx, cmd.Data, cmd.SessionID)
 	case CmdAdminChmod:
-		return fsm.executeAdminChmod(tx, data, sessionID)
+		return fsm.executeAdminChmod(tx, cmd.Data, cmd.SessionID)
 	case CmdStoreMetrics:
-		return fsm.executeStoreMetrics(tx, data)
+		return fsm.executeStoreMetrics(tx, cmd.Data)
 	case CmdSetGroupQuota:
-		return fsm.executeSetGroupQuota(tx, data)
+		return fsm.executeSetGroupQuota(tx, cmd.Data)
 	case CmdSetClusterSignKey:
-		return fsm.executeSetClusterSignKey(tx, data)
+		return fsm.executeSetClusterSignKey(tx, cmd.Data)
 	case CmdRemoveNode:
-		return fsm.executeRemoveNode(tx, data)
+		return fsm.executeRemoveNode(tx, cmd.Data)
 	case CmdRotateFSMKey:
-		return fsm.executeRotateFSMKey(tx, data)
+		return fsm.executeRotateFSMKey(tx, cmd.Data)
 	case CmdReencryptValue:
-		return fsm.executeReencryptValue(tx, data)
+		return fsm.executeReencryptValue(tx, cmd.Data)
 	case CmdBatch:
-		return fsm.applyBatchTx(tx, data, sessionID, depth+1)
+		var subCmds []LogCommand
+		json.Unmarshal(cmd.Data, &subCmds)
+		for i := range subCmds {
+			if subCmds[i].SessionID == "" {
+				subCmds[i].SessionID = cmd.SessionID
+			}
+		}
+		return fsm.executeBatchCommands(tx, subCmds, depth+1)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -653,36 +582,22 @@ func (fsm *MetadataFSM) checkLease(inode *Inode, sessionID string) error {
 	return nil
 }
 
-func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path string, sessionID string) error {
+func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionID string) error {
 	if path == "" {
 		return nil
 	}
 	if !strings.HasPrefix(path, "path:") {
 		path = "path:" + path
 	}
-
-	plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(path))
-	if err != nil {
-		return err
-	}
+	plain, _ := fsm.Get(tx, []byte("filename_leases"), []byte(path))
 	if plain == nil {
 		return nil
 	}
-
 	var leases map[string]LeaseInfo
-	if err := json.Unmarshal(plain, &leases); err != nil {
-		return err
-	}
-
+	json.Unmarshal(plain, &leases)
 	now := time.Now().UnixNano()
 	for _, l := range leases {
-		if l.Expiry <= now {
-			continue
-		}
-		// During MUTATION (e.g. rename/link/unlink), ANY lease from another session
-		// acts as a conflict. Even a SHARED lease from another session prevents us
-		// from swapping the path out from under them.
-		if l.SessionID != sessionID {
+		if l.Expiry > now && l.SessionID != sessionID {
 			return fmt.Errorf("%w: path %s: lease held by session %s", ErrConflict, path, l.SessionID)
 		}
 	}
@@ -691,170 +606,157 @@ func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path string, sessionID strin
 
 func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{} {
 	var inode Inode
-	if err := json.Unmarshal(data, &inode); err != nil {
-		return err
-	}
-
-	now := time.Now().UnixNano()
+	json.Unmarshal(data, &inode)
 	if inode.CTime == 0 {
-		inode.CTime = now
-	}
-	if inode.Mode == 0 {
-		if inode.Type == DirType {
-			inode.Mode = 0755
-		} else {
-			inode.Mode = 0644
-		}
+		inode.CTime = time.Now().UnixNano()
 	}
 	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	if inode.NLink == 0 {
 		inode.NLink = 1
 	}
-	v, err := fsm.Get(tx, []byte("inodes"), []byte(inode.ID))
-	if err != nil {
-		return err
-	}
+	v, _ := fsm.Get(tx, []byte("inodes"), []byte(inode.ID))
 	if v != nil {
 		return ErrExists
 	}
-
 	if inode.OwnerID != "" {
 		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
 			return err
 		}
 	}
-
 	inode.Version = 1
-	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
-		return err
-	}
+	fsm.saveInodeWithPages(tx, &inode)
 	if inode.OwnerID != "" {
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size))
 	}
 	return &inode
 }
 
 func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID string, leaseBindings map[string]string) interface{} {
-	var inode Inode
-	if err := json.Unmarshal(data, &inode); err != nil {
-		return err
-	}
-
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(inode.ID))
-	if err != nil {
-		return err
-	}
+	var update Inode
+	json.Unmarshal(data, &update)
+	plain, _ := fsm.Get(tx, []byte("inodes"), []byte(update.ID))
 	if plain == nil {
 		return ErrNotFound
 	}
+	var inode Inode
+	json.Unmarshal(plain, &inode)
 
-	var existing Inode
-	if err := json.Unmarshal(plain, &existing); err != nil {
-		return err
-	}
-
-	if err := fsm.checkLease(&existing, sessionID); err != nil {
-		return err
-	}
-
-	// Phase 41/42: Check individual path leases if this is a directory update (atomic swap or move).
-	if existing.Type == DirType && leaseBindings != nil {
-		// 1. Check for removed or changed entries
-		for nameHMAC, existingID := range existing.Children {
-			newID, stillExists := inode.Children[nameHMAC]
-			if !stillExists || newID != existingID {
-				if pathID, ok := leaseBindings[nameHMAC]; ok && pathID != "" {
-					if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		// 2. Check for newly added entries
-		for nameHMAC := range inode.Children {
-			if _, wasPresent := existing.Children[nameHMAC]; !wasPresent {
-				if pathID, ok := leaseBindings[nameHMAC]; ok && pathID != "" {
-					if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-
-	if inode.Version != existing.Version+1 {
+	if update.Version != inode.Version+1 {
 		return ErrConflict
 	}
 
-	ownerChanged := inode.OwnerID != existing.OwnerID
-	groupChanged := inode.GroupID != existing.GroupID
-
-	if ownerChanged || groupChanged {
-		// 1. Decrement old owner/group FIRST
-		if err := fsm.updateUsage(tx, existing.OwnerID, existing.GroupID, -1, -int64(existing.Size)); err != nil {
-			return err
-		}
-		// 2. Check Quota for new owner/group
-		// Safety: NEVER allow clearing OwnerID in an update if it was set
-		if inode.OwnerID == "" {
-			inode.OwnerID = existing.OwnerID
-		}
-		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-		// 3. Increment new owner/group
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-	} else if inode.OwnerID == "" {
-		inode.OwnerID = existing.OwnerID
+	if err := fsm.checkLease(&inode, sessionID); err != nil {
+		return err
 	}
-
-	oldPages := existing.ChunkPages
-	diffBytes := int64(inode.Size) - int64(existing.Size)
-
-	if !(ownerChanged || groupChanged) && diffBytes > 0 {
+	if inode.Type == DirType {
+		for nameHMAC, existingID := range inode.Children {
+			newID, stillExists := update.Children[nameHMAC]
+			if !stillExists || newID != existingID {
+				pathID, ok := leaseBindings[nameHMAC]
+				if !ok {
+					return fmt.Errorf("%w: missing lease binding for change to entry %s", ErrLeaseRequired, nameHMAC)
+				}
+				if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
+					return err
+				}
+			}
+		}
+		for nameHMAC := range update.Children {
+			if _, wasPresent := inode.Children[nameHMAC]; !wasPresent {
+				pathID, ok := leaseBindings[nameHMAC]
+				if !ok {
+					return fmt.Errorf("%w: missing lease binding for new entry %s", ErrLeaseRequired, nameHMAC)
+				}
+				if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	ownerChanged := update.OwnerID != "" && update.OwnerID != inode.OwnerID
+	groupChanged := update.GroupID != "" && update.GroupID != inode.GroupID
+	if ownerChanged || groupChanged {
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
+		newOwner := update.OwnerID
+		if newOwner == "" {
+			newOwner = inode.OwnerID
+		}
+		if err := fsm.checkQuota(tx, newOwner, update.GroupID, 1, int64(update.Size)); err != nil {
+			return err
+		}
+		fsm.updateUsage(tx, newOwner, update.GroupID, 1, int64(update.Size))
+		inode.OwnerID = newOwner
+		inode.GroupID = update.GroupID
+	}
+	oldPages := inode.ChunkPages
+	diffBytes := int64(update.Size) - int64(inode.Size)
+	if !(ownerChanged || groupChanged) && fsm.isPresent(data, "size") && diffBytes > 0 {
 		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
-
-	inode.Unlinked = existing.Unlinked
-	// Deep copy leases map to be safe
-	if existing.Leases != nil {
-		inode.Leases = make(map[string]LeaseInfo)
-		for k, v := range existing.Leases {
-			inode.Leases[k] = v
-		}
+	inode.Version = update.Version
+	if fsm.isPresent(data, "mode") {
+		inode.Mode = update.Mode
 	}
-
+	if fsm.isPresent(data, "size") {
+		inode.Size = update.Size
+	}
+	if fsm.isPresent(data, "ctime") {
+		inode.CTime = update.CTime
+	}
+	if update.ClientBlob != nil {
+		inode.ClientBlob = update.ClientBlob
+	}
+	if update.Children != nil || fsm.isPresent(data, "children") {
+		inode.Children = update.Children
+	}
+	if update.ChunkManifest != nil {
+		inode.ChunkManifest = update.ChunkManifest
+	}
+	if update.ChunkPages != nil {
+		inode.ChunkPages = update.ChunkPages
+	}
+	if update.UserSig != nil {
+		inode.UserSig = update.UserSig
+	}
+	if update.GroupSig != nil {
+		inode.GroupSig = update.GroupSig
+	}
+	if len(update.Lockbox) > 0 {
+		inode.Lockbox = update.Lockbox
+	}
+	if fsm.isPresent(data, "is_system") {
+		inode.IsSystem = update.IsSystem
+	}
+	if fsm.isPresent(data, "nlink") {
+		inode.NLink = update.NLink
+	}
+	if fsm.isPresent(data, "unlinked") {
+		inode.Unlinked = update.Unlinked
+	}
+	if update.Links != nil || fsm.isPresent(data, "links") {
+		inode.Links = update.Links
+	}
 	if !inode.Unlinked {
 		inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	}
-
 	if inode.NLink == 0 {
-		return fsm.deleteInodeInternal(tx, &inode)
-	}
-
-	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
-		return err
-	}
-
-	if !(ownerChanged || groupChanged) && diffBytes != 0 {
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
+		err := fsm.deleteInodeInternal(tx, &inode)
+		if err != nil {
 			return err
 		}
+		return &inode
 	}
-
-	// Clean up orphaned pages (pages in old but not in new)
+	fsm.saveInodeWithPages(tx, &inode)
+	if !(ownerChanged || groupChanged) && fsm.isPresent(data, "size") && diffBytes != 0 {
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 0, diffBytes)
+	}
 	if len(oldPages) > 0 {
 		newPagesMap := make(map[string]bool)
 		for _, pid := range inode.ChunkPages {
 			newPagesMap[pid] = true
 		}
-
 		pb := tx.Bucket([]byte("chunk_pages"))
 		for _, pid := range oldPages {
 			if !newPagesMap[pid] {
@@ -870,32 +772,29 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionID s
 	if err := json.Unmarshal(data, &id); err != nil {
 		id = string(data)
 	}
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
-	if err != nil {
-		return err
-	}
+	plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))
 	if plain == nil {
 		return nil
 	}
-
 	var inode Inode
-	if err := json.Unmarshal(plain, &inode); err != nil {
-		return err
-	}
-
+	json.Unmarshal(plain, &inode)
 	if err := fsm.checkLease(&inode, sessionID); err != nil {
 		return err
 	}
-
 	if inode.NLink > 0 {
 		return fmt.Errorf("cannot delete inode with active links (nlink=%d)", inode.NLink)
 	}
-
-	return fsm.deleteInodeInternal(tx, &inode)
+	if inode.Type == DirType && len(inode.Children) > 0 {
+		return fmt.Errorf("cannot delete non-empty directory")
+	}
+	err := fsm.deleteInodeInternal(tx, &inode)
+	if err != nil {
+		return err
+	}
+	return &inode
 }
 
 func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode) error {
-	// Check for active leases
 	now := time.Now().UnixNano()
 	hasActiveLeases := false
 	for _, l := range inode.Leases {
@@ -904,18 +803,12 @@ func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode) error {
 			break
 		}
 	}
-
 	if hasActiveLeases {
-		// Mark as unlinked and defer deletion
 		inode.Unlinked = true
-		if err := fsm.saveInodeWithPages(tx, inode); err != nil {
-			return err
-		}
-		// Add to unlinked_inodes bucket for reaper index
-		ub := tx.Bucket([]byte("unlinked_inodes"))
-		return ub.Put([]byte(inode.ID), []byte("true"))
+		fsm.saveInodeWithPages(tx, inode)
+		tx.Bucket([]byte("unlinked_inodes")).Put([]byte(inode.ID), []byte("true"))
+		return nil
 	}
-
 	return fsm.finalizeDeleteInode(tx, inode)
 }
 
@@ -927,133 +820,41 @@ func (fsm *MetadataFSM) finalizeDeleteInode(tx *bolt.Tx, inode *Inode) error {
 		}
 	}
 	if inode.OwnerID != "" {
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
-			return err
-		}
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
 	}
 	fsm.enqueueGC(tx, inode)
-
-	// Clean up unlinked index if it was there
-	ub := tx.Bucket([]byte("unlinked_inodes"))
-	ub.Delete([]byte(inode.ID))
-
+	tx.Bucket([]byte("unlinked_inodes")).Delete([]byte(inode.ID))
 	return fsm.Delete(tx, []byte("inodes"), []byte(inode.ID))
 }
 
 func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{} {
 	var node Node
-	if err := json.Unmarshal(data, &node); err != nil {
-		return err
-	}
-
+	json.Unmarshal(data, &node)
 	fsm.mu.Lock()
-	if len(node.PublicKey) > 0 {
-		fsm.trusted[string(node.PublicKey)] = true
-	}
-	if len(node.SignKey) > 0 {
-		fsm.trusted[string(node.SignKey)] = true
-	}
+	fsm.trusted[hex.EncodeToString(node.SignKey)] = true
 	fsm.mu.Unlock()
-
-	encoded, err := json.Marshal(node)
-	if err != nil {
-		return err
-	}
+	encoded, _ := json.Marshal(node)
 	return fsm.Put(tx, []byte("nodes"), []byte(node.ID), encoded)
 }
 
-func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} {
-	var nodeID string
-	if err := json.Unmarshal(data, &nodeID); err != nil {
-		nodeID = string(data) // Fallback for non-JSON raw strings if needed during transition
-	}
-	plain, err := fsm.Get(tx, []byte("nodes"), []byte(nodeID))
-	if err != nil {
-		return err
-	}
-	if plain == nil {
-		return ErrNotFound
-	}
-
-	var node Node
-	if err := json.Unmarshal(plain, &node); err != nil {
-		return err
-	}
-
-	// Remove from in-memory trust cache
-	fsm.mu.Lock()
-	delete(fsm.trusted, string(node.PublicKey))
-		delete(fsm.trusted, string(node.SignKey))
-		fsm.mu.Unlock()
-	
-		return fsm.Delete(tx, []byte("nodes"), []byte(nodeID))
-	}
-	
-
 func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} {
 	var user User
-	if err := json.Unmarshal(data, &user); err != nil {
-		return err
+	json.Unmarshal(data, &user)
+	if user.UID == 0 {
+		user.UID = generateID32()
 	}
 
-	v, err := fsm.Get(tx, []byte("users"), []byte(user.ID))
-	if err != nil {
-		return err
-	}
-	if v != nil {
-		return ErrExists
-	}
+	ub := tx.Bucket([]byte("users"))
+	isFirst := ub.Stats().KeyN == 0
+
+	encoded, _ := json.Marshal(user)
+	fsm.Put(tx, []byte("users"), []byte(user.ID), encoded)
+	fsm.Put(tx, []byte("uids"), uint32ToBytes(user.UID), []byte(user.ID))
 
 	// Bootstrap: First user is admin
-	isFirst := false
-	ub := tx.Bucket([]byte("users"))
-	if stats := ub.Stats(); stats.KeyN == 0 {
-		isFirst = true
-	}
-
-	// Allocate unique UID if not provided or 0
-	if user.UID == 0 {
-		for {
-			uid := generateID32()
-			if uid < 1000 {
-				continue // Reserve low UIDs
-			}
-			v, err := fsm.Get(tx, []byte("uids"), uint32ToBytes(uid))
-			if err != nil {
-				return err
-			}
-			if v == nil {
-				user.UID = uid
-				break
-			}
-		}
-	} else {
-		// If UID provided, check if already taken
-		existing, err := fsm.Get(tx, []byte("uids"), uint32ToBytes(user.UID))
-		if err != nil {
-			return err
-		}
-		if existing != nil {
-			return fmt.Errorf("UID %d already assigned to %s", user.UID, string(existing))
-		}
-	}
-
-	encoded, err := json.Marshal(user)
-	if err != nil {
-		return err
-	}
-
-	if err := fsm.Put(tx, []byte("users"), []byte(user.ID), encoded); err != nil {
-		return err
-	}
-	if err := fsm.Put(tx, []byte("uids"), uint32ToBytes(user.UID), []byte(user.ID)); err != nil {
-		return err
-	}
-
 	if isFirst {
-		if err := fsm.Put(tx, []byte("admins"), []byte(user.ID), []byte("true")); err != nil {
-			return err
-		}
+		log.Printf("DEBUG FSM [%s]: Bootstrapping first user %s as admin", fsm.nodeID, user.ID)
+		fsm.Put(tx, []byte("admins"), []byte(user.ID), []byte("true"))
 	}
 
 	return &user
@@ -1062,28 +863,22 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{} {
 	var userID string
 	if err := json.Unmarshal(data, &userID); err != nil {
-		userID = string(data) // Fallback for non-JSON raw strings if needed during transition
+		userID = string(data)
 	}
-	v, err := fsm.Get(tx, []byte("users"), []byte(userID))
-	if err != nil {
-		return err
-	}
-	if v == nil {
-		return ErrNotFound
-	}
+	log.Printf("DEBUG FSM PromoteAdmin [%s]: promoting user %s", fsm.nodeID, userID)
 	return fsm.Put(tx, []byte("admins"), []byte(userID), []byte("true"))
 }
 
+func (s *Server) IsAdmin(userID string) bool {
+	return s.fsm.IsAdmin(userID)
+}
+
 func (fsm *MetadataFSM) IsAdmin(userID string) bool {
-	isAdmin := false
-	_ = fsm.db.View(func(tx *bolt.Tx) error {
-		v, err := fsm.Get(tx, []byte("admins"), []byte(userID))
-		if err != nil {
-			return err
-		}
-		if v != nil {
-			isAdmin = true
-		}
+	var isAdmin bool
+	fsm.db.View(func(tx *bolt.Tx) error {
+		v, _ := fsm.Get(tx, []byte("admins"), []byte(userID))
+		isAdmin = v != nil
+		log.Printf("DEBUG FSM IsAdmin [%s]: user=%q isAdmin=%v (val=%q)", fsm.nodeID, userID, isAdmin, string(v))
 		return nil
 	})
 	return isAdmin
@@ -1091,114 +886,39 @@ func (fsm *MetadataFSM) IsAdmin(userID string) bool {
 
 func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{} {
 	var group Group
-	if err := json.Unmarshal(data, &group); err != nil {
-		return err
-	}
-
-	v, err := fsm.Get(tx, []byte("groups"), []byte(group.ID))
-	if err != nil {
-		return err
-	}
-	if v != nil {
-		return ErrExists
-	}
-
-	// Ensure GID is unique
-	existing, err := fsm.Get(tx, []byte("gids"), uint32ToBytes(group.GID))
-	if err != nil {
-		return err
-	}
-	if existing != nil {
-		return fmt.Errorf("GID %d already assigned to %s", group.GID, string(existing))
-	}
-
-	// We trust the client's version (should be 1 for a new group)
+	json.Unmarshal(data, &group)
 	if group.Version == 0 {
 		group.Version = 1
 	}
-	encoded, err := json.Marshal(group)
-	if err != nil {
-		return err
-	}
-
-	if err := fsm.Put(tx, []byte("groups"), []byte(group.ID), encoded); err != nil {
-		return err
-	}
-	if err := fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
-		return err
-	}
-
-	if err := fsm.updateGroupIndices(tx, &group, nil); err != nil {
-		return err
-	}
-
+	fsm.updateGroupIndices(tx, &group, nil)
+	encoded, _ := json.Marshal(group)
+	fsm.Put(tx, []byte("groups"), []byte(group.ID), encoded)
+	fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID))
 	return &group
 }
 
 func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte, sessionID string) interface{} {
-	var group Group
-	if err := json.Unmarshal(data, &group); err != nil {
-		return err
-	}
-	v, err := fsm.Get(tx, []byte("groups"), []byte(group.ID))
-	if err != nil {
-		return err
-	}
-	if v == nil {
+	var update Group
+	json.Unmarshal(data, &update)
+	plain, _ := fsm.Get(tx, []byte("groups"), []byte(update.ID))
+	if plain == nil {
 		return ErrNotFound
 	}
-
 	var existing Group
-	if err := json.Unmarshal(v, &existing); err != nil {
-		return err
-	}
-
-	if group.Version != existing.Version+1 {
+	json.Unmarshal(plain, &existing)
+	if update.Version != existing.Version+1 {
 		return ErrConflict
 	}
-
-	// Handle GID change in index
-	if group.GID != existing.GID {
-		fsm.Delete(tx, []byte("gids"), uint32ToBytes(existing.GID))
-		if err := fsm.Put(tx, []byte("gids"), uint32ToBytes(group.GID), []byte(group.ID)); err != nil {
-			return err
-		}
-	}
-
-	encoded, err := json.Marshal(group)
-	if err != nil {
-		return err
-	}
-	if err := fsm.Put(tx, []byte("groups"), []byte(group.ID), encoded); err != nil {
-		return err
-	}
-
-	if err := fsm.updateGroupIndices(tx, &group, &existing); err != nil {
-		return err
-	}
-
-	return &group
+	fsm.updateGroupIndices(tx, &update, &existing)
+	encoded, _ := json.Marshal(update)
+	return fsm.Put(tx, []byte("groups"), []byte(update.ID), encoded)
 }
 
-func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *Group) error {
+func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group, existing *Group) error {
 	mb := tx.Bucket([]byte("user_memberships"))
 	ob := tx.Bucket([]byte("owner_groups"))
-
 	encOne, _ := fsm.EncryptValue([]byte("user_memberships"), []byte("1"))
-
-	// 1. Membership Updates
-	if existing == nil {
-		// New group: Add all members
-		for uid := range group.Members {
-			sub, err := mb.CreateBucketIfNotExists([]byte(uid))
-			if err != nil {
-				return err
-			}
-			sub.Put([]byte(group.ID), encOne)
-		}
-	} else {
-		// Existing group: Delta update
-		// 1a. Remove users who left
+	if existing != nil {
 		for uid := range existing.Members {
 			if !group.Members[uid] {
 				sub := mb.Bucket([]byte(uid))
@@ -1207,514 +927,74 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group *Group, existing *
 				}
 			}
 		}
-		// 1b. Add users who joined
-		for uid := range group.Members {
-			if !existing.Members[uid] {
-				sub, err := mb.CreateBucketIfNotExists([]byte(uid))
-				if err != nil {
-					return err
-				}
-				sub.Put([]byte(group.ID), encOne)
-			}
-		}
-	}
-
-	// 2. Ownership Updates
-	if (existing == nil && group.OwnerID != "") || (existing != nil && existing.OwnerID != group.OwnerID) {
-		// Owner changed or new group
-		if existing != nil {
+		if existing.OwnerID != "" && existing.OwnerID != group.OwnerID {
 			sub := ob.Bucket([]byte(existing.OwnerID))
 			if sub != nil {
 				sub.Delete([]byte(existing.ID))
 			}
 		}
-		sub, err := ob.CreateBucketIfNotExists([]byte(group.OwnerID))
-		if err != nil {
-			return err
-		}
-		sub.Put([]byte(group.ID), encOne)
 	}
-
+	for uid := range group.Members {
+		if uid != "" && (existing == nil || !existing.Members[uid]) {
+			sub, err := mb.CreateBucketIfNotExists([]byte(uid))
+			if err == nil && sub != nil {
+				sub.Put([]byte(group.ID), encOne)
+			}
+		}
+	}
+	if group.OwnerID != "" && (existing == nil || existing.OwnerID != group.OwnerID) {
+		sub, err := ob.CreateBucketIfNotExists([]byte(group.OwnerID))
+		if err == nil && sub != nil {
+			sub.Put([]byte(group.ID), encOne)
+		}
+	}
 	return nil
 }
 
 func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interface{} {
 	var req AddReplicaRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
-	if err != nil {
-		return err
-	}
+	json.Unmarshal(data, &req)
+	plain, _ := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
 	if plain == nil {
 		return ErrNotFound
 	}
-
 	var inode Inode
-	if err := json.Unmarshal(plain, &inode); err != nil {
-		return err
-	}
-
-	// Load manifest to find chunk
-	if err := fsm.LoadInodeWithPages(tx, &inode); err != nil {
-		return err
-	}
-
-	updated := false
+	json.Unmarshal(plain, &inode)
+	fsm.LoadInodeWithPages(tx, &inode)
 	for i, chunk := range inode.ChunkManifest {
 		if chunk.ID == req.ChunkID {
-			for _, newID := range req.NodeIDs {
-				exists := false
-				for _, existingID := range chunk.Nodes {
-					if existingID == newID {
-						exists = true
+			for _, nid := range req.NodeIDs {
+				found := false
+				for _, eid := range chunk.Nodes {
+					if eid == nid {
+						found = true
 						break
 					}
 				}
-				if !exists {
-					inode.ChunkManifest[i].Nodes = append(inode.ChunkManifest[i].Nodes, newID)
-					updated = true
+				if !found {
+					inode.ChunkManifest[i].Nodes = append(inode.ChunkManifest[i].Nodes, nid)
 				}
 			}
 			break
 		}
 	}
-
-	if updated {
-		inode.Version++
-		if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
-			return err
-		}
-	}
-	return &inode
+	return fsm.saveInodeWithPages(tx, &inode)
 }
 
 func (fsm *MetadataFSM) executeGCRemove(tx *bolt.Tx, data []byte) interface{} {
 	var chunkID string
 	if err := json.Unmarshal(data, &chunkID); err != nil {
-		chunkID = string(data) // Fallback for non-JSON raw strings if needed during transition
+		chunkID = string(data)
 	}
-	b := tx.Bucket([]byte("garbage_collection"))
-	return b.Delete([]byte(chunkID))
-}
-
-func (fsm *MetadataFSM) executeSetClusterSignKey(tx *bolt.Tx, data []byte) interface{} {
-	if existing, _ := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key")); existing != nil {
-		return fmt.Errorf("cluster signing key already initialized")
-	}
-	return fsm.Put(tx, []byte("system"), []byte("cluster_sign_key"), data)
-}
-
-func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
-	var pub []byte
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		var key ClusterSignKey
-		if err := json.Unmarshal(plain, &key); err != nil {
-			return err
-		}
-		pub = key.Public
-		return nil
-	})
-	return pub, err
-}
-
-func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
-	var priv []byte
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		var key ClusterSignKey
-		if err := json.Unmarshal(plain, &key); err != nil {
-			return err
-		}
-		priv = key.EncryptedPrivate
-		return nil
-	})
-	return priv, err
-}
-
-func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
-	fsm.mu.RLock()
-	defer fsm.mu.RUnlock()
-	if fsm.clusterSecret == nil {
-		return nil, ErrNotFound
-	}
-	return fsm.clusterSecret, nil
-}
-
-// Snapshot returns a snapshot of the current state.
-func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
-	if fsm.OnSnapshot != nil {
-		if err := fsm.OnSnapshot(); err != nil {
-			return nil, err
-		}
-	}
-	return &MetadataSnapshot{db: fsm.db, keyRing: fsm.keyRing}, nil
-}
-
-func (fsm *MetadataFSM) ValidateNode(address string) error {
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
-				// Address in FSM is full URL (e.g. http://1.2.3.4:8080)
-				// Target might be full URL or Host:Port string.
-				if n.Address == address || n.ClusterAddress == address || strings.HasSuffix(n.Address, "/"+address) || strings.HasSuffix(n.ClusterAddress, "/"+address) {
-					return ErrStopIteration
-				}
-			}
-			return nil
-		})
-	})
-	if err == ErrStopIteration {
-		return nil
-	}
-	if err == nil {
-		return fmt.Errorf("node address %s not found in registry", address)
-	}
-	return err
-}
-
-// Restore restores the FSM from a snapshot.
-func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
-	defer rc.Close()
-
-	if err := fsm.db.Close(); err != nil {
-		return fmt.Errorf("close db: %w", err)
-	}
-
-	// 1. Read FSM KeyRing
-	lBuf := make([]byte, 4)
-	if _, err := io.ReadFull(rc, lBuf); err != nil {
-		fsm.reopen()
-		return fmt.Errorf("read keyring length: %w", err)
-	}
-	l := binary.BigEndian.Uint32(lBuf)
-	krData := make([]byte, l)
-	if _, err := io.ReadFull(rc, krData); err != nil {
-		fsm.reopen()
-		return fmt.Errorf("read keyring data: %w", err)
-	}
-
-	kr, err := crypto.UnmarshalKeyRing(krData)
-	if err != nil {
-		fsm.reopen()
-		return fmt.Errorf("unmarshal keyring: %w", err)
-	}
-
-	// 2. Restore DB
-	tmpPath := fsm.path + ".restore.tmp"
-	f, err := os.Create(tmpPath)
-	if err != nil {
-		fsm.reopen()
-		return err
-	}
-
-	if _, err := io.Copy(f, rc); err != nil {
-		f.Close()
-		os.Remove(tmpPath)
-		fsm.reopen()
-		return err
-	}
-	f.Close()
-
-	if err := os.Rename(tmpPath, fsm.path); err != nil {
-		os.Remove(tmpPath)
-		fsm.reopen()
-		return err
-	}
-
-	if err := fsm.reopen(); err != nil {
-		return err
-	}
-
-	// 3. Update memory state
-	fsm.mu.Lock()
-	fsm.keyRing = kr
-	fsm.mu.Unlock()
-
-	// 4. Rebuild the in-memory trust cache after restoring from snapshot.
-	fsm.loadTrustState()
-	return nil
-}
-
-func (fsm *MetadataFSM) reopen() error {
-	db, err := bolt.Open(fsm.path, 0600, nil)
-	if err != nil {
-		return err
-	}
-	fsm.db = db
-	return nil
-}
-
-type MetadataSnapshot struct {
-	db      *bolt.DB
-	keyRing *crypto.KeyRing
-}
-
-func (s *MetadataSnapshot) Persist(sink raft.SnapshotSink) error {
-	// 1. Write FSM KeyRing
-	krData := s.keyRing.Marshal()
-	l := uint32(len(krData))
-	lBuf := make([]byte, 4)
-	binary.BigEndian.PutUint32(lBuf, l)
-
-	if _, err := sink.Write(lBuf); err != nil {
-		sink.Cancel()
-		return err
-	}
-	if _, err := sink.Write(krData); err != nil {
-		sink.Cancel()
-		return err
-	}
-
-	err := s.db.View(func(tx *bolt.Tx) error {
-		_, err := tx.WriteTo(sink)
-		return err
-	})
-	if err != nil {
-		sink.Cancel()
-		return err
-	}
-	return sink.Close()
-}
-
-func (s *MetadataSnapshot) Release() {}
-
-func generateID32() uint32 {
-	b := make([]byte, 4)
-	rand.Read(b)
-	return binary.BigEndian.Uint32(b)
-}
-
-func uint32ToBytes(v uint32) []byte {
-	b := make([]byte, 4)
-	binary.BigEndian.PutUint32(b, v)
-	return b
-}
-
-// ChunkPageSize is the maximum number of chunks stored in a single inode before pagination occurs.
-const ChunkPageSize = 1000
-
-func (fsm *MetadataFSM) saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
-	// If manifest is large, split it
-	if len(inode.ChunkManifest) > ChunkPageSize {
-		var pageIDs []string
-		for i := 0; i < len(inode.ChunkManifest); i += ChunkPageSize {
-			end := i + ChunkPageSize
-			if end > len(inode.ChunkManifest) {
-				end = len(inode.ChunkManifest)
-			}
-			page := ChunkPage{
-				ID:     fmt.Sprintf("%s-page-%d", inode.ID, len(pageIDs)),
-				Chunks: inode.ChunkManifest[i:end],
-			}
-			pageIDs = append(pageIDs, page.ID)
-
-			encoded, err := json.Marshal(page)
-			if err != nil {
-				return err
-			}
-			if err := fsm.Put(tx, []byte("chunk_pages"), []byte(page.ID), encoded); err != nil {
-				return err
-			}
-		}
-		inode.ChunkPages = pageIDs
-		inode.ChunkManifest = nil
-	} else if len(inode.ChunkPages) > 0 && len(inode.ChunkManifest) <= ChunkPageSize && inode.ChunkManifest != nil {
-		// Was large, now small. Cleanup old pages.
-		pb := tx.Bucket([]byte("chunk_pages"))
-		for _, pid := range inode.ChunkPages {
-			pb.Delete([]byte(pid))
-		}
-		inode.ChunkPages = nil
-	}
-
-	encoded, err := json.Marshal(inode)
-	if err != nil {
-		return err
-	}
-	return fsm.Put(tx, []byte("inodes"), []byte(inode.ID), encoded)
-}
-
-func (fsm *MetadataFSM) LoadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
-	if len(inode.ChunkPages) > 0 && len(inode.ChunkManifest) == 0 {
-		for _, pid := range inode.ChunkPages {
-			plain, err := fsm.Get(tx, []byte("chunk_pages"), []byte(pid))
-			if err != nil {
-				return err
-			}
-			if plain != nil {
-				var page ChunkPage
-				if err := json.Unmarshal(plain, &page); err == nil {
-					inode.ChunkManifest = append(inode.ChunkManifest, page.Chunks...)
-				}
-			}
-		}
-	}
-	return nil
-}
-
-func (fsm *MetadataFSM) enqueueGC(tx *bolt.Tx, inode *Inode) error {
-	// Ensure we have the manifest loaded
-	if err := fsm.LoadInodeWithPages(tx, inode); err != nil {
-		return err
-	}
-
-	// Delete pages if they exist
-	if len(inode.ChunkPages) > 0 {
-		pb := tx.Bucket([]byte("chunk_pages"))
-		for _, pid := range inode.ChunkPages {
-			pb.Delete([]byte(pid))
-		}
-	}
-
-	b := tx.Bucket([]byte("garbage_collection"))
-	for _, chunk := range inode.ChunkManifest {
-		nodesJSON, _ := json.Marshal(chunk.Nodes)
-		// GC bucket might not need encryption if chunkIDs are anonymous,
-		// but let's be consistent and encrypt values.
-		enc, _ := fsm.EncryptValue([]byte("garbage_collection"), nodesJSON)
-		if err := b.Put([]byte(chunk.ID), enc); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
-	remainingInodes := deltaInodes
-	remainingBytes := deltaBytes
-
-	if groupID != "" {
-		v, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
-		if err != nil {
-			return err
-		}
-		if v != nil {
-			var group Group
-			if err := json.Unmarshal(v, &group); err != nil {
-				return fmt.Errorf("unmarshal group usage %s: %w", groupID, err)
-			}
-			group.Usage.InodeCount += deltaInodes
-			group.Usage.TotalBytes += deltaBytes
-
-			// Determine if this group is the authoritative budget for these resources
-			if group.Quota.MaxInodes > 0 {
-				remainingInodes = 0
-			}
-			if group.Quota.MaxBytes > 0 {
-				remainingBytes = 0
-			}
-
-			encoded, err := json.Marshal(group)
-			if err != nil {
-				return fmt.Errorf("marshal group: %w", err)
-			}
-			if err := fsm.Put(tx, []byte("groups"), []byte(groupID), encoded); err != nil {
-				return err
-			}
-		}
-	}
-
-	if userID != "" && (remainingInodes != 0 || remainingBytes != 0) {
-		v, err := fsm.Get(tx, []byte("users"), []byte(userID))
-		if err != nil {
-			return err
-		}
-		if v != nil {
-			var user User
-			if err := json.Unmarshal(v, &user); err != nil {
-				return fmt.Errorf("unmarshal user usage %s: %w", userID, err)
-			}
-			user.Usage.InodeCount += remainingInodes
-			user.Usage.TotalBytes += remainingBytes
-			encoded, err := json.Marshal(user)
-			if err != nil {
-				return fmt.Errorf("marshal user: %w", err)
-			}
-			if err := fsm.Put(tx, []byte("users"), []byte(userID), encoded); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, deltaInodes int64, deltaBytes int64) error {
-	if deltaInodes <= 0 && deltaBytes <= 0 {
-		return nil
-	}
-
-	remainingInodes := deltaInodes
-	remainingBytes := deltaBytes
-
-	if groupID != "" {
-		v, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
-		if err == nil && v != nil {
-			var group Group
-			if err := json.Unmarshal(v, &group); err == nil {
-				// Enforce group limits if they are set (non-zero)
-				if group.Quota.MaxInodes > 0 {
-					if deltaInodes > 0 && group.Usage.InodeCount+deltaInodes > group.Quota.MaxInodes {
-						return fmt.Errorf("group inode quota exceeded")
-					}
-					remainingInodes = 0 // Group quota is authoritative for this resource
-				}
-				if group.Quota.MaxBytes > 0 {
-					if deltaBytes > 0 && group.Usage.TotalBytes+deltaBytes > group.Quota.MaxBytes {
-						return fmt.Errorf("group storage quota exceeded")
-					}
-					remainingBytes = 0 // Group quota is authoritative for this resource
-				}
-			}
-		}
-	}
-
-	// Fallback to user quota for any remaining resources not covered by group limits
-	if userID != "" && (remainingInodes > 0 || remainingBytes > 0) {
-		v, err := fsm.Get(tx, []byte("users"), []byte(userID))
-		if err != nil || v == nil {
-			return nil
-		}
-		var user User
-		if err := json.Unmarshal(v, &user); err != nil {
-			return err
-		}
-		if remainingInodes > 0 && user.Quota.MaxInodes > 0 {
-			if user.Usage.InodeCount+remainingInodes > user.Quota.MaxInodes {
-				return fmt.Errorf("user inode quota exceeded")
-			}
-		}
-		if remainingBytes > 0 && user.Quota.MaxBytes > 0 {
-			if user.Usage.TotalBytes+remainingBytes > user.Quota.MaxBytes {
-				return fmt.Errorf("user storage quota exceeded")
-			}
-		}
-	}
-	return nil
+	return tx.Bucket([]byte("garbage_collection")).Delete([]byte(chunkID))
 }
 
 func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{} {
 	var req SetUserQuotaRequest
-	if err := json.Unmarshal(data, &req); err != nil {
+	err := json.Unmarshal(data, &req)
+	if err != nil {
 		return err
 	}
-
 	plain, err := fsm.Get(tx, []byte("users"), []byte(req.UserID))
 	if err != nil {
 		return err
@@ -1723,30 +1003,23 @@ func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{
 		return ErrNotFound
 	}
 	var user User
-	if err := json.Unmarshal(plain, &user); err != nil {
-		return err
-	}
-
+	json.Unmarshal(plain, &user)
 	if req.MaxBytes != nil {
-		user.Quota.MaxBytes = *req.MaxBytes
+		user.Quota.MaxBytes = int64(*req.MaxBytes)
 	}
 	if req.MaxInodes != nil {
-		user.Quota.MaxInodes = *req.MaxInodes
+		user.Quota.MaxInodes = int64(*req.MaxInodes)
 	}
-
-	encoded, err := json.Marshal(user)
-	if err != nil {
-		return err
-	}
+	encoded, _ := json.Marshal(user)
 	return fsm.Put(tx, []byte("users"), []byte(req.UserID), encoded)
 }
 
 func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface{} {
 	var req SetGroupQuotaRequest
-	if err := json.Unmarshal(data, &req); err != nil {
+	err := json.Unmarshal(data, &req)
+	if err != nil {
 		return err
 	}
-
 	plain, err := fsm.Get(tx, []byte("groups"), []byte(req.GroupID))
 	if err != nil {
 		return err
@@ -1755,21 +1028,14 @@ func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface
 		return ErrNotFound
 	}
 	var group Group
-	if err := json.Unmarshal(plain, &group); err != nil {
-		return err
-	}
-
+	json.Unmarshal(plain, &group)
 	if req.MaxBytes != nil {
-		group.Quota.MaxBytes = *req.MaxBytes
+		group.Quota.MaxBytes = int64(*req.MaxBytes)
 	}
 	if req.MaxInodes != nil {
-		group.Quota.MaxInodes = *req.MaxInodes
+		group.Quota.MaxInodes = int64(*req.MaxInodes)
 	}
-
-	encoded, err := json.Marshal(group)
-	if err != nil {
-		return err
-	}
+	encoded, _ := json.Marshal(group)
 	return fsm.Put(tx, []byte("groups"), []byte(req.GroupID), encoded)
 }
 
@@ -1787,38 +1053,273 @@ func (fsm *MetadataFSM) executeRotateKey(tx *bolt.Tx, data []byte) interface{} {
 		return err
 	}
 
-	// Prune
-	var keys []ClusterKey
-	prefix := "epoch_key_"
-	err := fsm.ForEach(tx, []byte("system"), func(k, v []byte) error {
-		if strings.HasPrefix(string(k), prefix) {
-			var kStruct ClusterKey
-			if err := json.Unmarshal(v, &kStruct); err == nil {
-				keys = append(keys, kStruct)
-			}
-		}
-		return nil
-	})
+	// Prune old keys (optional, keep last 5)
+	return nil
+}
+
+func (fsm *MetadataFSM) executeInitWorld(tx *bolt.Tx, data []byte) interface{} {
+	return fsm.Put(tx, []byte("system"), []byte("world_identity"), data)
+}
+
+func (fsm *MetadataFSM) executeStoreKeySync(tx *bolt.Tx, data []byte) interface{} {
+	var req KeySyncRequest
+	json.Unmarshal(data, &req)
+	encoded, _ := json.Marshal(req.Blob)
+	return fsm.Put(tx, []byte("keysync"), []byte(req.UserID), encoded)
+}
+
+func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+	var req AdminChownRequest
+	json.Unmarshal(data, &req)
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
 	if err != nil {
 		return err
 	}
+	if plain == nil {
+		return ErrNotFound
+	}
+	var inode Inode
+	json.Unmarshal(plain, &inode)
 
-	if len(keys) > 3 {
-		oldestIdx := -1
-		var oldestTime int64 = 1<<63 - 1
-		for i, k := range keys {
-			if k.CreatedAt < oldestTime {
-				oldestTime = k.CreatedAt
-				oldestIdx = i
-			}
+	newOwner := inode.OwnerID
+	if req.OwnerID != nil {
+		newOwner = *req.OwnerID
+	}
+	newGroup := inode.GroupID
+	if req.GroupID != nil {
+		newGroup = *req.GroupID
+	}
+
+	if newOwner != inode.OwnerID || newGroup != inode.GroupID {
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
+		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(inode.Size)); err != nil {
+			return err
 		}
-		if oldestIdx != -1 {
-			fsm.Delete(tx, []byte("system"), []byte("epoch_key_"+keys[oldestIdx].ID))
+		fsm.updateUsage(tx, newOwner, newGroup, 1, int64(inode.Size))
+		inode.OwnerID = newOwner
+		inode.GroupID = newGroup
+	}
+
+	inode.Version++
+	return fsm.saveInodeWithPages(tx, &inode)
+}
+
+func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+	var req AdminChmodRequest
+	json.Unmarshal(data, &req)
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
+		return ErrNotFound
+	}
+	var inode Inode
+	json.Unmarshal(plain, &inode)
+	inode.Mode = SanitizeMode(req.Mode, inode.Type)
+	inode.Version++
+	return fsm.saveInodeWithPages(tx, &inode)
+}
+
+func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{} {
+	var snap MetricSnapshot
+	json.Unmarshal(data, &snap)
+	return fsm.Put(tx, []byte("metrics"), int64ToBytes(snap.Timestamp), data)
+}
+
+func (fsm *MetadataFSM) executeRotateFSMKey(tx *bolt.Tx, data []byte) interface{} {
+	var req RotateFSMKeyRequest
+	json.Unmarshal(data, &req)
+	fsm.mu.Lock()
+	fsm.keyRing.AddKey(req.Gen, req.NewKey)
+	krData := fsm.keyRing.Marshal()
+	fsm.mu.Unlock()
+	return fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData)
+}
+
+func (fsm *MetadataFSM) executeReencryptValue(tx *bolt.Tx, data []byte) interface{} {
+	var req ReencryptRequest
+	json.Unmarshal(data, &req)
+	plain, err := fsm.Get(tx, req.Bucket, req.Key)
+	if err != nil {
+		return err
+	}
+	return fsm.Put(tx, req.Bucket, req.Key, plain)
+}
+
+func (fsm *MetadataFSM) executeSetClusterSignKey(tx *bolt.Tx, data []byte) interface{} {
+	return fsm.Put(tx, []byte("system"), []byte("cluster_sign_key"), data)
+}
+
+func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} {
+	var nodeID string
+	json.Unmarshal(data, &nodeID)
+
+	// Fetch node to revoke trust from in-memory map
+	if v, err := fsm.Get(tx, []byte("nodes"), []byte(nodeID)); err == nil && v != nil {
+		var node Node
+		if err := json.Unmarshal(v, &node); err == nil {
+			fsm.mu.Lock()
+			delete(fsm.trusted, hex.EncodeToString(node.SignKey))
+			fsm.mu.Unlock()
 		}
 	}
 
+	return fsm.Delete(tx, []byte("nodes"), []byte(nodeID))
+}
+
+func (fsm *MetadataFSM) loadTrustState() {
+	fsm.db.View(func(tx *bolt.Tx) error {
+		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil && n.Status == NodeStatusActive {
+				fsm.mu.Lock()
+				fsm.trusted[hex.EncodeToString(n.SignKey)] = true
+				fsm.mu.Unlock()
+			}
+			return nil
+		})
+	})
+}
+
+func (fsm *MetadataFSM) saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+	const maxManifest = 100
+	if len(inode.ChunkManifest) > maxManifest {
+		pages := (len(inode.ChunkManifest) + maxManifest - 1) / maxManifest
+		inode.ChunkPages = make([]string, pages)
+		for i := 0; i < pages; i++ {
+			start := i * maxManifest
+			end := (i + 1) * maxManifest
+			if end > len(inode.ChunkManifest) {
+				end = len(inode.ChunkManifest)
+			}
+			pageID := fmt.Sprintf("%s:p%d", inode.ID, i)
+			page := ChunkPage{ID: pageID, Chunks: inode.ChunkManifest[start:end]}
+			data, _ := json.Marshal(page)
+			fsm.Put(tx, []byte("chunk_pages"), []byte(pageID), data)
+			inode.ChunkPages[i] = pageID
+		}
+		savedManifest := inode.ChunkManifest
+		inode.ChunkManifest = nil
+		data, _ := json.Marshal(inode)
+		err := fsm.Put(tx, []byte("inodes"), []byte(inode.ID), data)
+		inode.ChunkManifest = savedManifest
+		return err
+	}
+	data, _ := json.Marshal(inode)
+	return fsm.Put(tx, []byte("inodes"), []byte(inode.ID), data)
+}
+
+func (fsm *MetadataFSM) LoadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+	if len(inode.ChunkPages) > 0 {
+		inode.ChunkManifest = nil
+		for _, pid := range inode.ChunkPages {
+			plain, err := fsm.Get(tx, []byte("chunk_pages"), []byte(pid))
+			if err == nil && plain != nil {
+				var page ChunkPage
+				if err := json.Unmarshal(plain, &page); err == nil {
+					inode.ChunkManifest = append(inode.ChunkManifest, page.Chunks...)
+				}
+			}
+		}
+	}
 	return nil
 }
+
+func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
+	// If it belongs to a group, only check group quota
+	if groupID != "" {
+		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
+		if err != nil {
+			return err
+		}
+		if plain != nil {
+			var g Group
+			json.Unmarshal(plain, &g)
+			if g.Quota.MaxInodes > 0 && g.Usage.InodeCount+inodes > g.Quota.MaxInodes {
+				return fmt.Errorf("group inode quota exceeded")
+			}
+			if g.Quota.MaxBytes > 0 && g.Usage.TotalBytes+bytes > g.Quota.MaxBytes {
+				return fmt.Errorf("group storage quota exceeded")
+			}
+		}
+		return nil
+	}
+
+	// Otherwise, check user quota
+	if userID != "" {
+		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
+		if plain != nil {
+			var u User
+			json.Unmarshal(plain, &u)
+			if u.Quota.MaxInodes > 0 && u.Usage.InodeCount+inodes > u.Quota.MaxInodes {
+				return fmt.Errorf("user inode quota exceeded")
+			}
+			if u.Quota.MaxBytes > 0 && u.Usage.TotalBytes+bytes > u.Quota.MaxBytes {
+				return fmt.Errorf("user storage quota exceeded")
+			}
+		}
+	}
+	return nil
+}
+
+func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
+	if groupID != "" {
+		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
+		if err != nil {
+			return err
+		}
+		if plain != nil {
+			var g Group
+			json.Unmarshal(plain, &g)
+			g.Usage.InodeCount += inodes
+			g.Usage.TotalBytes += bytes
+			data, _ := json.Marshal(g)
+			fsm.Put(tx, []byte("groups"), []byte(groupID), data)
+		}
+		return nil
+	}
+
+	if userID != "" {
+		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
+		if plain != nil {
+			var u User
+			json.Unmarshal(plain, &u)
+			u.Usage.InodeCount += inodes
+			u.Usage.TotalBytes += bytes
+			data, _ := json.Marshal(u)
+			fsm.Put(tx, []byte("users"), []byte(userID), data)
+		}
+	}
+	return nil
+}
+
+func (fsm *MetadataFSM) enqueueGC(tx *bolt.Tx, inode *Inode) {
+	fsm.LoadInodeWithPages(tx, inode)
+	for _, chunk := range inode.ChunkManifest {
+		nodesData, _ := json.Marshal(chunk.Nodes)
+		fsm.Put(tx, []byte("garbage_collection"), []byte(chunk.ID), nodesData)
+	}
+}
+
+func (fsm *MetadataFSM) IsInitialized() bool {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return len(fsm.trusted) > 0
+}
+
+func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return fsm.trusted[hex.EncodeToString(pubKey)]
+}
+
 func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	var key ClusterKey
 	err := fsm.db.View(func(tx *bolt.Tx) error {
@@ -1826,54 +1327,212 @@ func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 		if err != nil || id == nil {
 			return ErrNotFound
 		}
-
 		v, err := fsm.Get(tx, []byte("system"), []byte("epoch_key_"+string(id)))
-
 		if err != nil || v == nil {
 			return ErrNotFound
 		}
 		return json.Unmarshal(v, &key)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &key, nil
+	return &key, err
 }
 
-func (fsm *MetadataFSM) executeInitWorld(tx *bolt.Tx, data []byte) interface{} {
-	var world WorldIdentity
-	if err := json.Unmarshal(data, &world); err != nil {
-		return err
+func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface{} {
+	var req LeaseRequest
+	json.Unmarshal(data, &req)
+	now := time.Now().UnixNano()
+	expiry := now + req.Duration
+	inodes := make([]*Inode, len(req.InodeIDs))
+	for i, id := range req.InodeIDs {
+		isPath := strings.HasPrefix(id, "path:")
+		if !isPath && IsInodeID(id) {
+			plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+			if err != nil {
+				return err
+			}
+			if plain != nil {
+				var inode Inode
+				json.Unmarshal(plain, &inode)
+				inodes[i] = &inode
+				for _, l := range inode.Leases {
+					if l.Expiry > now && l.SessionID != req.SessionID {
+						if req.Type == LeaseExclusive || l.Type == LeaseExclusive {
+							return fmt.Errorf("%w: inode %s: held by session %s", ErrConflict, id, l.SessionID)
+						}
+					}
+				}
+			}
+		} else {
+			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			if err != nil {
+				return err
+			}
+			if plain != nil {
+				var leases map[string]LeaseInfo
+				json.Unmarshal(plain, &leases)
+				for _, l := range leases {
+					if l.Expiry > now && l.SessionID != req.SessionID {
+						if req.Type == LeaseExclusive || l.Type == LeaseExclusive {
+							return fmt.Errorf("%w: path %s: held by session %s", ErrConflict, id, l.SessionID)
+						}
+					}
+				}
+			}
+		}
 	}
-	v, err := fsm.Get(tx, []byte("system"), []byte("world_identity"))
-	if err != nil {
-		return err
+	for i, id := range req.InodeIDs {
+		isPath := strings.HasPrefix(id, "path:")
+		info := LeaseInfo{InodeID: id, SessionID: req.SessionID, Nonce: req.Nonce, Expiry: expiry, Type: req.Type}
+		nonce := req.Nonce
+		if nonce == "" {
+			nonce = "legacy-" + req.SessionID
+		}
+		if !isPath && IsInodeID(id) {
+			inode := inodes[i]
+			if inode == nil {
+				inode = &Inode{ID: id, OwnerID: req.UserID, Lockbox: req.Lockbox, Version: 1}
+			}
+			if inode.Leases == nil {
+				inode.Leases = make(map[string]LeaseInfo)
+			}
+			inode.Leases[nonce] = info
+			fsm.saveInodeWithPages(tx, inode)
+			encoded, _ := json.Marshal(info)
+			log.Printf("DEBUG FSM [%s]: Indexing lease %s:%s", fsm.nodeID, id, nonce)
+			fsm.Put(tx, []byte("leases"), []byte(id+":"+nonce), encoded)
+		} else {
+			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			if err != nil {
+				return err
+			}
+			leases := make(map[string]LeaseInfo)
+			if plain != nil {
+				json.Unmarshal(plain, &leases)
+			}
+			leases[nonce] = info
+			encoded, _ := json.Marshal(leases)
+			log.Printf("DEBUG FSM [%s]: Indexing path lease %s:%s", fsm.nodeID, id, nonce)
+			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+		}
 	}
-	if v != nil {
-		return fmt.Errorf("world identity already initialized")
-	}
-	return fsm.Put(tx, []byte("system"), []byte("world_identity"), data)
+	return nil
 }
-func (fsm *MetadataFSM) GetWorldIdentity() (*WorldIdentity, error) {
-	var world WorldIdentity
+
+func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface{} {
+	var req LeaseRequest
+	json.Unmarshal(data, &req)
+	now := time.Now().UnixNano()
+	for _, id := range req.InodeIDs {
+		nonce := req.Nonce
+		isPath := strings.HasPrefix(id, "path:")
+		if isPath || !IsInodeID(id) {
+			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			if err == nil && plain != nil {
+				var leases map[string]LeaseInfo
+				json.Unmarshal(plain, &leases)
+				if nonce == "" {
+					for n, l := range leases {
+						if l.SessionID == req.SessionID {
+							nonce = n
+							break
+						}
+					}
+				}
+				if nonce != "" {
+					delete(leases, nonce)
+					log.Printf("DEBUG FSM [%s]: Removing path lease index %s:%s", fsm.nodeID, id, nonce)
+					if len(leases) == 0 {
+						fsm.Delete(tx, []byte("filename_leases"), []byte(id))
+					} else {
+						encoded, _ := json.Marshal(leases)
+						fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+					}
+				}
+			}
+			if isPath {
+				continue
+			}
+		}
+		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
+		if err == nil && plain != nil {
+			var inode Inode
+			if err := json.Unmarshal(plain, &inode); err == nil {
+				if nonce == "" {
+					for n, l := range inode.Leases {
+						if l.SessionID == req.SessionID {
+							nonce = n
+							break
+						}
+					}
+				}
+				if _, ok := inode.Leases[nonce]; ok {
+					delete(inode.Leases, nonce)
+					log.Printf("DEBUG FSM [%s]: Removing lease index %s:%s", fsm.nodeID, id, nonce)
+					fsm.Delete(tx, []byte("leases"), []byte(id+":"+nonce))
+					if inode.Unlinked {
+						active := false
+						for _, l := range inode.Leases {
+							if l.Expiry > now {
+								active = true
+								break
+							}
+						}
+						if !active {
+							fsm.finalizeDeleteInode(tx, &inode)
+							continue
+						}
+					}
+					fsm.saveInodeWithPages(tx, &inode)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func (fsm *MetadataFSM) GetClusterSignPublicKey() ([]byte, error) {
+	var pub []byte
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("system"), []byte("world_identity"))
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
 		if err != nil {
 			return err
 		}
 		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(plain, &world)
+		var key ClusterSignKey
+		json.Unmarshal(plain, &key)
+		pub = key.Public
+		return nil
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &world, nil
+	return pub, err
+}
+
+func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
+	var priv []byte
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
+			return ErrNotFound
+		}
+		var key ClusterSignKey
+		json.Unmarshal(plain, &key)
+		priv = key.EncryptedPrivate
+		return nil
+	})
+	return priv, err
+}
+
+func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return fsm.clusterSecret, nil
 }
 
 func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
-	var group Group
+	var found bool
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
 		if err != nil {
@@ -1882,12 +1541,37 @@ func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
 		if plain == nil {
 			return ErrNotFound
 		}
-		return json.Unmarshal(plain, &group)
+		var g Group
+		json.Unmarshal(plain, &g)
+		if g.Members[userID] || g.OwnerID == userID {
+			found = true
+			return nil
+		}
+
+		// Recursive check: if the owner is a group, are we in THAT group?
+		visited := make(map[string]bool)
+		currID := g.OwnerID
+		for currID != "" && !visited[currID] {
+			visited[currID] = true
+			pPlain, _ := fsm.Get(tx, []byte("groups"), []byte(currID))
+			if pPlain == nil {
+				// Not a group ID, must be a user ID (direct check already done or it doesn't match)
+				if currID == userID {
+					found = true
+				}
+				return nil
+			}
+			var p Group
+			json.Unmarshal(pPlain, &p)
+			if p.Members[userID] || p.OwnerID == userID {
+				found = true
+				return nil
+			}
+			currID = p.OwnerID
+		}
+		return nil
 	})
-	if err != nil {
-		return false, err
-	}
-	return group.Members[userID] || group.OwnerID == userID, nil
+	return found, err
 }
 
 func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
@@ -1902,26 +1586,9 @@ func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
 		}
 		return json.Unmarshal(plain, &group)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &group, nil
+	return &group, err
 }
 
-func (fsm *MetadataFSM) executeStoreKeySync(tx *bolt.Tx, data []byte) interface{} {
-	var req KeySyncRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	encoded, err := json.Marshal(req.Blob)
-	if err != nil {
-		return err
-	}
-	return fsm.Put(tx, []byte("keysync"), []byte(req.UserID), encoded)
-}
-
-// GetKeySyncBlob retrieves the encrypted configuration blob for a user.
 func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
 	var blob KeySyncBlob
 	err := fsm.db.View(func(tx *bolt.Tx) error {
@@ -1934,485 +1601,85 @@ func (fsm *MetadataFSM) GetKeySyncBlob(userID string) (*KeySyncBlob, error) {
 		}
 		return json.Unmarshal(plain, &blob)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &blob, nil
+	return &blob, err
 }
 
-// InspectBucket allows read-only access to a bucket for testing purposes.
-func (fsm *MetadataFSM) InspectBucket(bucketName string, fn func(k, v []byte) error) error {
-	return fsm.db.View(func(tx *bolt.Tx) error {
-		return fsm.ForEach(tx, []byte(bucketName), fn)
-	})
-}
-
-func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface{} {
-	var req LeaseRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	lb := tx.Bucket([]byte("leases"))
-	fb := tx.Bucket([]byte("filename_leases"))
-	now := time.Now().UnixNano()
-	expiry := now + req.Duration
-
-	// 0. Proactive Cleanup (inodes)
-	c := lb.Cursor()
-	purged := 0
-	for k, v := c.First(); k != nil && purged < 10; k, v = c.Next() {
-		plain, err := fsm.DecryptValue([]byte("leases"), v)
-		if err != nil {
-			continue
-		}
-		var info LeaseInfo
-		if err := json.Unmarshal(plain, &info); err == nil {
-			if info.Expiry <= now {
-				lb.Delete(k)
-				purged++
-			}
-		}
-	}
-
-	// 0.1 Proactive Cleanup (filenames)
-	fc := fb.Cursor()
-	purged = 0
-	for k, v := fc.First(); k != nil && purged < 10; k, v = fc.Next() {
-		plain, err := fsm.DecryptValue([]byte("filename_leases"), v)
-		if err != nil {
-			continue
-		}
-		var leases map[string]LeaseInfo
-		if err := json.Unmarshal(plain, &leases); err == nil {
-			changed := false
-			for nonce, info := range leases {
-				if info.Expiry <= now {
-					delete(leases, nonce)
-					changed = true
-				}
-			}
-			if changed {
-				if len(leases) == 0 {
-					fb.Delete(k)
-					purged++
-				} else {
-					encoded, _ := json.Marshal(leases)
-					fsm.Put(tx, []byte("filename_leases"), k, encoded)
-				}
-			}
-		}
-	}
-
-	// 1. Validation Phase
-	inodes := make([]*Inode, len(req.InodeIDs))
-	for i, id := range req.InodeIDs {
-		isPath := strings.HasPrefix(id, "path:")
-		if !isPath && IsInodeID(id) {
-			plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
-			if err != nil {
-				return err
-			}
-			if plain == nil {
-				continue
-			}
-			var inode Inode
-			if err := json.Unmarshal(plain, &inode); err != nil {
-				return err
-			}
-			inodes[i] = &inode
-
-			// Conflict check
-			for _, l := range inode.Leases {
-				if l.Expiry <= now {
-					continue
-				}
-				if req.Type == LeaseExclusive {
-					// Exclusive conflicts with ANY lease from another session
-					if l.SessionID != req.SessionID {
-						return fmt.Errorf("%w: inode %s: held by session %s", ErrConflict, id, l.SessionID)
-					}
-				} else {
-					// Shared only conflicts with EXCLUSIVE leases from another session
-					if l.Type == LeaseExclusive && l.SessionID != req.SessionID {
-						return fmt.Errorf("%w: inode %s: exclusive lease held by session %s", ErrConflict, id, l.SessionID)
-					}
-				}
-			}
-		} else {
-			// Filename Lease
-			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
-			if err != nil {
-				return err
-			}
-			if plain != nil {
-				var leases map[string]LeaseInfo
-				if err := json.Unmarshal(plain, &leases); err == nil {
-					for _, l := range leases {
-						if l.Expiry <= now {
-							continue
-						}
-						if req.Type == LeaseExclusive {
-							if l.SessionID != req.SessionID {
-								return fmt.Errorf("%w: path %s: held by session %s", ErrConflict, id, l.SessionID)
-							}
-						} else {
-							// Shared lease request: conflicts ONLY if there is an existing EXCLUSIVE lease from another session
-							if l.Type == LeaseExclusive && l.SessionID != req.SessionID {
-								return fmt.Errorf("%w: path %s: exclusive lease held by session %s", ErrConflict, id, l.SessionID)
-							}
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// 2. Grant Phase
-	for i, id := range req.InodeIDs {
-		isPath := strings.HasPrefix(id, "path:")
-		info := LeaseInfo{
-			InodeID:   id,
-			SessionID: req.SessionID,
-			Nonce:     req.Nonce,
-			Expiry:    expiry,
-			Type:      req.Type,
-		}
-
-		if !isPath && IsInodeID(id) {
-			inode := inodes[i]
-			if inode == nil {
-				inode = &Inode{
-					ID:      id,
-					OwnerID: req.UserID,
-					Lockbox: req.Lockbox,
-					Version: 1,
-				}
-			}
-
-			if inode.Leases == nil {
-				inode.Leases = make(map[string]LeaseInfo)
-			}
-
-			// Use Nonce as the unique key for this handle's lease
-			nonce := req.Nonce
-			if nonce == "" {
-				nonce = "legacy-" + req.SessionID
-			}
-			inode.Leases[nonce] = info
-
-			if err := fsm.saveInodeWithPages(tx, inode); err != nil {
-				return err
-			}
-			encoded, _ := json.Marshal(info)
-			leaseKey := id + ":" + nonce
-			fsm.Put(tx, []byte("leases"), []byte(leaseKey), encoded)
-		} else {
-			// Filename lease (Map format)
-			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
-			if err != nil {
-				return err
-			}
-			leases := make(map[string]LeaseInfo)
-			if plain != nil {
-				if err := json.Unmarshal(plain, &leases); err != nil {
-					return fmt.Errorf("corrupted filename leases for %s: %w", id, err)
-				}
-			}
-			nonce := req.Nonce
-			if nonce == "" {
-				nonce = "legacy-" + req.SessionID
-			}
-			leases[nonce] = info
-			encoded, _ := json.Marshal(leases)
-			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
-		}
-	}
-
-	return nil
-}
-
-func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface{} {
-	var req LeaseRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	lb := tx.Bucket([]byte("leases"))
-	fb := tx.Bucket([]byte("filename_leases"))
-	now := time.Now().UnixNano()
-
-	for _, id := range req.InodeIDs {
-		isPath := strings.HasPrefix(id, "path:")
-		if isPath || !IsInodeID(id) {
-			// Filename Lease
-			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
-			if err != nil {
-				return err
-			}
-			if plain != nil {
-				var leases map[string]LeaseInfo
-				if err := json.Unmarshal(plain, &leases); err != nil {
-					return err
-				}
-				nonce := req.Nonce
-				if nonce == "" {
-					// Robustness: find any lease belonging to this session matching requested type
-					for n, l := range leases {
-						if l.SessionID == req.SessionID && l.Type == req.Type {
-							nonce = n
-							break
-						}
-					}
-					if nonce == "" {
-						// Last resort: any from this session
-						for n, l := range leases {
-							if l.SessionID == req.SessionID {
-								nonce = n
-								break
-							}
-						}
-					}
-				}
-				if nonce != "" {
-					delete(leases, nonce)
-					if len(leases) == 0 {
-						fb.Delete([]byte(id))
-					} else {
-						encoded, _ := json.Marshal(leases)
-						fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
-					}
-				}
-			}
-			// Important: if it looks like a path but IS also a valid InodeID (unlikely but possible),
-			// we should ALSO try to remove it from the inode bucket if it was an Inode-level lease.
-			// But if it has "path:" prefix, it's definitely NOT an InodeID in the database.
-			if isPath {
-				continue
-			}
-		}
-
-		plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			continue
-		}
-		var inode Inode
-		if err := json.Unmarshal(plain, &inode); err != nil {
-			return err
-		}
-
-		nonce := req.Nonce
-		if nonce == "" {
-			// Robustness: if nonce is omitted, try to find any lease belonging to this session.
-			for n, l := range inode.Leases {
-				if l.SessionID == req.SessionID {
-					nonce = n
-					break
-				}
-			}
-			if nonce == "" {
-				nonce = "legacy-" + req.SessionID
-			}
-		}
-
-		if _, ok := inode.Leases[nonce]; ok {
-			delete(inode.Leases, nonce)
-			lb.Delete([]byte(id + ":" + nonce))
-
-			// Check if we should finalize deletion
-			if inode.Unlinked {
-				active := false
-				for _, l := range inode.Leases {
-					if l.Expiry > now {
-						active = true
-						break
-					}
-				}
-				if !active {
-					if err := fsm.finalizeDeleteInode(tx, &inode); err != nil {
-						return err
-					}
-					continue // Inode deleted
-				}
-			}
-
-			if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
-}
-
-func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
-	var nodes []Node
+func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
+	var entries []GroupListEntry
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil {
-				nodes = append(nodes, n)
-			} else {
+		mb := tx.Bucket([]byte("user_memberships"))
+		ob := tx.Bucket([]byte("owner_groups"))
+		groupsFound := make(map[string]GroupRole)
+
+		// Helper to set role with priority: Owner > Manager > Member
+		setRole := func(gid string, role GroupRole) {
+			existing, ok := groupsFound[gid]
+			if !ok {
+				groupsFound[gid] = role
+				return
 			}
-			return nil
-		})
+			if role == RoleOwner {
+				groupsFound[gid] = RoleOwner
+			} else if role == RoleManager && existing == RoleMember {
+				groupsFound[gid] = RoleManager
+			}
+		}
+
+		// 1. Direct memberships
+		if sub := mb.Bucket([]byte(userID)); sub != nil {
+			sub.ForEach(func(k, v []byte) error {
+				setRole(string(k), RoleMember)
+				return nil
+			})
+		}
+
+		// 2. Direct ownerships
+		if sub := ob.Bucket([]byte(userID)); sub != nil {
+			sub.ForEach(func(k, v []byte) error {
+				setRole(string(k), RoleOwner)
+				return nil
+			})
+		}
+
+		// 3. Recursive Manager discovery
+		queue := make([]string, 0, len(groupsFound))
+		for gid := range groupsFound {
+			queue = append(queue, gid)
+		}
+		visited := make(map[string]bool)
+		for len(queue) > 0 {
+			parentID := queue[0]
+			queue = queue[1:]
+			if visited[parentID] {
+				continue
+			}
+			visited[parentID] = true
+
+			if sub := ob.Bucket([]byte(parentID)); sub != nil {
+				sub.ForEach(func(k, v []byte) error {
+					childID := string(k)
+					setRole(childID, RoleManager)
+					queue = append(queue, childID)
+					return nil
+				})
+			}
+		}
+
+		for gid, role := range groupsFound {
+			plain, err := fsm.Get(tx, []byte("groups"), []byte(gid))
+			if err == nil && plain != nil {
+				var g Group
+				json.Unmarshal(plain, &g)
+				entries = append(entries, GroupListEntry{
+					ID: g.ID, OwnerID: g.OwnerID, Role: role, EncKey: g.EncKey,
+					Lockbox: g.Lockbox, IsSystem: g.IsSystem, Usage: g.Usage, Quota: g.Quota,
+					ClientBlob: g.ClientBlob,
+				})
+			}
+		}
+		return nil
 	})
-	return nodes, err
-}
-
-func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID string) interface{} {
-	var req AdminChownRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
-	if err != nil {
-		return err
-	}
-	if plain == nil {
-		return ErrNotFound
-	}
-	var inode Inode
-	if err := json.Unmarshal(plain, &inode); err != nil {
-		return err
-	}
-
-	ownerChanged := req.OwnerID != nil && *req.OwnerID != inode.OwnerID
-	groupChanged := req.GroupID != nil && *req.GroupID != inode.GroupID
-
-	if ownerChanged || groupChanged {
-		newOwnerID := inode.OwnerID
-		if req.OwnerID != nil {
-			newOwnerID = *req.OwnerID
-		}
-		newGroupID := inode.GroupID
-		if req.GroupID != nil {
-			newGroupID = *req.GroupID
-		}
-
-		// 1. Decrement old owner/group FIRST to free up quota before checking new.
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size)); err != nil {
-			return err
-		}
-
-		// 2. Check Quota for new owner/group
-		if err := fsm.checkQuota(tx, newOwnerID, newGroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-
-		// 3. Update Inode
-		inode.OwnerID = newOwnerID
-		inode.GroupID = newGroupID
-
-		// 4. Increment new owner/group
-		if err := fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-	}
-
-	inode.CTime = time.Now().UnixNano()
-	inode.Version++
-
-	return fsm.saveInodeWithPages(tx, &inode)
-}
-
-func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, sessionID string) interface{} {
-	var req AdminChmodRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
-	if err != nil {
-		return err
-	}
-	if plain == nil {
-		return ErrNotFound
-	}
-	var inode Inode
-	if err := json.Unmarshal(plain, &inode); err != nil {
-		return err
-	}
-
-	inode.Mode = SanitizeMode(req.Mode, inode.Type)
-	inode.CTime = time.Now().UnixNano()
-	inode.Version++
-
-	return fsm.saveInodeWithPages(tx, &inode)
-}
-
-func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{} {
-	var snap MetricSnapshot
-	if err := json.Unmarshal(data, &snap); err != nil {
-		return err
-	}
-
-	return fsm.Put(tx, []byte("metrics"), int64ToBytes(snap.Timestamp), data)
-}
-
-func (fsm *MetadataFSM) executeRotateFSMKey(tx *bolt.Tx, data []byte) interface{} {
-	var req RotateFSMKeyRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	// We'll update the KeyRing in memory only AFTER the transaction commits.
-	// For now, store the entire updated keyring in the system bucket to ensure
-	// it's part of the Raft-applied state and is included in future snapshots.
-
-	// Temporarily add to a copy to marshal the full ring
-	// Note: keyRing.Marshal() is thread-safe but we are in a write lock context anyway.
-	krCopy, _ := crypto.UnmarshalKeyRing(fsm.keyRing.Marshal())
-	krCopy.AddKey(req.Gen, req.NewKey)
-
-	krData := krCopy.Marshal()
-	if err := fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData); err != nil {
-		return err
-	}
-
-	return nil
-}
-
-func (fsm *MetadataFSM) executeReencryptValue(tx *bolt.Tx, data []byte) interface{} {
-	var req ReencryptRequest
-	if err := json.Unmarshal(data, &req); err != nil {
-		return err
-	}
-
-	b := tx.Bucket(req.Bucket)
-	if b == nil {
-		return nil
-	}
-	v := b.Get(req.Key)
-	if v == nil {
-		return nil
-	}
-
-	if len(v) < 4 {
-		return nil
-	}
-
-	_, activeGen := fsm.keyRing.Current()
-	if binary.BigEndian.Uint32(v[:4]) == activeGen {
-		return nil // Already updated
-	}
-
-	// Fetch (decrypts automatically) and Put (encrypts with active key)
-	plain, err := fsm.Get(tx, req.Bucket, req.Key)
-	if err != nil {
-		return err
-	}
-	return fsm.Put(tx, req.Bucket, req.Key, plain)
-}
-
-func int64ToBytes(v int64) []byte {
-	b := make([]byte, 8)
-	binary.BigEndian.PutUint64(b, uint64(v))
-	return b
+	return entries, err
 }
 
 func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
@@ -2430,92 +1697,40 @@ func (fsm *MetadataFSM) GetLatestMetrics() (*MetricSnapshot, error) {
 		}
 		return json.Unmarshal(plain, &snap)
 	})
-	if err != nil {
-		return nil, err
-	}
-	return &snap, nil
+	return &snap, err
 }
 
-func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
-	var entries []GroupListEntry
+func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, error) {
+	var groups []Group
+	var nextCursor string
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		mb := tx.Bucket([]byte("user_memberships"))
-		ob := tx.Bucket([]byte("owner_groups"))
-
-		groupsFound := make(map[string]GroupRole)
-
-		// 1. Direct Memberships
-		if sub := mb.Bucket([]byte(userID)); sub != nil {
-			c := sub.Cursor()
-			for k, _ := c.First(); k != nil; k, _ = c.Next() {
-				groupsFound[string(k)] = RoleMember
+		b := tx.Bucket([]byte("groups"))
+		c := b.Cursor()
+		var k, v []byte
+		if cursor == "" {
+			k, v = c.First()
+		} else {
+			k, v = c.Seek([]byte(cursor))
+			if k != nil && string(k) == cursor {
+				k, v = c.Next()
 			}
 		}
-
-		// 2. Direct Ownership
-		if sub := ob.Bucket([]byte(userID)); sub != nil {
-			c := sub.Cursor()
-			for k, _ := c.First(); k != nil; k, _ = c.Next() {
-				groupsFound[string(k)] = RoleOwner
-			}
-		}
-
-		// 3. Delegated Management (Manager role)
-		// Find all groups the user is a member/owner of, then find groups owned by those groups.
-		// Note: we take a snapshot of keys to avoid concurrent map iteration/mutation issues
-		var currentGroups []string
-		for gid := range groupsFound {
-			currentGroups = append(currentGroups, gid)
-		}
-
-		for _, gid := range currentGroups {
-			if sub := ob.Bucket([]byte(gid)); sub != nil {
-				c := sub.Cursor()
-				for k, _ := c.First(); k != nil; k, _ = c.Next() {
-					targetGID := string(k)
-					// Prioritize roles: Owner > Manager > Member
-					if existing, ok := groupsFound[targetGID]; !ok || existing == RoleMember {
-						groupsFound[targetGID] = RoleManager
-					}
+		for count := 0; k != nil && (limit <= 0 || count < limit); k, v = c.Next() {
+			plain, err := fsm.DecryptValue([]byte("groups"), v)
+			if err == nil {
+				var g Group
+				if err := json.Unmarshal(plain, &g); err == nil {
+					groups = append(groups, g)
 				}
 			}
+			count++
 		}
-
-		// 4. Resolve metadata
-		for gid, role := range groupsFound {
-			plain, err := fsm.Get(tx, []byte("groups"), []byte(gid))
-			if err != nil || plain == nil {
-				continue
-			}
-			var g Group
-			if err := json.Unmarshal(plain, &g); err == nil {
-				// Optimization: Filter lockbox to only relevant entries
-				filteredLockbox := make(crypto.Lockbox)
-				if entry, ok := g.Lockbox[userID]; ok {
-					filteredLockbox[userID] = entry
-				}
-				if g.OwnerID != "" && g.OwnerID != userID {
-					if entry, ok := g.Lockbox[g.OwnerID]; ok {
-						filteredLockbox[g.OwnerID] = entry
-					}
-				}
-
-				entries = append(entries, GroupListEntry{
-					ID:         g.ID,
-					OwnerID:    g.OwnerID,
-					Role:       role,
-					EncKey:     g.EncKey,
-					Lockbox:    filteredLockbox,
-					IsSystem:   g.IsSystem,
-					ClientBlob: g.ClientBlob,
-					Usage:      g.Usage,
-					Quota:      g.Quota,
-				})
-			}
+		if k != nil {
+			nextCursor = string(k)
 		}
 		return nil
 	})
-	return entries, err
+	return groups, nextCursor, err
 }
 
 func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
@@ -2523,6 +1738,7 @@ func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
 	now := time.Now().UnixNano()
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		return fsm.ForEach(tx, []byte("leases"), func(k, v []byte) error {
+			log.Printf("DEBUG FSM: GetLeases found key %s", string(k))
 			var info LeaseInfo
 			if err := json.Unmarshal(v, &info); err == nil {
 				if info.Expiry > now {
@@ -2535,41 +1751,191 @@ func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
 	return leases, err
 }
 
-// GetGroups returns a paginated list of groups. Sorting is stable based on lexicographical Group IDs.
-func (fsm *MetadataFSM) GetGroups(cursor string, limit int) ([]Group, string, error) {
-	var groups []Group
-	var nextCursor string
+func (fsm *MetadataFSM) GetWorldIdentity() (*WorldIdentity, error) {
+	var world WorldIdentity
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("groups"))
-		if b == nil {
-			return nil
+		plain, err := fsm.Get(tx, []byte("system"), []byte("world_identity"))
+		if err != nil {
+			return err
 		}
-		c := b.Cursor()
-		var k, v []byte
-		if cursor == "" {
-			k, v = c.First()
-		} else {
-			k, v = c.Seek([]byte(cursor))
-			if k != nil && string(k) == cursor {
-				k, v = c.Next() // Start AFTER the cursor
-			}
+		if plain == nil {
+			return ErrNotFound
 		}
+		return json.Unmarshal(plain, &world)
+	})
+	return &world, err
+}
 
-		for count := 0; k != nil && (limit <= 0 || count < limit); k, v = c.Next() {
-			plain, err := fsm.DecryptValue([]byte("groups"), v)
-			if err != nil {
-				return err
+func (fsm *MetadataFSM) ValidateNode(address string) error {
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				if n.Address == address || n.ClusterAddress == address || strings.HasSuffix(n.Address, "/"+address) || strings.HasSuffix(n.ClusterAddress, "/"+address) {
+					return ErrStopIteration
+				}
 			}
-			var g Group
-			if err := json.Unmarshal(plain, &g); err == nil {
-				groups = append(groups, g)
-			}
-			count++
+			return nil
+		})
+	})
+	if err == ErrStopIteration {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("node address %s not found", address)
+}
+
+func (fsm *MetadataFSM) GetNode(id string) (*Node, error) {
+	var node Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		plain, err := fsm.Get(tx, []byte("nodes"), []byte(id))
+		if err != nil {
+			return err
 		}
-		if k != nil {
-			nextCursor = string(k)
+		if plain == nil {
+			return ErrNotFound
+		}
+		return json.Unmarshal(plain, &node)
+	})
+	return &node, err
+}
+
+func (fsm *MetadataFSM) GetNodeByRaftAddress(raftAddr string) (*Node, error) {
+	var node Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("nodes"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			plain, err := fsm.DecryptValue([]byte("nodes"), v)
+			if err != nil {
+				continue
+			}
+			var n Node
+			if err := json.Unmarshal(plain, &n); err == nil {
+				if n.RaftAddress == raftAddr {
+					node = n
+					return nil
+				}
+			}
+		}
+		return ErrNotFound
+	})
+	return &node, err
+}
+
+func (fsm *MetadataFSM) FSMKey() []byte {
+	fsm.mu.RLock()
+	kr := fsm.keyRing
+	fsm.mu.RUnlock()
+	k, _ := kr.Current()
+	return k
+}
+
+func (fsm *MetadataFSM) KeyRing() *crypto.KeyRing {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	return fsm.keyRing
+}
+
+const ChunkPageSize = 1000
+
+func (fsm *MetadataFSM) GetNodes() ([]Node, error) {
+	var nodes []Node
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		return fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				nodes = append(nodes, n)
+			}
+			return nil
+		})
+	})
+	return nodes, err
+}
+
+func (fsm *MetadataFSM) InspectBucket(bucketName string, fn func(k, v []byte) error) error {
+	return fsm.db.View(func(tx *bolt.Tx) error {
+		return fsm.ForEach(tx, []byte(bucketName), fn)
+	})
+}
+
+func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
+	if fsm.OnSnapshot != nil {
+		fsm.OnSnapshot()
+	}
+	return &MetadataSnapshot{db: fsm.db, keyRing: fsm.keyRing}, nil
+}
+
+func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
+	defer rc.Close()
+	lBuf := make([]byte, 4)
+	if _, err := io.ReadFull(rc, lBuf); err != nil {
+		return err
+	}
+	l := binary.BigEndian.Uint32(lBuf)
+	krData := make([]byte, l)
+	if _, err := io.ReadFull(rc, krData); err != nil {
+		return err
+	}
+	kr, _ := crypto.UnmarshalKeyRing(krData)
+	fsm.mu.Lock()
+	fsm.keyRing = kr
+	fsm.mu.Unlock()
+	fsm.db.Close()
+	tmpPath := fsm.path + ".restore"
+	f, _ := os.Create(tmpPath)
+	io.Copy(f, rc)
+	f.Close()
+	os.Rename(tmpPath, fsm.path)
+	return fsm.reopen()
+}
+
+func (fsm *MetadataFSM) reopen() error {
+	db, err := bolt.Open(fsm.path, 0600, nil)
+	if err != nil {
+		return err
+	}
+	fsm.mu.Lock()
+	fsm.db = db
+	fsm.mu.Unlock()
+	return nil
+}
+
+func (fsm *MetadataFSM) DumpInodes(tx *bolt.Tx) {
+	b := tx.Bucket([]byte("inodes"))
+	if b == nil {
+		return
+	}
+	log.Printf("--- FSM INODE DUMP [%s] ---", fsm.nodeID)
+	b.ForEach(func(k, v []byte) error {
+		var inode Inode
+		plain, err := fsm.DecryptValue([]byte("inodes"), v)
+		if err == nil {
+			if err := json.Unmarshal(plain, &inode); err == nil {
+				log.Printf("  Inode %s: Version=%d Children=%d Links=%d NLink=%d Unlinked=%v", inode.ID, inode.Version, len(inode.Children), len(inode.Links), inode.NLink, inode.Unlinked)
+			}
 		}
 		return nil
 	})
-	return groups, nextCursor, err
+	log.Printf("--- END DUMP [%s] ---", fsm.nodeID)
+}
+
+func generateID32() uint32 {
+	b := make([]byte, 4)
+	rand.Read(b)
+	return binary.BigEndian.Uint32(b)
+}
+
+func uint32ToBytes(v uint32) []byte {
+	b := make([]byte, 4)
+	binary.BigEndian.PutUint32(b, v)
+	return b
+}
+
+func int64ToBytes(v int64) []byte {
+	b := make([]byte, 8)
+	binary.BigEndian.PutUint64(b, uint64(v))
+	return b
 }

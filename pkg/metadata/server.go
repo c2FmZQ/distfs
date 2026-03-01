@@ -364,7 +364,7 @@ func (s *Server) applyBatch(req batchRequest) {
 	cmd := LogCommand{
 		Type:   CmdBatch,
 		Data:   data,
-		Atomic: false, // Server-aggregated batches are NOT atomic
+		Atomic: true, // Aggregated batches are atomic to preserve sub-batch integrity
 	}
 	f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -375,9 +375,17 @@ func (s *Server) applyBatch(req batchRequest) {
 	}
 
 	// 3. Distribute results
-	results, ok := f.Response().([]interface{})
+	resp := f.Response()
+	if err, ok := resp.(error); ok {
+		for _, ch := range req.resps {
+			ch <- err
+		}
+		return
+	}
+
+	results, ok := resp.([]interface{})
 	if !ok || len(results) != len(req.resps) {
-		log.Printf("Batch result mismatch: got %d results for %d requests", len(results), len(req.resps))
+		log.Printf("Batch result mismatch: got %T results for %d requests", resp, len(req.resps))
 		err := fmt.Errorf("internal batch error")
 		for _, ch := range req.resps {
 			ch <- err
@@ -620,6 +628,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		ctx := context.WithValue(r.Context(), userContextKey, user)
 		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
+			log.Printf("DEBUG AUTH: User %s provided Admin-Bypass header", user.ID)
 			ctx = context.WithValue(ctx, adminBypassContextKey, true)
 		}
 		r = r.WithContext(ctx)
@@ -717,7 +726,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, ErrCodeForbidden, "E2EE mandatory for admin operations", http.StatusForbidden)
 			return
 		}
-		if !s.fsm.IsAdmin(user.ID) {
+		isAdmin := s.fsm.IsAdmin(user.ID)
+		bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
+		log.Printf("DEBUG ADMIN ROUTE [%s]: user=%q isAdmin=%v bypass=%v", s.nodeID, user.ID, isAdmin, bypass)
+		if !isAdmin {
 			s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 			return
 		}
@@ -1251,6 +1263,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	log.Printf("DEBUG: handleBatch user=%s session=%s", user.ID, r.Header.Get("Session-Token"))
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
 	if err != nil {
@@ -1361,7 +1374,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
-		if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) {
+		if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) || errors.Is(firstErr, ErrLeaseRequired) || errors.Is(firstErr, ErrStructuralInconsistency) {
 			status = http.StatusConflict
 		} else if errors.Is(firstErr, ErrNotFound) {
 			status = http.StatusNotFound

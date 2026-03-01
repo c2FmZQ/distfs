@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"hash/fnv"
 	"io"
 	"log"
@@ -30,7 +31,16 @@ var _ fs.FSStatfser = (*FS)(nil)
 
 // NewFS creates a new FUSE file system.
 func NewFS(c *client.Client) *FS {
-	return &FS{client: c}
+	fsys := &FS{client: c}
+	// Configure lease expiration callback to notify VFS
+	c = c.WithLeaseExpiredCallback(func(id string, err error) {
+		log.Printf("DEBUG FUSE: Lease expired for %s: %v", id, err)
+		// We don't have easy access to the fuse.Server or mountpoint here to call Invalidate,
+		// but distfs-fuse is mostly stateless anyway.
+		// The main benefit is that the client will refetch on next access.
+	})
+	fsys.client = c
+	return fsys
 }
 
 func (f *FS) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
@@ -169,9 +179,31 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 	// Freshness check: only refetch if older than 100ms
 	forceRefresh := d.lastUpdate.IsZero()
-	if forceRefresh || time.Since(d.lastUpdate) > 100*time.Millisecond {
+	since := time.Since(d.lastUpdate)
+	if forceRefresh || since > 100*time.Millisecond {
 		id := d.inode.ID
-		if updated, err := d.fs.client.GetInode(ctx, id); err == nil {
+		d.mu.Unlock() // Release lock for network call
+
+		// Retry refresh a few times if it's a forced refresh (just after mutation)
+		maxAttempts := 1
+		if forceRefresh {
+			maxAttempts = 3
+		}
+
+		var updated *metadata.Inode
+		var err error
+		for attempt := 0; attempt < maxAttempts; attempt++ {
+			if attempt > 0 {
+				time.Sleep(50 * time.Millisecond)
+			}
+			updated, err = d.fs.client.GetInode(ctx, id)
+			if err == nil {
+				break
+			}
+		}
+
+		d.mu.Lock() // Re-acquire
+		if err == nil {
 			d.inode = updated
 			d.lastUpdate = time.Now()
 		} else if forceRefresh {
@@ -224,7 +256,11 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	}
 
 	// Refetch inode to see new children
-	if updated, err := d.fs.client.GetInode(ctx, d.inode.ID); err == nil {
+	id := d.inode.ID
+	d.mu.Unlock()
+	updated, err := d.fs.client.GetInode(ctx, id)
+	d.mu.Lock()
+	if err == nil {
 		d.inode = updated
 	}
 	var ids []string
@@ -279,6 +315,15 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 	inode, key, err := d.fs.client.AddEntry(ctx, id, key, req.Name, metadata.FileType, nil, 0, "", uint32(req.Mode), groupID, req.Uid, req.Gid)
 	if err != nil {
+		if errors.Is(err, metadata.ErrExists) && inode != nil {
+			// Created concurrently, open existing
+			f := &File{fs: d.fs, inode: inode, key: key}
+			h, openErr := f.Open(ctx, nil, nil)
+			if openErr != nil {
+				return nil, nil, openErr
+			}
+			return f, h, nil
+		}
 		return nil, nil, mapError(err)
 	}
 	d.mu.Lock()
@@ -395,6 +440,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 
 	err := d.fs.client.RemoveEntryRaw(ctx, id, key, req.Name)
 	if err != nil {
+		log.Printf("DEBUG FUSE: Remove(%s) in dir %s failed: %v", req.Name, id, err)
 		return mapError(err)
 	}
 	d.mu.Lock()
@@ -450,7 +496,13 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 	key := d.key
 	d.mu.Unlock()
 
-	return setAttr(ctx, d.fs.client, inode, key, req, &resp.Attr)
+	updated, err := setAttr(ctx, d.fs.client, inode, key, req, &resp.Attr)
+	if err == nil {
+		d.mu.Lock()
+		d.inode = updated
+		d.mu.Unlock()
+	}
+	return err
 }
 
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
@@ -483,7 +535,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	// Update target node's metadata to reflect new nlink
 	if updated, err := d.fs.client.GetInode(ctx, oldFile.inode.ID); err == nil {
 		oldFile.mu.Lock()
-		*oldFile.inode = *updated
+		oldFile.inode = updated
 		oldFile.mu.Unlock()
 	}
 	return old, nil
@@ -520,7 +572,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 
 	// Refetch to get current NLink/Size
 	if updated, err := f.fs.client.GetInode(ctx, f.inode.ID); err == nil {
-		*f.inode = *updated
+		f.inode = updated
 	}
 
 	a.Inode = inodeToUint64(f.inode.ID)
@@ -546,7 +598,19 @@ func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	return setAttr(ctx, f.fs.client, f.inode, f.key, req, &resp.Attr)
+	log.Printf("DEBUG FUSE: Setattr(id=%s valid=%v size=%v)", f.inode.ID, req.Valid, req.Size)
+	f.mu.Lock()
+	inode := f.inode
+	key := f.key
+	f.mu.Unlock()
+
+	updated, err := setAttr(ctx, f.fs.client, inode, key, req, &resp.Attr)
+	if err == nil {
+		f.mu.Lock()
+		f.inode = updated
+		f.mu.Unlock()
+	}
+	return err
 }
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
@@ -699,11 +763,20 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 
 	if h.pages == nil {
 		h.pages = make(map[int64][]byte)
+		h.file.mu.Lock()
 		h.size = h.file.inode.Size
+		h.file.mu.Unlock()
 	}
 	if h.stagingManifest == nil {
 		h.stagingManifest = make(map[int64]metadata.ChunkEntry)
 	}
+
+	// Ensure we have the latest size (may have been truncated via Setattr on the File)
+	h.file.mu.Lock()
+	if h.file.inode.Size < h.size {
+		h.size = h.file.inode.Size
+	}
+	h.file.mu.Unlock()
 
 	const chunkSize = 1024 * 1024
 
@@ -805,13 +878,18 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		indices = append(indices, idx)
 	}
 
+	h.file.mu.Lock()
+	inodeID := h.file.inode.ID
+	fileKey := h.file.key
+	h.file.mu.Unlock()
+
 	bgCtx := context.Background()
 	for _, idx := range indices {
 		page, ok := h.pages[idx]
 		if !ok {
 			continue
 		}
-		entry, err := h.file.fs.client.UploadChunkData(bgCtx, h.file.inode.ID, h.file.key, uint64(idx), page)
+		entry, err := h.file.fs.client.UploadChunkData(bgCtx, inodeID, fileKey, uint64(idx), page)
 		if err != nil {
 			log.Printf("FUSE Flush upload failed (idx=%d): %v", idx, err)
 			return mapError(err)
@@ -828,38 +906,45 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 
 	// 2. Commit Manifest if there are changes
 	if len(h.stagingManifest) > 0 {
-		// Start with existing manifest
-		manifest := make([]metadata.ChunkEntry, len(h.file.inode.ChunkManifest))
-		copy(manifest, h.file.inode.ChunkManifest)
-
-		// Determine new length and collect what we are committing
-		committedIndices := make([]int64, 0, len(h.stagingManifest))
-		maxIdx := int64(len(manifest)) - 1
-		for idx := range h.stagingManifest {
-			committedIndices = append(committedIndices, idx)
-			if idx > maxIdx {
-				maxIdx = idx
-			}
-		}
-
-		// Grow manifest if needed
-		if maxIdx >= int64(len(manifest)) {
-			newManifest := make([]metadata.ChunkEntry, maxIdx+1)
-			copy(newManifest, manifest)
-			manifest = newManifest
-		}
-
-		// Apply updates from staging
-		for idx, entry := range h.stagingManifest {
-			manifest[idx] = entry
-		}
-
-		// Capture size for commit
 		commitSize := h.size
+		staging := h.stagingManifest
+		h.stagingManifest = make(map[int64]metadata.ChunkEntry) // Clear staging early, we'll restore on failure
 
-		updated, err := h.file.fs.client.CommitInodeManifest(bgCtx, h.file.inode.ID, manifest, commitSize)
+		updated, err := h.file.fs.client.UpdateInode(bgCtx, inodeID, func(i *metadata.Inode) error {
+			// Determine new length
+			maxIdx := int64(len(i.ChunkManifest)) - 1
+			for idx := range staging {
+				if idx > maxIdx {
+					maxIdx = idx
+				}
+			}
+
+			// Grow manifest if needed
+			if maxIdx >= int64(len(i.ChunkManifest)) {
+				newManifest := make([]metadata.ChunkEntry, maxIdx+1)
+				copy(newManifest, i.ChunkManifest)
+				i.ChunkManifest = newManifest
+			}
+
+			// Apply updates from staging
+			for idx, entry := range staging {
+				i.ChunkManifest[idx] = entry
+			}
+
+			// Update size if it grew
+			if i.Size < commitSize {
+				i.Size = commitSize
+			}
+			i.SetInlineData(nil)
+			return nil
+		})
+
 		if err != nil {
 			log.Printf("FUSE Flush commit failed: %v", err)
+			// Restore staging on failure
+			for k, v := range staging {
+				h.stagingManifest[k] = v
+			}
 			return mapError(err)
 		}
 
@@ -868,10 +953,6 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		h.file.inode = updated
 		h.file.mu.Unlock()
 
-		// Clear only the indices we committed
-		for _, idx := range committedIndices {
-			delete(h.stagingManifest, idx)
-		}
 		// If size hasn't changed concurrently, sync it
 		if h.size == commitSize {
 			h.size = updated.Size
@@ -935,7 +1016,7 @@ func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) erro
 	return nil
 }
 
-func setAttr(ctx context.Context, c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse.SetattrRequest, respAttr *fuse.Attr) error {
+func setAttr(ctx context.Context, c *client.Client, inode *metadata.Inode, inodeKey []byte, req *fuse.SetattrRequest, respAttr *fuse.Attr) (*metadata.Inode, error) {
 	var mode *uint32
 	if req.Valid.Mode() {
 		m := uint32(req.Mode)
@@ -951,7 +1032,7 @@ func setAttr(ctx context.Context, c *client.Client, inode *metadata.Inode, inode
 		mtime = &mt
 	}
 
-	err := c.SetAttrByID(ctx, inode, inodeKey, metadata.SetAttrRequest{
+	updated, err := c.SetAttrByID(ctx, inode, inodeKey, metadata.SetAttrRequest{
 		InodeID: inode.ID,
 		Mode:    mode,
 		Size:    size,
@@ -959,18 +1040,18 @@ func setAttr(ctx context.Context, c *client.Client, inode *metadata.Inode, inode
 	})
 	if err != nil {
 		log.Printf("FUSE Setattr failed: %v", err)
-		return mapError(err)
+		return nil, mapError(err)
 	}
 
-	respAttr.Mode = os.FileMode(inode.Mode)
-	if inode.Type == metadata.SymlinkType {
+	respAttr.Mode = os.FileMode(updated.Mode)
+	if updated.Type == metadata.SymlinkType {
 		respAttr.Mode |= os.ModeSymlink
 	}
-	respAttr.Size = inode.Size
-	respAttr.Ctime = time.Unix(0, inode.CTime)
-	respAttr.Mtime = time.Unix(0, inode.GetMTime())
+	respAttr.Size = updated.Size
+	respAttr.Ctime = time.Unix(0, updated.CTime)
+	respAttr.Mtime = time.Unix(0, updated.GetMTime())
 
-	return nil
+	return updated, nil
 }
 
 func inodeToUint64(id string) uint64 {

@@ -166,6 +166,14 @@ Metadata operations in DistFS follow an **Optimistic Concurrency Control (OCC)**
 2.  **Client-Side Authority:** The client is responsible for fetching the latest state, applying mutations, and signing the new version.
 3.  **Lease Enforcement:** Linearizability is guaranteed via server-side lease enforcement (see Section 5 of [SERVER-API.md](SERVER-API.md)).
 4.  **Atomic Merge Pattern:** The client library provides mutation callbacks that automatically re-fetch and retry on version conflicts (HTTP 409).
+5.  **Structural Validation:** To maintain namespace integrity, the Metadata Server performs batch-wide structural checks:
+    *   **NLink Consistency:** The server validates that changes to a directory's `Children` map are matched by corresponding changes to the child Inode's `NLink` count within the same atomic batch.
+    *   **Link Bidirectionality:** For every addition to a directory's `Children` map, the child Inode MUST include a reciprocal entry in its `Links` map.
+    *   **Type Integrity:** 
+        *   `DirType` inodes cannot be hard-linked (maximum `NLink` of 1).
+        *   `FileType` and `SymlinkType` inodes MUST have an empty `Children` map.
+    *   **Root Protection:** Inodes with no parent links (Filesystem Roots) are protected from deletion and unlinking operations.
+    *   **Empty Directory Protection:** A request to delete a directory Inode (NLink=0) is rejected if the directory still contains children in its metadata.
 
 ### 4.6 Group Management & Authorization
 To prevent unauthorized hijacking and support collaborative administration, group mutations (updates to membership, keys, or names) are subject to strict cryptographic authorization.

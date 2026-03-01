@@ -199,7 +199,9 @@ func TestAdminOverrides(t *testing.T) {
 	uABytes, _ := json.Marshal(uA)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uABytes}.Marshal(), 5*time.Second)
 	// Promote user to admin (the command uses ID, which is already HMAC'd in our metadata.User if using standard flows, but here we provide it directly)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: metadata.MustMarshalJSON([]byte(uA.ID))}.Marshal(), 5*time.Second)
+	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: metadata.MustMarshalJSON(uA.ID)}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(1 * time.Second)
 
 	// 2. Create User B

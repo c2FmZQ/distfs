@@ -293,8 +293,8 @@ func TestClient_AdminMethods(t *testing.T) {
 	// 6. AdminSetUserQuota
 	err = c.WithAdmin(true).AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
 		UserID:    "u1",
-		MaxInodes: ptr(int64(100)),
-		MaxBytes:  ptr(int64(1000)),
+		MaxInodes: ptr(uint64(100)),
+		MaxBytes:  ptr(uint64(1000)),
 	})
 	if err != nil {
 		t.Fatalf("AdminSetUserQuota failed: %v", err)
@@ -303,8 +303,8 @@ func TestClient_AdminMethods(t *testing.T) {
 	// 7. AdminSetGroupQuota
 	err = c.WithAdmin(true).AdminSetGroupQuota(ctx, metadata.SetGroupQuotaRequest{
 		GroupID:   "g1",
-		MaxInodes: ptr(int64(50)),
-		MaxBytes:  ptr(int64(500)),
+		MaxInodes: ptr(uint64(50)),
+		MaxBytes:  ptr(uint64(500)),
 	})
 	if err != nil {
 		// Might fail if g1 not created yet

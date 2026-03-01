@@ -89,7 +89,7 @@ func TestSnapshotEncryption(t *testing.T) {
 	tmpDir1 := t.TempDir()
 	mk1, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st1 := storage.New(tmpDir1, mk1)
-	fsm1, _ := NewMetadataFSM(tmpDir1+"/fsm.bolt", []byte("test-cluster-secret"))
+	fsm1, _ := NewMetadataFSM("node1", tmpDir1+"/fsm.bolt", []byte("test-cluster-secret"))
 	defer fsm1.Close()
 
 	// Add data
@@ -107,7 +107,7 @@ func TestSnapshotEncryption(t *testing.T) {
 
 	// 3. Setup Target FSM (Clean state)
 	tmpDir2 := t.TempDir()
-	fsm2, _ := NewMetadataFSM(tmpDir2+"/fsm.bolt", []byte("test-cluster-secret")) // Has random key initially
+	fsm2, _ := NewMetadataFSM("node2", tmpDir2+"/fsm.bolt", []byte("test-cluster-secret")) // Has random key initially
 	defer fsm2.Close()
 
 	// 4. Restore Snapshot

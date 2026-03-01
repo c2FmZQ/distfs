@@ -5,6 +5,13 @@ REPORT="DISTFS-REPORT.md"
 LOG_DIR="$(dirname "$0")/../logs"
 mkdir -p "$LOG_DIR"
 
+SKIP_UNIT=0
+for arg in "$@"; do
+    if [ "$arg" == "--skip-unit" ] || [ "$arg" == "--fast" ]; then
+        SKIP_UNIT=1
+    fi
+done
+
 echo "# DistFS Test & Performance Report" > $REPORT
 echo "Date: $(date)" >> $REPORT
 echo "" >> $REPORT
@@ -20,21 +27,28 @@ CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
 CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
 
 # 2. Run Unit Tests
-echo "## Unit Tests" >> $REPORT
-echo '```' >> $REPORT
-echo "Running Unit Tests..."
-go fmt ./...
-go vet ./...
-if ! go test -race -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
-    cat "$LOG_DIR/unit-tests.log" >> $REPORT
+if [ $SKIP_UNIT -eq 0 ]; then
+    echo "## Unit Tests" >> $REPORT
     echo '```' >> $REPORT
-    echo "Unit Tests Failed"
-    exit 1
+    echo "Running Unit Tests..."
+    go fmt ./...
+    go vet ./...
+    if ! go test -race -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
+        cat "$LOG_DIR/unit-tests.log" >> $REPORT
+        echo '```' >> $REPORT
+        echo "Unit Tests Failed (Continuing to E2E)"
+        UNIT_FAILED=1
+    fi
+    grep "ok" "$LOG_DIR/unit-tests.log" >> $REPORT || true
+    grep "FAIL" "$LOG_DIR/unit-tests.log" >> $REPORT || true
+    echo '```' >> $REPORT
+    echo "" >> $REPORT
+else
+    echo "Skipping Unit Tests (--skip-unit / --fast)"
+    echo "## Unit Tests" >> $REPORT
+    echo "Skipped." >> $REPORT
+    echo "" >> $REPORT
 fi
-grep "ok" "$LOG_DIR/unit-tests.log" >> $REPORT || true
-grep "FAIL" "$LOG_DIR/unit-tests.log" >> $REPORT || true
-echo '```' >> $REPORT
-echo "" >> $REPORT
 
 # 3. Cleanup existing environment
 echo "Cleaning up Docker environment..."

@@ -66,7 +66,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 	}
 	dbPath := filepath.Join(baseDir, "fsm.bolt")
 	os.Remove(dbPath)
-	fsm, err := NewMetadataFSM(dbPath, clusterSecret)
+	fsm, err := NewMetadataFSM(nodeID, dbPath, clusterSecret)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fsm initialization: %w", err)
 	}

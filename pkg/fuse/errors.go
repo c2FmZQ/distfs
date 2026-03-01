@@ -4,7 +4,9 @@ package fuse
 import (
 	"context"
 	"errors"
+
 	"github.com/c2FmZQ/distfs/pkg/client"
+
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"strings"
 	"syscall"

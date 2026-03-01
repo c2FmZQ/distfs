@@ -594,8 +594,8 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 				}
 				userID = id
 			}
-			maxBytes, errBytes := strconv.ParseInt(bytesStr, 10, 64)
-			maxInodes, errInodes := strconv.ParseInt(inodesStr, 10, 64)
+			maxBytes, errBytes := strconv.ParseUint(bytesStr, 10, 64)
+			maxInodes, errInodes := strconv.ParseUint(inodesStr, 10, 64)
 			if errBytes != nil || errInodes != nil {
 				return errMsg(fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes))
 			}
@@ -608,8 +608,8 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 	case "group-quota":
 		groupID, bytesStr, inodesStr := m.inputs[0].Value(), m.inputs[1].Value(), m.inputs[2].Value()
 		return m, func() tea.Msg {
-			maxBytes, errBytes := strconv.ParseInt(bytesStr, 10, 64)
-			maxInodes, errInodes := strconv.ParseInt(inodesStr, 10, 64)
+			maxBytes, errBytes := strconv.ParseUint(bytesStr, 10, 64)
+			maxInodes, errInodes := strconv.ParseUint(inodesStr, 10, 64)
 			if errBytes != nil || errInodes != nil {
 				return errMsg(fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes))
 			}
@@ -873,8 +873,8 @@ func cmdAdminUserQuota(ctx context.Context, args []string) {
 		userID = id
 	}
 
-	maxBytes, _ := strconv.ParseInt(bytesStr, 10, 64)
-	maxInodes, _ := strconv.ParseInt(inodesStr, 10, 64)
+	maxBytes, _ := strconv.ParseUint(bytesStr, 10, 64)
+	maxInodes, _ := strconv.ParseUint(inodesStr, 10, 64)
 
 	req := metadata.SetUserQuotaRequest{
 		UserID:    userID,
@@ -895,8 +895,8 @@ func cmdAdminGroupQuota(ctx context.Context, args []string) {
 	groupID, bytesStr, inodesStr := args[0], args[1], args[2]
 	c := loadClient()
 
-	maxBytes, _ := strconv.ParseInt(bytesStr, 10, 64)
-	maxInodes, _ := strconv.ParseInt(inodesStr, 10, 64)
+	maxBytes, _ := strconv.ParseUint(bytesStr, 10, 64)
+	maxInodes, _ := strconv.ParseUint(inodesStr, 10, 64)
 
 	req := metadata.SetGroupQuotaRequest{
 		GroupID:   groupID,

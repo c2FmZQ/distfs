@@ -23,7 +23,8 @@ func TestSystemGroups(t *testing.T) {
 	uA := metadata.User{ID: adminID, SignKey: uASign.Public(), EncKey: uADK.EncapsulationKey().Bytes()}
 	uABytes, _ := json.Marshal(uA)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uABytes}.Marshal(), 5*time.Second)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte(adminID)}.Marshal(), 5*time.Second)
+	adminIDBytes, _ := json.Marshal(adminID)
+	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: adminIDBytes}.Marshal(), 5*time.Second)
 
 	userID := "alice"
 	uUSign, _ := crypto.GenerateIdentityKey()

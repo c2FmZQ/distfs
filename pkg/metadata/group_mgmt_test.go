@@ -251,8 +251,8 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 	}
 
 	// 2. Set Group Quota (1 Inode, 500 Bytes)
-	maxInodes := int64(1)
-	maxBytes := int64(500)
+	maxInodes := uint64(1)
+	maxBytes := uint64(500)
 	qReq := SetGroupQuotaRequest{
 		GroupID:   groupID,
 		MaxBytes:  &maxBytes,
@@ -320,8 +320,8 @@ func TestGroupQuotaFallback(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second)
 
 	// 2. Set Alice Quota to 1 Inode
-	maxInodes := int64(1)
-	uReq := SetUserQuotaRequest{UserID: userID, MaxInodes: &maxInodes}
+	maxInodesFallback := uint64(1)
+	uReq := SetUserQuotaRequest{UserID: userID, MaxInodes: &maxInodesFallback}
 	uReqBytes, _ := json.Marshal(uReq)
 	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: uReqBytes}.Marshal(), 5*time.Second)
 
@@ -379,14 +379,14 @@ func TestGroupQuotaBypassReproduction(t *testing.T) {
 	CreateUser(t, node, User{ID: userID, SignKey: sk.Public()})
 
 	// 1. Set User Byte Quota (500 Bytes)
-	maxBytes := int64(500)
+	maxBytes := uint64(500)
 	uReq := SetUserQuotaRequest{UserID: userID, MaxBytes: &maxBytes}
 	uReqBytes, _ := json.Marshal(uReq)
 	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: uReqBytes}.Marshal(), 5*time.Second)
 
 	// 2. Create Group G1 with Inode Quota (10) but NO Byte Quota (0)
 	groupID := "g1"
-	maxInodes := int64(10)
+	maxInodes := uint64(10)
 	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1}
 	g1Bytes, _ := json.Marshal(g1)
 	node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second)

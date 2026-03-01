@@ -27,7 +27,8 @@ func TestAdminRedaction(t *testing.T) {
 	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uABytes}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte(uA.ID)}.Marshal(), 5*time.Second).Error(); err != nil {
+	uAIDBytes, _ := json.Marshal(uA.ID)
+	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatal(err)
 	}
 

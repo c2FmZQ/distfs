@@ -802,9 +802,32 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Verify that joining nodes can successfully restore snapshots and bootstrap their KeyRings.
     *   **Action:** Remove all remaining plaintext `cluster_secret` logic from the FSM.
 
-### Phase 41 Testing Strategy:
-1.  **Byte-Perfect Hashing Tests:** Create test cases that manually construct manifest hashes using raw binary segments (Big-Endian) to verify cross-language compatibility.
-2.  **Unsealed Path Validation:** Verify that the server returns `403 Forbidden` if a mutation is attempted without L7 Sealing.
-3.  **Strict Endpoint Enforcement:** Verify that deleted standalone endpoints return `404 Not Found` and that no client-side logic still attempts to use them.
-4.  **Structured Error Assertion:** Update all existing error tests to verify the `DISTFS_*` code constants in the JSON response rather than searching for sub-strings in the error message.
-5.  **Lease Contention Integration:** Add a dedicated integration test where two distinct sessions attempt to update the same Inode simultaneously; verify that the FSM rejects the one without the Exclusive Lease with `DISTFS_LEASE_REQUIRED`.
+---
+
+## Phase 43: Metadata Structural Integrity & Atomic Mutations
+**Goal:** Enforce filesystem-level structural consistency in the Metadata Layer and implement truly atomic directory mutations.
+
+*   **Step 43.1: FSM Structural Validation Logic**
+    *   **Action:** Implement `validateStructuralConsistency` in `pkg/metadata/fsm.go`.
+    *   **Consistency Rules:**
+        1.  **NLink Delta:** `NLink` changes must match `Dir.Children` additions/removals in the batch.
+        2.  **Bidirectionality:** New directory entries must have reciprocal `Inode.Links` entries.
+        3.  **Type Constraints:** Directories must have `NLink <= 1` (no hard links). Non-directories must have `len(Children) == 0`.
+        4.  **Root Protection:** Prohibit `NLink=0` or `DeleteInode` for any Inode where `len(Links) == 0` (Roots).
+    *   **Enforcement:** Reject batches that would result in inconsistent link counts or orphaned entries.
+*   **Step 43.2: Non-Empty Directory Protection**
+    *   **Action:** Update `executeDeleteInode` to reject deletion if `len(inode.Children) > 0`.
+*   **Step 43.3: Client-Side Atomic AddEntry**
+    *   **Action:** Refactor `AddEntry` in `pkg/client/directory.go` to bundle `CmdCreateInode` (child) and `CmdUpdateInode` (parent) into a single atomic `LogCommand` batch.
+*   **Step 43.4: Client-Side Atomic RemoveEntry**
+    *   **Action:** Refactor `RemoveEntryRaw` to bundle parent update and child `NLink` decrement into one atomic batch.
+*   **Step 43.5: Client-Side Atomic Rename**
+    *   **Action:** Refactor `RenameRaw` to bundle all involved inode updates (source parent, target parent, moved child) into one atomic batch.
+*   **Step 43.6: Testing & Verification**
+    *   **Action:** Add FSM unit tests for structural inconsistency rejection.
+    *   **Action:** Rerun `TestAddEntryRegression` and `TestFUSE_POSIXCompliance` to verify metadata stability.
+
+### Phase 43 Testing Strategy:
+1.  **Inconsistent Batch Test:** Attempt to add a file to a directory without incrementing the file's `NLink` in the same batch; verify the server rejects the batch.
+2.  **Orphaned Entry Test:** Attempt to create an Inode without linking it in any parent; verify rejection (except for Root).
+3.  **Non-Empty Rmdir Test:** Verify `os.Remove` fails on a directory containing files.

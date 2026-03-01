@@ -470,7 +470,7 @@ func TestFSMRestore(t *testing.T) {
 	tmpDir := t.TempDir()
 
 	dbPath := filepath.Join(tmpDir, "fsm.bolt")
-	fsm, err := NewMetadataFSM(dbPath, []byte("test-cluster-secret"))
+	fsm, err := NewMetadataFSM("node1", dbPath, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestFSMRestore(t *testing.T) {
 
 	// New FSM
 	tmpDir2 := t.TempDir()
-	fsm2, err := NewMetadataFSM(filepath.Join(tmpDir2, "fsm2.bolt"), []byte("test-cluster-secret"))
+	fsm2, err := NewMetadataFSM("node2", filepath.Join(tmpDir2, "fsm2.bolt"), []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -528,7 +528,7 @@ func TestFSMRestore(t *testing.T) {
 func TestFSM_Errors(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	fsm, _ := NewMetadataFSM(filepath.Join(tmpDir, "fsm.bolt"), []byte("test-cluster-secret"))
+	fsm, _ := NewMetadataFSM("node1", filepath.Join(tmpDir, "fsm.bolt"), []byte("test-cluster-secret"))
 	defer fsm.Close()
 
 	// Invalid JSON
@@ -784,8 +784,8 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 1. Set Quota (1 Inode, 500 Bytes)
-	maxInodes := int64(1)
-	maxBytes := int64(500)
+	maxInodes := uint64(1)
+	maxBytes := uint64(500)
 	req := SetUserQuotaRequest{
 		UserID:    userID,
 		MaxBytes:  &maxBytes,
@@ -867,16 +867,20 @@ func TestAdminChownQuota(t *testing.T) {
 	CreateUser(t, node, User{ID: u2, SignKey: sk2.Public()})
 
 	// Set u2 Quota to 1 Inode
-	maxInodes := int64(1)
+	maxInodes := uint64(1)
 	req := SetUserQuotaRequest{UserID: u2, MaxInodes: &maxInodes}
 	reqBytes, _ := json.Marshal(req)
-	node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: reqBytes}.Marshal(), 5*time.Second)
+	if err := node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: reqBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to set user quota: %v", err)
+	}
 
 	// u1 creates a file
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Size: 100}
 	inode.SignInodeForTest(u1, sk1)
 	iBytes, _ := json.Marshal(inode)
-	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to create inode: %v", err)
+	}
 
 	// Admin chown 0000000000000000000000000000000f from u1 to u2
 	// u2 has 0 files, limit 1. Transfer should SUCCEED.
@@ -888,7 +892,9 @@ func TestAdminChownQuota(t *testing.T) {
 	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: u2, Size: 100}
 	inode2.SignInodeForTest(u2, sk2)
 	iBytes2, _ := json.Marshal(inode2)
-	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes2}.Marshal(), 5*time.Second)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes2}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to create inode2: %v", err)
+	}
 
 	// Now u2 is at limit (1/1).
 	// Transfer 0000000000000000000000000000000f from u1 to u2 should FAIL.
@@ -982,7 +988,10 @@ func TestSecurity_IDOR_User(t *testing.T) {
 
 	// 4. Admin requests User 2 (Should be FULL)
 	// Promote user1 to admin
-	node.Raft.Apply(LogCommand{Type: CmdPromoteAdmin, Data: []byte(u1ID)}.Marshal(), 5*time.Second)
+	u1IDBytes, _ := json.Marshal(u1ID)
+	if err := node.Raft.Apply(LogCommand{Type: CmdPromoteAdmin, Data: u1IDBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to promote user1: %v", err)
+	}
 
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/"+u2ID, nil)
 	req.Header.Set("Session-Token", token1)
@@ -1008,9 +1017,9 @@ func TestNodeRevocation(t *testing.T) {
 	nodeKey, _ := crypto.GenerateIdentityKey()
 	nodeID := "rogue-node"
 	n := Node{
-		ID:        nodeID,
-		PublicKey: nodeKey.Public(),
-		Status:    NodeStatusActive,
+		ID:      nodeID,
+		SignKey: nodeKey.Public(),
+		Status:  NodeStatusActive,
 	}
 	body, _ := json.Marshal(n)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/node", bytes.NewReader(body))
