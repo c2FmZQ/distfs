@@ -35,14 +35,10 @@ func createTestStorageLocal(t *testing.T, dir string) (*storage.Storage, storage
 	return st, mk
 }
 
+var nextTestUID uint32 = 1000
+
 func createUserLocal(t *testing.T, raftNode *metadata.RaftNode, user metadata.User) {
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Create user raft apply failed: %v", err)
-	}
+	metadata.CreateUser(t, raftNode, user)
 }
 
 func waitLeaderLocal(t *testing.T, r *raft.Raft) {

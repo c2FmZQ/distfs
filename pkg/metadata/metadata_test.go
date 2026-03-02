@@ -86,11 +86,7 @@ func TestMetadataCluster(t *testing.T) {
 		SignKey: userSignKey.Public(),
 		EncKey:  userDecKey.EncapsulationKey().Bytes(),
 	}
-	userBytes, _ := json.Marshal(user)
-	f := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: userBytes}.Marshal(), 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Raft Apply user failed: %v", err)
-	}
+	CreateUser(t, node, user)
 
 	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
@@ -183,18 +179,12 @@ func TestSecurity_AccessControl(t *testing.T) {
 	u1Dec, _ := crypto.GenerateEncryptionKey()
 	u1Sign, _ := crypto.GenerateIdentityKey()
 	u1 := User{ID: "u1", SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
-	u1Bytes, _ := json.Marshal(u1)
-	if err := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Failed to create u1: %v", err)
-	}
+	CreateUser(t, node, u1)
 
 	u2Dec, _ := crypto.GenerateEncryptionKey()
 	u2Sign, _ := crypto.GenerateIdentityKey()
 	u2 := User{ID: "u2", SignKey: u2Sign.Public(), EncKey: u2Dec.EncapsulationKey().Bytes()}
-	u2Bytes, _ := json.Marshal(u2)
-	if err := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u2Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Failed to create u2: %v", err)
-	}
+	CreateUser(t, node, u2)
 
 	// 2. User 1 creates a private inode (0600)
 	i1 := Inode{ID: "00000000000000000000000000000011", OwnerID: "u1", Mode: 0600}
@@ -300,16 +290,7 @@ func TestIdentityRegistry(t *testing.T) {
 		SignKey: userSignKey.Public(),
 		EncKey:  userDecKey.EncapsulationKey().Bytes(),
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	future := node.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Raft Apply failed: %v", err)
-	}
-	if err, ok := future.Response().(error); ok {
-		t.Fatalf("FSM Apply failed: %v", err)
-	}
+	CreateUser(t, node, user)
 
 	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
@@ -409,11 +390,7 @@ func TestKeySync(t *testing.T) {
 	u1Dec, _ := crypto.GenerateEncryptionKey()
 	u1Sign, _ := crypto.GenerateIdentityKey()
 	u1 := User{ID: userID, SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
-	u1Bytes, _ := json.Marshal(u1)
-	fUser := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second)
-	if err := fUser.Error(); err != nil {
-		t.Fatalf("Failed to apply user create: %v", err)
-	}
+	CreateUser(t, node, u1)
 
 	// Mint JWT
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
@@ -571,11 +548,7 @@ func TestChunkPagination(t *testing.T) {
 		SignKey: userSignKey.Public(),
 		EncKey:  userDecKey.EncapsulationKey().Bytes(),
 	}
-	userBytes, _ := json.Marshal(user)
-	f := node.Raft.Apply(LogCommand{Type: CmdCreateUser, Data: userBytes}.Marshal(), 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Raft Apply user failed: %v", err)
-	}
+	CreateUser(t, node, user)
 	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Create Inode with many chunks
@@ -679,16 +652,7 @@ func TestAccounting(t *testing.T) {
 	userID := "acc-user"
 	sk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: userID, SignKey: sk.Public()}
-	userBytes, _ := json.Marshal(user)
-	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	f := node.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Create user raft failed: %v", err)
-	}
-	if err, ok := f.Response().(error); ok {
-		t.Fatalf("Create user fsm failed: %v", err)
-	}
+	CreateUser(t, node, user)
 
 	// Helper to check usage
 	checkUsage := func(wantInodes, wantBytes int64) {
@@ -721,9 +685,9 @@ func TestAccounting(t *testing.T) {
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
-	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
-	cmdBytes, _ = json.Marshal(cmd)
-	f = node.Raft.Apply(cmdBytes, 5*time.Second)
+	cmd := LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmdBytes, _ := json.Marshal(cmd)
+	f := node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("Create inode raft failed: %v", err)
 	}
@@ -777,12 +741,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	userID := "quota-user"
 	sk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: userID, SignKey: sk.Public()}
-	userBytes, _ := json.Marshal(user)
-	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
-		t.Fatalf("Create user failed: %v", err)
-	}
+	CreateUser(t, node, user)
 
 	// 1. Set Quota (1 Inode, 500 Bytes)
 	maxInodes := uint64(1)
@@ -793,8 +752,8 @@ func TestQuotaEnforcement(t *testing.T) {
 		MaxInodes: &maxInodes,
 	}
 	reqBytes, _ := json.Marshal(req)
-	cmd = LogCommand{Type: CmdSetUserQuota, Data: reqBytes}
-	cmdBytes, _ = json.Marshal(cmd)
+	cmd := LogCommand{Type: CmdSetUserQuota, Data: reqBytes}
+	cmdBytes, _ := json.Marshal(cmd)
 	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Set quota failed: %v", err)
 	}

@@ -327,8 +327,7 @@ func TestClient_AdminMethods(t *testing.T) {
 	// 9. AdminPromote
 	usk2, _ := crypto.GenerateIdentityKey()
 	user2 := metadata.User{ID: u2, SignKey: usk2.Public()}
-	ub2, _ := json.Marshal(user2)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub2}.Marshal(), 5*time.Second)
+	metadata.CreateUser(t, node, user2)
 
 	err = c.WithAdmin(true).AdminPromote(ctx, u2)
 	if err != nil {
@@ -670,10 +669,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	usk2, _ := crypto.GenerateIdentityKey()
 	udk2, _ := crypto.GenerateEncryptionKey()
 	user2 := metadata.User{ID: u2, SignKey: usk2.Public(), EncKey: udk2.EncapsulationKey().Bytes()}
-	ub2, _ := json.Marshal(user2)
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub2}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Raft apply CreateUser failed: %v", err)
-	}
+	metadata.CreateUser(t, node, user2)
 	time.Sleep(100 * time.Millisecond) // Wait for FSM application
 
 	c2 := NewClient(ts.URL).WithIdentity(u2, udk2).WithSignKey(usk2)
@@ -748,10 +744,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	udk3, _ := crypto.GenerateEncryptionKey()
 	c3 := NewClient(ts.URL).WithIdentity("u3", udk3).WithSignKey(usk3)
 	user3 := metadata.User{ID: "u3", SignKey: usk3.Public(), EncKey: udk3.EncapsulationKey().Bytes()}
-	ub3, _ := json.Marshal(user3)
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub3}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Raft apply CreateUser u3 failed: %v", err)
-	}
+	metadata.CreateUser(t, node, user3)
 	time.Sleep(100 * time.Millisecond)
 
 	if err := c3.Login(ctx); err != nil {

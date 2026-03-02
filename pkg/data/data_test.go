@@ -49,11 +49,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		SignKey: u1Sign.Public(),
 		EncKey:  u1Dec.EncapsulationKey().Bytes(),
 	}
-	u1Bytes, _ := json.Marshal(u1)
-	f := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: u1Bytes}.Marshal(), 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("CreateUser apply failed: %v", err)
-	}
+	metadata.CreateUser(t, node, u1)
 
 	token1 := metadata.LoginSessionForTest(t, ts, "u1", u1Sign)
 
@@ -64,7 +60,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		Mode:    0644,
 	}
 	inodeBytes, _ := json.Marshal(inode)
-	f = node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: inodeBytes}.Marshal(), 5*time.Second)
+	f := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: inodeBytes}.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("CreateInode failed: %v", err)
 	}

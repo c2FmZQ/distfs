@@ -4007,12 +4007,14 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		// Ensure new owner has access
 		if attr.OwnerID != nil {
 			u, err := c.GetUser(ctx, *attr.OwnerID)
-			if err == nil {
-				pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey)
-				if err == nil {
-					i.Lockbox.AddRecipient(*attr.OwnerID, pk, key)
-				}
+			if err != nil {
+				return fmt.Errorf("failed to fetch new owner: %w", err)
 			}
+			pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey)
+			if err != nil {
+				return fmt.Errorf("failed to unmarshal new owner key: %w", err)
+			}
+			i.Lockbox.AddRecipient(*attr.OwnerID, pk, key)
 		}
 
 		worldRead := (i.Mode & 0004) != 0
@@ -4034,12 +4036,14 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 			_, groupInLockbox := i.Lockbox[i.GroupID]
 			if groupRW && !groupInLockbox {
 				group, err := c.GetGroup(ctx, i.GroupID)
-				if err == nil {
-					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-					if err == nil {
-						i.Lockbox.AddRecipient(i.GroupID, gpk, key)
-					}
+				if err != nil {
+					return fmt.Errorf("failed to fetch group: %w", err)
 				}
+				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				if err != nil {
+					return fmt.Errorf("failed to unmarshal group key: %w", err)
+				}
+				i.Lockbox.AddRecipient(i.GroupID, gpk, key)
 			} else if !groupRW && groupInLockbox {
 				delete(i.Lockbox, i.GroupID)
 			}
@@ -4976,12 +4980,14 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 			_, groupInLockbox := i.Lockbox[i.GroupID]
 			if groupRW && !groupInLockbox {
 				group, err := c.GetGroup(ctx, i.GroupID)
-				if err == nil {
-					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-					if err == nil {
-						i.Lockbox.AddRecipient(i.GroupID, gpk, key)
-					}
+				if err != nil {
+					return fmt.Errorf("failed to fetch group: %w", err)
 				}
+				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				if err != nil {
+					return fmt.Errorf("failed to unmarshal group key: %w", err)
+				}
+				i.Lockbox.AddRecipient(i.GroupID, gpk, key)
 			} else if !groupRW && groupInLockbox {
 				delete(i.Lockbox, i.GroupID)
 			}

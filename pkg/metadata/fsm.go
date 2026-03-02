@@ -876,8 +876,15 @@ func (fsm *MetadataFSM) executeRegisterNode(tx *bolt.Tx, data []byte) interface{
 func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} {
 	var user User
 	json.Unmarshal(data, &user)
+
 	if user.UID == 0 {
-		user.UID = generateID32()
+		return fmt.Errorf("UID must be provided and non-zero")
+	}
+
+	// Enforce UID uniqueness
+	existing, _ := fsm.Get(tx, []byte("uids"), uint32ToBytes(user.UID))
+	if existing != nil && string(existing) != user.ID {
+		return fmt.Errorf("UID %d already assigned", user.UID)
 	}
 
 	ub := tx.Bucket([]byte("users"))
@@ -931,6 +938,17 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 	if group.Version == 0 {
 		group.Version = 1
 	}
+
+	if group.GID == 0 {
+		return fmt.Errorf("GID must be provided and non-zero")
+	}
+
+	// Enforce GID uniqueness
+	existing, _ := fsm.Get(tx, []byte("gids"), uint32ToBytes(group.GID))
+	if existing != nil && string(existing) != group.ID {
+		return fmt.Errorf("GID %d already assigned", group.GID)
+	}
+
 	fsm.updateGroupIndices(tx, &group, nil)
 	encoded, _ := json.Marshal(group)
 	fsm.Put(tx, []byte("groups"), []byte(group.ID), encoded)
@@ -958,7 +976,10 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte, sessionID s
 func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group, existing *Group) error {
 	mb := tx.Bucket([]byte("user_memberships"))
 	ob := tx.Bucket([]byte("owner_groups"))
-	encOne, _ := fsm.EncryptValue([]byte("user_memberships"), []byte("1"))
+	encOne, err := fsm.EncryptValue([]byte("user_memberships"), []byte("1"))
+	if err != nil {
+		return err
+	}
 	if existing != nil {
 		for uid := range existing.Members {
 			if !group.Members[uid] {

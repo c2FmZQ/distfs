@@ -58,6 +58,9 @@ func (n NoopValidator) ValidateNode(address string) error {
 }
 
 func CreateUser(t *testing.T, raftNode *RaftNode, user User) {
+	for user.UID == 0 {
+		user.UID = generateID32()
+	}
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)

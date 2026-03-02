@@ -62,10 +62,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	usk, _ := crypto.GenerateIdentityKey()
 	udk, _ := crypto.GenerateEncryptionKey()
 	user := metadata.User{ID: userID, SignKey: usk.Public(), EncKey: udk.EncapsulationKey().Bytes()}
-	ub, _ := json.Marshal(user)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: ub}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Raft apply CreateUser failed: %v", err)
-	}
+	metadata.CreateUser(t, metaNode, user)
 
 	// Data Node Setup
 	dataDir := t.TempDir()

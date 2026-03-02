@@ -51,12 +51,8 @@ func TestRequestBatching(t *testing.T) {
 				SignKey: sk.Public(),
 				EncKey:  dk.EncapsulationKey().Bytes(),
 			}
-			body, _ := json.Marshal(user)
 
-			_, err := server.ApplyRaftCommandInternal(metadata.CmdCreateUser, body, "")
-			if err != nil {
-				errCh <- err
-			}
+			metadata.CreateUser(t, node, user)
 		}(i)
 	}
 

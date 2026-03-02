@@ -1469,8 +1469,32 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Generate unique UID
+	var uid uint32
+	err = s.fsm.db.View(func(tx *bolt.Tx) error {
+		for i := 0; i < 1000; i++ {
+			uid = generateID32()
+			if uid < 1000 {
+				continue
+			}
+			v, err := s.fsm.Get(tx, []byte("uids"), uint32ToBytes(uid))
+			if err != nil {
+				return err
+			}
+			if v == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("exhausted UID allocation attempts")
+	})
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to allocate UID", http.StatusInternalServerError)
+		return
+	}
+
 	user := User{
 		ID:      userID,
+		UID:     uid,
 		SignKey: req.SignKey,
 		EncKey:  req.EncKey,
 	}

@@ -16,12 +16,10 @@ package client
 
 import (
 	"bytes"
-	"encoding/json"
 	"io"
 	"io/fs"
 	"net/http/httptest"
 	"testing"
-	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
@@ -60,12 +58,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
 	}
-	userBytes, _ := json.Marshal(user)
-	cmd := metadata.LogCommand{Type: metadata.CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
-	if err := metaNode.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
-		t.Fatalf("Apply user failed: %v", err)
-	}
+	metadata.CreateUser(t, metaNode, user)
 
 	// Data Node
 	dataDir := t.TempDir()
