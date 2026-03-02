@@ -217,6 +217,14 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 }
 
 func (fsm *MetadataFSM) systemKey() []byte {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	if len(fsm.clusterSecret) == 0 {
+		// Return a distinct marker or panic? 
+		// If we use an empty key, it corrupts. If we panic, it crashes.
+		// Crashing is better than silent corruption during Raft apply.
+		panic("FSM: clusterSecret is uninitialized; cannot generate systemKey")
+	}
 	mac := hmac.New(sha256.New, fsm.clusterSecret)
 	mac.Write([]byte("FSM_SYSTEM_V1"))
 	return mac.Sum(nil)
@@ -496,6 +504,13 @@ func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs m
 			}
 		}
 	}
+
+	for id, delta := range expectedDeltas {
+		if delta != 0 && !modifiedIDs[id] {
+			return fmt.Errorf("%w: inode %s expected nlink delta %d but was not modified in batch", ErrStructuralInconsistency, id, delta)
+		}
+	}
+
 	for id := range modifiedIDs {
 		pre := preInodes[id]
 		plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))

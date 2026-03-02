@@ -49,6 +49,8 @@ func loadOrGenerateClusterSecret(st *storage.Storage, bootstrap bool) ([]byte, e
 	if !bootstrap {
 		// Non-bootstrap nodes must receive the secret from the leader during join.
 		// We'll return nil for now and let the join process handle it.
+		// WARNING: This allows the FSM to start with a nil secret. Any system writes
+		// before a restart (e.g. FSM key rotation) will corrupt the local database. 
 		return nil, nil
 	}
 

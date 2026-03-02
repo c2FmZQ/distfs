@@ -329,6 +329,8 @@ func (c *Client) WithRootAnchor(id, owner string, version uint64) *Client {
 func (c *Client) WithRootID(id string) *Client {
 	c2 := *c
 	c2.rootID = id
+	c2.rootOwner = ""
+	c2.rootVersion = 0
 	c2.pathCache = make(map[string]pathCacheEntry)
 	c2.pathMu = &sync.RWMutex{}
 	c2.rootMu = &sync.RWMutex{}
@@ -1126,7 +1128,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 	}
 
 	// Phase 31: Root Anchoring
-	if created.ID == metadata.RootID {
+	if created.ID == c.rootID {
 		c.rootMu.Lock()
 		c.rootOwner = created.OwnerID
 		c.rootVersion = created.Version
@@ -1182,7 +1184,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			}
 
 			// Phase 31: Root Anchoring
-			if updated.ID == metadata.RootID {
+			if updated.ID == c.rootID {
 				c.rootMu.Lock()
 				c.rootOwner = updated.OwnerID
 				c.rootVersion = updated.Version
@@ -1247,9 +1249,6 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 
 		if err := json.NewDecoder(body).Decode(&results); err != nil {
 			return err
-		}
-
-		if len(results) > 0 {
 		}
 
 		c.clearPathCache()
@@ -1338,7 +1337,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		}
 
 		// Phase 31: Root Anchoring
-		if id == metadata.RootID {
+		if id == c.rootID {
 			c.rootMu.RLock()
 			owner := c.rootOwner
 			version := c.rootVersion
