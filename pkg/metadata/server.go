@@ -2794,27 +2794,25 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Direct push to the joining node's internal address
-		go func(addr string, sealed []byte) {
-			bootstrapURL := strings.TrimSuffix(addr, "/") + "/v1/system/bootstrap"
-			req, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(sealed))
-			if err != nil {
-				log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
-				return
-			}
-			req.Header.Set("Content-Type", "application/octet-stream")
+		bootstrapURL := strings.TrimSuffix(req.Address, "/") + "/v1/system/bootstrap"
+		pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
+		if err != nil {
+			log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
+			return err
+		}
+		pushReq.Header.Set("Content-Type", "application/octet-stream")
 
-			resp, err := s.httpClient.Do(req)
-			if err != nil {
-				log.Printf("ERROR: Failed to push ClusterSecret to %s: %v", addr, err)
-				return
-			}
-			defer resp.Body.Close()
-			if resp.StatusCode != http.StatusOK {
-				log.Printf("ERROR: Node %s rejected ClusterSecret push: status %d", addr, resp.StatusCode)
-			} else {
-				log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", addr)
-			}
-		}(req.Address, encSecret)
+		pushResp, err := s.httpClient.Do(pushReq)
+		if err != nil {
+			log.Printf("ERROR: Failed to push ClusterSecret to %s: %v", req.Address, err)
+			return err
+		}
+		defer pushResp.Body.Close()
+		if pushResp.StatusCode != http.StatusOK {
+			log.Printf("ERROR: Node %s rejected ClusterSecret push: status %d", req.Address, pushResp.StatusCode)
+			return fmt.Errorf("node rejected cluster secret push: %d", pushResp.StatusCode)
+		}
+		log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", req.Address)
 
 		return map[string]string{"status": "ok"}
 	})

@@ -4231,7 +4231,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 	backoff := 50 * time.Millisecond
 	maxBackoff := 5 * time.Second
 
-	for {
+	for i := 0; i < 100; i++ {
 		err := op()
 		if err == nil {
 			return nil
@@ -4263,6 +4263,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 		}
 		return err
 	}
+	return metadata.ErrConflict
 }
 
 func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, error) {
@@ -4907,12 +4908,14 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 			i.OwnerID = *req.OwnerID
 			// If we have the key, add the new owner to the lockbox
 			newUser, err := c.GetUser(ctx, i.OwnerID)
-			if err == nil {
-				pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
-				if err == nil {
-					i.Lockbox.AddRecipient(i.OwnerID, pubKey, key)
-				}
+			if err != nil {
+				return fmt.Errorf("failed to fetch new owner %s: %w", i.OwnerID, err)
 			}
+			pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
+			if err != nil {
+				return fmt.Errorf("failed to unmarshal new owner key: %w", err)
+			}
+			i.Lockbox.AddRecipient(i.OwnerID, pubKey, key)
 		}
 		if req.GroupID != nil {
 			i.GroupID = *req.GroupID
@@ -5168,6 +5171,9 @@ func (c *Client) GroupChown(ctx context.Context, groupID, newOwnerID string) err
 	}
 
 	_, err = c.UpdateGroup(ctx, groupID, func(group *metadata.Group) error {
+		if newOwnerEK == nil {
+			return fmt.Errorf("failed to fetch encryption key for new owner %s", newOwnerID)
+		}
 		// 1. Update RegistryLockbox (if we are a manager)
 		rk, err := c.getGroupRegistryKey(ctx, group)
 		if err == nil && newOwnerEK != nil {

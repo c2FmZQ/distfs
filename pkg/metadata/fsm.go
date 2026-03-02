@@ -394,15 +394,6 @@ func (fsm *MetadataFSM) containsError(res interface{}) bool {
 	return false
 }
 
-func (fsm *MetadataFSM) isPresent(data []byte, key string) bool {
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return false
-	}
-	_, ok := raw[key]
-	return ok
-}
-
 func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int, atomic bool) []interface{} {
 	if depth > 4 {
 		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
@@ -681,6 +672,10 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID string, leaseBindings map[string]string) interface{} {
 	var update Inode
 	json.Unmarshal(data, &update)
+
+	var fields map[string]json.RawMessage
+	json.Unmarshal(data, &fields)
+
 	plain, _ := fsm.Get(tx, []byte("inodes"), []byte(update.ID))
 	if plain == nil {
 		return ErrNotFound
@@ -723,7 +718,6 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 	ownerChanged := update.OwnerID != "" && update.OwnerID != inode.OwnerID
 	groupChanged := update.GroupID != "" && update.GroupID != inode.GroupID
 	if ownerChanged || groupChanged {
-		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
 		newOwner := update.OwnerID
 		if newOwner == "" {
 			newOwner = inode.OwnerID
@@ -735,31 +729,32 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(update.Size)); err != nil {
 			return err
 		}
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
 		fsm.updateUsage(tx, newOwner, newGroup, 1, int64(update.Size))
 		inode.OwnerID = newOwner
 		inode.GroupID = newGroup
 	}
 	oldPages := inode.ChunkPages
 	diffBytes := int64(update.Size) - int64(inode.Size)
-	if !(ownerChanged || groupChanged) && fsm.isPresent(data, "size") && diffBytes > 0 {
+	if !(ownerChanged || groupChanged) && fields["size"] != nil && diffBytes > 0 {
 		if err := fsm.checkQuota(tx, inode.OwnerID, inode.GroupID, 0, diffBytes); err != nil {
 			return err
 		}
 	}
 	inode.Version = update.Version
-	if fsm.isPresent(data, "mode") {
+	if fields["mode"] != nil {
 		inode.Mode = update.Mode
 	}
-	if fsm.isPresent(data, "size") {
+	if fields["size"] != nil {
 		inode.Size = update.Size
 	}
-	if fsm.isPresent(data, "ctime") {
+	if fields["ctime"] != nil {
 		inode.CTime = update.CTime
 	}
 	if update.ClientBlob != nil {
 		inode.ClientBlob = update.ClientBlob
 	}
-	if update.Children != nil || fsm.isPresent(data, "children") {
+	if update.Children != nil || fields["children"] != nil {
 		inode.Children = update.Children
 	}
 	if update.ChunkManifest != nil {
@@ -777,16 +772,16 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 	if len(update.Lockbox) > 0 {
 		inode.Lockbox = update.Lockbox
 	}
-	if fsm.isPresent(data, "is_system") {
+	if fields["is_system"] != nil {
 		inode.IsSystem = update.IsSystem
 	}
-	if fsm.isPresent(data, "nlink") {
+	if fields["nlink"] != nil {
 		inode.NLink = update.NLink
 	}
-	if fsm.isPresent(data, "unlinked") {
+	if fields["unlinked"] != nil {
 		inode.Unlinked = update.Unlinked
 	}
-	if update.Links != nil || fsm.isPresent(data, "links") {
+	if update.Links != nil || fields["links"] != nil {
 		inode.Links = update.Links
 	}
 	if !inode.Unlinked {
@@ -800,7 +795,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 		return &inode
 	}
 	fsm.saveInodeWithPages(tx, &inode)
-	if !(ownerChanged || groupChanged) && fsm.isPresent(data, "size") && diffBytes != 0 {
+	if !(ownerChanged || groupChanged) && fields["size"] != nil && diffBytes != 0 {
 		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 0, diffBytes)
 	}
 	if len(oldPages) > 0 {
@@ -1174,10 +1169,10 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID st
 	}
 
 	if newOwner != inode.OwnerID || newGroup != inode.GroupID {
-		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
 		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(inode.Size)); err != nil {
 			return err
 		}
+		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
 		fsm.updateUsage(tx, newOwner, newGroup, 1, int64(inode.Size))
 		inode.OwnerID = newOwner
 		inode.GroupID = newGroup

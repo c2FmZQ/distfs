@@ -312,6 +312,15 @@ func TestClient_AdminMethods(t *testing.T) {
 
 	// 8. AdminChown
 	u2 := "u2"
+	usk2, _ := crypto.GenerateIdentityKey()
+	uek2, _ := crypto.GenerateEncryptionKey()
+	user2 := metadata.User{
+		ID:      u2,
+		SignKey: usk2.Public(),
+		EncKey:  uek2.EncapsulationKey().Bytes(),
+	}
+	metadata.CreateUser(t, node, user2)
+
 	c.Mkdir(ctx, "/testdir", 0755)
 	inode, _, err2 := c.ResolvePath(ctx, "/testdir")
 	if err2 != nil {
@@ -325,10 +334,6 @@ func TestClient_AdminMethods(t *testing.T) {
 	}
 
 	// 9. AdminPromote
-	usk2, _ := crypto.GenerateIdentityKey()
-	user2 := metadata.User{ID: u2, SignKey: usk2.Public()}
-	metadata.CreateUser(t, node, user2)
-
 	err = c.WithAdmin(true).AdminPromote(ctx, u2)
 	if err != nil {
 		t.Fatalf("AdminPromote failed: %v", err)
