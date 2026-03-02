@@ -43,6 +43,8 @@ var (
 	ErrAtomicRollback          = errors.New("atomic transaction failure")
 	ErrLeaseRequired           = errors.New("lease required")
 	ErrStructuralInconsistency = errors.New("structural inconsistency detected")
+	ErrQuotaExceeded           = errors.New("quota exceeded")
+	ErrQuotaDisabled           = errors.New("group quota is disabled")
 )
 
 type CommandType uint8
@@ -103,18 +105,6 @@ type LeaseRequest struct {
 	UserID    string         `json:"user_id,omitempty"`
 	Type      LeaseType      `json:"type,omitempty"`
 	Lockbox   crypto.Lockbox `json:"lockbox,omitempty"`
-}
-
-type SetUserQuotaRequest struct {
-	UserID    string  `json:"user_id"`
-	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
-	MaxInodes *uint64 `json:"max_inodes,omitempty"`
-}
-
-type SetGroupQuotaRequest struct {
-	GroupID   string  `json:"group_id"`
-	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
-	MaxInodes *uint64 `json:"max_inodes,omitempty"`
 }
 
 type RotateKeyRequest struct {
@@ -315,6 +305,37 @@ func (fsm *MetadataFSM) Close() error {
 	return fsm.db.Close()
 }
 
+func extractError(res interface{}) error {
+	if err, ok := res.(error); ok && err != nil {
+		return err
+	}
+	if slice, ok := res.([]interface{}); ok {
+		for _, item := range slice {
+			if err := extractError(item); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func extractErrorString(res interface{}) string {
+	if err, ok := res.(error); ok && err != nil {
+		return err.Error()
+	}
+	if s, ok := res.(string); ok && strings.HasPrefix(s, "api error:") {
+		return s
+	}
+	if slice, ok := res.([]interface{}); ok {
+		for _, item := range slice {
+			if str := extractErrorString(item); str != "" {
+				return str
+			}
+		}
+	}
+	return ""
+}
+
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var cmd LogCommand
 	if err := json.Unmarshal(l.Data, &cmd); err != nil {
@@ -324,25 +345,35 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var results interface{}
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
 		results = fsm.executeCommand(tx, cmd, 0)
+		if err, ok := results.(error); ok && err != nil {
+			return err // Trigger BoltDB rollback for simple errors
+		}
 		if cmd.Atomic && fsm.containsError(results) {
 			log.Printf("DEBUG FSM Apply [%s]: Triggering rollback due to atomic failure", fsm.nodeID)
-			return fmt.Errorf("rollback")
+			subErr := extractError(results)
+			if subErr != nil {
+				return fmt.Errorf("%w: %w", ErrAtomicRollback, subErr)
+			}
+			return ErrAtomicRollback
 		}
 		return nil
 	})
-	if err != nil {
-		log.Printf("DEBUG FSM Apply [%s]: db.Update returned error: %v", fsm.nodeID, err)
+	if err != nil && cmd.Atomic {
+		// If db.Update failed due to our explicit rollback trigger, return the error
+		// so the caller can inspect it using errors.Is()
+		results = err
 	}
-	log.Printf("DEBUG FSM Apply [%s]: Type=%d Result=%+v", fsm.nodeID, cmd.Type, results)
-	fsm.db.View(func(tx *bolt.Tx) error {
-		fsm.DumpInodes(tx)
-		return nil
-	})
 	return results
 }
 
 func (fsm *MetadataFSM) containsError(res interface{}) bool {
-	if _, ok := res.(error); ok {
+	if res == nil {
+		return false
+	}
+	if err, ok := res.(error); ok && err != nil {
+		return true
+	}
+	if s, ok := res.(string); ok && strings.HasPrefix(s, "api error:") {
 		return true
 	}
 	if slice, ok := res.([]interface{}); ok {
@@ -364,7 +395,7 @@ func (fsm *MetadataFSM) isPresent(data []byte, key string) bool {
 	return ok
 }
 
-func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int) []interface{} {
+func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, depth int, atomic bool) []interface{} {
 	if depth > 4 {
 		return []interface{}{fmt.Errorf("batch recursion depth exceeded")}
 	}
@@ -406,8 +437,9 @@ func (fsm *MetadataFSM) executeBatchCommands(tx *bolt.Tx, cmds []LogCommand, dep
 		results[i] = res
 		// If the OUTER command (from Apply) is non-atomic, we still want to support
 		// sub-batches being atomic. But BoltDB has no nested transactions.
-		// So if any sub-command has cmd.Atomic=true AND fails, we should stop and return results.
-		if cmd.Atomic && fsm.containsError(res) {
+		// So if either the OUTER batch is atomic OR this specific sub-command is atomic,
+		// we stop on failure to trigger rollback.
+		if (atomic || cmd.Atomic) && fsm.containsError(res) {
 			return results
 		}
 	}
@@ -564,11 +596,7 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 				subCmds[i].SessionID = cmd.SessionID
 			}
 		}
-		res := fsm.executeBatchCommands(tx, subCmds, depth+1)
-		if cmd.Atomic && fsm.containsError(res) {
-			return fmt.Errorf("%w: sub-batch failure", ErrAtomicRollback)
-		}
-		return res
+		return fsm.executeBatchCommands(tx, subCmds, depth+1, cmd.Atomic)
 	}
 	return fmt.Errorf("unknown command")
 }
@@ -685,12 +713,16 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 		if newOwner == "" {
 			newOwner = inode.OwnerID
 		}
-		if err := fsm.checkQuota(tx, newOwner, update.GroupID, 1, int64(update.Size)); err != nil {
+		newGroup := update.GroupID
+		if !groupChanged {
+			newGroup = inode.GroupID
+		}
+		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(update.Size)); err != nil {
 			return err
 		}
-		fsm.updateUsage(tx, newOwner, update.GroupID, 1, int64(update.Size))
+		fsm.updateUsage(tx, newOwner, newGroup, 1, int64(update.Size))
 		inode.OwnerID = newOwner
-		inode.GroupID = update.GroupID
+		inode.GroupID = newGroup
 	}
 	oldPages := inode.ChunkPages
 	diffBytes := int64(update.Size) - int64(inode.Size)
@@ -893,7 +925,9 @@ func (fsm *MetadataFSM) IsAdmin(userID string) bool {
 
 func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{} {
 	var group Group
-	json.Unmarshal(data, &group)
+	if err := json.Unmarshal(data, &group); err != nil {
+		return err
+	}
 	if group.Version == 0 {
 		group.Version = 1
 	}
@@ -1036,12 +1070,18 @@ func (fsm *MetadataFSM) executeSetGroupQuota(tx *bolt.Tx, data []byte) interface
 	}
 	var group Group
 	json.Unmarshal(plain, &group)
+
+	if !group.QuotaEnabled {
+		return ErrQuotaDisabled
+	}
+
 	if req.MaxBytes != nil {
 		group.Quota.MaxBytes = int64(*req.MaxBytes)
 	}
 	if req.MaxInodes != nil {
 		group.Quota.MaxInodes = int64(*req.MaxInodes)
 	}
+
 	encoded, _ := json.Marshal(group)
 	return fsm.Put(tx, []byte("groups"), []byte(req.GroupID), encoded)
 }
@@ -1234,69 +1274,102 @@ func (fsm *MetadataFSM) LoadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 }
 
 func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
-	if userID != "" {
-		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
-		if err != nil {
-			return err
-		}
-		if plain != nil {
-			var u User
-			json.Unmarshal(plain, &u)
-			if u.Quota.MaxInodes > 0 && u.Usage.InodeCount+inodes > u.Quota.MaxInodes {
-				return fmt.Errorf("user inode quota exceeded")
-			}
-			if u.Quota.MaxBytes > 0 && u.Usage.TotalBytes+bytes > u.Quota.MaxBytes {
-				return fmt.Errorf("user storage quota exceeded")
-			}
-		}
-	}
+	var g *Group
 	if groupID != "" {
-		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
-		if err != nil {
-			return err
-		}
+		plain, _ := fsm.Get(tx, []byte("groups"), []byte(groupID))
 		if plain != nil {
-			var g Group
-			json.Unmarshal(plain, &g)
+			var group Group
+			json.Unmarshal(plain, &group)
+			g = &group
+		}
+	}
+
+	var u *User
+	if userID != "" {
+		plain, _ := fsm.Get(tx, []byte("users"), []byte(userID))
+		if plain != nil {
+			var user User
+			json.Unmarshal(plain, &user)
+			u = &user
+		}
+	}
+
+	// 1. Check Inode Quota
+	if inodes != 0 {
+		if g != nil && g.QuotaEnabled {
 			if g.Quota.MaxInodes > 0 && g.Usage.InodeCount+inodes > g.Quota.MaxInodes {
-				return fmt.Errorf("group inode quota exceeded")
+				return fmt.Errorf("%w: group inode quota exceeded", ErrQuotaExceeded)
 			}
-			if g.Quota.MaxBytes > 0 && g.Usage.TotalBytes+bytes > g.Quota.MaxBytes {
-				return fmt.Errorf("group storage quota exceeded")
+		} else if u != nil {
+			if u.Quota.MaxInodes > 0 && u.Usage.InodeCount+inodes > u.Quota.MaxInodes {
+				return fmt.Errorf("%w: user inode quota exceeded", ErrQuotaExceeded)
 			}
 		}
 	}
+
+	// 2. Check Byte Quota
+	if bytes != 0 {
+		if g != nil && g.QuotaEnabled {
+			if g.Quota.MaxBytes > 0 && g.Usage.TotalBytes+bytes > g.Quota.MaxBytes {
+				return fmt.Errorf("%w: group storage quota exceeded", ErrQuotaExceeded)
+			}
+		} else if u != nil {
+			if u.Quota.MaxBytes > 0 && u.Usage.TotalBytes+bytes > u.Quota.MaxBytes {
+				return fmt.Errorf("%w: user storage quota exceeded", ErrQuotaExceeded)
+			}
+		}
+	}
+
 	return nil
 }
 
 func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes, bytes int64) error {
-	if userID != "" {
-		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
-		if err != nil {
-			return err
-		}
+	var g *Group
+	if groupID != "" {
+		plain, _ := fsm.Get(tx, []byte("groups"), []byte(groupID))
 		if plain != nil {
-			var u User
-			json.Unmarshal(plain, &u)
-			u.Usage.InodeCount += inodes
-			u.Usage.TotalBytes += bytes
-			data, _ := json.Marshal(u)
-			fsm.Put(tx, []byte("users"), []byte(userID), data)
+			var group Group
+			json.Unmarshal(plain, &group)
+			g = &group
 		}
 	}
-	if groupID != "" {
-		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
-		if err != nil {
-			return err
-		}
+
+	var u *User
+	if userID != "" {
+		plain, _ := fsm.Get(tx, []byte("users"), []byte(userID))
 		if plain != nil {
-			var g Group
-			json.Unmarshal(plain, &g)
-			g.Usage.InodeCount += inodes
-			g.Usage.TotalBytes += bytes
-			data, _ := json.Marshal(g)
-			fsm.Put(tx, []byte("groups"), []byte(groupID), data)
+			var user User
+			json.Unmarshal(plain, &user)
+			u = &user
 		}
+	}
+
+	// 1. Update Inode Usage
+	if inodes != 0 {
+		if g != nil && g.QuotaEnabled {
+			g.Usage.InodeCount += inodes
+		} else if u != nil {
+			u.Usage.InodeCount += inodes
+		}
+	}
+
+	// 2. Update Byte Usage
+	if bytes != 0 {
+		if g != nil && g.QuotaEnabled {
+			g.Usage.TotalBytes += bytes
+		} else if u != nil {
+			u.Usage.TotalBytes += bytes
+		}
+	}
+
+	// Save back
+	if g != nil {
+		data, _ := json.Marshal(g)
+		fsm.Put(tx, []byte("groups"), []byte(groupID), data)
+	}
+	if u != nil {
+		data, _ := json.Marshal(u)
+		fsm.Put(tx, []byte("users"), []byte(userID), data)
 	}
 	return nil
 }
@@ -1905,21 +1978,59 @@ func (fsm *MetadataFSM) reopen() error {
 }
 
 func (fsm *MetadataFSM) DumpInodes(tx *bolt.Tx) {
-	b := tx.Bucket([]byte("inodes"))
-	if b == nil {
-		return
-	}
-	log.Printf("--- FSM INODE DUMP [%s] ---", fsm.nodeID)
-	b.ForEach(func(k, v []byte) error {
-		var inode Inode
-		plain, err := fsm.DecryptValue([]byte("inodes"), v)
-		if err == nil {
-			if err := json.Unmarshal(plain, &inode); err == nil {
-				log.Printf("  Inode %s: Version=%d Children=%d Links=%d NLink=%d Unlinked=%v", inode.ID, inode.Version, len(inode.Children), len(inode.Links), inode.NLink, inode.Unlinked)
+	log.Printf("--- FSM STATE DUMP [%s] ---", fsm.nodeID)
+
+	// 1. Dump Inodes
+	ib := tx.Bucket([]byte("inodes"))
+	if ib != nil {
+		log.Printf("  INODES:")
+		ib.ForEach(func(k, v []byte) error {
+			var inode Inode
+			plain, err := fsm.DecryptValue([]byte("inodes"), v)
+			if err == nil {
+				if err := json.Unmarshal(plain, &inode); err == nil {
+					log.Printf("    Inode %s (%s): Owner=%s Group=%s Version=%d Children=%d Links=%d NLink=%d Unlinked=%v Size=%d",
+						inode.ID, inode.GetName(), inode.OwnerID, inode.GroupID, inode.Version, len(inode.Children), len(inode.Links), inode.NLink, inode.Unlinked, inode.Size)
+				}
 			}
-		}
-		return nil
-	})
+			return nil
+		})
+	}
+
+	// 2. Dump Users
+	ub := tx.Bucket([]byte("users"))
+	if ub != nil {
+		log.Printf("  USERS:")
+		ub.ForEach(func(k, v []byte) error {
+			var u User
+			plain, err := fsm.DecryptValue([]byte("users"), v)
+			if err == nil {
+				if err := json.Unmarshal(plain, &u); err == nil {
+					log.Printf("    User %s: UID=%d Usage={Inodes:%d, Bytes:%d} Quota={MaxInodes:%d, MaxBytes:%d}",
+						u.ID, u.UID, u.Usage.InodeCount, u.Usage.TotalBytes, u.Quota.MaxInodes, u.Quota.MaxBytes)
+				}
+			}
+			return nil
+		})
+	}
+
+	// 3. Dump Groups
+	gb := tx.Bucket([]byte("groups"))
+	if gb != nil {
+		log.Printf("  GROUPS:")
+		gb.ForEach(func(k, v []byte) error {
+			var g Group
+			plain, err := fsm.DecryptValue([]byte("groups"), v)
+			if err == nil {
+				if err := json.Unmarshal(plain, &g); err == nil {
+					log.Printf("    Group %s: GID=%d Owner=%s Usage={Inodes:%d, Bytes:%d} Quota={MaxInodes:%d, MaxBytes:%d}",
+						g.ID, g.GID, g.OwnerID, g.Usage.InodeCount, g.Usage.TotalBytes, g.Quota.MaxInodes, g.Quota.MaxBytes)
+				}
+			}
+			return nil
+		})
+	}
+
 	log.Printf("--- END DUMP [%s] ---", fsm.nodeID)
 }
 

@@ -19,8 +19,8 @@ echo "Admin: Setting User Quota..."
 distfs -use-pinentry=false -config $ADMIN_CONFIG admin-user-quota $USER_ID 5000 10
 
 # User: Create Group
-echo "User: Creating Group..."
-distfs -use-pinentry=false -config $USER_CONFIG group-create "my-project"
+echo "User: Creating Group with independent quota..."
+distfs -use-pinentry=false -config $USER_CONFIG group-create --quota "my-project"
 G_ID=$(distfs -use-pinentry=false -config $USER_CONFIG group-list | grep "my-project" | awk '{print $1}')
 
 # Admin: Set Group Quota

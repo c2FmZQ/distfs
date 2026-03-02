@@ -32,7 +32,7 @@ echo "User 3 ID: $U3_ID"
 echo "User 1: Creating group 'project-x'..."
 G1_OUT=$(distfs -use-pinentry=false -config /tmp/u1-group.json group-create project-x)
 echo "$G1_OUT"
-G1_ID=$(echo "$G1_OUT" | grep "ID:" | cut -d: -f2 | tr -d ' ')
+G1_ID=$(echo "$G1_OUT" | grep "^ID:" | awk '{print $2}')
 echo "Group project-x ID: $G1_ID"
 sleep 2
 

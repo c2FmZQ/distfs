@@ -3,6 +3,7 @@ package metadata
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"testing"
@@ -244,7 +245,7 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 
 	// 1. Create Group G1
 	groupID := "g1"
-	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1}
+	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1, QuotaEnabled: true}
 	g1Bytes, _ := json.Marshal(g1)
 	if err := node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Create group failed: %v", err)
@@ -279,8 +280,8 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatalf("Raft apply failed: %v", err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "group inode quota exceeded" {
-		t.Errorf("Expected group inode quota exceeded, got %v", f.Response())
+	if err, ok := f.Response().(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("Expected ErrQuotaExceeded, got %v", f.Response())
 	}
 
 	// 5. Increase Quota, but fail storage (2 Inodes, 150 Bytes)
@@ -299,8 +300,8 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatalf("Raft apply failed: %v", err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "group storage quota exceeded" {
-		t.Errorf("Expected group storage quota exceeded, got %v", f.Response())
+	if err, ok := f.Response().(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("Expected ErrQuotaExceeded, got %v", f.Response())
 	}
 }
 
@@ -356,8 +357,8 @@ func TestGroupQuotaFallback(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatalf("Raft apply file 2 failed: %v", err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "user inode quota exceeded" {
-		t.Errorf("Expected user inode quota exceeded, got %v", f.Response())
+	if err, ok := f.Response().(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("Expected ErrQuotaExceeded, got %v", f.Response())
 	}
 }
 
@@ -387,7 +388,7 @@ func TestGroupQuotaBypassReproduction(t *testing.T) {
 	// 2. Create Group G1 with Inode Quota (10) but NO Byte Quota (0)
 	groupID := "g1"
 	maxInodes := uint64(10)
-	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1}
+	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1, QuotaEnabled: true}
 	g1Bytes, _ := json.Marshal(g1)
 	node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second)
 
@@ -399,8 +400,8 @@ func TestGroupQuotaBypassReproduction(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdSetGroupQuota, Data: qReqBytes}.Marshal(), 5*time.Second)
 
 	// 3. Alice uploads 600 Byte file to Group G1.
-	// Current BUG: Because Group has a quota (Inodes), checkQuota returns nil early.
-	// Expected: Should fail because 600 > User's 500 Byte quota.
+	// Architectural Decision: When a group has QuotaEnabled=true, we ONLY check the group quota.
+	// Alice's personal 500 byte limit does NOT apply to group-charged storage.
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, GroupID: groupID, Size: 600}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
@@ -408,7 +409,41 @@ func TestGroupQuotaBypassReproduction(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "user storage quota exceeded" {
-		t.Errorf("Expected user storage quota exceeded (bypass attempt), got %v", f.Response())
+	res := f.Response()
+	if _, ok := res.(*Inode); !ok {
+		t.Errorf("Expected success (group quota is independent), got %T: %v", res, res)
+	}
+}
+
+func TestSetQuotaOnDisabledGroup(t *testing.T) {
+	node, ts, _, _, _ := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	userID := "alice"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: userID, SignKey: sk.Public()})
+
+	// 1. Create Group G1 with QuotaEnabled: false
+	groupID := "g1"
+	g1 := Group{ID: groupID, OwnerID: userID, GID: 5001, Version: 1, QuotaEnabled: false}
+	g1Bytes, _ := json.Marshal(g1)
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateGroup, Data: g1Bytes}.Marshal(), 5*time.Second).Error(); err != nil {
+		t.Fatalf("Create group failed: %v", err)
+	}
+
+	// 2. Attempt to Set Group Quota (Should Fail)
+	maxInodes := uint64(10)
+	qReq := SetGroupQuotaRequest{
+		GroupID:   groupID,
+		MaxInodes: &maxInodes,
+	}
+	qBytes, _ := json.Marshal(qReq)
+	f := node.Raft.Apply(LogCommand{Type: CmdSetGroupQuota, Data: qBytes}.Marshal(), 5*time.Second)
+	if err := f.Error(); err != nil {
+		t.Fatalf("Raft apply failed: %v", err)
+	}
+	if err, ok := f.Response().(error); !ok || !errors.Is(err, ErrQuotaDisabled) {
+		t.Errorf("Expected ErrQuotaDisabled, got %v", f.Response())
 	}
 }

@@ -141,7 +141,7 @@ func TestFSM_SetGroupQuota_Success(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Create Group
-	g1 := Group{ID: "g1", GID: 5000}
+	g1 := Group{ID: "g1", GID: 5000, QuotaEnabled: true}
 	gb1, _ := json.Marshal(g1)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateGroup, Data: gb1}.Marshal()})
 

@@ -972,14 +972,13 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 			return err
 		}
 		if plain == nil {
-			return fmt.Errorf("user not found")
+			return ErrNotFound
 		}
 		return json.Unmarshal(plain, &user)
 	})
 	if err != nil {
 		return nil, err
 	}
-
 	return &user, nil
 }
 
@@ -1373,17 +1372,30 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 			}
+		} else if e, ok := resp.(error); ok {
+			firstErr = e
 		}
-		if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) || errors.Is(firstErr, ErrLeaseRequired) || errors.Is(firstErr, ErrStructuralInconsistency) {
+
+		// Unwrap ErrAtomicRollback if necessary
+		actualErr := firstErr
+		if errors.Is(actualErr, ErrAtomicRollback) {
+			unwrapped := errors.Unwrap(actualErr)
+			if unwrapped != nil {
+				actualErr = unwrapped
+			}
+		}
+
+		if errors.Is(actualErr, ErrQuotaExceeded) || errors.Is(actualErr, ErrQuotaDisabled) {
+			status = http.StatusForbidden
+		} else if errors.Is(actualErr, ErrConflict) || errors.Is(actualErr, ErrExists) || errors.Is(actualErr, ErrLeaseRequired) {
 			status = http.StatusConflict
-		} else if errors.Is(firstErr, ErrNotFound) {
+		} else if errors.Is(actualErr, ErrNotFound) {
 			status = http.StatusNotFound
 		}
 		resp = s.sanitizeResponse(resp)
 		s.writeJSON(w, r, resp, status)
 		return
 	}
-
 	s.writeJSON(w, r, s.sanitizeResponse(resp), http.StatusOK)
 }
 
@@ -2049,6 +2061,8 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 			s.writeError(w, r, ErrCodeVersionConflict, err.Error(), http.StatusConflict)
 		} else if errors.Is(err, ErrNotFound) {
 			s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
+		} else if errors.Is(err, ErrQuotaExceeded) || errors.Is(err, ErrQuotaDisabled) {
+			s.writeError(w, r, ErrCodeQuotaExceeded, err.Error(), http.StatusForbidden)
 		} else {
 			s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		}
@@ -2072,7 +2086,9 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 					firstErr = e
 				}
 
-				if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) {
+				if errors.Is(firstErr, ErrQuotaExceeded) || errors.Is(firstErr, ErrQuotaDisabled) {
+					status = http.StatusForbidden
+				} else if errors.Is(firstErr, ErrConflict) || errors.Is(firstErr, ErrExists) || errors.Is(firstErr, ErrLeaseRequired) || errors.Is(firstErr, ErrStructuralInconsistency) {
 					status = http.StatusConflict
 				} else if errors.Is(firstErr, ErrNotFound) {
 					status = http.StatusNotFound
@@ -2105,13 +2121,29 @@ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sess
 		return nil, fmt.Errorf("not leader")
 	}
 
-	respCh := make(chan interface{}, 1)
 	cmd := &LogCommand{
 		Type:      cmdType,
 		Data:      data,
 		SessionID: sessionID,
 		Atomic:    cmdType == CmdBatch,
 	}
+
+	if cmd.Atomic {
+		f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
+		if err := f.Error(); err != nil {
+			return nil, err
+		}
+		resp := f.Response()
+		if err, ok := resp.(error); ok {
+			return nil, err
+		}
+		if s, ok := resp.(string); ok && strings.HasPrefix(s, "api error:") {
+			return nil, fmt.Errorf("%s", s)
+		}
+		return resp, nil
+	}
+
+	respCh := make(chan interface{}, 1)
 
 	s.batchMu.Lock()
 	s.batchQueue = append(s.batchQueue, cmd)
@@ -2419,12 +2451,22 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, code string,
 func (s *Server) sanitizeResponse(res interface{}) interface{} {
 	if err, ok := res.(error); ok {
 		code := ErrCodeInternal
-		if errors.Is(err, ErrConflict) {
+		if errors.Is(err, ErrQuotaExceeded) {
+			code = ErrCodeQuotaExceeded
+		} else if errors.Is(err, ErrConflict) {
 			code = ErrCodeVersionConflict
 		} else if errors.Is(err, ErrExists) {
 			code = ErrCodeExists
 		} else if errors.Is(err, ErrNotFound) {
 			code = ErrCodeNotFound
+		} else if errors.Is(err, ErrLeaseRequired) {
+			code = ErrCodeLeaseRequired
+		} else if errors.Is(err, ErrStructuralInconsistency) {
+			code = ErrCodeStructuralInconsistency
+		} else if errors.Is(err, ErrAtomicRollback) {
+			code = ErrCodeAtomicRollback
+		} else if errors.Is(err, ErrQuotaDisabled) {
+			code = ErrCodeQuotaDisabled
 		}
 		return APIErrorResponse{Code: code, Message: err.Error()}
 	}

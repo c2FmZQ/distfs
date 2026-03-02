@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/big"
@@ -818,8 +819,9 @@ func TestQuotaEnforcement(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "user inode quota exceeded" {
-		t.Errorf("Expected user inode quota exceeded, got %v", f.Response())
+	res := f.Response()
+	if err, ok := res.(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("Expected ErrQuotaExceeded, got %T: %v (IsQuota=%v)", res, res, errors.Is(err, ErrQuotaExceeded))
 	}
 
 	// 4. Update File 1 (Resize to 400 - OK)
@@ -848,8 +850,9 @@ func TestQuotaEnforcement(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "user storage quota exceeded" {
-		t.Errorf("Expected user storage quota exceeded, got %v", f.Response())
+	res = f.Response()
+	if err, ok := res.(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("Expected ErrQuotaExceeded, got %T: %v (IsQuota=%v)", res, res, errors.Is(err, ErrQuotaExceeded))
 	}
 }
 
@@ -904,8 +907,8 @@ func TestAdminChownQuota(t *testing.T) {
 	if err := f.Error(); err != nil {
 		t.Fatal(err)
 	}
-	if err, ok := f.Response().(error); !ok || err.Error() != "user inode quota exceeded" {
-		t.Errorf("Expected user inode quota exceeded, got %v", f.Response())
+	if err, ok := f.Response().(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
+		t.Errorf("Expected ErrQuotaExceeded, got %v", f.Response())
 	}
 
 	// Transfer 0000000000000000000000000000002f from u2 back to u2 (identity transfer)

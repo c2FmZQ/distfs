@@ -22,7 +22,7 @@ echo "Bob's contact string: $BOB_CONTACT"
 
 echo "Alice: Creating group 'exchange-test'..."
 G_OUT=$(distfs -use-pinentry=false -config /tmp/alice.json group-create exchange-test)
-G_ID=$(echo "$G_OUT" | grep "ID:" | cut -d: -f2 | tr -d ' ')
+G_ID=$(echo "$G_OUT" | grep "^ID:" | awk '{print $2}')
 echo "Group ID: $G_ID"
 
 echo "Alice: Adding Bob via contact string (with -f)..."

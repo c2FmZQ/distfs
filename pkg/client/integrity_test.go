@@ -95,6 +95,11 @@ func TestManifestIntegrity(t *testing.T) {
 		t.Errorf("Expected version 1, got %d", inode.Version)
 	}
 
+	// 4.5 User B explicitly grants Admin access so AdminChown can re-seal it
+	if err := clientB.Chmod(t.Context(), filePath, 0644); err != nil { // 0644 gives WorldRead, putting WorldKey in lockbox (which Admin can read)
+		t.Fatalf("Chmod failed: %v", err)
+	}
+
 	// 5. Admin Operations (Client-side Signing)
 	clientA := NewClient(ts.URL).WithIdentity(adminID, dkA).WithSignKey(skA).WithServerKey(ek).WithAdmin(true)
 	if err := clientA.Login(t.Context()); err != nil {
@@ -115,9 +120,9 @@ func TestManifestIntegrity(t *testing.T) {
 	if inode2.OwnerID != userID {
 		t.Errorf("Expected owner %s, got %s", userID, inode2.OwnerID)
 	}
-	// Version 2 after AdminChown
-	if inode2.Version != 2 {
-		t.Errorf("Expected version 2 after chown, got %d", inode2.Version)
+	// Version 3 after AdminChown (V1=Create, V2=Chmod 0644, V3=AdminChown)
+	if inode2.Version != 3 {
+		t.Errorf("Expected version 3 after chown, got %d", inode2.Version)
 	}
 
 	// Note: Admin cannot verify signerID or AuthorizedSigners after chown
@@ -155,7 +160,7 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// 7. Group Signing & Member Mutation
 	// 7.1 Create Group
-	group, err := clientA.CreateGroup(t.Context(), "test-group")
+	group, err := clientA.CreateGroup(t.Context(), "test-group", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -277,7 +282,7 @@ func TestGroupIntegrity(t *testing.T) {
 	}
 
 	// 3. Create Group (Verified initial signature)
-	group, err := client.CreateGroup(t.Context(), "integrity-group")
+	group, err := client.CreateGroup(t.Context(), "integrity-group", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}

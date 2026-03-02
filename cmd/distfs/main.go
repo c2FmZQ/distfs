@@ -501,16 +501,22 @@ func cmdChgrp(ctx context.Context, args []string) {
 }
 
 func cmdGroupCreate(ctx context.Context, args []string) {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("group-create", flag.ExitOnError)
+	quota := fs.Bool("quota", false, "Enable independent group quota (charged to group, not owner)")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
 		log.Fatal("group name required")
 	}
-	name := args[0]
+	name := fs.Arg(0)
 	c := loadClient()
-	group, err := c.CreateGroup(ctx, name)
+	group, err := c.CreateGroup(ctx, name, *quota)
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Group %s created. ID: %s\n", name, group.ID)
+	fmt.Printf("Group %s created.\n", name)
+	fmt.Printf("ID: %s\n", group.ID)
+	fmt.Printf("QuotaEnabled: %v\n", group.QuotaEnabled)
 }
 
 func cmdGroupAdd(ctx context.Context, args []string) {

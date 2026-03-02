@@ -227,7 +227,7 @@ func TestServer_AdminHandlers(t *testing.T) {
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// Create Group g1
-	group := Group{ID: "g1", OwnerID: u1, GID: 5000, Version: 1}
+	group := Group{ID: "g1", OwnerID: u1, GID: 5000, Version: 1, QuotaEnabled: true}
 	gb, _ := json.Marshal(group)
 	server.ApplyRaftCommandInternal(CmdCreateGroup, gb, "")
 

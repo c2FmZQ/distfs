@@ -46,7 +46,7 @@ func TestSystemGroups(t *testing.T) {
 		t.Fatalf("Alice login failed: %v", err)
 	}
 
-	_, err := cAlice.CreateSystemGroup(t.Context(), "alice-sys-group")
+	_, err := cAlice.CreateSystemGroup(t.Context(), "alice-sys-group", false)
 	if err == nil {
 		t.Error("Alice (non-admin) should NOT be able to create a system group")
 	} else {
@@ -59,7 +59,7 @@ func TestSystemGroups(t *testing.T) {
 		t.Fatalf("Admin login failed: %v", err)
 	}
 
-	sysGroup, err := cAdmin.CreateSystemGroup(t.Context(), "cluster-admin-group")
+	sysGroup, err := cAdmin.CreateSystemGroup(t.Context(), "cluster-admin-group", false)
 	if err != nil {
 		t.Fatalf("Admin failed to create system group: %v", err)
 	}

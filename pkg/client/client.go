@@ -1085,6 +1085,7 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 		inode.ClientBlob = encBlob
 	}
 
+	inode.SetSignerID(c.userID)
 	inode.Mode = metadata.SanitizeMode(inode.Mode, inode.Type)
 	hash := inode.ManifestHash()
 	inode.UserSig = c.signKey.Sign(hash)
@@ -3686,13 +3687,13 @@ func (c *Client) decryptRegistry(key []byte, encrypted []byte) ([]metadata.Membe
 }
 
 // CreateGroup creates a new user group.
-func (c *Client) CreateGroup(ctx context.Context, name string) (*metadata.Group, error) {
-	return c.createGroupInternal(ctx, name, false)
+func (c *Client) CreateGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error) {
+	return c.createGroupInternal(ctx, name, false, quotaEnabled)
 }
 
 // CreateSystemGroup creates a new system group (Admin only).
-func (c *Client) CreateSystemGroup(ctx context.Context, name string) (*metadata.Group, error) {
-	return c.createGroupInternal(ctx, name, true)
+func (c *Client) CreateSystemGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error) {
+	return c.createGroupInternal(ctx, name, true, quotaEnabled)
 }
 
 func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
@@ -3723,7 +3724,7 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 	return res.GID, err
 }
 
-func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem bool) (*metadata.Group, error) {
+func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem bool, quotaEnabled bool) (*metadata.Group, error) {
 	// Allocate numeric GID
 	gid, err := c.allocateGID(ctx)
 	if err != nil {
@@ -3798,6 +3799,7 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 		EncryptedRegistry: encRegistry,
 		ClientBlob:        encBlob,
 		IsSystem:          isSystem,
+		QuotaEnabled:      quotaEnabled,
 		Version:           1,
 	}
 	group.SetName(name)
@@ -4214,7 +4216,8 @@ func (c *Client) isRetryable(err error) bool {
 	if errors.As(err, &apiErr) {
 		if apiErr.StatusCode == http.StatusServiceUnavailable ||
 			apiErr.StatusCode == http.StatusTooManyRequests ||
-			apiErr.StatusCode == http.StatusInternalServerError {
+			apiErr.StatusCode == http.StatusInternalServerError ||
+			apiErr.Code == metadata.ErrCodeNotLeader {
 			return true
 		}
 	}
@@ -4234,8 +4237,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) ||
 			errors.Is(err, metadata.ErrConflict) ||
 			(apiErr != nil && apiErr.Code == metadata.ErrCodeVersionConflict) ||
-			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired) ||
-			(apiErr != nil && strings.Contains(apiErr.Message, "atomic transaction failure"))
+			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired)
 
 		if isConflict {
 			select {
@@ -4880,28 +4882,39 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 		return err
 	}
 	key, unlockErr := c.UnlockInode(ctx, inode)
+	if unlockErr != nil {
+		return fmt.Errorf("failed to unlock inode for re-sealing: %w", unlockErr)
+	}
 
 	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
+		// Ensure admin is an authorized signer since they are signing this update
+		signers := i.GetAuthorizedSigners()
+		adminInSigners := false
+		for _, s := range signers {
+			if s == c.userID {
+				adminInSigners = true
+				break
+			}
+		}
+		if !adminInSigners {
+			i.SetAuthorizedSigners(append(signers, c.userID))
+		}
+
 		if req.OwnerID != nil {
 			i.OwnerID = *req.OwnerID
-			// Reset authorized signers to just the new owner to ensure clean hand-off
-			i.SetAuthorizedSigners([]string{i.OwnerID})
-
 			// If we have the key, add the new owner to the lockbox
-			if unlockErr == nil {
-				newUser, err := c.GetUser(ctx, i.OwnerID)
+			newUser, err := c.GetUser(ctx, i.OwnerID)
+			if err == nil {
+				pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
 				if err == nil {
-					pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
-					if err == nil {
-						i.Lockbox.AddRecipient(i.OwnerID, pubKey, key)
-					}
+					i.Lockbox.AddRecipient(i.OwnerID, pubKey, key)
 				}
 			}
 		}
 		if req.GroupID != nil {
 			i.GroupID = *req.GroupID
 			// If we have the key, add the new group to the lockbox
-			if unlockErr == nil && i.GroupID != "" {
+			if i.GroupID != "" {
 				group, err := c.GetGroup(ctx, i.GroupID)
 				if err == nil {
 					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
@@ -4923,40 +4936,54 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 		return err
 	}
 	key, unlockErr := c.UnlockInode(ctx, inode)
+	if unlockErr != nil {
+		return fmt.Errorf("failed to unlock inode for re-sealing: %w", unlockErr)
+	}
 
 	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
+		// Ensure admin is an authorized signer since they are signing this update
+		signers := i.GetAuthorizedSigners()
+		adminInSigners := false
+		for _, s := range signers {
+			if s == c.userID {
+				adminInSigners = true
+				break
+			}
+		}
+		if !adminInSigners {
+			i.SetAuthorizedSigners(append(signers, c.userID))
+		}
+
 		i.Mode = mode
 
 		// 2. Handle Lockbox updates (World & Group)
-		if unlockErr == nil {
-			worldRead := (i.Mode & 0004) != 0
-			groupRW := (i.Mode & 0060) != 0
+		worldRead := (i.Mode & 0004) != 0
+		groupRW := (i.Mode & 0060) != 0
 
-			// 2.1 World Access
-			_, worldInLockbox := i.Lockbox[metadata.WorldID]
-			if worldRead && !worldInLockbox {
-				wpk, err := c.GetWorldPublicKey(ctx)
-				if err == nil {
-					i.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
-				}
-			} else if !worldRead && worldInLockbox {
-				delete(i.Lockbox, metadata.WorldID)
+		// 2.1 World Access
+		_, worldInLockbox := i.Lockbox[metadata.WorldID]
+		if worldRead && !worldInLockbox {
+			wpk, err := c.GetWorldPublicKey(ctx)
+			if err == nil {
+				i.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
 			}
+		} else if !worldRead && worldInLockbox {
+			delete(i.Lockbox, metadata.WorldID)
+		}
 
-			// 2.2 Group Access
-			if i.GroupID != "" {
-				_, groupInLockbox := i.Lockbox[i.GroupID]
-				if groupRW && !groupInLockbox {
-					group, err := c.GetGroup(ctx, i.GroupID)
+		// 2.2 Group Access
+		if i.GroupID != "" {
+			_, groupInLockbox := i.Lockbox[i.GroupID]
+			if groupRW && !groupInLockbox {
+				group, err := c.GetGroup(ctx, i.GroupID)
+				if err == nil {
+					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 					if err == nil {
-						gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-						if err == nil {
-							i.Lockbox.AddRecipient(i.GroupID, gpk, key)
-						}
+						i.Lockbox.AddRecipient(i.GroupID, gpk, key)
 					}
-				} else if !groupRW && groupInLockbox {
-					delete(i.Lockbox, i.GroupID)
 				}
+			} else if !groupRW && groupInLockbox {
+				delete(i.Lockbox, i.GroupID)
 			}
 		}
 		return nil

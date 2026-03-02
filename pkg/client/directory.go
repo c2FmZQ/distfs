@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
-	"log"
 	"net/http"
 	"path/filepath"
 	"strings"
@@ -212,7 +211,6 @@ func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.I
 		encName := hex.EncodeToString(mac.Sum(nil))
 
 		childID, ok := currentInode.Children[encName]
-		log.Printf("DEBUG: resolveSequential part=%s prefix=%s -> ok=%v id=%s children=%d", part, prefix, ok, childID, len(currentInode.Children))
 		if !ok {
 			return nil, nil, fmt.Errorf("path component %s not found in %s", part, prefix)
 		}

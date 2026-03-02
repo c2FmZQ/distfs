@@ -740,16 +740,18 @@ func cmdAdminChown(ctx context.Context, args []string) {
 	parts := strings.Split(ownerSpec, ":")
 	email := parts[0]
 
-	// 1. Resolve email to UserID
-	userID := email
-	if !isHexID(email) {
-		id, err := c.AdminLookup(ctx, email, "CLI chown")
-		if err != nil {
-			log.Fatalf("failed to resolve email %s: %v", email, err)
+	// 1. Resolve email to UserID (if provided)
+	if email != "" {
+		userID := email
+		if !isHexID(email) {
+			id, err := c.AdminLookup(ctx, email, "CLI chown")
+			if err != nil {
+				log.Fatalf("failed to resolve email %s: %v", email, err)
+			}
+			userID = id
 		}
-		userID = id
+		req.OwnerID = &userID
 	}
-	req.OwnerID = &userID
 
 	// 2. Resolve Group if provided
 	if len(parts) > 1 {

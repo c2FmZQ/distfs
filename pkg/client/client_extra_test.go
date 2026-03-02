@@ -354,7 +354,7 @@ func TestClient_GroupsExtra(t *testing.T) {
 	defer ts.Close()
 
 	// 1. CreateGroup
-	group, err := c.CreateGroup(ctx, "group1")
+	group, err := c.CreateGroup(ctx, "group1", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -567,7 +567,7 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 	}
 
 	// 2. Group access (0040)
-	group, _ := c.CreateGroup(ctx, "g1")
+	group, _ := c.CreateGroup(ctx, "g1", false)
 	lb2 := c.createLockbox(ctx, fileKey, 0640, group.ID)
 	if _, ok := lb2[group.ID]; !ok {
 		t.Errorf("Group %s missing from lockbox", group.ID)
@@ -682,7 +682,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	}
 
 	// 2. Setup Group g1
-	group, err := c1.CreateGroup(ctx, "g1")
+	group, err := c1.CreateGroup(ctx, "g1", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -787,7 +787,7 @@ func TestClient_Groups_SystemAndMembers(t *testing.T) {
 	defer ts.Close()
 
 	// 1. CreateSystemGroup
-	group, err := c.WithAdmin(true).CreateSystemGroup(ctx, "sysgroup")
+	group, err := c.WithAdmin(true).CreateSystemGroup(ctx, "sysgroup", false)
 	if err != nil {
 		t.Fatalf("CreateSystemGroup failed: %v", err)
 	}

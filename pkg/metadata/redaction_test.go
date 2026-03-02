@@ -57,7 +57,7 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 4. Create Group
-	group, err := c.CreateGroup(t.Context(), "test-group")
+	group, err := c.CreateGroup(t.Context(), "test-group", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}

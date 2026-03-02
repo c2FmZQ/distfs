@@ -38,7 +38,7 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 2. Alice creates Group A (Direct Owner)
-	groupA, err := clientAlice.CreateGroup(t.Context(), "group-a")
+	groupA, err := clientAlice.CreateGroup(t.Context(), "group-a", false)
 	if err != nil {
 		t.Fatalf("CreateGroup A failed: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestGroupDiscovery(t *testing.T) {
 	}
 
 	// 4. Alice creates Group B owned by Group A (Alice is Manager)
-	groupB, err := clientAlice.CreateGroup(t.Context(), "group-b")
+	groupB, err := clientAlice.CreateGroup(t.Context(), "group-b", false)
 	if err != nil {
 		t.Fatalf("CreateGroup B failed: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestGroupDiscovery(t *testing.T) {
 
 	// 8. Verify Cryptographic Authorization Transfer (Fix #3)
 	// Bob: Create Group C.
-	groupC, err := clientBob.CreateGroup(t.Context(), "group-c")
+	groupC, err := clientBob.CreateGroup(t.Context(), "group-c", false)
 	if err != nil {
 		t.Fatalf("Bob CreateGroup C failed: %v", err)
 	}

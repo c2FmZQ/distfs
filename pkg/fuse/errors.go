@@ -33,6 +33,15 @@ func mapError(err error) error {
 	if errors.Is(err, metadata.ErrConflict) {
 		return syscall.EAGAIN
 	}
+	if errors.Is(err, metadata.ErrLeaseRequired) {
+		return syscall.EACCES
+	}
+	if errors.Is(err, metadata.ErrStructuralInconsistency) {
+		return syscall.EIO
+	}
+	if errors.Is(err, metadata.ErrAtomicRollback) {
+		return syscall.EAGAIN
+	}
 
 	// 3. Handle Context errors
 	if errors.Is(err, context.Canceled) {

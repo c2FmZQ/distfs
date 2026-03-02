@@ -35,7 +35,7 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 	}
 
 	// 2. Alice creates a group
-	group, err := clientAlice.CreateGroup(t.Context(), "race-test")
+	group, err := clientAlice.CreateGroup(t.Context(), "race-test", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}

@@ -33,7 +33,7 @@ func TestGroupMemberRegistry(t *testing.T) {
 		t.Fatalf("Alice login failed: %v", err)
 	}
 
-	group, err := clientAlice.CreateGroup(t.Context(), "test-registry")
+	group, err := clientAlice.CreateGroup(t.Context(), "test-registry", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}

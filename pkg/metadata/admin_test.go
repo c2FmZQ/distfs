@@ -4,6 +4,7 @@ package metadata_test
 import (
 	"bytes"
 	"crypto/mlkem"
+	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"testing"
@@ -213,8 +214,28 @@ func TestAdminOverrides(t *testing.T) {
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateUser, Data: uBBytes}.Marshal(), 5*time.Second)
 
 	// 3. Create a File owned by Admin
-	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600, NLink: 1}
+	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600, NLink: 1, Version: 1, Lockbox: make(crypto.Lockbox)}
+	// Add Admin to lockbox so they can unlock it for re-sealing
+	fileKey := make([]byte, 32)
+	rand.Read(fileKey)
+	inode.Lockbox.AddRecipient(adminID, dkA.EncapsulationKey(), fileKey)
+
+	// Encrypt ClientBlob (VerifyInode now checks this)
+	blob := metadata.InodeClientBlob{
+		SignerID:          adminID,
+		AuthorizedSigners: []string{adminID},
+	}
+	plainBlob, _ := json.Marshal(blob)
+	encBlob, _ := crypto.EncryptDEM(fileKey, plainBlob)
+	inode.ClientBlob = encBlob
+
+	// IMPORTANT: These must be set so they are included in ManifestHash correctly
+	// AND matches what's in the ClientBlob.
+	inode.SetSignerID(adminID)
+	inode.SetAuthorizedSigners([]string{adminID})
+
 	inode.SignInodeForTest(adminID, skA)
+
 	iBytes, _ := json.Marshal(inode)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
 

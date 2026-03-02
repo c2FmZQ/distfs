@@ -163,8 +163,8 @@ DistFS primarily uses OCC for metadata mutations to achieve high throughput with
 DistFS uses groups for shared access. All encryption is end-to-end; the server never sees group keys.
 
 ### 6.1 Group Operations
-- `(c *Client) CreateGroup(ctx context.Context, name string) (*metadata.Group, error)`
-- `(c *Client) CreateSystemGroup(ctx context.Context, name string) (*metadata.Group, error)` (Admin only)
+- `(c *Client) CreateGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error)`
+- `(c *Client) CreateSystemGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error)` (Admin only)
 - `(c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info string, ci *ContactInfo) error`: Adds a member to a group. 
 - `(c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error`: Removes a member.
 - `(c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEntry, error]`
@@ -211,18 +211,65 @@ Public identity for key exchange.
 
 ---
 
-## 8. Error Mapping
+## 8. Error Handling and Registry
 
-The Client API automatically maps `DISTFS_*` error codes to standard Go `syscall` errors where appropriate:
+DistFS clients report errors through three primary mechanisms: structured `APIError` objects for server-side failures, wrapped `fmt.Errorf` for client-side validation/integrity, and standard `syscall` errors in the FUSE layer.
 
-| DistFS Code | HTTP | Syscall Error |
+### 8.1 Structured Server Errors (`APIError`)
+When the Metadata or Data server returns a non-200 status, the client returns an `*APIError`.
+
+| DistFS Code | HTTP | Description | client.FS / FUSE Mapping |
+| :--- | :--- | :--- | :--- |
+| `DISTFS_NOT_FOUND` | 404 | The requested resource (Inode, User, Group) does not exist. | `syscall.ENOENT` |
+| `DISTFS_EXISTS` | 409 | Resource already exists. | `syscall.EEXIST` |
+| `DISTFS_VERSION_CONFLICT` | 409 | OCC failure. High-level APIs retry automatically; low-level ones return this. | `syscall.EAGAIN` |
+| `DISTFS_LEASE_REQUIRED` | 409 | Operation requires an exclusive lease that was not provided. | `syscall.EACCES` |
+| `DISTFS_QUOTA_EXCEEDED` | 403 | User or Group storage/inode limit reached. | `syscall.EDQUOT` |
+| `DISTFS_QUOTA_DISABLED` | 403 | Attempted to set quota on a group where it is disabled. | `syscall.EACCES` |
+| `DISTFS_UNAUTHORIZED` | 401 | Invalid session token or expired authentication. | `syscall.EACCES` |
+| `DISTFS_FORBIDDEN` | 403 | Authenticated user lacks permission for the resource. | `syscall.EACCES` |
+| `DISTFS_NOT_LEADER` | 503 | Server is not the current leader. Client automatically retries other nodes. | `syscall.EAGAIN` |
+| `DISTFS_STRUCTURAL_INCONSISTENCY`| 409 | Mutation violates filesystem topology. | `syscall.EIO` |
+| `DISTFS_ATOMIC_ROLLBACK` | 500/409 | Atomic batch failure. | `syscall.EIO` |
+
+### 8.2 Client-Side Integrity and Security Errors
+These errors are generated locally by the client during verification of server responses. They typically indicate serious security or consistency issues.
+
+| Error Message Pattern | Description | Impact |
 | :--- | :--- | :--- |
-| `DISTFS_NOT_FOUND` | 404 | `syscall.ENOENT` |
-| `DISTFS_EXISTS` | 409 | `syscall.EEXIST` |
-| `DISTFS_FORBIDDEN` | 403 | `syscall.EACCES` |
-| `DISTFS_UNAUTHORIZED` | 401 | `syscall.EACCES` |
-| `DISTFS_QUOTA_EXCEEDED` | 403 | `syscall.EDQUOT` |
-| `DISTFS_VERSION_CONFLICT`| 409 | `syscall.EAGAIN` (if retry limit exceeded) |
+| `ROOT COMPROMISE DETECTED` | The root Inode's owner does not match the client's configured `RootAnchor`. | **CRITICAL**: Potential server takeover or malicious node. |
+| `ROOT ROLLBACK DETECTED` | The root Inode's version is older than the last known version in `RootAnchor`. | **CRITICAL**: Replay attack or server state rollback. |
+| `integrity check failed` | The cryptographic signature on an Inode or Group does not match its contents. | **CRITICAL**: Malicious metadata tampering detected. |
+| `invalid manifest signature` | The Inode manifest signature was not created by an authorized signer. | **HIGH**: Unauthorized metadata update. |
+| `access denied: no applicable recipient in lockbox` | The client possesses a valid identity but is not listed as a recipient for the file/group key. | **MEDIUM**: Normal ACL enforcement failure. |
+
+### 8.3 Path and Logic Errors
+Standard errors returned during normal path resolution or filesystem operations.
+
+| Error Message | Description | FUSE Mapping |
+| :--- | :--- | :--- |
+| `path component %s not found` | Part of the path does not exist. | `syscall.ENOENT` |
+| `path component %s is not a directory` | Attempted to resolve through a file/symlink as if it were a directory. | `syscall.ENOTDIR` |
+| `is a directory` | Attempted to read data from a directory inode. | `syscall.EISDIR` |
+| `not a directory` | Attempted to list entries of a file inode. | `syscall.ENOTDIR` |
+| `directory not empty` | Attempted to `Remove` a non-empty directory. | `syscall.ENOTEMPTY` |
+| `client identity not fully configured` | Mutation attempted before `WithIdentity` or `WithSignKey` was called. | `syscall.EACCES` |
+
+### 8.4 FUSE Mapping (`pkg/fuse`)
+The `fuse` package uses a `mapError` helper to ensure the OS kernel receives appropriate POSIX error codes. If an internal error does not match any specific mapping, it defaults to `syscall.EIO`.
+
+- **Context Cancellations:** `context.Canceled` -> `syscall.EINTR`, `context.DeadlineExceeded` -> `syscall.ETIMEDOUT`.
+- **String Matching:** For non-structured errors, FUSE performs case-insensitive substring matching for "directory not empty", "not a directory", "access denied", etc.
+
+### 8.5 Data Layer and Cryptographic Errors
+Errors occurring during chunk retrieval or cryptographic primitive execution.
+
+| Error Message Pattern | Description | Impact |
+| :--- | :--- | :--- |
+| `failed to download chunk %s` | The client could not retrieve an encrypted chunk from any of the allocated storage nodes. | **HIGH**: Data unavailability. Possible network partition or node failure. |
+| `decapsulate failed` | ML-KEM-768 decapsulation of a File or Group key failed. | **HIGH**: Likely invalid ciphertext or corrupted local private key. |
+| `decrypt failed` | AES-GCM decryption of a data chunk or `client_blob` failed. | **HIGH**: Data corruption or incorrect/stale symmetric key. |
+| `integrity check failed` | Post-download hash or signature verification failed for a chunk. | **CRITICAL**: In-transit data tampering detected. |
 
 ---
 

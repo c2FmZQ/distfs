@@ -71,7 +71,7 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 ### 2.4 Groups & Permissions
 | Method | Path | Auth | Description |
 | :--- | :--- | :--- | :--- |
-| `POST` | `/v1/group/` | Session + E2EE | Create a new security group. |
+| `POST` | `/v1/group/` | Session + E2EE | Create a new security group. Payload: `{"id": "name", "quota_enabled": bool}`. |
 | `GET` | `/v1/group/{id}` | Session | Fetch group metadata and members. |
 | `PUT` | `/v1/group/{id}` | Session + E2EE | Update group (Owner/Admin only). |
 | `GET` | `/v1/group/{id}/private` | Session + E2EE | Get Group Key (Encapsulated for member). |
@@ -146,7 +146,8 @@ Clients MUST use this schema inside the encrypted `client_blob`:
   "lockbox": {"recipient_id": {"kem": "base64", "dem": "base64"}},
   "version": 1,
   "signer_id": "user_id",
-  "signature": "base64_sig"
+  "signature": "base64_sig",
+  "quota_enabled": true
 }
 ```
 
@@ -213,16 +214,22 @@ To hide filenames from the server, all map keys in `children` and `links` are HM
 
 ## 7. Error Code Registry
 
-| Code | HTTP | Description |
-| :--- | :--- | :--- |
-| `DISTFS_NOT_FOUND` | 404 | Resource does not exist. |
-| `DISTFS_EXISTS` | 409 | Resource already exists. |
-| `DISTFS_VERSION_CONFLICT` | 409 | Version mismatch (Optimistic concurrency). |
-| `DISTFS_LEASE_REQUIRED` | 409 | Mutation attempted without Exclusive lease. |
-| `DISTFS_QUOTA_EXCEEDED` | 403 | Storage or Inode limit reached. |
-| `DISTFS_UNAUTHORIZED` | 401 | Invalid session, signature, or token. |
-| `DISTFS_FORBIDDEN` | 403 | Insufficient permissions (ACL). |
-| `DISTFS_NOT_LEADER` | 503 | Node is not the Raft leader. |
+The DistFS API maps FSM sentinel errors to structured JSON HTTP responses (`APIErrorResponse`). The following table defines the authoritative conditions under which each error MUST be triggered.
+
+| Code | HTTP | FSM Sentinel | Intended Trigger Condition |
+| :--- | :--- | :--- | :--- |
+| `DISTFS_NOT_FOUND` | 404 | `ErrNotFound` | The requested Inode, User, or Group ID does not exist in the BoltDB state. |
+| `DISTFS_EXISTS` | 409 | `ErrExists` | Attempting to create an Inode, User, or Group ID that already exists. |
+| `DISTFS_VERSION_CONFLICT` | 409 | `ErrConflict` | Optimistic concurrency failure: the `Version` field in an update command does not strictly equal the current `Version` in the BoltDB state + 1. |
+| `DISTFS_LEASE_REQUIRED` | 409 | `ErrLeaseRequired` | A mutation (update/delete) was attempted on an Inode, but the request's `sessionID` does not hold a valid, unexpired `LeaseExclusive` for that Inode. |
+| `DISTFS_QUOTA_EXCEEDED` | 403 | `ErrQuotaExceeded` | The operation would cause the debtor's (User or Group) `Usage` to strictly exceed their `Quota`. Note: Groups with `quota_enabled: true` are always the debtors for their files. |
+| `DISTFS_QUOTA_DISABLED` | 403 | `ErrQuotaDisabled` | Attempted to set a quota on a group that was created with `quota_enabled: false`. |
+| `DISTFS_UNAUTHORIZED` | 401 | (Auth Middleware) | The client failed to provide a valid signature, a valid session JWT, or the OIDC token is invalid/expired. |
+| `DISTFS_FORBIDDEN` | 403 | (ACL Checks) | The authenticated user is not the owner of the Inode/Group, is not an Admin, or is attempting a restricted action (e.g. promoting an admin). |
+| `DISTFS_NOT_LEADER` | 503 | `raft.ErrNotLeader` | The HTTP request was routed to a node that is not the current Raft leader. Clients MUST retry against a different node. |
+| `DISTFS_STRUCTURAL_INCONSISTENCY` | 409 | `ErrStructuralInconsistency` | An atomic batch mutation would result in a corrupted filesystem graph. Examples: a parent directory claims a child, but the child does not have a reciprocal `links` entry; an Inode is deleted but still has an active lease. |
+| `DISTFS_ATOMIC_ROLLBACK` | 500 / 409 | `ErrAtomicRollback` | An explicitly marked atomic `CmdBatch` encountered a failure in one of its sub-commands (e.g., a version conflict). The FSM MUST trigger a BoltDB `tx.Rollback()` and return this error wrapping the original sub-command failure. |
+| `DISTFS_INTERNAL_ERROR` | 500 | (Various) | Unexpected errors, panics, cryptographic seal verification failures, or disk I/O errors. |
 
 ---
 

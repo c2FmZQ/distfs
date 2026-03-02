@@ -147,7 +147,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				{Type: CmdUpdateInode, Data: pData, SessionID: "session1", LeaseBindings: map[string]string{nameHMAC: pathID}},
 			}
 
-			results := fsm.executeBatchCommands(tx, cmds, 0)
+			results := fsm.executeBatchCommands(tx, cmds, 0, true)
 			if fsm.containsError(results) {
 				return fmt.Errorf("batch failed: %v", results)
 			}
@@ -186,7 +186,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				{Type: CmdUpdateInode, Data: pData, SessionID: "session1", LeaseBindings: map[string]string{nameHMAC: pathID}},
 			}
 
-			results := fsm.executeBatchCommands(tx, cmds, 0)
+			results := fsm.executeBatchCommands(tx, cmds, 0, true)
 			if fsm.containsError(results) {
 				return fmt.Errorf("batch failed: %v", results)
 			}

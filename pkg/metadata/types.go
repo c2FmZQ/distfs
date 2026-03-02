@@ -35,15 +35,18 @@ type APIErrorResponse struct {
 }
 
 const (
-	ErrCodeNotFound        = "DISTFS_NOT_FOUND"
-	ErrCodeExists          = "DISTFS_EXISTS"
-	ErrCodeVersionConflict = "DISTFS_VERSION_CONFLICT"
-	ErrCodeLeaseRequired   = "DISTFS_LEASE_REQUIRED"
-	ErrCodeQuotaExceeded   = "DISTFS_QUOTA_EXCEEDED"
-	ErrCodeUnauthorized    = "DISTFS_UNAUTHORIZED"
-	ErrCodeForbidden       = "DISTFS_FORBIDDEN"
-	ErrCodeNotLeader       = "DISTFS_NOT_LEADER"
-	ErrCodeInternal        = "DISTFS_INTERNAL_ERROR"
+	ErrCodeNotFound                = "DISTFS_NOT_FOUND"
+	ErrCodeExists                  = "DISTFS_EXISTS"
+	ErrCodeVersionConflict         = "DISTFS_VERSION_CONFLICT"
+	ErrCodeLeaseRequired           = "DISTFS_LEASE_REQUIRED"
+	ErrCodeQuotaExceeded           = "DISTFS_QUOTA_EXCEEDED"
+	ErrCodeUnauthorized            = "DISTFS_UNAUTHORIZED"
+	ErrCodeForbidden               = "DISTFS_FORBIDDEN"
+	ErrCodeNotLeader               = "DISTFS_NOT_LEADER"
+	ErrCodeInternal                = "DISTFS_INTERNAL_ERROR"
+	ErrCodeAtomicRollback          = "DISTFS_ATOMIC_ROLLBACK"
+	ErrCodeStructuralInconsistency = "DISTFS_STRUCTURAL_INCONSISTENCY"
+	ErrCodeQuotaDisabled           = "DISTFS_QUOTA_DISABLED"
 )
 
 // OIDCConfig represents the subset of OpenID Connect configuration needed by clients.
@@ -168,6 +171,7 @@ type Group struct {
 	IsSystem          bool            `json:"is_system"` // Only settable by Admin
 	SignerID          string          `json:"signer_id,omitempty"`
 	Signature         []byte          `json:"signature,omitempty"`
+	QuotaEnabled      bool            `json:"quota_enabled"` // Immutable, decided at creation
 
 	// Client-side transient state
 	name string
@@ -185,19 +189,26 @@ const (
 )
 
 type GroupListEntry struct {
-	ID         string         `json:"id"`
-	OwnerID    string         `json:"owner_id"`
-	Role       GroupRole      `json:"role"`
-	EncKey     []byte         `json:"enc_key"` // Group Public Key
-	Lockbox    crypto.Lockbox `json:"lockbox"` // For name decryption
-	IsSystem   bool           `json:"is_system"`
-	ClientBlob []byte         `json:"client_blob,omitempty"`
-	Usage      UserUsage      `json:"usage"`
-	Quota      UserQuota      `json:"quota"`
+	ID           string         `json:"id"`
+	OwnerID      string         `json:"owner_id"`
+	Role         GroupRole      `json:"role"`
+	EncKey       []byte         `json:"enc_key"` // Group Public Key
+	Lockbox      crypto.Lockbox `json:"lockbox"` // For name decryption
+	IsSystem     bool           `json:"is_system"`
+	ClientBlob   []byte         `json:"client_blob,omitempty"`
+	Usage        UserUsage      `json:"usage"`
+	Quota        UserQuota      `json:"quota"`
+	QuotaEnabled bool           `json:"quota_enabled"`
 }
 
 type GroupListResponse struct {
 	Groups []GroupListEntry `json:"groups"`
+}
+
+// CreateGroupRequest is the payload for group creation.
+type CreateGroupRequest struct {
+	ID           string `json:"id"`
+	QuotaEnabled bool   `json:"quota_enabled"`
 }
 
 // Hash calculates a cryptographic hash of the group metadata for signing.
@@ -294,6 +305,14 @@ func (g *Group) Hash() []byte {
 	h.Write([]byte("enc_registry:"))
 	h.Write(g.EncryptedRegistry)
 	h.Write([]byte("|"))
+
+	// Include QuotaEnabled in hash (Phase 43)
+	h.Write([]byte("quota_enabled:"))
+	if g.QuotaEnabled {
+		h.Write([]byte("1|"))
+	} else {
+		h.Write([]byte("0|"))
+	}
 
 	return h.Sum(nil)
 }
@@ -459,6 +478,15 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(t)
 	h.Write([]byte("|"))
 
+	h.Write([]byte("signer:" + i.signerID + "|"))
+	if len(i.authorizedSigners) > 0 {
+		h.Write([]byte("auth_signers:"))
+		for _, s := range i.authorizedSigners {
+			h.Write([]byte(s + ","))
+		}
+		h.Write([]byte("|"))
+	}
+
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
 		h.Write([]byte("links:"))
@@ -536,18 +564,20 @@ func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
 		i.authorizedSigners = []string{i.OwnerID}
 	}
 
-	// For tests, we simulate the ClientBlob so ManifestHash is consistent
-	blob := InodeClientBlob{
-		Name:              i.name,
-		SymlinkTarget:     i.symlinkTarget,
-		InlineData:        i.inlineData,
-		MTime:             i.mtime,
-		UID:               i.uid,
-		GID:               i.gid,
-		SignerID:          i.signerID,
-		AuthorizedSigners: i.authorizedSigners,
+	if len(i.ClientBlob) == 0 {
+		// For tests, we simulate the ClientBlob so ManifestHash is consistent
+		blob := InodeClientBlob{
+			Name:              i.name,
+			SymlinkTarget:     i.symlinkTarget,
+			InlineData:        i.inlineData,
+			MTime:             i.mtime,
+			UID:               i.uid,
+			GID:               i.gid,
+			SignerID:          i.signerID,
+			AuthorizedSigners: i.authorizedSigners,
+		}
+		i.ClientBlob, _ = json.Marshal(blob)
 	}
-	i.ClientBlob, _ = json.Marshal(blob)
 
 	hash := i.ManifestHash()
 	i.UserSig = key.Sign(hash)
@@ -671,4 +701,16 @@ type SetAttrRequest struct {
 	GroupID *string `json:"group_id,omitempty"`
 	Size    *uint64 `json:"size,omitempty"`
 	MTime   *int64  `json:"mtime,omitempty"`
+}
+
+type SetUserQuotaRequest struct {
+	UserID    string  `json:"user_id"`
+	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
+	MaxInodes *uint64 `json:"max_inodes,omitempty"`
+}
+
+type SetGroupQuotaRequest struct {
+	GroupID   string  `json:"group_id"`
+	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
+	MaxInodes *uint64 `json:"max_inodes,omitempty"`
 }

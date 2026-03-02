@@ -242,14 +242,12 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** [Done] Implement `GET /v1/user/groups` endpoint in `MetadataServer` to return groups associated with the authenticated user.
     *   **Action:** [Done] Implement role resolution logic (Owner, Manager, Member) on the server.
     *   **Action:** [Done] Add `distfs group-list` command to CLI with local decryption of group names.
-*   **Step 13.8: Group Resource Quotas [COMPLETED]**
-    *   **Action:** [Done] Add `Usage` and `Quota` fields to `Group` struct in `pkg/metadata/types.go`.
-    *   **Action:** [Done] Refactor `checkQuota` and `updateUsage` in `pkg/metadata/fsm.go` to support the group-first enforcement hierarchy.
-    *   **Action:** [Done] Address Critical Review findings: Fix partial quota bypass, `updateUsage` double-attribution, and `executeAdminChown` double-counting.
-    *   **Action:** [Done] Implement `CmdSetGroupQuota` Raft command and corresponding server handler.
-    *   **Action:** [Done] Add `admin-group-quota` command to Admin CLI for managing group limits.
-    *   **Action:** [Done] Add `distfs quota` command to CLI.
-    *   **Action:** [Done] Add E2E test verifying group quota enforcement and user fallback behavior.
+*   **Step 13.8: Group Resource Quotas [REFACTORED]**
+    *   **Action:** [Done] Add `Usage`, `Quota`, and `QuotaEnabled` fields to `Group` struct.
+    *   **Action:** [Done] Implement "Static Quota Mode": groups with `QuotaEnabled: true` are charged exclusively; others fall back to the owner.
+    *   **Action:** [Done] Remove complex dynamic migration logic in favor of immutable creation-time accounting mode.
+    *   **Action:** [Done] Implement `CmdSetGroupQuota` and restrict it to quota-enabled groups.
+    *   **Action:** [Done] Update CLI and E2E tests to align with the new mode-based enforcement.
 
 ---
 
