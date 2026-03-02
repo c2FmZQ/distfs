@@ -31,7 +31,9 @@ import (
 	"iter"
 	"log"
 	mrand "math/rand"
+	"net"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -4206,15 +4208,37 @@ func (c *Client) isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	// Network errors
-	if strings.Contains(msg, "timeout") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "connection reset") ||
-		strings.Contains(msg, "eof") {
+
+	// 1. Check for specific wrapped types
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+	}
+
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true // Always retry DNS errors during cluster join/discovery
+	}
+
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		// urlErr.Err contains the underlying network error
+		return c.isRetryable(urlErr.Err)
+	}
+
+	// 2. Check for specific syscall errors
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.ETIMEDOUT) ||
+		errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
 	}
-	// API errors
+
+	// 3. API errors
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		if apiErr.StatusCode == http.StatusServiceUnavailable ||
@@ -4224,6 +4248,7 @@ func (c *Client) isRetryable(err error) bool {
 			return true
 		}
 	}
+
 	return false
 }
 

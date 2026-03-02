@@ -2686,17 +2686,29 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	infoURL := strings.TrimSuffix(req.Address, "/") + "/v1/node/info"
-	discoveryReq, err := http.NewRequest("GET", infoURL, nil)
-	if err != nil {
-		s.writeError(w, r, ErrCodeInternal, "invalid address", http.StatusBadRequest)
-		return
-	}
-	discoveryReq.Header.Set(raftNonceHeader, hex.EncodeToString(nonce))
-	discoveryReq.Header.Set(raftSignatureHeader, s.signNonce(nonce, "LEADER_PROBE"))
+	var resp *http.Response
+	var lastDiscoveryErr error
 
-	resp, err := s.discoveryHTTPClient.Do(discoveryReq)
-	if err != nil {
-		s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("discovery failed: %v", err), http.StatusInternalServerError)
+	for i := 0; i < 10; i++ {
+		discoveryReq, err := http.NewRequest("GET", infoURL, nil)
+		if err != nil {
+			s.writeError(w, r, ErrCodeInternal, "invalid address", http.StatusBadRequest)
+			return
+		}
+		discoveryReq.Header.Set(raftNonceHeader, hex.EncodeToString(nonce))
+		discoveryReq.Header.Set(raftSignatureHeader, s.signNonce(nonce, "LEADER_PROBE"))
+
+		resp, err = s.discoveryHTTPClient.Do(discoveryReq)
+		if err == nil {
+			break
+		}
+		lastDiscoveryErr = err
+		log.Printf("DEBUG: Discovery of %s failed (attempt %d): %v", req.Address, i+1, err)
+		time.Sleep(1 * time.Second)
+	}
+
+	if resp == nil {
+		s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("discovery failed after retries: %v", lastDiscoveryErr), http.StatusInternalServerError)
 		return
 	}
 	defer resp.Body.Close()
@@ -2795,23 +2807,36 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 
 		// Direct push to the joining node's internal address
 		bootstrapURL := strings.TrimSuffix(req.Address, "/") + "/v1/system/bootstrap"
-		pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
-		if err != nil {
-			log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
-			return err
-		}
-		pushReq.Header.Set("Content-Type", "application/octet-stream")
+		var pushResp *http.Response
+		var lastPushErr error
 
-		pushResp, err := s.httpClient.Do(pushReq)
-		if err != nil {
-			log.Printf("ERROR: Failed to push ClusterSecret to %s: %v", req.Address, err)
-			return err
+		for i := 0; i < 10; i++ {
+			pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
+			if err != nil {
+				log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
+				return err
+			}
+			pushReq.Header.Set("Content-Type", "application/octet-stream")
+
+			pushResp, err = s.httpClient.Do(pushReq)
+			if err == nil && pushResp.StatusCode == http.StatusOK {
+				break
+			}
+			if err != nil {
+				lastPushErr = err
+			} else {
+				lastPushErr = fmt.Errorf("status %d", pushResp.StatusCode)
+				pushResp.Body.Close()
+			}
+			log.Printf("DEBUG: Push to %s failed (attempt %d): %v", req.Address, i+1, lastPushErr)
+			time.Sleep(1 * time.Second)
+		}
+
+		if pushResp == nil || pushResp.StatusCode != http.StatusOK {
+			log.Printf("ERROR: Node %s rejected ClusterSecret push: %v", req.Address, lastPushErr)
+			return fmt.Errorf("node rejected cluster secret push: %v", lastPushErr)
 		}
 		defer pushResp.Body.Close()
-		if pushResp.StatusCode != http.StatusOK {
-			log.Printf("ERROR: Node %s rejected ClusterSecret push: status %d", req.Address, pushResp.StatusCode)
-			return fmt.Errorf("node rejected cluster secret push: %d", pushResp.StatusCode)
-		}
 		log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", req.Address)
 
 		return map[string]string{"status": "ok"}
