@@ -220,7 +220,7 @@ func (fsm *MetadataFSM) systemKey() []byte {
 	fsm.mu.RLock()
 	defer fsm.mu.RUnlock()
 	if len(fsm.clusterSecret) == 0 {
-		// Return a distinct marker or panic? 
+		// Return a distinct marker or panic?
 		// If we use an empty key, it corrupts. If we panic, it crashes.
 		// Crashing is better than silent corruption during Raft apply.
 		panic("FSM: clusterSecret is uninitialized; cannot generate systemKey")

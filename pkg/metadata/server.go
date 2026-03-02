@@ -2689,7 +2689,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var lastDiscoveryErr error
 
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 30; i++ {
 		discoveryReq, err := http.NewRequest("GET", infoURL, nil)
 		if err != nil {
 			s.writeError(w, r, ErrCodeInternal, "invalid address", http.StatusBadRequest)
@@ -2810,7 +2810,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		var pushResp *http.Response
 		var lastPushErr error
 
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 30; i++ {
 			pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
 			if err != nil {
 				log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
