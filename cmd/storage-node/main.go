@@ -20,6 +20,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net"
@@ -50,7 +51,7 @@ func loadOrGenerateClusterSecret(st *storage.Storage, bootstrap bool) ([]byte, e
 		// Non-bootstrap nodes must receive the secret from the leader during join.
 		// We'll return nil for now and let the join process handle it.
 		// WARNING: This allows the FSM to start with a nil secret. Any system writes
-		// before a restart (e.g. FSM key rotation) will corrupt the local database. 
+		// before a restart (e.g. FSM key rotation) will corrupt the local database.
 		return nil, nil
 	}
 
@@ -274,6 +275,23 @@ func main() {
 						log.Fatalf("failed to register bootstrap node: %v", err)
 					}
 
+					// 3. Initialize Active Epoch Key
+					if _, err := rn.FSM.GetActiveKey(); err != nil {
+						log.Println("Initializing Active Epoch Key...")
+						key, err := crypto.GenerateEncryptionKey()
+						if err == nil {
+							clusterKey := metadata.ClusterKey{
+								ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+								EncKey:    key.EncapsulationKey().Bytes(),
+								DecKey:    key.Bytes(),
+								CreatedAt: time.Now().Unix(),
+							}
+							data, _ := json.Marshal(clusterKey)
+							cmd := metadata.LogCommand{Type: metadata.CmdRotateKey, Data: data}
+							rn.Raft.Apply(cmd.Marshal(), 5*time.Second)
+						}
+					}
+
 					break AnchorInitLoop
 				}
 			}
@@ -338,7 +356,9 @@ func main() {
 	clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
 	clusterMux.Handle("/v1/auth/", metaServer)
 	clusterMux.Handle("/v1/login", metaServer)
-	clusterMux.Handle("/v1/system/bootstrap", metaServer)
+	if len(clusterSecret) == 0 {
+		clusterMux.Handle("/v1/system/bootstrap", metaServer)
+	}
 	clusterMux.Handle("/api/debug/", metaServer)
 
 	// 7. Registration & Heartbeat
@@ -349,7 +369,7 @@ func main() {
 			ClusterAddress: *clusterAdvertise,
 			RaftAddress:    *raftAdvertise, // Raft address
 			Status:         metadata.NodeStatusActive,
-			PublicKey:      decKey.EncapsulationKey().Bytes(),
+			PublicKey:      raftKey.Public(),
 			SignKey:        signKey.Public(),
 		}
 

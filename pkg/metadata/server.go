@@ -59,6 +59,7 @@ type Raft interface {
 	VerifyLeader() raft.Future
 	RemoveServer(id raft.ServerID, prevIndex uint64, timeout time.Duration) raft.IndexFuture
 	AddVoter(id raft.ServerID, address raft.ServerAddress, prevIndex uint64, timeout time.Duration) raft.IndexFuture
+	GetConfiguration() raft.ConfigurationFuture
 }
 
 // Server is the HTTP server for the Metadata Node.
@@ -2761,14 +2762,93 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 2. Add to Raft
+	// 2. Check if already in cluster
+	cfg := s.raft.GetConfiguration()
+	if err := cfg.Error(); err == nil {
+		for _, srv := range cfg.Configuration().Servers {
+			if srv.ID == raft.ServerID(info.ID) {
+				s.writeError(w, r, ErrCodeForbidden, "node already registered in cluster", http.StatusBadRequest)
+				return
+			}
+		}
+	}
+
+	// 3. Push ClusterSecret to the new node via internal mTLS FIRST
+	secret, err := s.fsm.GetClusterSecret()
+	if err != nil {
+		log.Printf("ERROR: ClusterSecret not available for push: %v", err)
+		s.writeError(w, r, ErrCodeInternal, "ClusterSecret not available", http.StatusInternalServerError)
+		return
+	}
+
+	probedKEM, err := crypto.UnmarshalEncapsulationKey(info.PublicKey)
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "invalid public key", http.StatusBadRequest)
+		return
+	}
+
+	encSecret, err := crypto.SealRequest(probedKEM, s.signKey, secret)
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to seal secret", http.StatusInternalServerError)
+		return
+	}
+
+	bootstrapURL := strings.TrimSuffix(req.Address, "/") + "/v1/system/bootstrap"
+	var pushResp *http.Response
+	var lastPushErr error
+	alreadyBootstrapped := false
+
+	for i := 0; i < 30; i++ {
+		pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
+		if err != nil {
+			log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
+			s.writeError(w, r, ErrCodeInternal, "failed to create push request", http.StatusInternalServerError)
+			return
+		}
+		pushReq.Header.Set("Content-Type", "application/octet-stream")
+
+		pushResp, err = s.httpClient.Do(pushReq)
+		if err == nil {
+			if pushResp.StatusCode == http.StatusOK {
+				break
+			}
+			if pushResp.StatusCode == http.StatusForbidden || pushResp.StatusCode == http.StatusNotFound {
+				alreadyBootstrapped = true
+				break
+			}
+			lastPushErr = fmt.Errorf("status %d", pushResp.StatusCode)
+			pushResp.Body.Close()
+		} else {
+			lastPushErr = err
+		}
+		log.Printf("DEBUG: Push to %s failed (attempt %d): %v", req.Address, i+1, lastPushErr)
+		time.Sleep(1 * time.Second)
+	}
+
+	if pushResp != nil {
+		pushResp.Body.Close()
+	}
+
+	if err != nil || (pushResp != nil && pushResp.StatusCode != http.StatusOK && !alreadyBootstrapped) {
+		log.Printf("ERROR: Node %s rejected ClusterSecret push: %v", req.Address, lastPushErr)
+		s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("node rejected cluster secret push: %v", lastPushErr), http.StatusInternalServerError)
+		return
+	}
+
+	if alreadyBootstrapped {
+		log.Printf("SUCCESS: Node %s already has ClusterSecret", req.Address)
+	} else {
+		log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", req.Address)
+	}
+
+	// 4. Add to Raft
 	f := s.raft.AddVoter(raft.ServerID(info.ID), raft.ServerAddress(info.RaftAddress), 0, 0)
 	if err := f.Error(); err != nil {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// 3. Register/Update Node metadata in FSM
+	// 5. Register/Update Node metadata in FSM
 	var node Node
 	s.fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := s.fsm.Get(tx, []byte("nodes"), []byte(info.ID))
@@ -2788,57 +2868,6 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	node.RaftAddress = info.RaftAddress
 	data, _ := json.Marshal(node)
 	s.ApplyRaftCommandWithHook(w, r, CmdRegisterNode, data, http.StatusOK, func(resp interface{}) interface{} {
-		// 4. Push ClusterSecret to the new node via internal mTLS
-		secret, err := s.fsm.GetClusterSecret()
-		if err != nil {
-			log.Printf("ERROR: ClusterSecret not available for push: %v", err)
-			return err
-		}
-
-		probedKEM, err := crypto.UnmarshalEncapsulationKey(info.PublicKey)
-		if err != nil {
-			return err
-		}
-
-		encSecret, err := crypto.SealRequest(probedKEM, s.signKey, secret)
-		if err != nil {
-			return err
-		}
-
-		// Direct push to the joining node's internal address
-		bootstrapURL := strings.TrimSuffix(req.Address, "/") + "/v1/system/bootstrap"
-		var pushResp *http.Response
-		var lastPushErr error
-
-		for i := 0; i < 30; i++ {
-			pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
-			if err != nil {
-				log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
-				return err
-			}
-			pushReq.Header.Set("Content-Type", "application/octet-stream")
-
-			pushResp, err = s.httpClient.Do(pushReq)
-			if err == nil && pushResp.StatusCode == http.StatusOK {
-				break
-			}
-			if err != nil {
-				lastPushErr = err
-			} else {
-				lastPushErr = fmt.Errorf("status %d", pushResp.StatusCode)
-				pushResp.Body.Close()
-			}
-			log.Printf("DEBUG: Push to %s failed (attempt %d): %v", req.Address, i+1, lastPushErr)
-			time.Sleep(1 * time.Second)
-		}
-
-		if pushResp == nil || pushResp.StatusCode != http.StatusOK {
-			log.Printf("ERROR: Node %s rejected ClusterSecret push: %v", req.Address, lastPushErr)
-			return fmt.Errorf("node rejected cluster secret push: %v", lastPushErr)
-		}
-		defer pushResp.Body.Close()
-		log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", req.Address)
-
 		return map[string]string{"status": "ok"}
 	})
 }

@@ -106,9 +106,17 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		return fmt.Errorf("failed to fetch server key: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to fetch server key: status %d: %s", resp.StatusCode, string(b))
+	}
 	sKey, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return fmt.Errorf("failed to read server key: %w", err)
+	}
+	svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
+	if err != nil {
+		return fmt.Errorf("failed to unmarshal server key: %w", err)
 	}
 
 	if opts.IsNew {
@@ -150,10 +158,6 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		}
 
 		c := NewClient(opts.ServerURL)
-		svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal server key: %w", err)
-		}
 		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 
 		// Ensure root exists and capture anchor
