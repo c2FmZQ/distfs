@@ -306,6 +306,7 @@ func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte)
 	})
 }
 
+// GetFSMKeyRing serializes the current FSM keyring for bootstrap push.
 func (fsm *MetadataFSM) GetFSMKeyRing() []byte {
 	fsm.mu.RLock()
 	defer fsm.mu.RUnlock()
@@ -315,6 +316,7 @@ func (fsm *MetadataFSM) GetFSMKeyRing() []byte {
 	return fsm.keyRing.Marshal()
 }
 
+// InitializeFSMKeyRing sets the initial keyring during bootstrap.
 func (fsm *MetadataFSM) InitializeFSMKeyRing(krData []byte) error {
 	kr, err := crypto.UnmarshalKeyRing(krData)
 	if err != nil {
@@ -367,6 +369,7 @@ func extractErrorString(res interface{}) string {
 	return ""
 }
 
+// Apply applies a Raft log entry to the state machine.
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var cmd LogCommand
 	if err := json.Unmarshal(l.Data, &cmd); err != nil {
@@ -948,6 +951,7 @@ func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{
 	return fsm.Put(tx, []byte("admins"), []byte(userID), []byte("true"))
 }
 
+// IsAdmin returns true if the given user has administrative privileges.
 func (s *Server) IsAdmin(userID string) bool {
 	return s.fsm.IsAdmin(userID)
 }
@@ -1449,6 +1453,7 @@ func (fsm *MetadataFSM) IsTrusted(pubKey []byte) bool {
 	return fsm.trusted[hex.EncodeToString(pubKey)]
 }
 
+// GetActiveKey returns the current active cluster encryption key.
 func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	var key ClusterKey
 	err := fsm.db.View(func(tx *bolt.Tx) error {
@@ -1990,6 +1995,7 @@ func (fsm *MetadataFSM) InspectBucket(bucketName string, fn func(k, v []byte) er
 	})
 }
 
+// Snapshot returns a point-in-time snapshot of the FSM.
 func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	if fsm.OnSnapshot != nil {
 		fsm.OnSnapshot()
@@ -1997,6 +2003,7 @@ func (fsm *MetadataFSM) Snapshot() (raft.FSMSnapshot, error) {
 	return &MetadataSnapshot{db: fsm.db, keyRing: fsm.keyRing}, nil
 }
 
+// Restore restores the FSM state from a snapshot reader.
 func (fsm *MetadataFSM) Restore(rc io.ReadCloser) error {
 	defer rc.Close()
 	lBuf := make([]byte, 4)

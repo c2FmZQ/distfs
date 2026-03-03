@@ -645,7 +645,7 @@ func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 	return nil
 }
 
-// FileHandle manages the state of an open file, including buffering writes to a temporary file.
+// FileHandle manages the state of an open file, including buffering writes.
 type FileHandle struct {
 	file            *File
 	reader          *client.FileReader

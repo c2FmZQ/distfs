@@ -48,6 +48,7 @@ type contextKey string
 
 const adminBypassContextKey contextKey = "admin-bypass"
 
+// GetServerSignKey fetches the cluster's public signing key (ML-DSA).
 func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	c.keyMu.RLock()
 	sk := c.serverSignPK
@@ -81,6 +82,7 @@ func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	return b, nil
 }
 
+// GetServerKey fetches the cluster's current world public encryption key (ML-KEM).
 func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, error) {
 	c.keyMu.RLock()
 	sk := c.serverKey
@@ -346,6 +348,7 @@ func (c *Client) WithAdmin(admin bool) *Client {
 	return &c2
 }
 
+// WithLeaseExpiredCallback returns a new client with the specified lease expiration callback.
 func (c *Client) WithLeaseExpiredCallback(fn func(id string, err error)) *Client {
 	c2 := *c
 	c2.onLeaseExpired = fn
@@ -1291,6 +1294,7 @@ func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
 	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: data}, nil
 }
 
+// DeleteInode deletes an inode by ID. It performs an atomic update setting NLink to 0.
 func (c *Client) DeleteInode(ctx context.Context, id string) error {
 	_, err := c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
 		i.NLink = 0
@@ -1658,6 +1662,7 @@ type readAheadResult struct {
 	ready chan struct{}
 }
 
+// FileReader provides streaming read access to a file's chunks with background prefetching.
 type FileReader struct {
 	client          *Client
 	inode           *metadata.Inode
@@ -2171,6 +2176,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	return w, nil
 }
 
+// FileWriter provides buffered write access to a file, performing an atomic swap on Close.
 type FileWriter struct {
 	client     *Client
 	ctx        context.Context
@@ -2443,6 +2449,7 @@ func (w *FileWriter) leaseRenewalLoop(id string, lType metadata.LeaseType) {
 	}
 }
 
+// FetchChunk retrieves and decrypts a specific chunk of a file by index.
 func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx int64) ([]byte, error) {
 	inode, err := c.GetInode(ctx, id)
 	if err != nil {
@@ -2471,6 +2478,7 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 	return crypto.DecryptChunk(key, ct)
 }
 
+// DownloadChunkData downloads and decrypts a single chunk from a set of node URLs.
 func (c *Client) DownloadChunkData(ctx context.Context, inodeID string, chunkID string, urls []string, key []byte) ([]byte, error) {
 	token, err := c.issueToken(ctx, inodeID, []string{chunkID}, "R")
 	if err != nil {
@@ -2483,6 +2491,7 @@ func (c *Client) DownloadChunkData(ctx context.Context, inodeID string, chunkID 
 	return crypto.DecryptChunk(key, enc)
 }
 
+// UploadChunkData encrypts and uploads a single chunk to the cluster.
 func (c *Client) UploadChunkData(ctx context.Context, id string, key []byte, chunkIndex uint64, data []byte) (metadata.ChunkEntry, error) {
 	// Encrypt
 	cid, ct, err := crypto.EncryptChunk(key, data, chunkIndex)
@@ -2512,6 +2521,7 @@ func (c *Client) UploadChunkData(ctx context.Context, id string, key []byte, chu
 	return metadata.ChunkEntry{ID: cid, Nodes: nodeIDs, URLs: nodeURLs}, nil
 }
 
+// CommitInodeManifest updates the chunk manifest and size of an inode.
 func (c *Client) CommitInodeManifest(ctx context.Context, id string, manifest []metadata.ChunkEntry, size uint64) (*metadata.Inode, error) {
 	return c.UpdateInode(ctx, id, func(i *metadata.Inode) error {
 		i.ChunkManifest = manifest
@@ -2521,6 +2531,7 @@ func (c *Client) CommitInodeManifest(ctx context.Context, id string, manifest []
 	})
 }
 
+// SyncFile synchronizes local dirty chunks to the cluster and updates the manifest.
 func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size int64, dirtyChunks map[int64]bool) (*metadata.Inode, error) {
 	// 1. Get current inode state
 	inode, err := c.getInode(ctx, id)
@@ -2645,6 +2656,7 @@ func (c *Client) SyncFile(ctx context.Context, id string, r io.ReaderAt, size in
 	})
 }
 
+// ReadDataFile reads and unmarshals a single JSON data file.
 func (c *Client) ReadDataFile(ctx context.Context, name string, data any) error {
 	return c.ReadDataFiles(ctx, []string{name}, []any{data})
 }
@@ -2779,6 +2791,7 @@ func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader,
 	return readers, nil
 }
 
+// SaveDataFile serializes data to JSON and performs an atomic write to the cluster.
 func (c *Client) SaveDataFile(ctx context.Context, name string, data any) error {
 	return c.SaveDataFiles(ctx, []string{name}, []any{data})
 }
@@ -4056,6 +4069,7 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 }
 
 // Remove deletes an inode at the given path.
+// Remove deletes the file or empty directory at the given path.
 func (c *Client) Remove(ctx context.Context, path string) error {
 	return c.RemoveEntry(ctx, path)
 }
@@ -4393,6 +4407,7 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 	})
 }
 
+// ReleaseLeases releases previously acquired distributed leases.
 func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) error {
 	leaseIDs := make([]string, len(ids))
 	for i, id := range ids {
@@ -4443,6 +4458,7 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) 
 	})
 }
 
+// AdminListUsers returns an iterator over all users in the cluster.
 func (c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error] {
 	return func(yield func(*metadata.User, error) bool) {
 		var users []metadata.User
@@ -4491,6 +4507,7 @@ func (c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, e
 	}
 }
 
+// AdminListGroups returns an iterator over all groups in the cluster.
 func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error] {
 	return func(yield func(*metadata.Group, error) bool) {
 		cursor := ""
@@ -4554,6 +4571,7 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 	}
 }
 
+// AdminListLeases returns an iterator over all active leases in the cluster.
 func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error] {
 	return func(yield func(*metadata.LeaseInfo, error) bool) {
 		var leases []metadata.LeaseInfo
@@ -4601,6 +4619,7 @@ func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseI
 		}
 	}
 }
+// AdminListNodes returns an iterator over all storage nodes in the cluster.
 func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 	return func(yield func(*metadata.Node) bool) {
 		var nodes []metadata.Node
@@ -4644,6 +4663,7 @@ func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 	}
 }
 
+// AdminClusterStatus returns detailed information about the cluster state and node statistics.
 func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
 	var status map[string]interface{}
 	err := c.withRetry(ctx, func() error {
@@ -4680,6 +4700,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 	return status, err
 }
 
+// AdminLookup resolves a plaintext email to its HMAC-derived User ID.
 func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{
 		"email":  email,
@@ -4724,6 +4745,7 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 	return result.ID, err
 }
 
+// AdminPromote grants administrative privileges to a user.
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
 	return c.withRetry(ctx, func() error {
@@ -4760,6 +4782,7 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	})
 }
 
+// AdminJoinNode adds a new storage node to the cluster.
 func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	payload, _ := json.Marshal(map[string]string{"address": address})
 	return c.withRetry(ctx, func() error {
@@ -4796,6 +4819,7 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	})
 }
 
+// AdminRemoveNode removes a storage node from the cluster by ID.
 func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 	payload, _ := json.Marshal(map[string]string{"id": id})
 	return c.withRetry(ctx, func() error {
@@ -4832,6 +4856,7 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 	})
 }
 
+// AdminSetUserQuota updates the resource limits for a user.
 func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
 	data, _ := json.Marshal(req)
 	return c.withRetry(ctx, func() error {
@@ -4868,6 +4893,7 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 	})
 }
 
+// AdminSetGroupQuota updates the resource limits for a group.
 func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error {
 	data, _ := json.Marshal(req)
 	return c.withRetry(ctx, func() error {
@@ -4904,6 +4930,7 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 	})
 }
 
+// AdminChown reassigns ownership of an inode by ID. This is a metadata-only override.
 func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
 	// Try to unlock so we can re-key for the new owner/group
 	inode, err := c.getInodeInternal(ctx, inodeID, false)
@@ -4960,6 +4987,7 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 	return err
 }
 
+// AdminChmod modifies the permission bits of an inode by ID.
 func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) error {
 	// 1. Try to unlock so we can re-key for group/world if bits changed
 	inode, err := c.getInodeInternal(ctx, inodeID, false)

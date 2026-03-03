@@ -400,6 +400,7 @@ func (s *Server) applyBatch(req batchRequest) {
 }
 
 // Shutdown stops the server and its background workers.
+// Shutdown gracefully stops the server and its background workers.
 func (s *Server) Shutdown() {
 	close(s.stopCh)
 	if s.replMonitor != nil {
@@ -546,6 +547,7 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(info)
 }
 
+// ServeHTTP routes and handles incoming Metadata API requests.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Identify Public Routes
 	isPublic := false
@@ -2065,6 +2067,7 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
 	return nil
 }
 
+// ApplyRaftCommand handles a generic Raft command proposal from an HTTP request.
 func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
 	if s.raft.State() != raft.Leader {
 		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
@@ -2081,10 +2084,12 @@ func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdTyp
 	s.ApplyRaftCommandRaw(w, r, cmdType, body, successCode)
 }
 
+// ApplyRaftCommandRaw proposes a raw data payload to Raft.
 func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
 	s.ApplyRaftCommandWithHook(w, r, cmdType, data, successCode, nil)
 }
 
+// ApplyRaftCommandWithHook proposes a Raft command and executes a hook on the result before responding.
 func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int, hook func(interface{}) interface{}) {
 	sessionID := r.Header.Get("Session-Token")
 	resp, err := s.ApplyRaftCommandInternal(cmdType, data, sessionID)
@@ -2155,6 +2160,7 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 	}
 }
 
+// ApplyRaftCommandInternal proposes a command to Raft from an internal server context.
 func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sessionID string) (interface{}, error) {
 	if s.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("not leader")
@@ -2205,6 +2211,7 @@ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sess
 	return res, nil
 }
 
+// FSM returns the underlying Metadata State Machine.
 func (s *Server) FSM() *MetadataFSM {
 	return s.fsm
 }

@@ -100,6 +100,7 @@ func (c *Client) GetPathID(ctx context.Context, path string) (string, error) {
 	return "path:" + parentInode.ID + ":" + nameHMAC, nil
 }
 
+// ResolvePath resolves a human-readable path to an Inode and its decrypted FileKey.
 func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	path = "/" + strings.Trim(path, "/")
 
@@ -362,6 +363,7 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 }
 
 // Mkdir creates a directory.
+// Mkdir creates a new directory at the specified path.
 func (c *Client) Mkdir(ctx context.Context, path string, perm fs.FileMode) error {
 	return c.addEntry(ctx, path, metadata.DirType, nil, 0, "", uint32(perm))
 }
@@ -390,6 +392,7 @@ func (c *Client) CreateFile(ctx context.Context, path string, r io.Reader, size 
 }
 
 // Chmod changes the mode of a file or directory.
+// Chmod changes the permission bits of the file or directory at the given path.
 func (c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error {
 	return c.SetAttr(ctx, path, metadata.SetAttrRequest{
 		Mode: ptr(uint32(mode)),
@@ -397,6 +400,7 @@ func (c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error
 }
 
 // Chown changes the owner and group of a file or directory.
+// Chown changes the owner and group of the file or directory at the given path.
 func (c *Client) Chown(ctx context.Context, path string, ownerID, groupID string) error {
 	return c.SetAttr(ctx, path, metadata.SetAttrRequest{
 		OwnerID: &ownerID,
@@ -405,11 +409,13 @@ func (c *Client) Chown(ctx context.Context, path string, ownerID, groupID string
 }
 
 // Symlink creates a symbolic link.
+// Symlink creates a symbolic link at linkPath pointing to target.
 func (c *Client) Symlink(ctx context.Context, target, linkPath string) error {
 	return c.addEntry(ctx, linkPath, metadata.SymlinkType, nil, 0, target, 0777)
 }
 
 // Rename moves or renames a directory entry.
+// Rename atomically moves or renames a file or directory.
 func (c *Client) Rename(ctx context.Context, oldPath, newPath string) error {
 	oldDir, oldName := filepath.Split(strings.TrimRight(oldPath, "/"))
 	newDir, newName := filepath.Split(strings.TrimRight(newPath, "/"))
@@ -668,6 +674,7 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 }
 
 // Stat returns file info for the given path.
+// Stat returns metadata information for the file or directory at the given path.
 func (c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error) {
 	inode, _, err := c.ResolvePath(ctx, path)
 	if err != nil {
@@ -681,12 +688,14 @@ func (c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error) {
 }
 
 // Lstat returns file info for the given path, without following the final symlink.
+// Lstat returns metadata information for the path, without following symbolic links.
 func (c *Client) Lstat(ctx context.Context, path string) (*DistFileInfo, error) {
 	// Our ResolvePath currently follows all symlinks.
 	// TODO: Support Lstat properly by adding a 'followFinal' flag to ResolvePath.
 	return c.Stat(ctx, path)
 }
 
+// ReadDir returns a list of directory entries for the given path.
 // ReadDir returns a list of directory entries for the given path.
 func (c *Client) ReadDir(ctx context.Context, path string) ([]*DistDirEntry, error) {
 	return c.ReadDirExtended(ctx, path)
@@ -712,6 +721,7 @@ func (c *Client) Open(ctx context.Context, path string, flag int, perm fs.FileMo
 }
 
 // Link creates a hard link.
+// Link creates a hard link at linkPath pointing to an existing file at targetPath.
 func (c *Client) Link(ctx context.Context, targetPath, linkPath string) error {
 	target, _, err := c.ResolvePath(ctx, targetPath)
 	if err != nil {

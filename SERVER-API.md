@@ -93,18 +93,25 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 ```json
 {
   "id": "32_char_hex",
+  "links": {"parentID:nameHMAC": true},
   "type": 0, // 0:File, 1:Dir, 2:Symlink
   "owner_id": "user_id",
   "group_id": "group_id",
   "mode": 420, // octal 0644
   "size": 1024,
-  "links": {"parentID:nameHMAC": true},
+  "ctime": 1772517680144,
+  "nlink": 1,
+  "client_blob": "base64_enc_metadata",
   "children": {"nameHMAC": "childID"},
   "manifest": [{"id": "chunk_hash", "nodes": ["node_id"]}],
+  "chunk_pages": ["page_id"],
   "lockbox": {"recipient_id": {"kem": "base64", "dem": "base64"}},
-  "client_blob": "base64_enc_metadata",
   "version": 5,
-  "user_sig": "base64_sig"
+  "is_system": false,
+  "leases": {"nonce": {"id": "session_id", "exp": 123, "type": 1}},
+  "unlinked": false,
+  "user_sig": "base64_sig",
+  "group_sig": "base64_sig"
 }
 ```
 
@@ -118,6 +125,7 @@ Clients MUST use this schema inside the encrypted `client_blob`:
   "mtime": int64_ns,
   "uid": uint32,
   "gid": uint32,
+  "signer_id": "user_id",
   "authorized_signers": ["user_id"]
 }
 ```
@@ -166,11 +174,12 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 5. `[]byte("sys:" + (is_system ? "1" : "0") + "|")`
 6. `[]byte("client_blob:")` + `raw_encrypted_bytes` + `[]byte("|")`
 7. `[]byte("owner:" + owner_id + "|")`
-8. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
-9. `[]byte("children:")` + `SortedCSV(nameHMAC:childID)` + `[]byte("|")`
-10. `[]byte("manifest:")` + `CSV(chunk_ids)` + `[]byte("|")`
-11. `[]byte("pages:")` + `SortedCSV(chunk_page_ids)` + `[]byte("|")`
-12. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
+8. `[]byte("type:")` + `BigEndian(uint32(type))` + `[]byte("|")`
+9. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
+10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID)` + `[]byte("|")`
+11. `[]byte("manifest:")` + `CSV(chunk_id(node1,node2,...))` + `[]byte("|")`
+12. `[]byte("pages:")` + `SortedCSV(chunk_page_ids)` + `[]byte("|")`
+13. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
 
 ### 4.2 Group Hash
 The group `signature` is over the SHA-256 hash of these fields concatenated **exactly**:
@@ -188,6 +197,7 @@ The group `signature` is over the SHA-256 hash of these fields concatenated **ex
 12. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
 13. `[]byte("registry_lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
 14. `[]byte("enc_registry:")` + `enc_registry_bytes` + `[]byte("|")`
+15. `[]byte("quota_enabled:" + (quota_enabled ? "1" : "0") + "|")`
 
 ---
 

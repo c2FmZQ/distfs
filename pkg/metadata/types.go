@@ -41,21 +41,33 @@ type APIErrorResponse struct {
 }
 
 const (
+	// ErrCodeNotFound indicates the requested resource does not exist.
 	ErrCodeNotFound                = "DISTFS_NOT_FOUND"
+	// ErrCodeExists indicates an attempt to create a resource that already exists.
 	ErrCodeExists                  = "DISTFS_EXISTS"
+	// ErrCodeVersionConflict indicates an optimistic concurrency failure.
 	ErrCodeVersionConflict         = "DISTFS_VERSION_CONFLICT"
+	// ErrCodeLeaseRequired indicates a mutation attempt without holding an exclusive lease.
 	ErrCodeLeaseRequired           = "DISTFS_LEASE_REQUIRED"
+	// ErrCodeQuotaExceeded indicates the user or group has exceeded their storage limit.
 	ErrCodeQuotaExceeded           = "DISTFS_QUOTA_EXCEEDED"
+	// ErrCodeUnauthorized indicates invalid or missing authentication credentials.
 	ErrCodeUnauthorized            = "DISTFS_UNAUTHORIZED"
+	// ErrCodeForbidden indicates the user lacks permission for the requested action.
 	ErrCodeForbidden               = "DISTFS_FORBIDDEN"
+	// ErrCodeNotLeader indicates the request was sent to a follower node.
 	ErrCodeNotLeader               = "DISTFS_NOT_LEADER"
+	// ErrCodeInternal indicates an unexpected server-side error or panic.
 	ErrCodeInternal                = "DISTFS_INTERNAL_ERROR"
+	// ErrCodeAtomicRollback indicates a sub-command in a batch failed, causing a full rollback.
 	ErrCodeAtomicRollback          = "DISTFS_ATOMIC_ROLLBACK"
+	// ErrCodeStructuralInconsistency indicates a mutation that violates filesystem topology.
 	ErrCodeStructuralInconsistency = "DISTFS_STRUCTURAL_INCONSISTENCY"
+	// ErrCodeQuotaDisabled indicates an attempt to set quota on a group where it is disabled.
 	ErrCodeQuotaDisabled           = "DISTFS_QUOTA_DISABLED"
 )
 
-// OIDCConfig represents the subset of OpenID Connect configuration needed by clients.
+// OIDCConfig represents the OpenID Connect configuration needed by clients for authentication.
 type OIDCConfig struct {
 	Issuer                      string `json:"issuer"`
 	JWKSURI                     string `json:"jwks_uri"`
@@ -105,6 +117,7 @@ func IsInodeID(id string) bool {
 }
 
 // ChunkEntry represents a single chunk of a file and its location.
+// ChunkEntry represents a single data chunk and its storage locations.
 type ChunkEntry struct {
 	ID    string   `json:"id"`
 	Nodes []string `json:"nodes"`          // Storage Node IDs
@@ -112,6 +125,7 @@ type ChunkEntry struct {
 }
 
 // ChunkPage is a pagination structure for storing large file manifests.
+// ChunkPage represents a paginated collection of chunk entries for large files.
 type ChunkPage struct {
 	ID     string       `json:"id"`
 	Chunks []ChunkEntry `json:"chunks"`
@@ -159,6 +173,7 @@ type GroupClientBlob struct {
 }
 
 // Group represents a user group for sharing access.
+// Group represents a security group in DistFS, including membership and keys.
 type Group struct {
 	ID                string          `json:"id"`
 	GID               uint32          `json:"gid"`
@@ -483,15 +498,6 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("type:"))
 	h.Write(t)
 	h.Write([]byte("|"))
-
-	h.Write([]byte("signer:" + i.signerID + "|"))
-	if len(i.authorizedSigners) > 0 {
-		h.Write([]byte("auth_signers:"))
-		for _, s := range i.authorizedSigners {
-			h.Write([]byte(s + ","))
-		}
-		h.Write([]byte("|"))
-	}
 
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
