@@ -928,8 +928,8 @@ func (s *Server) handleSystemBootstrap(w http.ResponseWriter, r *http.Request) {
 
 	// Initialize KeyRing
 	if err := s.fsm.InitializeFSMKeyRing(payload.FSMKeyRing); err != nil {
-		log.Printf("ERROR: Failed to initialize FSM KeyRing: %v", err)
-		// Secret is already saved, so we'll have to deal with it on restart if this fails.
+		s.writeError(w, r, ErrCodeInternal, "failed to initialize FSM KeyRing: "+err.Error(), http.StatusInternalServerError)
+		return
 	}
 
 	log.Printf("SUCCESS: Node bootstrapped with ClusterSecret and FSM KeyRing")

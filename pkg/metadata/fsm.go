@@ -738,15 +738,15 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 			}
 		}
 	}
-	ownerChanged := update.OwnerID != "" && update.OwnerID != inode.OwnerID
-	groupChanged := update.GroupID != "" && update.GroupID != inode.GroupID
+	ownerChanged := fields["owner_id"] != nil && update.OwnerID != inode.OwnerID
+	groupChanged := fields["group_id"] != nil && update.GroupID != inode.GroupID
 	if ownerChanged || groupChanged {
 		newOwner := update.OwnerID
-		if newOwner == "" {
+		if fields["owner_id"] == nil {
 			newOwner = inode.OwnerID
 		}
 		newGroup := update.GroupID
-		if !groupChanged {
+		if fields["group_id"] == nil {
 			newGroup = inode.GroupID
 		}
 		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(update.Size)); err != nil {
@@ -1001,6 +1001,7 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte, sessionID s
 	if update.Version != existing.Version+1 {
 		return ErrConflict
 	}
+	update.QuotaEnabled = existing.QuotaEnabled // Immutable
 	fsm.updateGroupIndices(tx, &update, &existing)
 	encoded, _ := json.Marshal(update)
 	return fsm.Put(tx, []byte("groups"), []byte(update.ID), encoded)
