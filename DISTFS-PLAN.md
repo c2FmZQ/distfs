@@ -829,3 +829,26 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 1.  **Inconsistent Batch Test:** Attempt to add a file to a directory without incrementing the file's `NLink` in the same batch; verify the server rejects the batch.
 2.  **Orphaned Entry Test:** Attempt to create an Inode without linking it in any parent; verify rejection (except for Root).
 3.  **Non-Empty Rmdir Test:** Verify `os.Remove` fails on a directory containing files.
+
+---
+
+## Phase 44: Hardware Security (TPM Integration)
+**Goal:** Implement optional Trusted Platform Module (TPM) support to bind node identity and master secrets to physical hardware.
+
+*   **Step 44.1: Abstract Identity Interfaces**
+    *   **Action:** Refactor `pkg/metadata/node_identity.go` so `NodeKey` utilizes the `crypto.Signer` interface rather than concrete `ed25519` types.
+    *   **Action:** Update `GenerateSelfSignedCert` in `pkg/metadata/raft_manager.go` to accept the generic interface.
+*   **Step 44.2: TPM-Backed Node Identity (mTLS)**
+    *   **Action:** Modify `LoadOrGenerateNodeKey` to optionally accept a `*tpm.TPM` instance. When provided, generate an ECC P-256 key within the TPM and persist its serialized handle instead of raw private key bytes.
+*   **Step 44.3: Hardware-Bound Master Key**
+    *   **Action:** Add `-use-tpm` flag to `cmd/storage-node`.
+    *   **Action:** Implement logic to derive a hardware-bound `HardwareHash` by performing an HMAC over the `DISTFS_MASTER_KEY` environment variable using a TPM-managed key. Use this hash to initialize the local `storage_crypto` layer.
+*   **Step 44.4: Client-Side Integration**
+    *   **Action:** Add `-use-tpm` to `cmd/distfs` and `cmd/distfs-fuse`. Replicate the TPM HMAC wrapping logic for `DISTFS_PASSWORD`.
+*   **Step 44.5: Testing & Verification**
+    *   **Action:** Verify the standard (non-TPM) build path works unmodified.
+    *   **Action:** Manually test node bootstrap and client mounting on a TPM-enabled instance.
+
+### Phase 44 Testing Strategy:
+1.  **Backward Compatibility:** Run all existing E2E tests without `-use-tpm` to ensure `ed25519` defaults remain fully functional.
+2.  **TPM Interface Integrity:** Ensure unit tests for `node_identity.go` pass when providing a mock or interface-compliant TPM key struct.

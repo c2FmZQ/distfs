@@ -39,7 +39,8 @@ The system is designed to scale horizontally, with the following soft limits:
 *   **Metadata Privacy:** Directory names and file names are encrypted. The MetaNode sees the file system as a graph of opaque IDs, not paths like `/home/alice/docs`.
 *   **Node Security:** Leveraging `github.com/c2FmZQ/storage`, all data stored on MetaNodes and DataNodes (Raft logs, snapshots, chunk files, keys) is encrypted *at rest*.
     *   **Root Secret:** A `DISTFS_MASTER_KEY` environment variable provides the master passphrase.
-    *   **Master Key:** A `crypto.MasterKey` is derived from this passphrase to decrypt the node-local key store (`data/master.key`).
+    *   **Hardware Binding (Optional):** If the `--use-tpm` flag is provided, the node will use a local Trusted Platform Module (TPM) to compute an HMAC over the `DISTFS_MASTER_KEY`. This ensures the local storage backend cannot be decrypted without physical access to the specific hardware that initialized it.
+    *   **Master Key:** A `crypto.MasterKey` is derived from this passphrase (or its TPM HMAC) to decrypt the node-local key store (`data/master.key`).
     *   **ClusterSecret Vault:** Each node maintains a local encrypted vault containing the shared **ClusterSecret**. This vault is protected by the node's unique Master Key.
     *   **Isolation:** Encryption keys are node-local and never shared across the network.
 *   **Key Rotation:** 
@@ -350,9 +351,9 @@ To support containerized and NATed environments, nodes must explicitly advertise
 
 ### 7.2 Node Identity & Security (Zero-Trust)
 The cluster employs a **Zero-Trust security model** where no node is inherently trusted.
-*   **Node Key:** Each node generates a persistent **Ed25519 private key** (`node.key`) on first startup.
+*   **Node Key:** Each node generates a persistent private key (`node.key`) on first startup. By default, this is a software-generated **Ed25519** key. If the `--use-tpm` flag is provided, a hardware-bound **ECC P-256** key is generated inside the local TPM, and only the key handle is stored on disk, ensuring the private key material never exists in system memory.
 *   **Node ID:** The unique Raft Node ID is derived from the first 8 bytes of the public key.
-*   **Mutual TLS (mTLS):** All inter-node communication (Cluster API and Raft) is secured via mTLS. Nodes exchange self-signed certificates signed by their `node.key`. Connections are only accepted if the peer's public key is in the authorized `NodeMeta` list.
+*   **Mutual TLS (mTLS):** All inter-node communication (Cluster API and Raft) is secured via mTLS. Nodes exchange self-signed certificates signed by their `node.key` (or the TPM). Connections are only accepted if the peer's public key is in the authorized `NodeMeta` list.
 
 ### 7.3 Trust Bootstrapping (TOFU)
 To solve the initial trust problem, new nodes use **Trust On First Use (TOFU)**:
