@@ -28,6 +28,12 @@ type KeyData struct {
 	Bytes []byte `json:"bytes"`
 }
 
+// BootstrapPayload contains the cryptographic material pushed to a joining node.
+type BootstrapPayload struct {
+	ClusterSecret []byte `json:"cluster_secret"`
+	FSMKeyRing    []byte `json:"fsm_keyring"`
+}
+
 // APIErrorResponse is the standard structured error response.
 type APIErrorResponse struct {
 	Code    string `json:"code"`

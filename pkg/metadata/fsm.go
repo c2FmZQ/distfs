@@ -204,7 +204,7 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		if krData != nil {
 			fsm.keyRing, _ = crypto.UnmarshalKeyRing(krData)
 		}
-		if fsm.keyRing == nil {
+		if fsm.keyRing == nil && len(clusterSecret) > 0 {
 			k := make([]byte, 32)
 			rand.Read(k)
 			fsm.keyRing = crypto.NewKeyRing(k)
@@ -303,6 +303,29 @@ func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte)
 			return err
 		}
 		return fn(k, plain)
+	})
+}
+
+func (fsm *MetadataFSM) GetFSMKeyRing() []byte {
+	fsm.mu.RLock()
+	defer fsm.mu.RUnlock()
+	if fsm.keyRing == nil {
+		return nil
+	}
+	return fsm.keyRing.Marshal()
+}
+
+func (fsm *MetadataFSM) InitializeFSMKeyRing(krData []byte) error {
+	kr, err := crypto.UnmarshalKeyRing(krData)
+	if err != nil {
+		return err
+	}
+	fsm.mu.Lock()
+	fsm.keyRing = kr
+	fsm.mu.Unlock()
+
+	return fsm.db.Update(func(tx *bolt.Tx) error {
+		return fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), krData)
 	})
 }
 

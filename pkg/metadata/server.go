@@ -539,6 +539,9 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	if s.signKey != nil {
 		info["sign_key"] = s.signKey.Public()
 	}
+	if s.decKey != nil {
+		info["enc_key"] = s.decKey.EncapsulationKey().Bytes()
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(info)
 }
@@ -583,6 +586,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Debug Routes (Protected by shared secret)
 	if s.handleDebugRoutes(w, r) {
+		return
+	}
+
+	if r.URL.Path == "/v1/system/bootstrap" && r.Method == http.MethodPost {
+		s.handleSystemBootstrap(w, r)
 		return
 	}
 
@@ -700,11 +708,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	if r.URL.Path == "/v1/cluster/stats" && r.Method == http.MethodGet {
 		s.handleGetClusterStats(w, r)
-		return
-	}
-
-	if r.URL.Path == "/v1/system/bootstrap" && r.Method == http.MethodPost {
-		s.handleSystemBootstrap(w, r)
 		return
 	}
 
@@ -900,25 +903,36 @@ func (s *Server) handleSystemBootstrap(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Unseal using our node identity.
-	// OpenRequest returns (timestamp, clientPK, payload, error).
-	_, _, secret, err := crypto.OpenRequest(s.decKey, nil, body)
+	plain, err := crypto.Unseal(body, s.decKey)
 	if err != nil {
-		s.writeError(w, r, ErrCodeInternal, "failed to unseal cluster secret: "+err.Error(), http.StatusBadRequest)
+		s.writeError(w, r, ErrCodeInternal, "failed to unseal bootstrap payload: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var payload BootstrapPayload
+	if err := json.Unmarshal(plain, &payload); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to unmarshal bootstrap payload: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
 	// Persist to local vault
-	if err := s.vault.SaveClusterSecret(secret); err != nil {
+	if err := s.vault.SaveClusterSecret(payload.ClusterSecret); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "failed to save cluster secret: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	// Update memory FSM
+	// Update memory FSM secret
 	s.fsm.mu.Lock()
-	s.fsm.clusterSecret = secret
+	s.fsm.clusterSecret = payload.ClusterSecret
 	s.fsm.mu.Unlock()
 
-	log.Printf("SUCCESS: Node bootstrapped with ClusterSecret")
+	// Initialize KeyRing
+	if err := s.fsm.InitializeFSMKeyRing(payload.FSMKeyRing); err != nil {
+		log.Printf("ERROR: Failed to initialize FSM KeyRing: %v", err)
+		// Secret is already saved, so we'll have to deal with it on restart if this fails.
+	}
+
+	log.Printf("SUCCESS: Node bootstrapped with ClusterSecret and FSM KeyRing")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -2750,6 +2764,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		RaftAddress string `json:"raft_address"`
 		PublicKey   []byte `json:"public_key"`
 		SignKey     []byte `json:"sign_key"`
+		EncKey      []byte `json:"enc_key"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "invalid discovery response", http.StatusInternalServerError)
@@ -2773,7 +2788,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 3. Push ClusterSecret to the new node via internal mTLS FIRST
+	// 3. Push ClusterSecret and KeyRing to the new node via internal mTLS FIRST
 	secret, err := s.fsm.GetClusterSecret()
 	if err != nil {
 		log.Printf("ERROR: ClusterSecret not available for push: %v", err)
@@ -2781,15 +2796,23 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	probedKEM, err := crypto.UnmarshalEncapsulationKey(info.PublicKey)
+	payload := BootstrapPayload{
+		ClusterSecret: secret,
+		FSMKeyRing:    s.fsm.GetFSMKeyRing(),
+	}
+	payloadBytes, _ := json.Marshal(payload)
+
+	probedKEM, err := crypto.UnmarshalEncapsulationKey(info.EncKey)
 	if err != nil {
+		log.Printf("ERROR: EncKey: %v", err)
 		s.writeError(w, r, ErrCodeInternal, "invalid public key", http.StatusBadRequest)
 		return
 	}
 
-	encSecret, err := crypto.SealRequest(probedKEM, s.signKey, secret)
+	encPayload, err := crypto.Seal(payloadBytes, probedKEM, time.Now().UnixNano())
 	if err != nil {
-		s.writeError(w, r, ErrCodeInternal, "failed to seal secret", http.StatusInternalServerError)
+		log.Printf("ERROR: Seal: %v", err)
+		s.writeError(w, r, ErrCodeInternal, "failed to seal bootstrap payload", http.StatusInternalServerError)
 		return
 	}
 
@@ -2799,15 +2822,21 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	alreadyBootstrapped := false
 
 	for i := 0; i < 30; i++ {
-		pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encSecret))
+		pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encPayload))
 		if err != nil {
 			log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
 			s.writeError(w, r, ErrCodeInternal, "failed to create push request", http.StatusInternalServerError)
 			return
 		}
 		pushReq.Header.Set("Content-Type", "application/octet-stream")
+		if s.raftSecret != "" {
+			pushReq.Header.Set("X-Raft-Secret", s.raftSecret)
+		}
 
-		pushResp, err = s.httpClient.Do(pushReq)
+		// We use discoveryHTTPClient here because the joining node's certificate
+		// is not yet in the FSM's trusted list. The payload is sealed with the node's
+		// ML-KEM key, ensuring confidentiality.
+		pushResp, err = s.discoveryHTTPClient.Do(pushReq)
 		if err == nil {
 			if pushResp.StatusCode == http.StatusOK {
 				break
@@ -2816,12 +2845,13 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 				alreadyBootstrapped = true
 				break
 			}
-			lastPushErr = fmt.Errorf("status %d", pushResp.StatusCode)
+			b, _ := io.ReadAll(pushResp.Body)
+			lastPushErr = fmt.Errorf("status %d (%s)", pushResp.StatusCode, b)
 			pushResp.Body.Close()
 		} else {
 			lastPushErr = err
 		}
-		log.Printf("DEBUG: Push to %s failed (attempt %d): %v", req.Address, i+1, lastPushErr)
+		log.Printf("DEBUG: Push to %s failed (attempt %d): %v", bootstrapURL, i+1, lastPushErr)
 		time.Sleep(1 * time.Second)
 	}
 

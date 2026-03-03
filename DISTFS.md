@@ -393,8 +393,8 @@ DistFS utilizes a two-tiered trust model to resolve the circular dependency betw
 
 1.  **Tier 1: Local Node Vault:**
     *   On initial bootstrap, the Leader generates a high-entropy **ClusterSecret** and stores it in its local node-local encrypted vault (protected by the node's unique `MasterKey`).
-    *   During the `Join` handshake, the Leader retrieves the `ClusterSecret` and encapsulates it for the joining node's Public Encryption Key.
-    *   The joining node decrypts and persists the `ClusterSecret` in its own local Tier 1 vault.
+    *   During the `Join` handshake, the Leader retrieves the **ClusterSecret** and the current **FSM KeyRing**. It encapsulates both for the joining node's Public Encryption Key.
+    *   The joining node decrypts the payload, persists the `ClusterSecret` in its local Tier 1 vault, and initializes its local BoltDB `system` bucket with the `FSM KeyRing`. This ensures the node is cryptographically ready to apply Raft logs immediately upon joining.
 2.  **Tier 2: Cluster Root of Trust (FSM):**
     *   The BoltDB `system` bucket contains the cluster-wide root metadata, including the **FSM KeyRing**.
     *   Values in the `system` bucket are encrypted using a key derived from the `ClusterSecret`.

@@ -25,7 +25,6 @@ services:
     volumes:
       - node2-data:/data
     depends_on:
-      - storage-node-1
       - test-auth
 
   storage-node-3:
@@ -36,7 +35,6 @@ services:
     volumes:
       - node3-data:/data
     depends_on:
-      - storage-node-1
       - test-auth
 
   e2e-runner:
