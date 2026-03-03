@@ -15,6 +15,8 @@
 package metadata
 
 import (
+	"log"
+
 	"github.com/c2FmZQ/storage"
 )
 
@@ -44,7 +46,11 @@ func (v *NodeVault) LoadClusterSecret() ([]byte, error) {
 // SaveClusterSecret persists the shared cluster secret to the local vault.
 func (v *NodeVault) SaveClusterSecret(secret []byte) error {
 	kd := KeyData{Bytes: secret}
-	return v.st.SaveDataFile(clusterSecretName, kd)
+	err := v.st.SaveDataFile(clusterSecretName, kd)
+	if err != nil {
+		log.Printf("ERROR: SaveDataFile(%q): %v", clusterSecretName, err)
+	}
+	return err
 }
 
 // HasClusterSecret returns true if the secret is already present in the vault.

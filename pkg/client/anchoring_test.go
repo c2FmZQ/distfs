@@ -2,8 +2,8 @@ package client
 
 import (
 	"context"
-	"testing"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"testing"
 )
 
 func TestClient_WithRootID_Anchoring(t *testing.T) {

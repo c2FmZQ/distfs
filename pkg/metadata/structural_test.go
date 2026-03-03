@@ -32,8 +32,8 @@ func TestFSM_StructuralValidation_ImplicitNLink(t *testing.T) {
 
 	batch := []LogCommand{
 		{
-			Type: CmdUpdateInode, 
-			Data: pb2,
+			Type:          CmdUpdateInode,
+			Data:          pb2,
 			LeaseBindings: map[string]string{"child_name": "path:p1:child_name"},
 		},
 	}
