@@ -21,7 +21,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
 	metaSt := storage.New(metaDir, mk)
 
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
@@ -54,7 +54,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	ts := httptest.NewServer(metaServer)
 
 	// User

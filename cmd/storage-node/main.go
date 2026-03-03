@@ -111,6 +111,7 @@ func main() {
 		tlsCert = flag.String("tls-cert", "", "TLS certificate for public API")
 		tlsKey  = flag.String("tls-key", "", "TLS key for public API")
 		useTPM  = flag.Bool("use-tpm", false, "Use TPM for hardware-bound security")
+		disableDoH = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
 	)
 	flag.Parse()
 
@@ -345,7 +346,7 @@ func main() {
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey)
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey, *disableDoH)
 	metaServer.SetRaftAddress(*raftAdvertise)
 	metaServer.SetAPIURL(*apiURL)
 	metaServer.SetTLSPublicKey(raftKey.Public())

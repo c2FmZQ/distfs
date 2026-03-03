@@ -111,7 +111,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorageLocal(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -127,7 +127,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	serverEK, metaSignPK := bootstrapClusterLocal(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()

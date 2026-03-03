@@ -7,7 +7,7 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Running dump-inodes on root..."
-if distfs -use-pinentry=false -admin -config /root/.distfs/config.json dump-inodes / > /tmp/dump.log; then
+if distfs -disable-doh -use-pinentry=false -admin -config /root/.distfs/config.json dump-inodes / > /tmp/dump.log; then
     echo "dump-inodes executed successfully."
 else
     echo "FAIL: dump-inodes failed."

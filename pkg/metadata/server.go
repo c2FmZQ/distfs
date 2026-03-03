@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/ech"
 	"github.com/c2FmZQ/tlsproxy/jwks"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/hashicorp/go-retryablehttp"
@@ -134,10 +135,54 @@ type challengeEntry struct {
 }
 
 // NewServer creates a new Metadata Server.
-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
+
+	var echTransport, discoveryTransport http.RoundTripper
+
+	if disableDoH {
+		t1 := http.DefaultTransport.(*http.Transport).Clone()
+		t1.TLSClientConfig = clientTLSConfig
+		echTransport = t1
+
+		t2 := http.DefaultTransport.(*http.Transport).Clone()
+		t2.TLSClientConfig = func() *tls.Config {
+			if clientTLSConfig == nil {
+				return nil
+			}
+			cfg := clientTLSConfig.Clone()
+			cfg.InsecureSkipVerify = true
+			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				return nil
+			}
+			return cfg
+		}()
+		discoveryTransport = t2
+	} else {
+		e1 := ech.NewTransport()
+		e1.HTTPTransport.DialContext = nil
+		e1.TLSConfig = clientTLSConfig
+		e1.Resolver = ech.DefaultResolver
+		echTransport = e1
+
+		e2 := ech.NewTransport()
+		e2.HTTPTransport.DialContext = nil
+		e2.Resolver = ech.DefaultResolver
+		e2.TLSConfig = func() *tls.Config {
+			if clientTLSConfig == nil {
+				return nil
+			}
+			cfg := clientTLSConfig.Clone()
+			cfg.InsecureSkipVerify = true
+			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+				return nil
+			}
+			return cfg
+		}()
+		discoveryTransport = e2
+	}
 
 	s := &Server{
 		nodeID:     nodeID,
@@ -147,27 +192,12 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		signKey:    signKey,
 		raftSecret: raftSecret,
 		httpClient: &http.Client{
-			Transport: &http.Transport{
-				TLSClientConfig: clientTLSConfig,
-			},
-			Timeout: 10 * time.Second,
+			Transport: echTransport,
+			Timeout:   10 * time.Second,
 		},
-		discoveryHTTPClient: &http.Client{Transport: &http.Transport{
-			TLSClientConfig: func() *tls.Config {
-				if clientTLSConfig == nil {
-					return nil
-				}
-				cfg := clientTLSConfig.Clone()
-				cfg.InsecureSkipVerify = true
-				cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-					// Always succeed the handshake during discovery, but we'll
-					// verify the key match in the handler.
-					return nil
-				}
-				return cfg
-			}(),
-		},
-			Timeout: 5 * time.Second,
+		discoveryHTTPClient: &http.Client{
+			Transport: discoveryTransport,
+			Timeout:   5 * time.Second,
 		},
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),

@@ -510,7 +510,7 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey)
+	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true)
 
 	// node2 has no leader
 	req, _ := http.NewRequest("GET", "/v1/meta/batch/root", nil)
@@ -1125,7 +1125,7 @@ func TestServer_Forwarding(t *testing.T) {
 	s1.ApplyRaftCommandInternal(CmdRegisterNode, n1b, "")
 
 	nodeDecKey2, _ := crypto.GenerateEncryptionKey()
-	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2)
+	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2, true)
 	ts2 := httptest.NewServer(s2)
 	defer ts2.Close()
 

@@ -7,14 +7,14 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating ha directory..."
-until distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /ha; do
+until distfs -disable-doh -use-pinentry=false -config /root/.distfs/config.json mkdir /ha; do
     echo "Retrying ha mkdir..."
     sleep 1
 done
 
 echo "Uploading test file..."
 echo "ha-resilience-data" > /tmp/ha.txt
-distfs -use-pinentry=false put /tmp/ha.txt /ha/ha-test.bin
+distfs -disable-doh -use-pinentry=false put /tmp/ha.txt /ha/ha-test.bin
 
 echo "Ensuring replication has started..."
 sleep 2
@@ -26,10 +26,10 @@ echo "Waiting for cluster to detect failure..."
 sleep 5
 
 echo "Verifying cluster state..."
-distfs -use-pinentry=false whoami > /dev/null
+distfs -disable-doh -use-pinentry=false whoami > /dev/null
 
 echo "Verifying file is STILL readable from remaining nodes..."
-distfs -use-pinentry=false get /ha/ha-test.bin /tmp/ha-back.txt
+distfs -disable-doh -use-pinentry=false get /ha/ha-test.bin /tmp/ha-back.txt
 if grep -q "ha-resilience-data" /tmp/ha-back.txt; then
     echo "PASS: HA Read consistency"
 else

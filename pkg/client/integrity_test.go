@@ -18,7 +18,7 @@ func TestManifestIntegrity(t *testing.T) {
 	// 1. Setup Node & Server
 	tmpDir := t.TempDir()
 	st, _ := createTestStorage(t, tmpDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key", nil)
 	nodeID := "node1"
 
 	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
@@ -37,7 +37,7 @@ func TestManifestIntegrity(t *testing.T) {
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	raftSecret := "supersecret"
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0, metadata.NewNodeVault(st), nodeDecKey)
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0, metadata.NewNodeVault(st), nodeDecKey, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -247,7 +247,7 @@ func TestGroupIntegrity(t *testing.T) {
 	// 1. Setup Node & Server
 	tmpDir := t.TempDir()
 	st, _ := createTestStorage(t, tmpDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(st, "node.key", nil)
 	nodeID := "node1"
 
 	raftNode, err := metadata.NewRaftNode(nodeID, "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
@@ -265,7 +265,7 @@ func TestGroupIntegrity(t *testing.T) {
 
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0, metadata.NewNodeVault(st), nodeDecKey)
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0, metadata.NewNodeVault(st), nodeDecKey, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

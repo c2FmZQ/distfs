@@ -852,3 +852,23 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 ### Phase 44 Testing Strategy:
 1.  **Backward Compatibility:** Run all existing E2E tests without `-use-tpm` to ensure `ed25519` defaults remain fully functional.
 2.  **TPM Interface Integrity:** Ensure unit tests for `node_identity.go` pass when providing a mock or interface-compliant TPM key struct.
+
+---
+
+## Phase 45: Privacy & ECH Integration
+**Goal:** Integrate `github.com/c2FmZQ/ech` into all client-initiated HTTP clients to encrypt SNI (Encrypted Client Hello) and secure DNS queries (DNS-over-HTTPS).
+
+*   **Step 45.1: Client Library Update**
+    *   **Action:** Modify `pkg/client/client.go` to use `ech.NewTransport()` for the primary `httpClient`.
+    *   **Action:** Add `WithDisableDoH(disable bool)` to allow fallback to the standard system resolver for internal/testing environments.
+*   **Step 45.2: Server Internal Clients Update**
+    *   **Action:** Modify `pkg/metadata/server.go` to accept a `disableDoH` parameter in `NewServer`.
+    *   **Action:** Instantiate `ech.NewTransport()` for `s.httpClient` and `s.discoveryHTTPClient`, applying the appropriate TLS configurations.
+*   **Step 45.3: CLI Flags & Configuration**
+    *   **Action:** Add the `-disable-doh` flag to `cmd/distfs`, `cmd/distfs-fuse`, and `cmd/storage-node`.
+    *   **Action:** Plumb this flag through to the respective client builders and server initializers.
+*   **Step 45.4: Test Infrastructure Adaptation**
+    *   **Action:** Update `docker-compose.yml` to pass `-disable-doh` to all `storage-node` instances.
+    *   **Action:** Update all `scripts/test-*.sh` scripts to pass `-disable-doh` to `distfs` and `distfs-fuse` commands, as the local Docker network relies on standard DNS, not public DoH resolvers.
+*   **Step 45.5: Verification**
+    *   **Action:** Run `go test -failfast ./...` and `./scripts/run-tests.sh --skip-unit` to ensure the fallback resolver works correctly in the test environment while the code is wired for ECH by default.

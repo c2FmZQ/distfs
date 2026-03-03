@@ -35,7 +35,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 	// 1. Setup Cluster
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
@@ -46,7 +46,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -122,7 +122,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	// 1. Setup (reuse setup logic if possible, but keep self-contained for now)
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
@@ -132,7 +132,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	serverEK, _ := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()

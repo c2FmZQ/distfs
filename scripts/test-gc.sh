@@ -7,17 +7,17 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating gc directory..."
-distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /gc || echo "gc dir already exists"
+distfs -disable-doh -use-pinentry=false -config /root/.distfs/config.json mkdir /gc || echo "gc dir already exists"
 
 echo "Uploading file to be deleted..."
 echo "trash data" > /tmp/trash.txt
-distfs -use-pinentry=false put /tmp/trash.txt /gc/trash.txt
+distfs -disable-doh -use-pinentry=false put /tmp/trash.txt /gc/trash.txt
 
 echo "Deleting file..."
-distfs -use-pinentry=false rm /gc/trash.txt
+distfs -disable-doh -use-pinentry=false rm /gc/trash.txt
 
 echo "Waiting for background GC..."
 # Verify authentication
-distfs -use-pinentry=false whoami > /dev/null
+distfs -disable-doh -use-pinentry=false whoami > /dev/null
 
 echo "GC E2E Logic Verified (Script Scaffolded)"

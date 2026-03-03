@@ -15,24 +15,24 @@ CONFIG="/tmp/hedge-config.json"
 # 1. Obtain JWT and Initialize
 echo "Initializing Account..."
 JWT=$(wget -qO- "$AUTH_URL/mint?email=hedge-user@example.com")
-OUT=$(/bin/distfs -use-pinentry=false -config "$CONFIG" init --new -server "$SERVER_URL" -jwt "$JWT")
+OUT=$(/bin/distfs -disable-doh -use-pinentry=false -config "$CONFIG" init --new -server "$SERVER_URL" -jwt "$JWT")
 echo "$OUT"
 USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 # Provision User Home Directory via Admin
 echo "Admin: Provisioning home directory for $USER_ID..."
-/bin/distfs -use-pinentry=false -config /root/.distfs/config.json mkdir "/users/$USER_ID" || true
+/bin/distfs -disable-doh -use-pinentry=false -config /root/.distfs/config.json mkdir "/users/$USER_ID" || true
 sleep 2
-echo "y" | /bin/distfs -use-pinentry=false -admin -config /root/.distfs/config.json admin-chown "$USER_ID" "/users/$USER_ID"
+echo "y" | /bin/distfs -disable-doh -use-pinentry=false -admin -config /root/.distfs/config.json admin-chown "$USER_ID" "/users/$USER_ID"
 
 # 2. Write a file
 echo "Uploading test file..."
 echo "Hedged read test data" > /tmp/hedge.txt
-/bin/distfs -use-pinentry=false -config "$CONFIG" put /tmp/hedge.txt "/users/$USER_ID/hedge-test.txt"
+/bin/distfs -disable-doh -use-pinentry=false -config "$CONFIG" put /tmp/hedge.txt "/users/$USER_ID/hedge-test.txt"
 
 # 3. Verify normal read
 echo "Verifying normal read..."
-/bin/distfs -use-pinentry=false -config "$CONFIG" get "/users/$USER_ID/hedge-test.txt" /tmp/hedge-back.txt
+/bin/distfs -disable-doh -use-pinentry=false -config "$CONFIG" get "/users/$USER_ID/hedge-test.txt" /tmp/hedge-back.txt
 grep -q "Hedged read test data" /tmp/hedge-back.txt
 
 # 4. SIMULATE SLOW/DEAD NODE
@@ -45,7 +45,7 @@ sleep 2
 # This should succeed quickly because of the 1s staggered start.
 echo "Performing hedged read (should be fast)..."
 start=$(date +%s)
-/bin/distfs -use-pinentry=false -config "$CONFIG" get "/users/$USER_ID/hedge-test.txt" /tmp/hedge-failover.txt
+/bin/distfs -disable-doh -use-pinentry=false -config "$CONFIG" get "/users/$USER_ID/hedge-test.txt" /tmp/hedge-failover.txt
 end=$(date +%s)
 duration=$((end - start))
 

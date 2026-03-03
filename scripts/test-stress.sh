@@ -7,7 +7,7 @@ echo "Waiting for client configuration..."
 until [ -f /root/.distfs/config.json ]; do sleep 1; done
 
 echo "Creating stress directory..."
-distfs -use-pinentry=false -config /root/.distfs/config.json mkdir /stress || echo "stress dir already exists"
+distfs -disable-doh -use-pinentry=false -config /root/.distfs/config.json mkdir /stress || echo "stress dir already exists"
 
 mkdir -p /tmp/stress-in /tmp/stress-out
 
@@ -17,8 +17,8 @@ run_stress() {
     FILE="/stress/stress-$ID.txt"
     DATA="stress data from worker $ID"
     echo "$DATA" > /tmp/stress-in/$ID
-    distfs -use-pinentry=false put /tmp/stress-in/$ID $FILE
-    distfs -use-pinentry=false get $FILE /tmp/stress-out/$ID
+    distfs -disable-doh -use-pinentry=false put /tmp/stress-in/$ID $FILE
+    distfs -disable-doh -use-pinentry=false get $FILE /tmp/stress-out/$ID
     if grep -q "$DATA" /tmp/stress-out/$ID; then
         echo "Worker $ID: PASS"
     else

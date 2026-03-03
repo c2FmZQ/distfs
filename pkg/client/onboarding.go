@@ -41,6 +41,7 @@ type OnboardingOptions struct {
 	TokenEndpoint string
 	ShowQR        bool
 	Browser       string
+	DisableDoH    bool
 }
 
 // GetOIDCToken retrieves an OIDC token using the device flow or returns the provided JWT.
@@ -55,7 +56,12 @@ func GetOIDCToken(ctx context.Context, opts OnboardingOptions) (string, error) {
 
 	if authEndpoint == "" || tokenEndpoint == "" {
 		// Discovery from server
-		resp, err := http.Get(opts.ServerURL + "/v1/auth/config")
+		httpClient := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH).httpClient
+		req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/auth/config", nil)
+		if err != nil {
+			return "", fmt.Errorf("failed to create auth config request: %w", err)
+		}
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return "", fmt.Errorf("failed to fetch auth config: %w", err)
 		}
@@ -100,8 +106,14 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		return err
 	}
 
+	httpClient := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH).httpClient
+
 	// Fetch Server Key
-	resp, err := http.Get(opts.ServerURL + "/v1/meta/key")
+	req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/meta/key", nil)
+	if err != nil {
+		return fmt.Errorf("failed to create server key request: %w", err)
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("failed to fetch server key: %w", err)
 	}
@@ -124,14 +136,19 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		dk, _ := crypto.GenerateEncryptionKey()
 		sk, _ := crypto.GenerateIdentityKey()
 
-		req := map[string]interface{}{
+		payload := map[string]interface{}{
 			"jwt":      token,
 			"sign_key": sk.Public(),
 			"enc_key":  dk.EncapsulationKey().Bytes(),
 		}
-		body, _ := json.Marshal(req)
+		body, _ := json.Marshal(payload)
 
-		resp, err := http.Post(opts.ServerURL+"/v1/user/register", "application/json", bytes.NewReader(body))
+		req, err := http.NewRequestWithContext(ctx, "POST", opts.ServerURL+"/v1/user/register", bytes.NewReader(body))
+		if err != nil {
+			return fmt.Errorf("failed to create registration request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := httpClient.Do(req)
 		if err != nil {
 			return fmt.Errorf("registration failed: %w", err)
 		}
@@ -157,7 +174,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 			ServerKey: hex.EncodeToString(sKey),
 		}
 
-		c := NewClient(opts.ServerURL)
+		c := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH)
 		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 
 		// Ensure root exists and capture anchor
@@ -195,7 +212,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		fmt.Printf("New account initialized successfully. User ID: %s\n", user.ID)
 	} else {
 		// Existing account flow (Pull)
-		c := NewClient(opts.ServerURL)
+		c := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH)
 		blob, err := c.PullKeySync(ctx, token)
 		if err != nil {
 			return fmt.Errorf("failed to pull keys: %w (did you mean --new?)", err)

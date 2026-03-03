@@ -31,7 +31,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	// 1. Setup Cluster
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	if err != nil {
 		t.Fatal(err)
@@ -45,7 +45,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()

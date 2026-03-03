@@ -115,7 +115,7 @@ func TestClientIntegration(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -134,7 +134,7 @@ func TestClientIntegration(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -232,7 +232,7 @@ func TestReplication(t *testing.T) {
 	// 1. Setup Metadata Node
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -260,7 +260,7 @@ func TestReplication(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -336,7 +336,7 @@ func TestDirectories(t *testing.T) {
 	// Setup Cluster (Single node fine for logic)
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -352,7 +352,7 @@ func TestDirectories(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -435,7 +435,7 @@ func TestReplicationRepair(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -451,7 +451,7 @@ func TestReplicationRepair(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -548,7 +548,7 @@ func TestReadAhead(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -564,7 +564,7 @@ func TestReadAhead(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -667,7 +667,7 @@ func TestGarbageCollection(t *testing.T) {
 	// 1. Setup Metadata
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
 	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
 	if err != nil {
@@ -683,7 +683,7 @@ func TestGarbageCollection(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -771,7 +771,7 @@ func TestGarbageCollection(t *testing.T) {
 func TestResolvePathComplex(t *testing.T) {
 	metaDir := t.TempDir()
 	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key")
+	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
 	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
 	defer metaNode.Shutdown()
 	metaNode.Raft.BootstrapCluster(raft.Configuration{
@@ -782,7 +782,7 @@ func TestResolvePathComplex(t *testing.T) {
 	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	metaServer.StopKeyRotation()
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()

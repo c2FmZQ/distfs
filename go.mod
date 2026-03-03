@@ -1,11 +1,13 @@
 module github.com/c2FmZQ/distfs
 
-go 1.25.5
+go 1.26.0
 
 require (
 	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5
+	github.com/c2FmZQ/ech v0.4.0
 	github.com/c2FmZQ/storage v0.3.2
 	github.com/c2FmZQ/tlsproxy/jwks v0.0.0-20260210222347-c2dddf848fef
+	github.com/c2FmZQ/tpm v0.5.0
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
@@ -27,7 +29,6 @@ require (
 	github.com/atotto/clipboard v0.1.4 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/boltdb/bolt v1.3.1 // indirect
-	github.com/c2FmZQ/tpm v0.5.0 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
 	github.com/charmbracelet/x/ansi v0.11.6 // indirect
 	github.com/charmbracelet/x/cellbuf v0.0.15 // indirect
@@ -44,6 +45,7 @@ require (
 	github.com/hashicorp/go-metrics v0.5.4 // indirect
 	github.com/hashicorp/go-msgpack/v2 v2.1.5 // indirect
 	github.com/hashicorp/golang-lru v1.0.2 // indirect
+	github.com/hashicorp/golang-lru/v2 v2.0.7 // indirect
 	github.com/hashicorp/raft-boltdb v0.0.0-20251103221153-05f9dd7a5148 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/mattn/go-colorable v0.1.14 // indirect

@@ -37,6 +37,7 @@ The system is designed to scale horizontally, with the following soft limits:
 ### 3.1 The "Trust No One" Model
 *   **Data Privacy:** All file content is encrypted on the Client side using AES-256-GCM before it is sent to any node.
 *   **Metadata Privacy:** Directory names and file names are encrypted. The MetaNode sees the file system as a graph of opaque IDs, not paths like `/home/alice/docs`.
+*   **Network Privacy:** By default, all HTTP clients utilize Encrypted Client Hello (ECH) and DNS-over-HTTPS (DoH) via `github.com/c2FmZQ/ech`. This encrypts the SNI during the TLS handshake and the DNS resolution queries, preventing network observers from identifying the specific DistFS clusters or nodes a client is communicating with. (This can be disabled via `--disable-doh` for internal environments).
 *   **Node Security:** Leveraging `github.com/c2FmZQ/storage`, all data stored on MetaNodes and DataNodes (Raft logs, snapshots, chunk files, keys) is encrypted *at rest*.
     *   **Root Secret:** A `DISTFS_MASTER_KEY` environment variable provides the master passphrase.
     *   **Hardware Binding (Optional):** If the `--use-tpm` flag is provided, the node will use a local Trusted Platform Module (TPM) to compute an HMAC over the `DISTFS_MASTER_KEY`. This ensures the local storage backend cannot be decrypted without physical access to the specific hardware that initialized it.

@@ -28,7 +28,7 @@ MAX_RETRIES=30
 COUNT=0
 while true; do
     JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-    if distfs -use-pinentry=false init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
+    if distfs -disable-doh -use-pinentry=false init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
         break
     fi
     COUNT=$((COUNT + 1))
@@ -40,16 +40,16 @@ while true; do
 done
 
 echo "GLOBAL SETUP COMPLETE. Admin ID:"
-distfs -use-pinentry=false whoami
+distfs -disable-doh -use-pinentry=false whoami
 
 echo "Creating /users directory..."
-distfs -use-pinentry=false mkdir /users
-distfs -use-pinentry=false chmod 0755 /users
+distfs -disable-doh -use-pinentry=false mkdir /users
+distfs -disable-doh -use-pinentry=false chmod 0755 /users
 
 # Pre-register and promote benchmark user to avoid 403s during performance test
 BENCH_JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
-DISTFS_PASSWORD=benchpass distfs -use-pinentry=false -config /tmp/bench-config.json init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT"
-distfs -use-pinentry=false admin-promote bench-user@example.com || echo "bench-user promotion failed"
+DISTFS_PASSWORD=benchpass distfs -disable-doh -use-pinentry=false -config /tmp/bench-config.json init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT"
+distfs -disable-doh -use-pinentry=false admin-promote bench-user@example.com || echo "bench-user promotion failed"
 
 FAILED=0
 

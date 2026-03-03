@@ -148,37 +148,44 @@ func Load(path string) (*Config, error) {
 	return nil, fmt.Errorf("invalid config format: encryption mandatory")
 }
 
+// TPMHasher is an optional callback to cryptographically bind the passphrase to a local TPM.
+var TPMHasher func(password []byte) ([]byte, error)
+
 func deriveKey(password []byte, salt []byte) []byte {
 	return argon2.IDKey(password, salt, 1, 64*1024, 4, 32)
 }
 
 // GetPassword prompts the user for a passphrase.
 func GetPassword(prompt string, confirm bool) ([]byte, error) {
+	var pass []byte
+	var err error
+
 	if envPass := os.Getenv("DISTFS_PASSWORD"); envPass != "" {
-		return []byte(envPass), nil
+		pass = []byte(envPass)
+	} else if UsePinentry {
+		pass, err = getPasswordPinentry(prompt, confirm)
+	} else {
+		fmt.Fprint(os.Stderr, prompt)
+		pass, err = term.ReadPassword(int(syscall.Stdin))
+		fmt.Fprintln(os.Stderr)
+		if err == nil && confirm {
+			fmt.Fprint(os.Stderr, "Confirm passphrase: ")
+			byteConfirm, errConf := term.ReadPassword(int(syscall.Stdin))
+			fmt.Fprintln(os.Stderr)
+			if errConf != nil {
+				err = errConf
+			} else if !bytes.Equal(pass, byteConfirm) {
+				err = fmt.Errorf("passwords do not match")
+			}
+		}
 	}
 
-	if UsePinentry {
-		return getPasswordPinentry(prompt, confirm)
-	}
-
-	fmt.Fprint(os.Stderr, prompt)
-	bytePassword, err := term.ReadPassword(int(syscall.Stdin))
-	fmt.Fprintln(os.Stderr)
 	if err != nil {
 		return nil, err
 	}
 
-	if confirm {
-		fmt.Fprint(os.Stderr, "Confirm passphrase: ")
-		byteConfirm, err := term.ReadPassword(int(syscall.Stdin))
-		fmt.Fprintln(os.Stderr)
-		if err != nil {
-			return nil, err
-		}
-		if !bytes.Equal(bytePassword, byteConfirm) {
-			return nil, fmt.Errorf("passwords do not match")
-		}
+	if TPMHasher != nil {
+		return TPMHasher(pass)
 	}
-	return bytePassword, nil
+	return pass, nil
 }

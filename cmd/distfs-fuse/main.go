@@ -67,6 +67,7 @@ import (
 	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
 	useTPM := flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
+	disableDoH := flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
 
 	serverURL := flag.String("server", "http://localhost:8080", "Metadata Server URL (only used if config is missing)")
 	isNew := flag.Bool("new", false, "Initialize a new account if config is missing")
@@ -102,6 +103,7 @@ import (
 			TokenEndpoint: *tokenEndpoint,
 			ShowQR:        *qrCode,
 			Browser:       *browser,
+			DisableDoH:    *disableDoH,
 		}
 		if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
 			log.Fatal(err)
@@ -118,7 +120,7 @@ import (
 	if err != nil {
 		log.Fatal(err)
 	}
-	c := loadClient(conf, *rootID)
+	c := loadClient(conf, *rootID, *disableDoH)
 
 	conn, err := fuse.Mount(
 		*mountpoint,
@@ -147,7 +149,7 @@ import (
 	}
 }
 
-func loadClient(conf *config.Config, rootID string) *client.Client {
+func loadClient(conf *config.Config, rootID string, disableDoH bool) *client.Client {
 	c := client.NewClient(conf.ServerURL)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
@@ -165,7 +167,8 @@ func loadClient(conf *config.Config, rootID string) *client.Client {
 	c = c.WithIdentity(conf.UserID, dk).
 		WithSignKey(sk).
 		WithServerKey(svKey).
-		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion)
+		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
+		WithDisableDoH(disableDoH)
 
 	if rootID != "" {
 		c = c.WithRootID(rootID)

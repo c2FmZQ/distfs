@@ -26,6 +26,8 @@ github.com/beorn7/perks v1.0.0/go.mod h1:KWe93zE9D1o94FZ5RNwFwVgaQK1VOXiVxmqh+Ce
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/boltdb/bolt v1.3.1 h1:JQmyP4ZBrce+ZQu0dY660FMfatumYDLun9hBCUVIkF4=
 github.com/boltdb/bolt v1.3.1/go.mod h1:clJnj/oiGkjum5o1McbSZDSLxVThjynRyGBgiAx27Ps=
+github.com/c2FmZQ/ech v0.4.0 h1:KbRAzFK6S2tBy03PQBWx72SyoxreN+VEg9kEZk9pPag=
+github.com/c2FmZQ/ech v0.4.0/go.mod h1:efG3ukNhMom+/MxsJnClR6awhxaEpxr5C9ruAeKj92k=
 github.com/c2FmZQ/storage v0.3.2 h1:/Qy/uoZTEw1XxrkHK4MAiQliwpZ02Y5w/whym8Q4+qQ=
 github.com/c2FmZQ/storage v0.3.2/go.mod h1:kgLL2yKcpWW62FmdoWwETSAWKpF95dBfhD6N7zfE1PE=
 github.com/c2FmZQ/tlsproxy/jwks v0.0.0-20260210222347-c2dddf848fef h1:1cZ8BSuLb9Lz/KQCJh+SmXIE04t1jirIG/MPH1izdjM=
@@ -130,6 +132,8 @@ github.com/hashicorp/go-uuid v1.0.0/go.mod h1:6SBZvOh/SIDV7/2o3Jml5SYk/TvGqwFJ/b
 github.com/hashicorp/golang-lru v0.5.0/go.mod h1:/m3WP610KZHVQ1SGc6re/UDhFvYD7pJ4Ao+sR/qLZy8=
 github.com/hashicorp/golang-lru v1.0.2 h1:dV3g9Z/unq5DpblPpw+Oqcv4dU/1omnb4Ok8iPY6p1c=
 github.com/hashicorp/golang-lru v1.0.2/go.mod h1:iADmTwqILo4mZ8BN3D2Q6+9jd8WM5uGBxy+E8yxSoD4=
+github.com/hashicorp/golang-lru/v2 v2.0.7 h1:a+bsQ5rvGLjzHuww6tVxozPZFVghXaHOwFs4luLUK2k=
+github.com/hashicorp/golang-lru/v2 v2.0.7/go.mod h1:QeFd9opnmA6QUJc5vARoKUSoFhyfM2/ZepoAG6RGpeM=
 github.com/hashicorp/raft v1.7.3 h1:DxpEqZJysHN0wK+fviai5mFcSYsCkNpFUl1xpAW8Rbo=
 github.com/hashicorp/raft v1.7.3/go.mod h1:DfvCGFxpAUPE0L4Uc8JLlTPtc3GzSbdH0MTJCLgnmJQ=
 github.com/hashicorp/raft-boltdb v0.0.0-20251103221153-05f9dd7a5148 h1:tjaIHlfKX22DCCPTx2mK+6N/kTP9DV7B3bxEUyQtjKA=

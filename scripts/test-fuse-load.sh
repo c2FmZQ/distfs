@@ -36,7 +36,7 @@ until wget -qO- "$SERVER_URL/v1/meta/key" > /dev/null 2>&1; do
 done
 echo "Server ready."
 
-/bin/distfs -config /tmp/fuse-load-config.json init --new -server "$SERVER_URL" -jwt "$JWT"
+/bin/distfs -disable-doh -config /tmp/fuse-load-config.json init --new -server "$SERVER_URL" -jwt "$JWT"
 
 # 2. Mount
 echo "Mounting DistFS to $MOUNT_POINT..."
