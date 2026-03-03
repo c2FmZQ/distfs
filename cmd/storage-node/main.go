@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"crypto/mlkem"
 	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -38,6 +39,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
+	"github.com/c2FmZQ/tpm"
 	"github.com/hashicorp/raft"
 )
 
@@ -108,6 +110,7 @@ func main() {
 
 		tlsCert = flag.String("tls-cert", "", "TLS certificate for public API")
 		tlsKey  = flag.String("tls-key", "", "TLS key for public API")
+		useTPM  = flag.Bool("use-tpm", false, "Use TPM for hardware-bound security")
 	)
 	flag.Parse()
 
@@ -143,9 +146,52 @@ func main() {
 	}
 
 	// 0. Initialize Encryption
-	passphrase := os.Getenv("DISTFS_MASTER_KEY")
-	if passphrase == "" {
+	passphraseStr := os.Getenv("DISTFS_MASTER_KEY")
+	if passphraseStr == "" {
 		log.Fatal("DISTFS_MASTER_KEY environment variable is required")
+	}
+
+	var tpmDev *tpm.TPM
+	if *useTPM {
+		var err error
+		tpmDev, err = tpm.New()
+		if err != nil {
+			log.Fatalf("failed to initialize TPM: %v", err)
+		}
+		defer tpmDev.Close()
+	}
+
+	passphrase := []byte(passphraseStr)
+
+	// Hardware-bind the passphrase using TPM HMAC
+	if tpmDev != nil {
+		hmacKeyPath := filepath.Join(baseDir, "tpm_hmac.key")
+		var hmacKey *tpm.Key
+		if b, err := os.ReadFile(hmacKeyPath); err == nil {
+			hmacKey, err = tpmDev.UnmarshalKey(b)
+			if err != nil {
+				log.Fatalf("failed to unmarshal TPM HMAC key: %v", err)
+			}
+		} else {
+			hmacKey, err = tpmDev.CreateKey(tpm.WithHMAC(256))
+			if err != nil {
+				log.Fatalf("failed to create TPM HMAC key: %v", err)
+			}
+			marshaled, err := hmacKey.Marshal()
+			if err != nil {
+				log.Fatalf("failed to marshal TPM HMAC key: %v", err)
+			}
+			if err := os.WriteFile(hmacKeyPath, marshaled, 0600); err != nil {
+				log.Fatalf("failed to save TPM HMAC key: %v", err)
+			}
+		}
+
+		boundHash, err := hmacKey.HMAC(passphrase)
+		if err != nil {
+			log.Fatalf("failed to compute TPM HMAC: %v", err)
+		}
+		passphrase = []byte(hex.EncodeToString(boundHash))
+		log.Println("Hardware security enabled: Master key is bound to TPM")
 	}
 
 	// Load or Create Master Key
@@ -154,7 +200,7 @@ func main() {
 	var err error
 
 	if _, err := os.Stat(mkPath); err == nil {
-		mk, err = storage_crypto.ReadMasterKey([]byte(passphrase), mkPath)
+		mk, err = storage_crypto.ReadMasterKey(passphrase, mkPath)
 		if err != nil {
 			log.Fatalf("failed to read master key: %v", err)
 		}
@@ -163,7 +209,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("failed to create master key: %v", err)
 		}
-		if err := mk.Save([]byte(passphrase), mkPath); err != nil {
+		if err := mk.Save(passphrase, mkPath); err != nil {
 			log.Fatalf("failed to save master key: %v", err)
 		}
 	}
@@ -172,7 +218,7 @@ func main() {
 	st := storage.New(baseDir, mk)
 
 	// 1. Load Node Identity Key (Ed25519)
-	raftKey, err := metadata.LoadOrGenerateNodeKey(st, "node.key")
+	raftKey, err := metadata.LoadOrGenerateNodeKey(st, "node.key", tpmDev)
 	if err != nil {
 		log.Fatalf("failed to load node key: %v", err)
 	}

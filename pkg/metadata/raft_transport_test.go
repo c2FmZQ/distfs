@@ -13,7 +13,7 @@ import (
 
 func TestTLSStreamLayer(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	key := &NodeKey{Pub: pub, Priv: priv}
+	key := &NodeKey{Pub: pub, Signer: priv}
 	cert, _ := GenerateSelfSignedCert(key)
 	tlsConfig := NewServerTLSConfig(cert, func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		return nil

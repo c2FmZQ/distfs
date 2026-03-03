@@ -504,7 +504,7 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 	tmpDir := t.TempDir()
 	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st := storage.New(tmpDir, mk)
-	nodeKey, _ := LoadOrGenerateNodeKey(st, "node.key")
+	nodeKey, _ := LoadOrGenerateNodeKey(st, "node.key", nil)
 	node2, _ := NewRaftNode("node2", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
 	defer node2.Shutdown()
 
@@ -1084,7 +1084,7 @@ func TestServer_Forwarding(t *testing.T) {
 	// Node 2 (Follower)
 	tmpDir2 := t.TempDir()
 	st2, _ := createTestStorage(t, tmpDir2)
-	nodeKey2, _ := LoadOrGenerateNodeKey(st2, "node.key")
+	nodeKey2, _ := LoadOrGenerateNodeKey(st2, "node.key", nil)
 	nodeID2 := NodeIDFromKey(nodeKey2)
 	n2, _ := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2, []byte("test-cluster-secret"))
 	defer n2.Shutdown()

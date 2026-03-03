@@ -14,7 +14,7 @@ import (
 
 func TestNodeIDFromPublicKey(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	key := &NodeKey{Pub: pub, Priv: priv}
+	key := &NodeKey{Pub: pub, Signer: priv}
 	id1 := NodeIDFromKey(key)
 	id2 := NodeIDFromPublicKey(key.Pub)
 	if id1 != id2 {
@@ -30,7 +30,7 @@ func TestRaftNode_KeyRing(t *testing.T) {
 	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st := storage.New(tmpDir, mk)
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	nodeKey := &NodeKey{Pub: pub, Priv: priv}
+	nodeKey := &NodeKey{Pub: pub, Signer: priv}
 
 	// 1. Create RaftNode
 	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))

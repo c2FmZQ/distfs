@@ -24,10 +24,10 @@ import (
 	"time"
 )
 
-// GenerateSelfSignedCert generates a self-signed X.509 certificate using the provided NodeKey (Ed25519).
+// GenerateSelfSignedCert generates a self-signed X.509 certificate using the provided NodeKey (Ed25519 or TPM-backed ECC).
 func GenerateSelfSignedCert(key *NodeKey) (*tls.Certificate, error) {
-	edPriv := key.Priv
-	edPub := key.Pub
+	signer := key.Signer
+	pubKey := signer.Public()
 
 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
@@ -50,14 +50,14 @@ func GenerateSelfSignedCert(key *NodeKey) (*tls.Certificate, error) {
 		IsCA:                  true,
 	}
 
-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, edPub, edPriv)
+	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, pubKey, signer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create certificate: %w", err)
 	}
 
 	return &tls.Certificate{
 		Certificate: [][]byte{derBytes},
-		PrivateKey:  edPriv,
+		PrivateKey:  signer,
 	}, nil
 }
 

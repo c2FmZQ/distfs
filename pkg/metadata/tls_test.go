@@ -11,7 +11,7 @@ import (
 
 func TestTLS_Configs(t *testing.T) {
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	key := &NodeKey{Pub: pub, Priv: priv}
+	key := &NodeKey{Pub: pub, Signer: priv}
 	cert, err := GenerateSelfSignedCert(key)
 	if err != nil {
 		t.Fatal(err)

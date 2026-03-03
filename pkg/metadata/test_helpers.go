@@ -93,7 +93,7 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	}
 	st := storage.New(tmpDir, mk)
 
-	nodeKey, err := LoadOrGenerateNodeKey(st, "node.key")
+	nodeKey, err := LoadOrGenerateNodeKey(st, "node.key", nil)
 	if err != nil {
 		t.Fatalf("failed to generate node key: %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -19,12 +20,53 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	distfuse "github.com/c2FmZQ/distfs/pkg/fuse"
-)
+	"github.com/c2FmZQ/tpm"
+	)
 
-func main() {
+	func setupTPMHasher(configPath string) {
+	config.TPMHasher = func(password []byte) ([]byte, error) {
+		tpmDev, err := tpm.New()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize TPM: %w", err)
+		}
+		defer tpmDev.Close()
+
+		baseDir := filepath.Dir(configPath)
+		hmacKeyPath := filepath.Join(baseDir, "tpm_hmac.key")
+		var hmacKey *tpm.Key
+
+		if b, err := os.ReadFile(hmacKeyPath); err == nil {
+			hmacKey, err = tpmDev.UnmarshalKey(b)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal TPM HMAC key: %w", err)
+			}
+		} else {
+			hmacKey, err = tpmDev.CreateKey(tpm.WithHMAC(256))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create TPM HMAC key: %w", err)
+			}
+			marshaled, err := hmacKey.Marshal()
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal TPM HMAC key: %w", err)
+			}
+			if err := os.WriteFile(hmacKeyPath, marshaled, 0600); err != nil {
+				return nil, fmt.Errorf("failed to save TPM HMAC key: %w", err)
+			}
+		}
+
+		boundHash, err := hmacKey.HMAC(password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute TPM HMAC: %w", err)
+		}
+		return []byte(hex.EncodeToString(boundHash)), nil
+	}
+	}
+
+	func main() {
 	mountpoint := flag.String("mount", "", "Mount point")
 	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
+	useTPM := flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
 
 	serverURL := flag.String("server", "http://localhost:8080", "Metadata Server URL (only used if config is missing)")
 	isNew := flag.Bool("new", false, "Initialize a new account if config is missing")
@@ -38,12 +80,15 @@ func main() {
 	qrCode := flag.Bool("qr", false, "Show a QR code of the verification URL")
 	browser := flag.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
 	rootID := flag.String("root-id", "", "Root inode ID to mount (chroot)")
-
 	flag.Parse()
+
 	config.UsePinentry = *usePinentry
 
-	ctx := context.Background()
+	if *useTPM {
+		setupTPMHasher(*configPath)
+	}
 
+	ctx := context.Background()
 	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
 		fmt.Println("Configuration missing. Starting unified onboarding...")
 		opts := client.OnboardingOptions{

@@ -32,18 +32,63 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"github.com/c2FmZQ/tpm"
 	"golang.org/x/term"
 )
 
 var (
 	configPath  = flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry = flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
+	useTPM      = flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
 	adminFlag   = flag.Bool("admin", false, "Enable admin bypass mode")
 )
+
+func setupTPMHasher() {
+	config.TPMHasher = func(password []byte) ([]byte, error) {
+		tpmDev, err := tpm.New()
+		if err != nil {
+			return nil, fmt.Errorf("failed to initialize TPM: %w", err)
+		}
+		defer tpmDev.Close()
+
+		baseDir := filepath.Dir(*configPath)
+		hmacKeyPath := filepath.Join(baseDir, "tpm_hmac.key")
+		var hmacKey *tpm.Key
+
+		if b, err := os.ReadFile(hmacKeyPath); err == nil {
+			hmacKey, err = tpmDev.UnmarshalKey(b)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal TPM HMAC key: %w", err)
+			}
+		} else {
+			hmacKey, err = tpmDev.CreateKey(tpm.WithHMAC(256))
+			if err != nil {
+				return nil, fmt.Errorf("failed to create TPM HMAC key: %w", err)
+			}
+			marshaled, err := hmacKey.Marshal()
+			if err != nil {
+				return nil, fmt.Errorf("failed to marshal TPM HMAC key: %w", err)
+			}
+			if err := os.WriteFile(hmacKeyPath, marshaled, 0600); err != nil {
+				return nil, fmt.Errorf("failed to save TPM HMAC key: %w", err)
+			}
+		}
+
+		boundHash, err := hmacKey.HMAC(password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to compute TPM HMAC: %w", err)
+		}
+		return []byte(hex.EncodeToString(boundHash)), nil
+	}
+}
 
 func main() {
 	flag.Usage = usage
 	flag.Parse()
+
+	if *useTPM {
+		setupTPMHasher()
+	}
 
 	if flag.NArg() == 0 {
 		usage()

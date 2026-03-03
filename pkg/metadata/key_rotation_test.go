@@ -94,7 +94,7 @@ func TestFSMKeyRingSync(t *testing.T) {
 	mk2, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st2 := storage.New(tmpDir2, mk2)
 	pub2, priv2, _ := ed25519.GenerateKey(rand.Reader)
-	nodeKey2 := &NodeKey{Pub: pub2, Priv: priv2}
+	nodeKey2 := &NodeKey{Pub: pub2, Signer: priv2}
 	nodeID2 := NodeIDFromKey(nodeKey2)
 
 	node2, err := NewRaftNode(nodeID2, "127.0.0.1:0", "", tmpDir2, st2, nodeKey2, []byte("test-cluster-secret"))
@@ -131,7 +131,7 @@ func TestKeyRotation(t *testing.T) {
 	st := storage.New(tmpDir, mk)
 
 	pub, priv, _ := ed25519.GenerateKey(rand.Reader)
-	nodeKey := &NodeKey{Pub: pub, Priv: priv}
+	nodeKey := &NodeKey{Pub: pub, Signer: priv}
 
 	// 1. Start Node
 	node, err := NewRaftNode("node1", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
