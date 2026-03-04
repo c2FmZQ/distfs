@@ -1,0 +1,231 @@
+diff --git a/pkg/metadata/server.go b/pkg/metadata/server.go
+index 6ef8a20..79fda21 100644
+--- a/pkg/metadata/server.go
++++ b/pkg/metadata/server.go
+@@ -41,10 +41,11 @@ import (
+ 	"strings"
+ 	"sync"
+ 	"time"
+ 
+ 	"github.com/c2FmZQ/distfs/pkg/crypto"
++	"github.com/c2FmZQ/ech"
+ 	"github.com/c2FmZQ/tlsproxy/jwks"
+ 	"github.com/golang-jwt/jwt/v5"
+ 	"github.com/hashicorp/go-retryablehttp"
+ 	"github.com/hashicorp/raft"
+ 	bolt "go.etcd.io/bbolt"
+@@ -132,44 +133,73 @@ type challengeEntry struct {
+ 	UserID    string
+ 	CreatedAt time.Time
+ }
+ 
+ // NewServer creates a new Metadata Server.
+-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768) *Server {
++func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool) *Server {
+ 	retryClient := retryablehttp.NewClient()
+ 	retryClient.Logger = nil
+ 	remote := jwks.NewRemote(retryClient, nil)
+ 
++	var echTransport, discoveryTransport http.RoundTripper
++
++	if disableDoH {
++		t1 := http.DefaultTransport.(*http.Transport).Clone()
++		t1.TLSClientConfig = clientTLSConfig
++		echTransport = t1
++
++		t2 := http.DefaultTransport.(*http.Transport).Clone()
++		t2.TLSClientConfig = func() *tls.Config {
++			if clientTLSConfig == nil {
++				return nil
++			}
++			cfg := clientTLSConfig.Clone()
++			cfg.InsecureSkipVerify = true
++			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
++				return nil
++			}
++			return cfg
++		}()
++		discoveryTransport = t2
++	} else {
++		e1 := ech.NewTransport()
++		e1.HTTPTransport.DialContext = nil
++		e1.TLSConfig = clientTLSConfig
++		e1.Resolver = ech.DefaultResolver
++		echTransport = e1
++
++		e2 := ech.NewTransport()
++		e2.HTTPTransport.DialContext = nil
++		e2.Resolver = ech.DefaultResolver
++		e2.TLSConfig = func() *tls.Config {
++			if clientTLSConfig == nil {
++				return nil
++			}
++			cfg := clientTLSConfig.Clone()
++			cfg.InsecureSkipVerify = true
++			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
++				return nil
++			}
++			return cfg
++		}()
++		discoveryTransport = e2
++	}
++
+ 	s := &Server{
+ 		nodeID:     nodeID,
+ 		raft:       r,
+ 		fsm:        fsm,
+ 		jwks:       remote,
+ 		signKey:    signKey,
+ 		raftSecret: raftSecret,
+ 		httpClient: &http.Client{
+-			Transport: &http.Transport{
+-				TLSClientConfig: clientTLSConfig,
+-			},
+-			Timeout: 10 * time.Second,
+-		},
+-		discoveryHTTPClient: &http.Client{Transport: &http.Transport{
+-			TLSClientConfig: func() *tls.Config {
+-				if clientTLSConfig == nil {
+-					return nil
+-				}
+-				cfg := clientTLSConfig.Clone()
+-				cfg.InsecureSkipVerify = true
+-				cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+-					// Always succeed the handshake during discovery, but we'll
+-					// verify the key match in the handler.
+-					return nil
+-				}
+-				return cfg
+-			}(),
++			Transport: echTransport,
++			Timeout:   10 * time.Second,
+ 		},
+-			Timeout: 5 * time.Second,
++		discoveryHTTPClient: &http.Client{
++			Transport: discoveryTransport,
++			Timeout:   5 * time.Second,
+ 		},
+ 		challengeCache:      make(map[string]challengeEntry),
+ 		requestNonceCache:   make(map[string]time.Time),
+ 		sessionKeyCache:     make(map[string]sessionKeyEntry),
+ 		clientTLSConfig:     clientTLSConfig,
+@@ -398,10 +428,11 @@ func (s *Server) applyBatch(req batchRequest) {
+ 		req.resps[i] <- res
+ 	}
+ }
+ 
+ // Shutdown stops the server and its background workers.
++// Shutdown gracefully stops the server and its background workers.
+ func (s *Server) Shutdown() {
+ 	close(s.stopCh)
+ 	if s.replMonitor != nil {
+ 		s.replMonitor.Stop()
+ 	}
+@@ -544,10 +575,11 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
+ 	}
+ 	w.Header().Set("Content-Type", "application/json")
+ 	json.NewEncoder(w).Encode(info)
+ }
+ 
++// ServeHTTP routes and handles incoming Metadata API requests.
+ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+ 	// 1. Identify Public Routes
+ 	isPublic := false
+ 	switch r.URL.Path {
+ 	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world",
+@@ -2063,10 +2095,11 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
+ 	}
+ 
+ 	return nil
+ }
+ 
++// ApplyRaftCommand handles a generic Raft command proposal from an HTTP request.
+ func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdType CommandType, limit int64, successCode int) {
+ 	if s.raft.State() != raft.Leader {
+ 		s.writeError(w, r, ErrCodeNotLeader, "not leader", http.StatusServiceUnavailable)
+ 		return
+ 	}
+@@ -2079,14 +2112,16 @@ func (s *Server) ApplyRaftCommand(w http.ResponseWriter, r *http.Request, cmdTyp
+ 	}
+ 
+ 	s.ApplyRaftCommandRaw(w, r, cmdType, body, successCode)
+ }
+ 
++// ApplyRaftCommandRaw proposes a raw data payload to Raft.
+ func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int) {
+ 	s.ApplyRaftCommandWithHook(w, r, cmdType, data, successCode, nil)
+ }
+ 
++// ApplyRaftCommandWithHook proposes a Raft command and executes a hook on the result before responding.
+ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int, hook func(interface{}) interface{}) {
+ 	sessionID := r.Header.Get("Session-Token")
+ 	resp, err := s.ApplyRaftCommandInternal(cmdType, data, sessionID)
+ 	if err != nil {
+ 		if w == nil {
+@@ -2153,10 +2188,11 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
+ 
+ 		w.WriteHeader(successCode)
+ 	}
+ }
+ 
++// ApplyRaftCommandInternal proposes a command to Raft from an internal server context.
+ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sessionID string) (interface{}, error) {
+ 	if s.raft.State() != raft.Leader {
+ 		return nil, fmt.Errorf("not leader")
+ 	}
+ 
+@@ -2203,10 +2239,11 @@ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sess
+ 		return nil, err
+ 	}
+ 	return res, nil
+ }
+ 
++// FSM returns the underlying Metadata State Machine.
+ func (s *Server) FSM() *MetadataFSM {
+ 	return s.fsm
+ }
+ 
+ func (s *Server) SessionKeyCacheSize() int {
+diff --git a/pkg/metadata/tls.go b/pkg/metadata/tls.go
+index 601ef59..f28b141 100644
+--- a/pkg/metadata/tls.go
++++ b/pkg/metadata/tls.go
+@@ -22,14 +22,14 @@ import (
+ 	"fmt"
+ 	"math/big"
+ 	"time"
+ )
+ 
+-// GenerateSelfSignedCert generates a self-signed X.509 certificate using the provided NodeKey (Ed25519).
++// GenerateSelfSignedCert generates a self-signed X.509 certificate using the provided NodeKey (Ed25519 or TPM-backed ECC).
+ func GenerateSelfSignedCert(key *NodeKey) (*tls.Certificate, error) {
+-	edPriv := key.Priv
+-	edPub := key.Pub
++	signer := key.Signer
++	pubKey := signer.Public()
+ 
+ 	serialNumberLimit := new(big.Int).Lsh(big.NewInt(1), 128)
+ 	serialNumber, err := rand.Int(rand.Reader, serialNumberLimit)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to generate serial number: %w", err)
+@@ -48,18 +48,18 @@ func GenerateSelfSignedCert(key *NodeKey) (*tls.Certificate, error) {
+ 		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+ 		BasicConstraintsValid: true,
+ 		IsCA:                  true,
+ 	}
+ 
+-	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, edPub, edPriv)
++	derBytes, err := x509.CreateCertificate(rand.Reader, &template, &template, pubKey, signer)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("failed to create certificate: %w", err)
+ 	}
+ 
+ 	return &tls.Certificate{
+ 		Certificate: [][]byte{derBytes},
+-		PrivateKey:  edPriv,
++		PrivateKey:  signer,
+ 	}, nil
+ }
+ 
+ // NewServerTLSConfig creates a TLS config for the server (mTLS).
+ // It requires a callback to verify peer certificates against authorized nodes (NodeMeta).

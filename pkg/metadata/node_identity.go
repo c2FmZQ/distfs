@@ -21,6 +21,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/hex"
+	"fmt"
 
 	"github.com/c2FmZQ/storage"
 	"github.com/c2FmZQ/tpm"
@@ -43,13 +44,13 @@ func LoadOrGenerateNodeKey(st *storage.Storage, name string, tpmDev *tpm.TPM) (*
 		if tpmDev != nil {
 			// Try to load as TPM key
 			key, err := tpmDev.UnmarshalKey(kd.Bytes)
-			if err == nil {
-				pubBytes, _ := x509.MarshalPKIXPublicKey(key.Public())
-				return &NodeKey{Signer: key, Pub: pubBytes}, nil
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal TPM key (existing node.key is not a TPM key): %w", err)
 			}
-			// If it fails to unmarshal as TPM key, fall through and try Ed25519 (legacy upgrade) or fail.
+			pubBytes, _ := x509.MarshalPKIXPublicKey(key.Public())
+			return &NodeKey{Signer: key, Pub: pubBytes}, nil
 		}
-		
+
 		// Fallback/Default: Ed25519
 		if len(kd.Bytes) == ed25519.PrivateKeySize {
 			priv := ed25519.PrivateKey(kd.Bytes)
@@ -62,11 +63,11 @@ func LoadOrGenerateNodeKey(st *storage.Storage, name string, tpmDev *tpm.TPM) (*
 	if tpmDev != nil {
 		key, err := tpmDev.CreateKey(tpm.WithECC(elliptic.P256()))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to create TPM key: %w", err)
 		}
 		marshaled, err := key.Marshal()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("failed to marshal TPM key handle: %w", err)
 		}
 		kd.Bytes = marshaled
 		if err := st.SaveDataFile(name, kd); err != nil {

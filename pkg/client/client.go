@@ -267,15 +267,25 @@ type Client struct {
 
 // NewClient creates a new DistFS client.
 func NewClient(serverAddr string) *Client {
-	echTransport := ech.NewTransport()
-	echTransport.HTTPTransport.DialContext = nil
-	echTransport.HTTPTransport.MaxIdleConns = 100
-	echTransport.HTTPTransport.MaxIdleConnsPerHost = 100
+	var transport http.RoundTripper
+
+	if strings.HasPrefix(serverAddr, "http://") {
+		t := http.DefaultTransport.(*http.Transport).Clone()
+		t.ForceAttemptHTTP2 = true
+		t.MaxIdleConns = 100
+		t.MaxIdleConnsPerHost = 100
+		transport = t
+	} else {
+		echTransport := ech.NewTransport()
+		echTransport.HTTPTransport.MaxIdleConns = 100
+		echTransport.HTTPTransport.MaxIdleConnsPerHost = 100
+		transport = echTransport
+	}
 
 	return &Client{
 		serverURL: serverAddr,
 		httpClient: &http.Client{
-			Transport: echTransport,
+			Transport: transport,
 			Timeout:   5 * time.Minute,
 		},
 		keyCache:      make(map[string]fileMetadata),
@@ -350,21 +360,19 @@ func (c *Client) WithAdmin(admin bool) *Client {
 	return &c2
 }
 
-// WithDisableDoH configures whether to disable DNS-over-HTTPS and ECH, using the standard system resolver instead.
+// WithDisableDoH configures whether to disable DNS-over-HTTPS and use the system resolver instead.
 func (c *Client) WithDisableDoH(disable bool) *Client {
 	c2 := *c
 	clonedClient := *c.httpClient
 	c2.httpClient = &clonedClient
 
-	if disable {
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		t.ForceAttemptHTTP2 = true
-		t.MaxIdleConns = 100
-		t.MaxIdleConnsPerHost = 100
-		c2.httpClient.Transport = t
-	} else if transport, ok := c2.httpClient.Transport.(*ech.Transport); ok {
+	if transport, ok := c2.httpClient.Transport.(*ech.Transport); ok {
 		t2 := *transport
-		t2.Resolver = ech.DefaultResolver
+		if disable {
+			t2.Resolver = ech.InsecureGoResolver()
+		} else {
+			t2.Resolver = ech.DefaultResolver
+		}
 		c2.httpClient.Transport = &t2
 	}
 	return &c2

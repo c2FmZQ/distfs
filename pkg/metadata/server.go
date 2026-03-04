@@ -140,49 +140,28 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
 
-	var echTransport, discoveryTransport http.RoundTripper
-
+	resolver := ech.DefaultResolver
 	if disableDoH {
-		t1 := http.DefaultTransport.(*http.Transport).Clone()
-		t1.TLSClientConfig = clientTLSConfig
-		echTransport = t1
-
-		t2 := http.DefaultTransport.(*http.Transport).Clone()
-		t2.TLSClientConfig = func() *tls.Config {
-			if clientTLSConfig == nil {
-				return nil
-			}
-			cfg := clientTLSConfig.Clone()
-			cfg.InsecureSkipVerify = true
-			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-				return nil
-			}
-			return cfg
-		}()
-		discoveryTransport = t2
-	} else {
-		e1 := ech.NewTransport()
-		e1.HTTPTransport.DialContext = nil
-		e1.TLSConfig = clientTLSConfig
-		e1.Resolver = ech.DefaultResolver
-		echTransport = e1
-
-		e2 := ech.NewTransport()
-		e2.HTTPTransport.DialContext = nil
-		e2.Resolver = ech.DefaultResolver
-		e2.TLSConfig = func() *tls.Config {
-			if clientTLSConfig == nil {
-				return nil
-			}
-			cfg := clientTLSConfig.Clone()
-			cfg.InsecureSkipVerify = true
-			cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-				return nil
-			}
-			return cfg
-		}()
-		discoveryTransport = e2
+		resolver = ech.InsecureGoResolver()
 	}
+
+	echTransport := ech.NewTransport()
+	echTransport.TLSConfig = clientTLSConfig
+	echTransport.Resolver = resolver
+
+	discoveryTransport := ech.NewTransport()
+	discoveryTransport.Resolver = resolver
+	discoveryTransport.TLSConfig = func() *tls.Config {
+		if clientTLSConfig == nil {
+			return nil
+		}
+		cfg := clientTLSConfig.Clone()
+		cfg.InsecureSkipVerify = true
+		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+			return nil
+		}
+		return cfg
+	}()
 
 	s := &Server{
 		nodeID:     nodeID,
