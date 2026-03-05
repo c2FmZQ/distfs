@@ -1545,7 +1545,10 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-		lb := c.createLockbox(ctx, fileKey, mode, c.userID, groupID)
+		lb, err := c.createLockbox(ctx, fileKey, mode, c.userID, groupID)
+		if err != nil {
+			return err
+		}
 
 		// Assume not found, create new
 		links := make(map[string]bool)
@@ -2193,6 +2196,11 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	rand.Read(uidBytes)
 	newID := hex.EncodeToString(uidBytes)
 
+	lb, err := c.createLockbox(ctx, fileKey, 0600, c.userID, groupID)
+	if err != nil {
+		return nil, err
+	}
+
 	inode := &metadata.Inode{
 		ID:      newID,
 		Type:    metadata.FileType,
@@ -2201,7 +2209,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		GroupID: groupID,
 		// Links will be updated during commit
 		Links:   map[string]bool{parentID + ":" + nameHMAC: true},
-		Lockbox: c.createLockbox(ctx, fileKey, 0600, c.userID, groupID),
+		Lockbox: lb,
 		Version: 1,
 	}
 	inode.SetName(fileName)

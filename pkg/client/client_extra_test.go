@@ -565,14 +565,14 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 	fileKey := make([]byte, 32)
 
 	// 1. World access (0004)
-	lb := c.createLockbox(ctx, fileKey, 0644, c.userID, "")
+	lb, _ := c.createLockbox(ctx, fileKey, 0644, c.userID, "")
 	if _, ok := lb[metadata.WorldID]; !ok {
 		// WorldID might be missing if world public key not available, but should be hit
 	}
 
 	// 2. Group access (0040)
 	group, _ := c.CreateGroup(ctx, "g1", false)
-	lb2 := c.createLockbox(ctx, fileKey, 0640, c.userID, group.ID)
+	lb2, _ := c.createLockbox(ctx, fileKey, 0640, c.userID, group.ID)
 	if _, ok := lb2[group.ID]; !ok {
 		t.Errorf("Group %s missing from lockbox", group.ID)
 	}

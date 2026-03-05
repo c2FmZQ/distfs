@@ -51,7 +51,10 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 		return err
 	}
 
-	lb := c.createLockbox(ctx, rootKey, 0755, c.userID, "")
+	lb, err := c.createLockbox(ctx, rootKey, 0755, c.userID, "")
+	if err != nil {
+		return err
+	}
 	newInode := metadata.Inode{
 		ID:       c.rootID,
 		Type:     metadata.DirType,
@@ -305,6 +308,11 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			ownerID = opts.OwnerID
 		}
 
+		lb, err := c.createLockbox(ctx, newKey, mode, ownerID, groupID)
+		if err != nil {
+			return err
+		}
+
 		newInode := metadata.Inode{
 			ID: newID,
 			Links: map[string]bool{
@@ -314,7 +322,8 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			Mode:          mode,
 			Children:      make(map[string]string),
 			ChunkManifest: chunkEntries,
-			Lockbox:       c.createLockbox(ctx, newKey, mode, ownerID, groupID),
+			Lockbox:       lb,
+
 			OwnerID:       ownerID,
 			GroupID:       groupID,
 			CTime:         time.Now().UnixNano(),
@@ -893,51 +902,65 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	return nil
 }
 
-func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, ownerID, groupID string) crypto.Lockbox {
+func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, ownerID, groupID string) (crypto.Lockbox, error) {
 	lb := crypto.NewLockbox()
-	if c.decKey != nil {
-		lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
+
+	effectiveOwner := ownerID
+	if effectiveOwner == "" {
+		effectiveOwner = c.userID
 	}
 
-	// Always add the owner if they are different from the current user
-	if ownerID != "" && ownerID != c.userID {
-		if strings.HasPrefix(ownerID, ":") {
+	if effectiveOwner == c.userID {
+		if c.decKey != nil {
+			lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
+		}
+	} else {
+		if strings.HasPrefix(effectiveOwner, ":") {
 			// Group Owner
-			gid := strings.TrimPrefix(ownerID, ":")
+			gid := strings.TrimPrefix(effectiveOwner, ":")
 			group, err := c.GetGroup(ctx, gid)
-			if err == nil {
-				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				if err == nil {
-					lb.AddRecipient(gid, gpk, key)
-				}
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch group owner %s: %w", gid, err)
 			}
+			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal group enc key: %w", err)
+			}
+			lb.AddRecipient(gid, gpk, key)
 		} else {
 			// User Owner
-			user, err := c.GetUser(ctx, ownerID)
-			if err == nil {
-				upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-				if err == nil {
-					lb.AddRecipient(ownerID, upk, key)
-				}
+			user, err := c.GetUser(ctx, effectiveOwner)
+			if err != nil {
+				return nil, fmt.Errorf("failed to fetch user owner %s: %w", effectiveOwner, err)
 			}
+			upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+			if err != nil {
+				return nil, fmt.Errorf("failed to unmarshal user enc key: %w", err)
+			}
+			lb.AddRecipient(effectiveOwner, upk, key)
 		}
 	}
+
 	if (mode & 0004) != 0 {
 		wpk, err := c.GetWorldPublicKey(ctx)
-		if err == nil {
-			lb.AddRecipient(metadata.WorldID, wpk, key)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch world public key: %w", err)
 		}
+		lb.AddRecipient(metadata.WorldID, wpk, key)
 	}
+
 	if groupID != "" && (mode&0060) != 0 {
 		group, err := c.GetGroup(ctx, groupID)
-		if err == nil {
-			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-			if err == nil {
-				lb.AddRecipient(groupID, gpk, key)
-			}
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch group %s: %w", groupID, err)
 		}
+		gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal group enc key: %w", err)
+		}
+		lb.AddRecipient(groupID, gpk, key)
 	}
-	return lb
+	return lb, nil
 }
 
 func generateID() string {

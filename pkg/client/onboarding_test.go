@@ -48,6 +48,9 @@ func TestPerformUnifiedOnboarding_NewAccount(t *testing.T) {
 			w.Write(dk.EncapsulationKey().Bytes())
 		case "/v1/meta/key/sign":
 			w.Write(signKey.Public())
+		case "/v1/meta/key/world":
+			dk, _ := crypto.GenerateEncryptionKey()
+			w.Write(dk.EncapsulationKey().Bytes())
 		case "/v1/user/register":
 			json.NewEncoder(w).Encode(map[string]string{"id": "user-123"})
 		case "/v1/user/keysync":
@@ -136,6 +139,9 @@ func TestPerformUnifiedOnboarding_Restore(t *testing.T) {
 			w.Write(dk.EncapsulationKey().Bytes())
 		case "/v1/meta/key/sign":
 			w.Write(signKey.Public())
+		case "/v1/meta/key/world":
+			dk, _ := crypto.GenerateEncryptionKey()
+			w.Write(dk.EncapsulationKey().Bytes())
 		case "/v1/user/keysync":
 			if r.Method == http.MethodGet {
 				json.NewEncoder(w).Encode(blob)
