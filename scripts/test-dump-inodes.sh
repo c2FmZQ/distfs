@@ -3,11 +3,13 @@ set -e
 # E2E Test for dump-inodes command
 export DISTFS_PASSWORD=testpassword
 
+export DISTFS_CONFIG_DIR="${DISTFS_CONFIG_DIR:-/root/.distfs}"
 echo "Waiting for client configuration..."
-until [ -f /root/.distfs/config.json ]; do sleep 1; done
+until [ -f "$DISTFS_CONFIG_DIR/config.json" ]; do sleep 1; done
 
-echo "Running dump-inodes on root..."
-if distfs -disable-doh -use-pinentry=false -admin -config /root/.distfs/config.json dump-inodes / > /tmp/dump.log; then
+echo "Dumping inodes via Admin CLI..."
+if distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" dump-inodes / > /tmp/dump.log; then
+
     echo "dump-inodes executed successfully."
 else
     echo "FAIL: dump-inodes failed."

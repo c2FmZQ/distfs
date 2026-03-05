@@ -70,8 +70,6 @@ const (
 	CmdAcquireLeases     CommandType = 22
 	CmdReleaseLeases     CommandType = 23
 	CmdPromoteAdmin      CommandType = 24
-	CmdAdminChown        CommandType = 25
-	CmdAdminChmod        CommandType = 26
 	CmdStoreMetrics      CommandType = 27
 	CmdSetGroupQuota     CommandType = 28
 	CmdSetClusterSignKey CommandType = 29
@@ -100,14 +98,13 @@ type ReencryptRequest struct {
 }
 
 type LeaseRequest struct {
-	InodeIDs     []string       `json:"inode_ids"`
-	SessionID    string         `json:"session_id"`
-	Nonce        string         `json:"nonce,omitempty"`
-	Duration     int64          `json:"duration"`
-	UserID       string         `json:"user_id,omitempty"`
-	Type         LeaseType      `json:"type,omitempty"`
-	Lockbox      crypto.Lockbox `json:"lockbox,omitempty"`
-	Placeholders []Inode        `json:"placeholders,omitempty"`
+	InodeIDs     []string  `json:"inode_ids"`
+	SessionID    string    `json:"session_id"`
+	Nonce        string    `json:"nonce,omitempty"`
+	Duration     int64     `json:"duration"`
+	UserID       string    `json:"user_id,omitempty"`
+	Type         LeaseType `json:"type,omitempty"`
+	Placeholders []Inode   `json:"placeholders,omitempty"`
 }
 
 type RotateKeyRequest struct {
@@ -618,10 +615,6 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 		return fsm.executeReleaseLeases(tx, cmd.Data, cmd.SessionNonce)
 	case CmdPromoteAdmin:
 		return fsm.executePromoteAdmin(tx, cmd.Data)
-	case CmdAdminChown:
-		return fsm.executeAdminChown(tx, cmd.Data, cmd.UserID)
-	case CmdAdminChmod:
-		return fsm.executeAdminChmod(tx, cmd.Data, cmd.UserID)
 	case CmdStoreMetrics:
 		return fsm.executeStoreMetrics(tx, cmd.Data)
 	case CmdSetGroupQuota:
@@ -739,6 +732,11 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 		return err
 	}
 
+	// Phase 47: Admin creation bypass. Only admins can create inodes for other users.
+	if inode.OwnerID != userID && !fsm.IsAdmin(userID) {
+		return fmt.Errorf("user %s is not authorized to create inodes for %s", userID, inode.OwnerID)
+	}
+
 	if inode.CTime == 0 {
 		inode.CTime = time.Now().UnixNano()
 	}
@@ -788,12 +786,10 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	json.Unmarshal(plain, &inode)
 
 	if update.Version != inode.Version+1 {
-		log.Printf("DEBUG FSM executeUpdateInode: Version conflict for %s (update.Version=%d, inode.Version=%d)", update.ID, update.Version, inode.Version)
 		return ErrConflict
 	}
 
 	if err := fsm.checkLease(&inode, sessionNonce); err != nil {
-		log.Printf("DEBUG FSM executeUpdateInode: Lease conflict for %s: %v", update.ID, err)
 		return err
 	}
 	if inode.Type == DirType {
@@ -822,22 +818,34 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 		}
 	}
 	ownerChanged := fields["owner_id"] != nil && update.OwnerID != inode.OwnerID
+	if ownerChanged {
+		return fmt.Errorf("OwnerID is immutable")
+	}
+
 	groupChanged := fields["group_id"] != nil && update.GroupID != inode.GroupID
-	if ownerChanged || groupChanged {
-		newOwner := update.OwnerID
-		if fields["owner_id"] == nil {
-			newOwner = inode.OwnerID
+	if groupChanged && update.GroupID != "" {
+		// Verify signer is authorized for the new group
+		v, err := fsm.Get(tx, []byte("groups"), []byte(update.GroupID))
+		if err != nil {
+			return fmt.Errorf("failed to fetch group: %w", err)
 		}
+		if v == nil {
+			return fmt.Errorf("group %s not found", update.GroupID)
+		}
+		var group Group
+		json.Unmarshal(v, &group)
+		if !group.Members[userID] && group.OwnerID != userID {
+			return fmt.Errorf("user %s is not authorized to assign files to group %s", userID, update.GroupID)
+		}
+	}
+
+	if groupChanged {
 		newGroup := update.GroupID
-		if fields["group_id"] == nil {
-			newGroup = inode.GroupID
-		}
-		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(update.Size)); err != nil {
+		if err := fsm.checkQuota(tx, inode.OwnerID, newGroup, 1, int64(update.Size)); err != nil {
 			return err
 		}
 		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
-		fsm.updateUsage(tx, newOwner, newGroup, 1, int64(update.Size))
-		inode.OwnerID = newOwner
+		fsm.updateUsage(tx, inode.OwnerID, newGroup, 1, int64(update.Size))
 		inode.GroupID = newGroup
 	}
 	oldPages := inode.ChunkPages
@@ -874,6 +882,9 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	}
 	if update.GroupSig != nil {
 		inode.GroupSig = update.GroupSig
+	}
+	if update.SignerID != "" {
+		inode.SignerID = update.SignerID
 	}
 	if len(update.Lockbox) > 0 {
 		inode.Lockbox = update.Lockbox
@@ -1252,67 +1263,6 @@ func (fsm *MetadataFSM) executeStoreKeySync(tx *bolt.Tx, data []byte) interface{
 	json.Unmarshal(data, &req)
 	encoded, _ := json.Marshal(req.Blob)
 	return fsm.Put(tx, []byte("keysync"), []byte(req.UserID), encoded)
-}
-
-func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, userID string) interface{} {
-	var req AdminChownRequest
-	json.Unmarshal(data, &req)
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
-	if err != nil {
-		return err
-	}
-	if plain == nil {
-		return ErrNotFound
-	}
-	var inode Inode
-	json.Unmarshal(plain, &inode)
-
-	if !fsm.IsAdmin(userID) {
-		return fmt.Errorf("permission denied: only admins can perform chown")
-	}
-
-	newOwner := inode.OwnerID
-	if req.OwnerID != nil {
-		newOwner = *req.OwnerID
-	}
-	newGroup := inode.GroupID
-	if req.GroupID != nil {
-		newGroup = *req.GroupID
-	}
-
-	if newOwner != inode.OwnerID || newGroup != inode.GroupID {
-		if err := fsm.checkQuota(tx, newOwner, newGroup, 1, int64(inode.Size)); err != nil {
-			return err
-		}
-		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, -1, -int64(inode.Size))
-		fsm.updateUsage(tx, newOwner, newGroup, 1, int64(inode.Size))
-		inode.OwnerID = newOwner
-		inode.GroupID = newGroup
-	}
-
-	inode.Version++
-	return fsm.saveInodeWithPages(tx, &inode)
-}
-
-func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, userID string) interface{} {
-	var req AdminChmodRequest
-	json.Unmarshal(data, &req)
-	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
-	if err != nil {
-		return err
-	}
-	if plain == nil {
-		return ErrNotFound
-	}
-	var inode Inode
-	json.Unmarshal(plain, &inode)
-
-	if !fsm.IsAdmin(userID) {
-		return fmt.Errorf("permission denied: only admins can perform chmod")
-	}
-	inode.Mode = SanitizeMode(req.Mode, inode.Type)
-	inode.Version++
-	return fsm.saveInodeWithPages(tx, &inode)
 }
 
 func (fsm *MetadataFSM) executeStoreMetrics(tx *bolt.Tx, data []byte) interface{} {

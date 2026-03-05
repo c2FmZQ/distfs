@@ -62,14 +62,37 @@ func TestManifestIntegrity(t *testing.T) {
 	time.Sleep(1 * time.Second) // Allow FSM to catch up
 
 	// 3. Client Operations
-	// 3.1 User B creates a file
+	// 3.1 User B login
 	clientB := NewClient(ts.URL).WithIdentity(userID, dkB).WithSignKey(skB).WithServerKey(ek)
 	if err := clientB.Login(t.Context()); err != nil {
 		t.Fatalf("User B login failed: %v", err)
 	}
 
-	if err := clientB.EnsureRoot(t.Context()); err != nil {
+	// 3.2 Admin initializes Root
+	clientA := NewClient(ts.URL).WithIdentity(adminID, dkA).WithSignKey(skA).WithServerKey(ek).WithAdmin(true)
+	if err := clientA.Login(t.Context()); err != nil {
+		t.Fatalf("Admin login failed: %v", err)
+	}
+	if err := clientA.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
+	}
+
+	// 3.3 Create a system group for root access and add User B
+	rootGroup, err := clientA.CreateGroup(t.Context(), "root-managers", true)
+	if err != nil {
+		t.Fatalf("Create root group failed: %v", err)
+	}
+	if err := clientA.AddUserToGroup(t.Context(), rootGroup.ID, userID, "test", nil); err != nil {
+		t.Fatalf("Add User B to root group failed: %v", err)
+	}
+
+	// 3.4 Grant Group Write access to Root
+	if err := clientA.SetAttr(t.Context(), "/", metadata.SetAttrRequest{
+		Mode:    ptr(uint32(0770)),
+		GroupID: ptr(rootGroup.ID),
+		OwnerID: ptr(adminID),
+	}); err != nil {
+		t.Fatalf("Chgrp root failed: %v", err)
 	}
 
 	filePath := "/secret.txt"
@@ -93,69 +116,6 @@ func TestManifestIntegrity(t *testing.T) {
 	// Version 1 because of atomic creation in Phase 43
 	if inode.Version != 1 {
 		t.Errorf("Expected version 1, got %d", inode.Version)
-	}
-
-	// 4.5 User B explicitly grants Admin access so AdminChown can re-seal it
-	if err := clientB.Chmod(t.Context(), filePath, 0644); err != nil { // 0644 gives WorldRead, putting WorldKey in lockbox (which Admin can read)
-		t.Fatalf("Chmod failed: %v", err)
-	}
-
-	// 5. Admin Operations (Client-side Signing)
-	clientA := NewClient(ts.URL).WithIdentity(adminID, dkA).WithSignKey(skA).WithServerKey(ek).WithAdmin(true)
-	if err := clientA.Login(t.Context()); err != nil {
-		t.Fatalf("Admin login failed: %v", err)
-	}
-
-	// Admin changes ownership to User B (re-signing by Admin)
-	chownReq := metadata.AdminChownRequest{OwnerID: &userID}
-	if err := clientA.AdminChown(t.Context(), inode.ID, chownReq); err != nil {
-		t.Fatalf("AdminChown failed: %v", err)
-	}
-
-	var inode2 *metadata.Inode
-	inode2, err = clientA.GetInodeUnverified(t.Context(), inode.ID)
-	if err != nil {
-		t.Fatalf("GetInode failed: %v", err)
-	}
-	if inode2.OwnerID != userID {
-		t.Errorf("Expected owner %s, got %s", userID, inode2.OwnerID)
-	}
-	// Version 3 after AdminChown (V1=Create, V2=Chmod 0644, V3=AdminChown)
-	if inode2.Version != 3 {
-		t.Errorf("Expected version 3 after chown, got %d", inode2.Version)
-	}
-
-	// Note: Admin cannot verify signerID or AuthorizedSigners after chown
-	// because they are now encrypted for User B.
-	// clientA.VerifyInode(t.Context(), inode2) would fail here.
-
-	// 6. ADVERSARIAL: Evil Server Tampering
-	// Manually modify the size in the DB without updating signature
-	err = raftNode.FSM.DB().Update(func(tx *bolt.Tx) error {
-		v, err := raftNode.FSM.Get(tx, []byte("inodes"), []byte(inode2.ID))
-		if err != nil {
-			return err
-		}
-		var i metadata.Inode
-		if err := json.Unmarshal(v, &i); err != nil {
-			return err
-		}
-		i.Size = 99999 // TAMPERED
-		data, _ := json.Marshal(i)
-		return raftNode.FSM.Put(tx, []byte("inodes"), []byte(inode2.ID), data)
-	})
-	if err != nil {
-		t.Fatalf("DB tamper failed: %v", err)
-	}
-
-	// Verify we can still get it verified-but-not-decrypted (metadata only)
-	// Admin can see the inode now because VerifyInode returns nil if key missing.
-	it, err := clientA.GetInode(t.Context(), inode2.ID)
-	if err != nil {
-		t.Fatalf("GetInode failed after chown (expected success via partial verify): %v", err)
-	}
-	if it.Size != 99999 {
-		t.Errorf("Expected tampered size 99999, got %d", it.Size)
 	}
 
 	// 7. Group Signing & Member Mutation

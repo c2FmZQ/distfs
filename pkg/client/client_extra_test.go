@@ -310,7 +310,7 @@ func TestClient_AdminMethods(t *testing.T) {
 		// Might fail if g1 not created yet
 	}
 
-	// 8. AdminChown
+	// 8. MkdirExtended (Admin owner override)
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
 	uek2, _ := crypto.GenerateEncryptionKey()
@@ -321,16 +321,16 @@ func TestClient_AdminMethods(t *testing.T) {
 	}
 	metadata.CreateUser(t, node, user2)
 
-	c.Mkdir(ctx, "/testdir", 0755)
-	inode, _, err2 := c.ResolvePath(ctx, "/testdir")
+	err = c.WithAdmin(true).MkdirExtended(ctx, "/admin-owned-for-u2", 0755, MkdirOptions{OwnerID: u2})
+	if err != nil {
+		t.Fatalf("MkdirExtended (Admin) failed: %v", err)
+	}
+	inode, _, err2 := c.ResolvePath(ctx, "/admin-owned-for-u2")
 	if err2 != nil {
 		t.Fatalf("ResolvePath failed: %v", err2)
 	}
-	err = c.WithAdmin(true).AdminChown(ctx, inode.ID, metadata.AdminChownRequest{
-		OwnerID: &u2,
-	})
-	if err != nil {
-		t.Fatalf("AdminChown failed: %v", err)
+	if inode.OwnerID != u2 {
+		t.Errorf("Expected owner %s, got %s", u2, inode.OwnerID)
 	}
 
 	// 9. AdminPromote
@@ -565,14 +565,14 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 	fileKey := make([]byte, 32)
 
 	// 1. World access (0004)
-	lb := c.createLockbox(ctx, fileKey, 0644, "")
+	lb := c.createLockbox(ctx, fileKey, 0644, c.userID, "")
 	if _, ok := lb[metadata.WorldID]; !ok {
 		// WorldID might be missing if world public key not available, but should be hit
 	}
 
 	// 2. Group access (0040)
 	group, _ := c.CreateGroup(ctx, "g1", false)
-	lb2 := c.createLockbox(ctx, fileKey, 0640, group.ID)
+	lb2 := c.createLockbox(ctx, fileKey, 0640, c.userID, group.ID)
 	if _, ok := lb2[group.ID]; !ok {
 		t.Errorf("Group %s missing from lockbox", group.ID)
 	}
@@ -776,6 +776,103 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	err = c1.GroupChown(ctx, group.ID, "u2")
 	if err != nil {
 		t.Errorf("GroupChown failed: %v", err)
+	}
+}
+
+func TestVerifyInode_Signatures(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	u1ID := c.UserID()
+	sk := c.SignKey()
+	dk := c.DecKey() // Need decryption key for VerifyInode
+
+	// 1. Missing SignerID (FAIL)
+	inode := &metadata.Inode{ID: "f1", OwnerID: u1ID, Type: metadata.FileType, Version: 1}
+	err := c.VerifyInode(ctx, inode)
+	if err == nil {
+		t.Error("VerifyInode should reject inode with missing SignerID")
+	}
+
+	// 2. Invalid UserSig (FAIL)
+	inode.SetSignerID(u1ID)
+	inode.UserSig = []byte("garbage")
+	err = c.VerifyInode(ctx, inode)
+	if err == nil {
+		t.Error("VerifyInode should reject inode with invalid UserSig")
+	}
+
+	// 3. Valid Signature but missing Lockbox (FAIL - cannot decrypt fileKey)
+	inode.SignInodeForTest(u1ID, sk)
+	err = c.VerifyInode(ctx, inode)
+	if err == nil {
+		t.Error("VerifyInode should reject inode with missing lockbox entry")
+	}
+
+	// 4. Valid Signature and Lockbox (SUCCESS)
+	fileKey := make([]byte, 32)
+	inode.Lockbox = make(crypto.Lockbox)
+	inode.Lockbox.AddRecipient(u1ID, dk.EncapsulationKey(), fileKey)
+	inode.SetFileKey(fileKey)
+
+	// Must have a valid ClientBlob for successful decryption
+	blob := metadata.InodeClientBlob{
+		Name:  "f1",
+		MTime: time.Now().UnixNano(),
+	}
+	encBlob, _ := c.encryptInodeClientBlob(blob, fileKey)
+	inode.ClientBlob = encBlob
+
+	inode.SignInodeForTest(u1ID, sk)
+	err = c.VerifyInode(ctx, inode)
+	if err != nil {
+		t.Errorf("VerifyInode failed for valid signature and lockbox: %v", err)
+	}
+}
+
+func TestVerifyInode_AdminBypass(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts := SetupTestClient(t)
+	defer ts.Close()
+
+	adminID := c.UserID()
+	skA := c.SignKey()
+
+	// 1. Admin creates empty directory for other user (SUCCESS)
+	inode := &metadata.Inode{ID: "dir1", OwnerID: "userB", Type: metadata.DirType, Version: 1}
+	inode.SetSignerID(adminID)
+	inode.ClientBlob = nil // Admin creation doesn't provide ClientBlob
+	inode.UserSig = skA.Sign(inode.ManifestHash())
+	err := c.VerifyInode(ctx, inode)
+	if err != nil {
+		t.Errorf("VerifyInode failed for admin-created empty directory: %v", err)
+	}
+
+	// 2. Admin creates non-empty directory for other user (FAIL)
+	inode2 := &metadata.Inode{
+		ID:       "dir2",
+		OwnerID:  "userB",
+		Type:     metadata.DirType,
+		Version:  1,
+		Children: map[string]string{"f1": "id1"},
+	}
+	inode2.SetSignerID(adminID)
+	inode2.ClientBlob = nil
+	inode2.UserSig = skA.Sign(inode2.ManifestHash())
+	err = c.VerifyInode(ctx, inode2)
+	if err == nil {
+		t.Error("VerifyInode should reject admin-created non-empty directory")
+	}
+
+	// 3. Admin creates file for other user (FAIL)
+	inode3 := &metadata.Inode{ID: "file1", OwnerID: "userB", Type: metadata.FileType, Version: 1}
+	inode3.SetSignerID(adminID)
+	inode3.ClientBlob = nil
+	inode3.UserSig = skA.Sign(inode3.ManifestHash())
+	err = c.VerifyInode(ctx, inode3)
+	if err == nil {
+		t.Error("VerifyInode should reject admin-created file (only empty dirs allowed)")
 	}
 }
 
@@ -999,35 +1096,6 @@ func TestClient_SyncFile(t *testing.T) {
 	readBack, _ := io.ReadAll(reader)
 	if !bytes.Equal(readBack, newContent) {
 		t.Errorf("Expected %s, got %s", string(newContent), string(readBack))
-	}
-}
-
-func TestClient_AdminChmod(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
-	defer metaNode.Shutdown()
-	defer metaServer.Shutdown()
-	defer ts.Close()
-
-	ctx := context.Background()
-
-	// Promote user to admin
-	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
-
-	// Create a file
-	path := "/secret"
-	c.CreateFile(ctx, path, bytes.NewReader([]byte("data")), 4)
-	inode, _, _ := c.ResolvePath(ctx, path)
-
-	// Chmod via Admin
-	err := c.AdminChmod(ctx, inode.ID, 0640)
-	if err != nil {
-		t.Fatalf("AdminChmod failed: %v", err)
-	}
-
-	// Verify
-	updated, _, _ := c.ResolvePath(ctx, path)
-	if updated.Mode != 0640 {
-		t.Errorf("Expected mode 0640, got %o", updated.Mode)
 	}
 }
 

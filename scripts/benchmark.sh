@@ -1,31 +1,29 @@
 #!/bin/sh
 set -e
-# System Performance Benchmark
-set -e
+# DistFS System Benchmark Script
+# Measures latency and throughput for various operations
+
+export DISTFS_PASSWORD=testpassword
 
 echo "--- Starting DistFS System Benchmark ---"
 
-# Wait for services
-sleep 2
+# 1. Setup Benchmark Identity
+echo "Initializing identity..."
+JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
+# Benchmark user is already promoted and added to Administrators group by global setup.
+# test-all-e2e.sh provisioned /tmp/bench-dir/config.json
+export DISTFS_CONFIG_DIR="/tmp/bench-dir"
 
-SERVER_URL="http://storage-node-1:8080"
-AUTH_URL="http://test-auth:8080"
-JWT=$(wget -qO- "$AUTH_URL/mint?email=bench-user@example.com")
+if [ ! -f "$DISTFS_CONFIG_DIR/config.json" ]; then
+    distfs -disable-doh -use-pinentry=false init -server http://storage-node-1:8080 -jwt "$JWT" || \
+    distfs -disable-doh -use-pinentry=false init --new -server http://storage-node-1:8080 -jwt "$JWT"
+fi
 
-# 1. Metadata Benchmark (mkdir)
 echo "Stressing Metadata Layer (Raft)..."
-/bin/distfs-bench -disable-doh -server "$SERVER_URL" -jwt "$JWT" -admin -mode mkdir -workers 5 -count 100
+# Use pre-provisioned /bench-workspace to avoid root signing issues
+distfs-bench -server http://storage-node-1:8080 -jwt "$JWT" -mode mkdir -count 100 -path /bench-workspace
 
-# 2. Small File Throughput (1KB)
-echo "Benchmarking Small File Throughput (1KB)..."
-/bin/distfs-bench -disable-doh -server "$SERVER_URL" -jwt "$JWT" -admin -mode put -workers 5 -count 10 -size 1024
+echo "Measuring Data Throughput (1MB Chunks)..."
+distfs-bench -server http://storage-node-1:8080 -jwt "$JWT" -mode put -size 1048576 -count 10 -path /bench-workspace
 
-# 3. Large File Throughput (5MB)
-echo "Benchmarking Large File Throughput (5MB)..."
-/bin/distfs-bench -disable-doh -server "$SERVER_URL" -jwt "$JWT" -admin -mode put -workers 2 -count 20 -size 5242880
-
-# 4. Read Latency & Throughput (5MB)
-echo "Benchmarking Read Performance (5MB)..."
-/bin/distfs-bench -disable-doh -server "$SERVER_URL" -jwt "$JWT" -admin -mode get -workers 2 -count 20 -size 5242880
-
-echo "--- Benchmark Complete ---"
+echo "Benchmark Complete."

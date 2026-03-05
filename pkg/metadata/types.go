@@ -152,6 +152,7 @@ type User struct {
 	EncKey  []byte    `json:"enc_key"`
 	Usage   UserUsage `json:"usage"`
 	Quota   UserQuota `json:"quota"`
+	IsAdmin bool      `json:"is_admin"`
 }
 
 // RegisterUserRequest is the payload for user registration.
@@ -382,27 +383,14 @@ type ClusterStats struct {
 	NodeCount     int   `json:"node_count"`
 }
 
-type AdminChownRequest struct {
-	InodeID string  `json:"inode_id"`
-	OwnerID *string `json:"owner_id,omitempty"` // New DistFS User ID
-	GroupID *string `json:"group_id,omitempty"` // New DistFS Group ID
-}
-
-type AdminChmodRequest struct {
-	InodeID string `json:"inode_id"`
-	Mode    uint32 `json:"mode"`
-}
-
 // InodeClientBlob contains non-enforcement metadata for an inode.
 type InodeClientBlob struct {
-	Name              string   `json:"name"`
-	SymlinkTarget     string   `json:"symlink_target,omitempty"`
-	InlineData        []byte   `json:"inline_data,omitempty"`
-	MTime             int64    `json:"mtime"`
-	UID               uint32   `json:"uid"`
-	GID               uint32   `json:"gid"`
-	SignerID          string   `json:"signer_id,omitempty"`
-	AuthorizedSigners []string `json:"authorized_signers,omitempty"`
+	Name          string `json:"name"`
+	SymlinkTarget string `json:"symlink_target,omitempty"`
+	InlineData    []byte `json:"inline_data,omitempty"`
+	MTime         int64  `json:"mtime"`
+	UID           uint32 `json:"uid"`
+	GID           uint32 `json:"gid"`
 }
 
 // Inode represents a file or directory in the metadata layer.
@@ -426,20 +414,19 @@ type Inode struct {
 	Leases        map[string]LeaseInfo `json:"leases,omitempty"` // Nonce -> LeaseInfo
 	Unlinked      bool                 `json:"unlinked,omitempty"`
 
-	// Manifest Integrity (Phase 31)
+	// Manifest Integrity (Phase 31 & 47)
+	SignerID string `json:"signer_id,omitempty"`
 	UserSig  []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
 	GroupSig []byte `json:"group_sig,omitempty"`
 
 	// Client-side transient state (unexported, not in JSON)
-	name              string
-	symlinkTarget     string
-	inlineData        []byte
-	mtime             int64
-	uid               uint32
-	gid               uint32
-	signerID          string
-	authorizedSigners []string
-	fileKey           []byte
+	name          string
+	symlinkTarget string
+	inlineData    []byte
+	mtime         int64
+	uid           uint32
+	gid           uint32
+	fileKey       []byte
 }
 
 func (i *Inode) GetName() string           { return i.name }
@@ -454,13 +441,10 @@ func (i *Inode) GetUID() uint32            { return i.uid }
 func (i *Inode) SetUID(u uint32)           { i.uid = u }
 func (i *Inode) GetGID() uint32            { return i.gid }
 func (i *Inode) SetGID(g uint32)           { i.gid = g }
-func (i *Inode) GetSignerID() string       { return i.signerID }
-
-func (i *Inode) SetSignerID(s string)            { i.signerID = s }
-func (i *Inode) GetAuthorizedSigners() []string  { return i.authorizedSigners }
-func (i *Inode) SetAuthorizedSigners(s []string) { i.authorizedSigners = s }
-func (i *Inode) GetFileKey() []byte              { return i.fileKey }
-func (i *Inode) SetFileKey(k []byte)             { i.fileKey = k }
+func (i *Inode) GetSignerID() string       { return i.SignerID }
+func (i *Inode) SetSignerID(s string)      { i.SignerID = s }
+func (i *Inode) GetFileKey() []byte        { return i.fileKey }
+func (i *Inode) SetFileKey(k []byte)       { i.fileKey = k }
 
 // ManifestHash calculates a cryptographic hash of the inode's manifest and critical metadata.
 func (i *Inode) ManifestHash() []byte {
@@ -492,6 +476,7 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write([]byte("|"))
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
+	h.Write([]byte("signer:" + i.SignerID + "|"))
 
 	t := make([]byte, 4)
 	binary.BigEndian.PutUint32(t, uint32(i.Type))
@@ -571,22 +556,17 @@ func (i *Inode) ManifestHash() []byte {
 // SignInodeForTest signs an inode using a provided identity key.
 // Only used for low-level metadata tests that bypass the client.
 func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
-	i.signerID = userID
-	if len(i.authorizedSigners) == 0 && i.OwnerID != "" {
-		i.authorizedSigners = []string{i.OwnerID}
-	}
+	i.SignerID = userID
 
 	if len(i.ClientBlob) == 0 {
 		// For tests, we simulate the ClientBlob so ManifestHash is consistent
 		blob := InodeClientBlob{
-			Name:              i.name,
-			SymlinkTarget:     i.symlinkTarget,
-			InlineData:        i.inlineData,
-			MTime:             i.mtime,
-			UID:               i.uid,
-			GID:               i.gid,
-			SignerID:          i.signerID,
-			AuthorizedSigners: i.authorizedSigners,
+			Name:          i.name,
+			SymlinkTarget: i.symlinkTarget,
+			InlineData:    i.inlineData,
+			MTime:         i.mtime,
+			UID:           i.uid,
+			GID:           i.gid,
 		}
 		i.ClientBlob, _ = json.Marshal(blob)
 	}

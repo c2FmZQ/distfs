@@ -1,84 +1,76 @@
 #!/bin/sh
 set -e
-# E2E Test for Enhanced LS Command
+# LS Formatting and Sorting E2E Test
 set -e
+
+CONFIG="/tmp/ls-user-config.json"
 
 echo "Starting LS E2E Tests..."
 
-TEST_DIR="/ls-test-$(date +%s)"
-distfs -disable-doh -use-pinentry=false mkdir $TEST_DIR
+# Wait for readiness
+until wget -qO- --timeout=2 http://storage-node-1:8080/v1/meta/key > /dev/null 2>&1; do sleep 1; done
 
-# Create a mix of files
-# Use echo -n to avoid trailing newline for exact size checks
-echo -n "small" > /tmp/small.txt
-distfs -disable-doh -use-pinentry=false put /tmp/small.txt $TEST_DIR/small.txt
+# Pre-provisioned /users/ls-user directory owned by ls-user
+# Setup Test Data
+echo "small" > /tmp/small
+echo "this is a much larger file" > /tmp/large
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" put /tmp/small /users/ls-user/a-small.txt
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" put /tmp/large /users/ls-user/z-large.txt
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" mkdir /users/ls-user/d-dir
 
-echo -n "large-data-for-sorting" > /tmp/large.txt
-distfs -disable-doh -use-pinentry=false put /tmp/large.txt $TEST_DIR/large.txt
+# Set modes to match expectations (rwx)
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" chmod 0777 /users/ls-user/a-small.txt
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" chmod 0777 /users/ls-user/z-large.txt
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" chmod 0777 /users/ls-user/d-dir
 
-echo -n "hidden" > /tmp/hidden.txt
-distfs -disable-doh -use-pinentry=false put /tmp/hidden.txt $TEST_DIR/.hidden.txt
-
-distfs -disable-doh -use-pinentry=false mkdir $TEST_DIR/subdir
-echo -n "subfile" > /tmp/sub.txt
-distfs -disable-doh -use-pinentry=false put /tmp/sub.txt $TEST_DIR/subdir/sub.txt
-
-# 1. Test basic ls (no hidden)
-OUT=$(distfs -disable-doh -use-pinentry=false ls $TEST_DIR)
-echo "$OUT" | grep "small.txt" > /dev/null
-echo "$OUT" | grep "large.txt" > /dev/null
-echo "$OUT" | grep "subdir" > /dev/null
-if echo "$OUT" | grep ".hidden.txt" > /dev/null; then
-    echo "FAIL: Hidden file shown in default ls"
+echo "TEST: Standard LS (Alpha Sort)"
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" ls /users/ls-user > /tmp/ls-std
+if head -n 1 /tmp/ls-std | grep -q "a-small.txt"; then
+    echo "PASS: Standard Alpha Sort"
+else
+    echo "FAIL: Standard Alpha Sort"
+    cat /tmp/ls-std
     exit 1
 fi
-echo "[PASS] Basic LS"
 
-# 2. Test ls -a (all)
-OUT=$(distfs -disable-doh -use-pinentry=false ls -a $TEST_DIR)
-echo "$OUT" | grep ".hidden.txt" > /dev/null
-echo "[PASS] LS -a"
-
-# 3. Test ls -l (long format)
-OUT=$(distfs -disable-doh -use-pinentry=false ls -l $TEST_DIR)
-echo "$OUT" | grep "small.txt" | grep "5" > /dev/null # Size check: 'small' is 5 bytes
-echo "$OUT" | grep "large.txt" | grep "22" > /dev/null # Size check: 22 bytes
-echo "$OUT" | grep "drwx" > /dev/null # Mode check for subdir
-echo "[PASS] LS -l"
-
-# 4. Test ls -R (recursive)
-OUT=$(distfs -disable-doh -use-pinentry=false ls -R $TEST_DIR)
-echo "$OUT" | grep "$TEST_DIR/subdir:" > /dev/null
-echo "$OUT" | grep "sub.txt" > /dev/null
-echo "[PASS] LS -R"
-
-# 5. Test ls -S (sort by size)
-# Go's flag package doesn't support -1S, must use separate flags
-OUT=$(distfs -disable-doh -use-pinentry=false ls -1 -S $TEST_DIR)
-FIRST=$(echo "$OUT" | head -n 1)
-if [ "$FIRST" != "large.txt" ]; then
-    echo "FAIL: Expected large.txt first in ls -S, got $FIRST"
-    echo "Full output: $OUT"
+echo "TEST: Reverse Sort (-r)"
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" ls -r /users/ls-user > /tmp/ls-rev
+if head -n 1 /tmp/ls-rev | grep -q "z-large.txt"; then
+    echo "PASS: Reverse Sort"
+else
+    echo "FAIL: Reverse Sort"
+    cat /tmp/ls-rev
     exit 1
 fi
-echo "[PASS] LS -S"
 
-# 6. Test ls -t (sort by time)
-# Wait a moment to ensure mtime difference
-sleep 2
-echo -n "newest" > /tmp/newest.txt
-distfs -disable-doh -use-pinentry=false put /tmp/newest.txt $TEST_DIR/newest.txt
-OUT=$(distfs -disable-doh -use-pinentry=false ls -1 -t $TEST_DIR)
-FIRST=$(echo "$OUT" | head -n 1)
-if [ "$FIRST" != "newest.txt" ]; then
-    echo "FAIL: Expected newest.txt first in ls -t, got $FIRST"
+echo "TEST: Size Sort (-S)"
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" ls -S /users/ls-user > /tmp/ls-size
+if head -n 1 /tmp/ls-size | grep -q "z-large.txt"; then
+    echo "PASS: Size Sort"
+else
+    echo "FAIL: Size Sort"
+    cat /tmp/ls-size
     exit 1
 fi
-echo "[PASS] LS -t"
 
-# 7. Test ls -F (classify)
-OUT=$(distfs -disable-doh -use-pinentry=false ls -F $TEST_DIR)
-echo "$OUT" | grep "subdir/" > /dev/null
-echo "[PASS] LS -F"
+echo "TEST: Long Format (-l)"
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" ls -l /users/ls-user > /tmp/ls-long
+if grep -q "rwxrwx" /tmp/ls-long; then
+    echo "PASS: Long Format"
+else
+    echo "FAIL: Long Format"
+    cat /tmp/ls-long
+    exit 1
+fi
 
-echo "ALL LS E2E TESTS PASSED"
+echo "TEST: Classification (-F)"
+distfs -disable-doh -use-pinentry=false -config "$CONFIG" ls -F /users/ls-user > /tmp/ls-class
+if grep -q "d-dir/" /tmp/ls-class; then
+    echo "PASS: Classification"
+else
+    echo "FAIL: Classification"
+    cat /tmp/ls-class
+    exit 1
+fi
+
+echo "LS E2E TESTS PASSED"

@@ -4,13 +4,12 @@ package metadata_test
 import (
 	"bytes"
 	"crypto/mlkem"
-	"crypto/rand"
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
+
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	bolt "go.etcd.io/bbolt"
@@ -178,8 +177,8 @@ func TestAdminAPI(t *testing.T) {
 	}
 }
 
-func TestAdminOverrides(t *testing.T) {
-	node, ts, _, _, server := metadata.SetupCluster(t)
+func TestAdminMkdirOwner(t *testing.T) {
+	node, ts, _, _, _ := metadata.SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -189,50 +188,15 @@ func TestAdminOverrides(t *testing.T) {
 	skA, _ := crypto.GenerateIdentityKey()
 	uA := metadata.User{ID: adminID, UID: 1001, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, uA)
-	// Promote user to admin
-	if _, err := server.ApplyRaftCommandInternal(metadata.CmdPromoteAdmin, metadata.MustMarshalJSON(uA.ID), "bootstrap"); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(100 * time.Millisecond)
 
 	// 2. Create User B
-	userID := "userB"
+	userBID := "userB"
 	dkB, _ := crypto.GenerateEncryptionKey()
 	skB, _ := crypto.GenerateIdentityKey()
-	uB := metadata.User{ID: userID, UID: 1002, SignKey: skB.Public(), EncKey: dkB.EncapsulationKey().Bytes()}
+	uB := metadata.User{ID: userBID, UID: 1002, SignKey: skB.Public(), EncKey: dkB.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, uB)
 
-	// 3. Create a File owned by Admin
-	inode := metadata.Inode{ID: "file1", OwnerID: adminID, Size: 100, Mode: 0600, NLink: 1, Version: 1, Lockbox: make(crypto.Lockbox)}
-	// Add Admin to lockbox so they can unlock it for re-sealing
-	fileKey := make([]byte, 32)
-	rand.Read(fileKey)
-	inode.Lockbox.AddRecipient(adminID, dkA.EncapsulationKey(), fileKey)
-
-	// Encrypt ClientBlob (VerifyInode now checks this)
-	blob := metadata.InodeClientBlob{
-		SignerID:          adminID,
-		AuthorizedSigners: []string{adminID},
-	}
-	plainBlob, _ := json.Marshal(blob)
-	encBlob, _ := crypto.EncryptDEM(fileKey, plainBlob)
-	inode.ClientBlob = encBlob
-
-	// IMPORTANT: These must be set so they are included in ManifestHash correctly
-	// AND matches what's in the ClientBlob.
-	inode.SetSignerID(adminID)
-	inode.SetAuthorizedSigners([]string{adminID})
-
-	inode.SignInodeForTest(adminID, skA)
-
-	iBytes, _ := json.Marshal(inode)
-	if _, err := server.ApplyRaftCommandInternal(metadata.CmdCreateInode, iBytes, adminID); err != nil {
-		t.Fatal(err)
-	}
-
-	time.Sleep(100 * time.Millisecond)
-
-	// Setup Client
+	// 3. Admin Setup
 	c := client.NewClient(ts.URL)
 	c = c.WithIdentity(adminID, dkA).WithSignKey(skA)
 	ekBytes, _ := c.GetServerSignKey(t.Context())
@@ -242,53 +206,173 @@ func TestAdminOverrides(t *testing.T) {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	// 4. Admin Chown to User B
-	req := metadata.AdminChownRequest{OwnerID: &userID}
-	if err := c.AdminChown(t.Context(), "file1", req); err != nil {
-		t.Fatalf("AdminChown failed: %v", err)
+	// 3.5 Initialize Root
+	if err := c.EnsureRoot(t.Context()); err != nil {
+		t.Fatalf("EnsureRoot failed: %v", err)
+	}
+
+	// 4. Admin creates directory for User B
+	dirPath := "/userB-home"
+	err := c.MkdirExtended(t.Context(), dirPath, 0700, client.MkdirOptions{OwnerID: userBID})
+	if err != nil {
+		t.Fatalf("Admin MkdirExtended failed: %v", err)
 	}
 
 	// 5. Verify Metadata
-	var updated metadata.Inode
-	node.FSM.DB().View(func(tx *bolt.Tx) error {
-		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("file1"))
-		if err != nil {
-			return err
-		}
-		return json.Unmarshal(plain, &updated)
-	})
-	if updated.OwnerID != userID {
-		t.Errorf("Expected owner %s, got %s", userID, updated.OwnerID)
+	inode, _, err := c.ResolvePath(t.Context(), dirPath)
+	if err != nil {
+		t.Fatalf("ResolvePath failed: %v", err)
+	}
+	if inode.OwnerID != userBID {
+		t.Errorf("Expected owner %s, got %s", userBID, inode.OwnerID)
+	}
+	if inode.SignerID != adminID {
+		t.Errorf("Expected signer %s, got %s", adminID, inode.SignerID)
 	}
 
-	// 6. Verify Quota accounting
+	// 6. Verify User B Quota
 	var uBUpdated metadata.User
 	node.FSM.DB().View(func(tx *bolt.Tx) error {
-		plain, err := node.FSM.Get(tx, []byte("users"), []byte(userID))
+		plain, err := node.FSM.Get(tx, []byte("users"), []byte(userBID))
 		if err != nil {
 			return err
 		}
 		return json.Unmarshal(plain, &uBUpdated)
 	})
-	if uBUpdated.Usage.TotalBytes != 100 {
-		t.Errorf("Expected User B usage 100, got %d", uBUpdated.Usage.TotalBytes)
-	}
 	if uBUpdated.Usage.InodeCount != 1 {
 		t.Errorf("Expected User B inode count 1, got %d", uBUpdated.Usage.InodeCount)
 	}
+}
 
-	// 7. Admin Chmod (World-write 0002 should be stripped to 0775)
-	if err := c.AdminChmod(t.Context(), "file1", 0777); err != nil {
-		t.Fatalf("AdminChmod failed: %v", err)
-	}
-	node.FSM.DB().View(func(tx *bolt.Tx) error {
-		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("file1"))
-		if err != nil {
-			return err
+func TestOwnerImmutability(t *testing.T) {
+	node, ts, _, _, server := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create User
+	uID := "user1"
+	dk, _ := crypto.GenerateEncryptionKey()
+	sk, _ := crypto.GenerateIdentityKey()
+	user := metadata.User{ID: uID, UID: 1001, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
+	metadata.CreateUser(t, node, user)
+
+	// 2. Create Inode
+	inode := metadata.Inode{ID: "file1", OwnerID: uID, Version: 1, Type: metadata.FileType}
+	inode.SignInodeForTest(uID, sk)
+	ib, _ := json.Marshal(inode)
+	server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ib, uID)
+
+	// 3. Attempt to change owner via Update
+	inode.Version = 2
+	inode.OwnerID = "victim"
+	inode.SignInodeForTest(uID, sk)
+	ub, _ := json.Marshal(inode)
+
+	res, err := server.ApplyRaftCommandInternal(metadata.CmdUpdateInode, ub, uID)
+	if err == nil {
+		if !isFSMError(res) {
+			t.Error("FSM should have rejected OwnerID change")
 		}
-		return json.Unmarshal(plain, &updated)
+	}
+}
+
+func TestFSM_GroupAuthorization(t *testing.T) {
+	node, ts, _, _, server := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create User and Group
+	u1ID := "user1"
+	sk1, _ := crypto.GenerateIdentityKey()
+	u1 := metadata.User{ID: u1ID, UID: 1001, SignKey: sk1.Public()}
+	metadata.CreateUser(t, node, u1)
+
+	gID := "group1"
+	group := metadata.Group{ID: gID, OwnerID: "some-other-user", Members: map[string]bool{"somebody": true}}
+	fsm := node.FSM
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		return fsm.Put(tx, []byte("groups"), []byte(gID), metadata.MustMarshalJSON(group))
 	})
-	if updated.Mode != 0775 {
-		t.Errorf("Expected mode 0775, got %04o", updated.Mode)
+
+	// 2. Create Inode owned by u1
+	inode := metadata.Inode{ID: "file1", OwnerID: u1ID, Version: 1, Type: metadata.FileType}
+	inode.SignInodeForTest(u1ID, sk1)
+	ib, _ := json.Marshal(inode)
+	server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ib, u1ID)
+
+	// 3. Attempt to assign to group1 (u1 is not a member)
+	inode.Version = 2
+	inode.GroupID = gID
+	inode.SignInodeForTest(u1ID, sk1)
+	ub, _ := json.Marshal(inode)
+
+	res, err := server.ApplyRaftCommandInternal(metadata.CmdUpdateInode, ub, u1ID)
+	if err == nil {
+		if !isFSMError(res) {
+			t.Error("FSM should have rejected GroupID assignment for non-member")
+		}
+	}
+
+	// 4. Add u1 to group and try again
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		group.Members[u1ID] = true
+		return fsm.Put(tx, []byte("groups"), []byte(gID), metadata.MustMarshalJSON(group))
+	})
+
+	res, err = server.ApplyRaftCommandInternal(metadata.CmdUpdateInode, ub, u1ID)
+	if err != nil || isFSMError(res) {
+		t.Errorf("FSM should have allowed GroupID assignment for member: %v", res)
+	}
+}
+
+func isFSMError(res interface{}) bool {
+	if res == nil {
+		return false
+	}
+	if _, ok := res.(error); ok {
+		return true
+	}
+	if b, ok := res.([]byte); ok {
+		// Try to see if it's an APIErrorResponse
+		var er metadata.APIErrorResponse
+		if err := json.Unmarshal(b, &er); err == nil && er.Code != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFSM_AdminCreation(t *testing.T) {
+	node, ts, _, _, server := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Create Admin and Normal User
+	adminID := "admin"
+	skA, _ := crypto.GenerateIdentityKey()
+	metadata.CreateUser(t, node, metadata.User{ID: adminID, UID: 1001, SignKey: skA.Public()})
+
+	user1ID := "user1"
+	sk1, _ := crypto.GenerateIdentityKey()
+	metadata.CreateUser(t, node, metadata.User{ID: user1ID, UID: 1002, SignKey: sk1.Public()})
+
+	// 2. Admin creates inode for user1 (SUCCESS)
+	inodeA := metadata.Inode{ID: "dirA", OwnerID: user1ID, Version: 1, Type: metadata.DirType}
+	inodeA.SignInodeForTest(adminID, skA)
+	ibA, _ := json.Marshal(inodeA)
+	res, err := server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ibA, adminID)
+	if err != nil || isFSMError(res) {
+		t.Errorf("Admin should be allowed to create inode for another user: %v", res)
+	}
+
+	// 3. Normal user creates inode for admin (FAIL)
+	inode1 := metadata.Inode{ID: "dir1", OwnerID: adminID, Version: 1, Type: metadata.DirType}
+	inode1.SignInodeForTest(user1ID, sk1)
+	ib1, _ := json.Marshal(inode1)
+	res, err = server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ib1, user1ID)
+	if err == nil {
+		if !isFSMError(res) {
+			t.Error("Normal user should be forbidden from creating inode for another user")
+		}
 	}
 }

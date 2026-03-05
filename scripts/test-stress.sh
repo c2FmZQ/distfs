@@ -3,26 +3,20 @@ set -e
 # Multi-client Concurrency Stress Test
 export DISTFS_PASSWORD=testpassword
 
-echo "Waiting for client configuration..."
-until [ -f /root/.distfs/config.json ]; do sleep 1; done
+CONFIG="/tmp/stress-user-config.json"
 
-echo "Creating stress directory..."
-distfs -disable-doh -use-pinentry=false -config /root/.distfs/config.json mkdir /stress || echo "stress dir already exists"
-
+echo "Using pre-provisioned /users/stress-user directory..."
 mkdir -p /tmp/stress-in /tmp/stress-out
 
 run_stress() {
     ID=$1
     echo "Worker $ID: Starting..."
-    FILE="/stress/stress-$ID.txt"
-    DATA="stress data from worker $ID"
-    echo "$DATA" > /tmp/stress-in/$ID
-    distfs -disable-doh -use-pinentry=false put /tmp/stress-in/$ID $FILE
-    distfs -disable-doh -use-pinentry=false get $FILE /tmp/stress-out/$ID
-    if grep -q "$DATA" /tmp/stress-out/$ID; then
-        echo "Worker $ID: PASS"
-    else
-        echo "Worker $ID: FAIL"
+    # Each worker uploads and downloads a unique file
+    echo "worker-$ID data" > "/tmp/stress-in/f-$ID"
+    distfs -disable-doh -use-pinentry=false -config "$CONFIG" put "/tmp/stress-in/f-$ID" "/users/stress-user/file-$ID"
+    distfs -disable-doh -use-pinentry=false -config "$CONFIG" get "/users/stress-user/file-$ID" "/tmp/stress-out/f-$ID"
+    if ! grep -q "worker-$ID data" "/tmp/stress-out/f-$ID"; then
+        echo "Worker $ID: FAILED integrity check"
         exit 1
     fi
 }

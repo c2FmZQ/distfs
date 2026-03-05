@@ -137,6 +137,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 			// Prepare Parent Update (adding child)
 			pUpdate := Inode{
 				ID:       parentID,
+				OwnerID:  "u1",
 				Type:     DirType,
 				Version:  2,
 				NLink:    1, // Keep parent link count
@@ -179,6 +180,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 			// Prepare Parent Update (removing child)
 			pUpdate := Inode{
 				ID:       parentID,
+				OwnerID:  "u1",
 				Type:     DirType,
 				Version:  3,
 				NLink:    1,

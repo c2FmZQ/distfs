@@ -154,6 +154,7 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 	a.Inode = inodeToUint64(d.inode.ID)
 	a.Mode = os.ModeDir | os.FileMode(d.inode.Mode)
 	a.Size = uint64(len(d.inode.Children))
+	a.Nlink = d.inode.NLink
 	a.Uid = d.inode.GetUID()
 	a.Gid = d.inode.GetGID()
 	a.Ctime = time.Unix(0, d.inode.CTime)
@@ -532,6 +533,7 @@ func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.
 	d.mu.Lock()
 	d.lastUpdate = time.Time{}
 	d.mu.Unlock()
+
 	// Update target node's metadata to reflect new nlink
 	if updated, err := d.fs.client.GetInode(ctx, oldFile.inode.ID); err == nil {
 		oldFile.mu.Lock()
@@ -581,6 +583,7 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 		a.Mode |= os.ModeSymlink
 	}
 	a.Size = f.inode.Size
+	a.Nlink = f.inode.NLink
 	a.Uid = f.inode.GetUID()
 	a.Gid = f.inode.GetGID()
 	a.Ctime = time.Unix(0, f.inode.CTime)

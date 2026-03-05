@@ -138,10 +138,6 @@ func main() {
 		cmdAdminJoin(ctx, args)
 	case "admin-remove":
 		cmdAdminRemove(ctx, args)
-	case "admin-chown":
-		cmdAdminChown(ctx, args)
-	case "admin-chmod":
-		cmdAdminChmod(ctx, args)
 	case "admin-user-quota":
 		cmdAdminUserQuota(ctx, args)
 	case "admin-group-quota":
@@ -166,12 +162,24 @@ func cmdWhoami(ctx context.Context, args []string) {
 	fmt.Println(c.UserID())
 }
 
+func isHexID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func usage() {
 	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] [-admin] <command> [args]")
 	fmt.Println("Commands:")
 	fmt.Println("  init [--new] -server <url>      Initialize client config (pulls existing keys by default)")
 	fmt.Println("  ls <path>                       List directory")
-	fmt.Println("  mkdir <path>                    Create directory")
+	fmt.Println("  mkdir [--owner=id] <path>       Create directory (Admin can specify owner)")
 	fmt.Println("  rm <path>                       Delete file or directory")
 	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  chgrp <group_id> <path>         Change group")
@@ -188,8 +196,6 @@ func usage() {
 	fmt.Println("  admin                           Open interactive cluster management console")
 	fmt.Println("  admin-join <addr>               Add a node to the cluster (discovered via address)")
 	fmt.Println("  admin-remove <id>               Remove a node from the cluster (by node ID)")
-	fmt.Println("  admin-chown <email>[:<group>] <path> Override ownership (Admin only)")
-	fmt.Println("  admin-chmod <mode> <path>       Override permissions (Admin only)")
 	fmt.Println("  admin-user-quota <email> <max_bytes> <max_inodes> Set user quota (Admin only)")
 	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
 	fmt.Println("  admin-create-root [id]          Initialize a new root inode (Admin only, defaults to standard root)")
@@ -494,12 +500,39 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 }
 
 func cmdMkdir(ctx context.Context, args []string) {
-	if len(args) < 1 {
+	fs := flag.NewFlagSet("mkdir", flag.ExitOnError)
+	ownerID := fs.String("owner", "", "Specify owner ID (Admin only)")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
 		log.Fatal("path required")
 	}
-	path := args[0]
+	path := fs.Arg(0)
 	c := loadClient()
-	if err := c.Mkdir(ctx, path, 0700); err != nil {
+
+	opts := client.MkdirOptions{}
+	if *ownerID != "" {
+		resolvedOwner := *ownerID
+		if strings.Contains(resolvedOwner, "@") && !strings.HasPrefix(resolvedOwner, ":") {
+			// Resolve email to UserID.
+			if *adminFlag {
+				id, err := c.AdminLookup(ctx, resolvedOwner, "CLI mkdir --owner")
+				if err != nil {
+					log.Fatalf("failed to resolve owner %s via admin: %v", resolvedOwner, err)
+				}
+				resolvedOwner = id
+			} else {
+				user, err := c.GetUser(ctx, resolvedOwner)
+				if err != nil {
+					log.Fatalf("failed to resolve owner %s: %v", resolvedOwner, err)
+				}
+				resolvedOwner = user.ID
+			}
+		}
+		opts.OwnerID = resolvedOwner
+	}
+
+	if err := c.MkdirExtended(ctx, path, 0700, opts); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Directory %s created.\n", path)

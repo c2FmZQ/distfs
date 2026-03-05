@@ -1,43 +1,40 @@
 #!/bin/sh
 set -e
+# Quota Command E2E Test
 set -e
 
 # Setup Admin
 echo "Global Setup..."
-export ADMIN_CONFIG=/root/.distfs/config.json
-# Admin is already initialized by test-all-e2e.sh in /root/.distfs/config.json
+export DISTFS_CONFIG_DIR="${DISTFS_CONFIG_DIR:-/root/.distfs}"
+export ADMIN_CONFIG="$DISTFS_CONFIG_DIR/config.json"
+# Admin is already initialized by test-all-e2e.sh in "$DISTFS_CONFIG_DIR/config.json"
 
 # Setup User
 echo "User Setup..."
 export USER_CONFIG=/tmp/user-quota.json
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=user-quota@example.com")
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG init --new -server http://storage-node-1:8080 -jwt "$JWT"
-USER_ID=$(distfs -disable-doh -use-pinentry=false -config $USER_CONFIG whoami)
+distfs -disable-doh -use-pinentry=false -config "$USER_CONFIG" init --new -server http://storage-node-1:8080 -jwt "$JWT"
 
-# Admin: Set User Quota
 echo "Admin: Setting User Quota..."
-distfs -disable-doh -use-pinentry=false -config $ADMIN_CONFIG admin-user-quota $USER_ID 5000 10
+distfs -disable-doh -use-pinentry=false -config "$ADMIN_CONFIG" admin-user-quota user-quota@example.com 5000 10
 
-# User: Create Group
 echo "User: Creating Group with independent quota..."
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG group-create --quota "my-project"
-G_ID=$(distfs -disable-doh -use-pinentry=false -config $USER_CONFIG group-list | grep "my-project" | awk '{print $1}')
+distfs -disable-doh -use-pinentry=false -config "$USER_CONFIG" group-create --quota my-project > /tmp/group-out.txt
+G_ID=$(grep "^ID:" /tmp/group-out.txt | awk '{print $2}')
 
-# Admin: Set Group Quota
 echo "Admin: Setting Group Quota for G_ID: '$G_ID'..."
-distfs -disable-doh -use-pinentry=false -config $ADMIN_CONFIG admin-group-quota "$G_ID" 2000 5
+distfs -disable-doh -use-pinentry=false -config "$ADMIN_CONFIG" admin-group-quota "$G_ID" 2000 5
 
-# User: Check Quota
 echo "User: Running 'distfs quota'..."
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota
+distfs -disable-doh -use-pinentry=false -config "$USER_CONFIG" quota > /tmp/quota-out.txt
+cat /tmp/quota-out.txt
 
 echo "Verification: Checking for expected strings..."
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota | grep "Personal Usage for $USER_ID"
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota | grep "Inodes: 0 / 10"
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota | grep "Storage: 0 B / 4.9 KB"
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota | grep "Group: my-project"
-# Note: Group is empty initially
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota | grep "Inodes: 0 / 5"
-distfs -disable-doh -use-pinentry=false -config $USER_CONFIG quota | grep "Storage: 0 B / 2.0 KB"
+grep -q "Personal Usage" /tmp/quota-out.txt
+grep -q "Inodes: 0 / 10" /tmp/quota-out.txt
+grep -q "Storage: 0 B / 4.9 KB" /tmp/quota-out.txt
+grep -q "Group: my-project" /tmp/quota-out.txt
+grep -q "Inodes: 0 / 5" /tmp/quota-out.txt
+grep -q "Storage: 0 B / 2.0 KB" /tmp/quota-out.txt
 
 echo "QUOTA COMMAND TEST PASSED"

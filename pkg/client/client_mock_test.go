@@ -137,8 +137,8 @@ func TestClient_MockedConflict(t *testing.T) {
 				inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey)
 
 				blob := metadata.InodeClientBlob{
-					SignerID:          "u1",
-					AuthorizedSigners: []string{"u1"},
+					Name:  "u1",
+					MTime: time.Now().UnixNano(),
 				}
 				plainBlob, _ := json.Marshal(blob)
 				encBlob, _ := crypto.EncryptDEM(fileKey, plainBlob)
@@ -146,7 +146,6 @@ func TestClient_MockedConflict(t *testing.T) {
 
 				// Also set transient fields for ManifestHash calculation during signing
 				inode.SetSignerID("u1")
-				inode.SetAuthorizedSigners([]string{"u1"})
 				inode.SignInodeForTest("u1", sk)
 
 				b, _ := json.Marshal(inode)

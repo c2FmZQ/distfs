@@ -43,6 +43,7 @@ var (
 	size       = flag.Int64("size", 1024, "Size of files for put mode (in bytes)")
 	adminFlag  = flag.Bool("admin", false, "Enable admin bypass mode")
 	disableDoH = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
+	benchPath  = flag.String("path", "", "Base path for benchmark operations (default: root)")
 )
 
 type stats struct {
@@ -106,20 +107,29 @@ func main() {
 		log.Fatal("-jwt flag is required for benchmark")
 	}
 
-	configPath := "/tmp/bench-config.json"
-	os.Setenv("DISTFS_PASSWORD", "benchpass")
-	defer os.Unsetenv("DISTFS_PASSWORD")
+	configPath := "/root/.distfs/config.json"
+	if dir := os.Getenv("DISTFS_CONFIG_DIR"); dir != "" {
+		configPath = dir + "/config.json"
+	}
+
+	if os.Getenv("DISTFS_PASSWORD") == "" {
+		os.Setenv("DISTFS_PASSWORD", "benchpass")
+		defer os.Unsetenv("DISTFS_PASSWORD")
+	}
 
 	ctx := context.Background()
+	_, statErr := os.Stat(configPath)
+	isNew := os.IsNotExist(statErr)
+
 	opts := client.OnboardingOptions{
 		ConfigPath: configPath,
 		ServerURL:  *serverURL,
 		JWT:        *jwt,
-		IsNew:      true,
+		IsNew:      isNew,
 		DisableDoH: *disableDoH,
 	}
 
-	if _, err := os.Stat(configPath); os.IsNotExist(err) {
+	if isNew {
 		fmt.Printf("Initializing identity...")
 		if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
 			log.Fatalf("onboarding failed: %v", err)
@@ -164,12 +174,16 @@ func main() {
 	}
 
 	// Create bench root
-	benchDir := fmt.Sprintf("/bench-%d", time.Now().UnixNano())
+	base := ""
+	if *benchPath != "" {
+		base = strings.TrimRight(*benchPath, "/")
+	}
+	benchDir := fmt.Sprintf("%s/bench-%d", base, time.Now().UnixNano())
 	if err := c.Mkdir(ctx, benchDir, 0700); err != nil {
 		log.Fatalf("failed to create bench dir: %v", err)
 	}
 	defer func() {
-		if err := c.Remove(ctx, benchDir); err != nil {
+		if err := c.RemoveAll(ctx, benchDir); err != nil {
 			log.Printf("failed to cleanup bench dir: %v", err)
 		}
 	}()

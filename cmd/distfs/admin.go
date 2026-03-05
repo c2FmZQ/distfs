@@ -3,10 +3,10 @@ package main
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"iter"
 	"log"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -68,8 +68,7 @@ type AdminClient interface {
 	AdminRemoveNode(ctx context.Context, id string) error
 	DecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error)
 	ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)
-	AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error
-	AdminChmod(ctx context.Context, inodeID string, mode uint32) error
+	MkdirExtended(ctx context.Context, path string, perm os.FileMode, opts client.MkdirOptions) error
 }
 
 type model struct {
@@ -721,119 +720,6 @@ func cmdAdminRemove(ctx context.Context, args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Node %s removed from cluster.\n", id)
-}
-
-func cmdAdminChown(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("admin-chown", flag.ExitOnError)
-	force := fs.Bool("f", false, "Force operation without confirmation")
-	if err := fs.Parse(args); err != nil {
-		return
-	}
-	remaining := fs.Args()
-	if len(remaining) < 2 {
-		log.Fatal("usage: admin-chown [-f] <owner_email|owner_id>[:<new_group_id>] <path>")
-	}
-	ownerSpec, path := remaining[0], remaining[1]
-	c := loadClient()
-
-	var req metadata.AdminChownRequest
-	parts := strings.Split(ownerSpec, ":")
-	email := parts[0]
-
-	// 1. Resolve email to UserID (if provided)
-	if email != "" {
-		userID := email
-		if !isHexID(email) {
-			id, err := c.AdminLookup(ctx, email, "CLI chown")
-			if err != nil {
-				log.Fatalf("failed to resolve email %s: %v", email, err)
-			}
-			userID = id
-		}
-		req.OwnerID = &userID
-	}
-
-	// 2. Resolve Group if provided
-	if len(parts) > 1 {
-		groupID := parts[1]
-		req.GroupID = &groupID
-	}
-
-	// 3. Resolve Path to InodeID
-	inode, _, err := c.ResolvePath(ctx, path)
-	if err != nil {
-		log.Fatalf("failed to resolve path %s: %v", path, err)
-	}
-
-	// 4. Warning
-	if !*force {
-		fmt.Printf("WARNING: Changing ownership of %s to %s.\n", path, email)
-		fmt.Println("Existing encrypted data will NOT be readable by the new owner.")
-		fmt.Print("Proceed? [y/N]: ")
-		var confirm string
-		fmt.Scanln(&confirm)
-		if strings.ToLower(confirm) != "y" {
-			fmt.Println("Aborted.")
-			return
-		}
-	}
-
-	if err := c.AdminChown(ctx, inode.ID, req); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Ownership updated successfully.")
-}
-
-func cmdAdminChmod(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("admin-chmod", flag.ExitOnError)
-	force := fs.Bool("f", false, "Force operation without confirmation")
-	if err := fs.Parse(args); err != nil {
-		return
-	}
-	remaining := fs.Args()
-	if len(remaining) < 2 {
-		log.Fatal("usage: admin-chmod [-f] <mode> <path>")
-	}
-	modeStr, path := remaining[0], remaining[1]
-	mode, err := strconv.ParseUint(modeStr, 8, 32)
-	if err != nil {
-		log.Fatalf("invalid mode: %v", err)
-	}
-
-	c := loadClient()
-	inode, _, err := c.ResolvePath(ctx, path)
-	if err != nil {
-		log.Fatalf("failed to resolve path %s: %v", path, err)
-	}
-
-	if !*force {
-		fmt.Printf("WARNING: Overriding permissions of %s to %s.\n", path, modeStr)
-		fmt.Println("This only affects metadata visibility.")
-		fmt.Print("Proceed? [y/N]: ")
-		var confirm string
-		fmt.Scanln(&confirm)
-		if strings.ToLower(confirm) != "y" {
-			fmt.Println("Aborted.")
-			return
-		}
-	}
-
-	if err := c.AdminChmod(ctx, inode.ID, uint32(mode)); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Permissions updated successfully.")
-}
-
-func isHexID(s string) bool {
-	if len(s) != 64 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
 }
 
 func cmdAdminPromote(ctx context.Context, args []string) {

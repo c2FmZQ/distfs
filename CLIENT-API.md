@@ -181,8 +181,6 @@ These functions return iterators or perform privileged metadata overrides.
 - `(c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error]`
 - `(c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error`
 - `(c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error`
-- `(c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error`
-- `(c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) error`
 - `(c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node]`
 - `(c *Client) AdminJoinNode(ctx context.Context, address string) error`
 - `(c *Client) AdminRemoveNode(ctx context.Context, id string) error`

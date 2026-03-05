@@ -8,8 +8,8 @@ run_test() {
     name=$1
     script=$2
     echo "Running $name..."
-    # Run in subshell
-    ( $script )
+    # Run in subshell, propagate config dir
+    ( export DISTFS_CONFIG_DIR=$DISTFS_CONFIG_DIR; $script )
     if [ $? -eq 0 ]; then
         echo "[PASS] $name" | tee -a $REPORT_FILE
         return 0
@@ -20,36 +20,96 @@ run_test() {
 }
 
 echo "Starting Unified E2E Test Suite..."
-sleep 2
 
-# GLOBAL SETUP: Create Admin and make root world-writable
+# Function to wait for cluster readiness
+wait_for_ready() {
+    echo "Waiting for cluster leader..."
+    for i in $(seq 1 30); do
+        if wget -qO- "http://storage-node-1:8080/v1/health" | grep -q '"is_leader":true'; then
+            echo "Cluster leader found."
+            return 0
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for cluster leader."
+    return 1
+}
+
+wait_for_ready || exit 1
+
+# Use a clean temporary directory for this run's configuration
+export DISTFS_CONFIG_DIR=$(mktemp -d)
+echo "Using config directory: $DISTFS_CONFIG_DIR"
+
+# GLOBAL SETUP: Create Admin
 echo "PERFORMING GLOBAL SETUP..."
-MAX_RETRIES=30
-COUNT=0
-while true; do
-    JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-    if distfs -disable-doh -use-pinentry=false init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
-        break
-    fi
-    COUNT=$((COUNT + 1))
-    if [ $COUNT -ge $MAX_RETRIES ]; then
-        echo "GLOBAL SETUP FAILED: Could not initialize admin"
-        exit 1
-    fi
-    sleep 2
-done
+JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
+if ! distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
+    echo "GLOBAL SETUP FAILED: Admin initialization failed"
+    exit 1
+fi
 
-echo "GLOBAL SETUP COMPLETE. Admin ID:"
-distfs -disable-doh -use-pinentry=false whoami
+ADMIN_ID=$(distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" whoami)
+echo "Global Admin ID: $ADMIN_ID"
 
-echo "Creating /users directory..."
-distfs -disable-doh -use-pinentry=false mkdir /users
-distfs -disable-doh -use-pinentry=false chmod 0755 /users
+# 1. Create a Shared Administrators Group for root management
+echo "Creating Administrators group..."
+distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
+ADMIN_GID=$(grep "^ID:" /tmp/admin-group.txt | awk '{print $2}')
+echo "Administrators GID: $ADMIN_GID"
 
-# Pre-register and promote benchmark user to avoid 403s during performance test
+echo "Assigning root directory to Administrators group..."
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chgrp "$ADMIN_GID" /
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0775 /
+
+# 2. Provision Users and Workspaces under /users/
+provision_user() {
+    name=$1
+    email=$2
+    conf="/tmp/${name}-config.json"
+    path="/users/${name}"
+    echo "Provisioning ${name} ($email) at ${path}..."
+    
+    U_JWT=$(wget -qO- "http://test-auth:8080/mint?email=$email")
+    U_OUT=$(distfs -disable-doh -use-pinentry=false -config "$conf" init --new -server http://storage-node-1:8080 -jwt "$U_JWT")
+    U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
+    
+    # Provision directory via Global Admin
+    distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$U_ID" "$path"
+}
+
+echo "Provisioning /users base directory..."
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /users
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0755 /users
+
+provision_user "fuse-user" "fuse-user@example.com"
+provision_user "gc-user" "gc-user@example.com"
+provision_user "stress-user" "stress-user@example.com"
+provision_user "integrity-user" "integrity-user@example.com"
+provision_user "public-user" "public-user@example.com"
+provision_user "group-user" "group-user@example.com"
+provision_user "quota-user" "quota-user@example.com"
+provision_user "ls-user" "ls-user@example.com"
+
+# Pre-register benchmark user and add to Administrators
+echo "Provisioning benchmark workspace..."
 BENCH_JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
-DISTFS_PASSWORD=benchpass distfs -disable-doh -use-pinentry=false -config /tmp/bench-config.json init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT"
-distfs -disable-doh -use-pinentry=false admin-promote bench-user@example.com || echo "bench-user promotion failed"
+# Benchmark uses a persistent config at /tmp/bench-dir/config.json
+mkdir -p /tmp/bench-dir
+BENCH_OUT=$(distfs -disable-doh -use-pinentry=false -config "/tmp/bench-dir/config.json" init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT")
+BENCH_ID=$(echo "$BENCH_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
+
+# Provision /bench-workspace via Global Admin
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$BENCH_ID" /bench-workspace
+
+# Promote and add to Administrators group
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user@example.com
+distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" "$BENCH_ID"
+
+# Provision HA directory (world-writable for test flexibility)
+echo "Provisioning /ha..."
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
 
 FAILED=0
 

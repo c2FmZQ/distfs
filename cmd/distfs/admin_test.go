@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -87,10 +88,7 @@ func (m *mockAdminClient) DecryptGroupName(ctx context.Context, entry metadata.G
 func (m *mockAdminClient) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
 	return &metadata.Inode{ID: "inode-123"}, []byte("key"), m.err
 }
-func (m *mockAdminClient) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
-	return m.err
-}
-func (m *mockAdminClient) AdminChmod(ctx context.Context, inodeID string, mode uint32) error {
+func (m *mockAdminClient) MkdirExtended(ctx context.Context, path string, perm os.FileMode, opts client.MkdirOptions) error {
 	return m.err
 }
 

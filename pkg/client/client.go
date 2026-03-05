@@ -397,6 +397,14 @@ func (c *Client) UserID() string {
 	return c.userID
 }
 
+func (c *Client) SignKey() *crypto.IdentityKey {
+	return c.signKey
+}
+
+func (c *Client) DecKey() *mlkem.DecapsulationKey768 {
+	return c.decKey
+}
+
 func (c *Client) getSessionToken() string {
 	c.sessionMu.RLock()
 	defer c.sessionMu.RUnlock()
@@ -1132,33 +1140,14 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	fileKey := inode.GetFileKey()
 
 	// 2. Prepare ClientBlob
-	authSigners := inode.GetAuthorizedSigners()
-	if len(authSigners) == 0 && inode.OwnerID != "" {
-		authSigners = []string{inode.OwnerID}
-	}
-
-	found := false
-	for _, s := range authSigners {
-		if s == c.userID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		authSigners = append(authSigners, c.userID)
-	}
-	inode.SetAuthorizedSigners(authSigners)
-
 	if len(fileKey) > 0 {
 		blob := metadata.InodeClientBlob{
-			Name:              inode.GetName(),
-			SymlinkTarget:     inode.GetSymlinkTarget(),
-			InlineData:        inode.GetInlineData(),
-			MTime:             inode.GetMTime(),
-			UID:               inode.GetUID(),
-			GID:               inode.GetGID(),
-			SignerID:          c.userID,
-			AuthorizedSigners: authSigners,
+			Name:          inode.GetName(),
+			SymlinkTarget: inode.GetSymlinkTarget(),
+			InlineData:    inode.GetInlineData(),
+			MTime:         inode.GetMTime(),
+			UID:           inode.GetUID(),
+			GID:           inode.GetGID(),
 		}
 
 		encBlob, err := c.encryptInodeClientBlob(blob, fileKey)
@@ -1199,7 +1188,7 @@ func (c *Client) createInode(ctx context.Context, inode metadata.Inode) (*metada
 		return nil, fmt.Errorf("empty results from createInode batch")
 	}
 
-	if err := c.isResultError(results[0]); err != nil {
+	if err := c.IsResultError(results[0]); err != nil {
 		return nil, err
 	}
 
@@ -1251,7 +1240,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			if len(results) == 0 {
 				return nil, fmt.Errorf("empty results from updateInode batch")
 			}
-			if err := c.isResultError(results[0]); err != nil {
+			if err := c.IsResultError(results[0]); err != nil {
 				return nil, err
 			}
 			var updated metadata.Inode
@@ -1556,7 +1545,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-		lb := c.createLockbox(ctx, fileKey, mode, groupID)
+		lb := c.createLockbox(ctx, fileKey, mode, c.userID, groupID)
 
 		// Assume not found, create new
 		links := make(map[string]bool)
@@ -2212,7 +2201,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		GroupID: groupID,
 		// Links will be updated during commit
 		Links:   map[string]bool{parentID + ":" + nameHMAC: true},
-		Lockbox: c.createLockbox(ctx, fileKey, 0600, groupID),
+		Lockbox: c.createLockbox(ctx, fileKey, 0600, c.userID, groupID),
 		Version: 1,
 	}
 	inode.SetName(fileName)
@@ -3179,6 +3168,7 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		if err := c.decryptInodeClientBlob(inode.ClientBlob, fileKey, &blob); err != nil {
 			return fmt.Errorf("failed to decrypt client blob: %w", err)
 		}
+
 		// Populate transient fields
 		inode.SetName(blob.Name)
 		inode.SetSymlinkTarget(blob.SymlinkTarget)
@@ -3186,12 +3176,9 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		inode.SetMTime(blob.MTime)
 		inode.SetUID(blob.UID)
 		inode.SetGID(blob.GID)
-		inode.SetSignerID(blob.SignerID)
-		inode.SetAuthorizedSigners(blob.AuthorizedSigners)
 	}
 
 	signerID := inode.GetSignerID()
-	authSigners := inode.GetAuthorizedSigners()
 
 	if signerID == "" {
 		return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
@@ -3218,24 +3205,19 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	}
 
 	// 3. Check Authorization
-	// Either the Signer must be in AuthorizedSigners OR we have a valid Group Signature from the owning group
-	authorized := groupValid
+	authorized := (signerID == inode.OwnerID) || groupValid
 
 	if !authorized {
-		for _, s := range authSigners {
-			if s == signerID {
-				authorized = true
-				break
-			}
-		}
-		// Owner is implicitly authorized if no AuthorizedSigners listed
-		if !authorized && len(authSigners) == 0 && signerID == inode.OwnerID {
+		// Admin Bypass for mkdir --owner:
+		// If signer is an admin, they are authorized to sign empty directories
+		// (this is for initial administrative setup/provisioning).
+		if user.IsAdmin && inode.Type == metadata.DirType && len(inode.Children) == 0 {
 			authorized = true
 		}
 	}
 
 	if !authorized {
-		return fmt.Errorf("signer %s is not authorized for inode %s (no valid group sig or ACL match)", signerID, inode.ID)
+		return fmt.Errorf("signer %s is not authorized for inode %s", signerID, inode.ID)
 	}
 
 	return nil
@@ -3919,7 +3901,7 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 		return nil, fmt.Errorf("empty results from createGroup batch")
 	}
 
-	if err := c.isResultError(results[0]); err != nil {
+	if err := c.IsResultError(results[0]); err != nil {
 		return nil, err
 	}
 
@@ -4378,8 +4360,13 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 		if err == nil {
 			return nil
 		}
-		log.Printf("DEBUG CLIENT withConflictRetry: got error: %v", err)
 		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+				return err
+			}
+		}
+
 		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) ||
 			errors.Is(err, metadata.ErrConflict) ||
 			(apiErr != nil && apiErr.Code == metadata.ErrCodeVersionConflict) ||
@@ -4472,7 +4459,6 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 	req := metadata.LeaseRequest{
 		InodeIDs:     leaseIDs,
 		Duration:     int64(duration),
-		Lockbox:      opts.Lockbox,
 		Type:         opts.Type,
 		Nonce:        opts.Nonce,
 		Placeholders: opts.Placeholders,
@@ -5037,157 +5023,8 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 	})
 }
 
-// AdminChown reassigns ownership of an inode by ID. This is a metadata-only override.
-func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.AdminChownRequest) error {
-	// Try to unlock so we can re-key for the new owner/group
-	inode, err := c.getInodeInternal(ctx, inodeID, false)
-	if err != nil {
-		return err
-	}
-	key, unlockErr := c.UnlockInode(ctx, inode)
-	if unlockErr != nil {
-		return fmt.Errorf("failed to unlock inode for re-sealing: %w", unlockErr)
-	}
-
-	var ownerPK *mlkem.EncapsulationKey768
-	var groupPK *mlkem.EncapsulationKey768
-
-	if req.OwnerID != nil {
-		newUser, err := c.GetUser(ctx, *req.OwnerID)
-		if err != nil {
-			return fmt.Errorf("failed to fetch new owner %s: %w", *req.OwnerID, err)
-		}
-		pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
-		if err != nil {
-			return fmt.Errorf("failed to unmarshal new owner key: %w", err)
-		}
-		ownerPK = pubKey
-	}
-
-	targetGroupID := inode.GroupID
-	if req.GroupID != nil {
-		targetGroupID = *req.GroupID
-	}
-
-	if targetGroupID != "" {
-		group, err := c.GetGroup(ctx, targetGroupID)
-		if err == nil {
-			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-			if err == nil {
-				groupPK = gpk
-			}
-		}
-	}
-
-	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
-		// Ensure admin is an authorized signer since they are signing this update
-		signers := i.GetAuthorizedSigners()
-		adminInSigners := false
-		for _, s := range signers {
-			if s == c.userID {
-				adminInSigners = true
-				break
-			}
-		}
-		if !adminInSigners {
-			i.SetAuthorizedSigners(append(signers, c.userID))
-		}
-
-		if req.OwnerID != nil {
-			i.OwnerID = *req.OwnerID
-			if ownerPK != nil {
-				i.Lockbox.AddRecipient(i.OwnerID, ownerPK, key)
-			}
-		}
-		if req.GroupID != nil {
-			i.GroupID = *req.GroupID
-			if i.GroupID != "" && groupPK != nil {
-				i.Lockbox.AddRecipient(i.GroupID, groupPK, key)
-			}
-		}
-		return nil
-	})
-	return err
-}
-
-// AdminChmod modifies the permission bits of an inode by ID.
-func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) error {
-	// 1. Try to unlock so we can re-key for group/world if bits changed
-	inode, err := c.getInodeInternal(ctx, inodeID, false)
-	if err != nil {
-		return err
-	}
-	key, unlockErr := c.UnlockInode(ctx, inode)
-	if unlockErr != nil {
-		return fmt.Errorf("failed to unlock inode for re-sealing: %w", unlockErr)
-	}
-
-	var worldPK *mlkem.EncapsulationKey768
-	var groupPK *mlkem.EncapsulationKey768
-
-	worldRead := (mode & 0004) != 0
-	groupRW := (mode & 0060) != 0
-
-	if worldRead {
-		wpk, err := c.GetWorldPublicKey(ctx)
-		if err == nil {
-			worldPK = wpk
-		}
-	}
-
-	if inode.GroupID != "" && groupRW {
-		group, err := c.GetGroup(ctx, inode.GroupID)
-		if err == nil {
-			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-			if err == nil {
-				groupPK = gpk
-			}
-		}
-	}
-
-	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
-		// Ensure admin is an authorized signer since they are signing this update
-		signers := i.GetAuthorizedSigners()
-		adminInSigners := false
-		for _, s := range signers {
-			if s == c.userID {
-				adminInSigners = true
-				break
-			}
-		}
-		if !adminInSigners {
-			i.SetAuthorizedSigners(append(signers, c.userID))
-		}
-
-		i.Mode = mode
-
-		// 2. Handle Lockbox updates (World & Group)
-		worldRead := (i.Mode & 0004) != 0
-		groupRW := (i.Mode & 0060) != 0
-
-		// 2.1 World Access
-		_, worldInLockbox := i.Lockbox[metadata.WorldID]
-		if worldRead && worldPK != nil {
-			i.Lockbox.AddRecipient(metadata.WorldID, worldPK, key)
-		} else if !worldRead && worldInLockbox {
-			delete(i.Lockbox, metadata.WorldID)
-		}
-
-		// 2.2 Group Access
-		if i.GroupID != "" {
-			_, groupInLockbox := i.Lockbox[i.GroupID]
-			if groupRW && groupPK != nil {
-				i.Lockbox.AddRecipient(i.GroupID, groupPK, key)
-			} else if !groupRW && groupInLockbox {
-				delete(i.Lockbox, i.GroupID)
-			}
-		}
-		return nil
-	})
-	return err
-}
-
-func (c *Client) isResultError(data json.RawMessage) *APIError {
+// IsResultError checks if a Raft command result is an error and returns it.
+func (c *Client) IsResultError(data json.RawMessage) *APIError {
 	var er metadata.APIErrorResponse
 	if err := json.Unmarshal(data, &er); err == nil && er.Code != "" {
 		// It is an error
@@ -5289,7 +5126,7 @@ func (c *Client) UpdateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 			if len(results) == 0 {
 				return nil, fmt.Errorf("empty results from updateGroup batch")
 			}
-			if err := c.isResultError(results[0]); err != nil {
+			if err := c.IsResultError(results[0]); err != nil {
 				return nil, err
 			}
 			var updated metadata.Group

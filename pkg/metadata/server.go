@@ -926,8 +926,15 @@ func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	state := s.raft.State().String()
+	isLeader := s.raft.State() == raft.Leader
+
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status":     "ok",
+		"raft_state": state,
+		"is_leader":  isLeader,
+	})
 }
 
 func (s *Server) handleSystemBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -1706,6 +1713,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 		UID:     user.UID,
 		SignKey: user.SignKey,
 		EncKey:  user.EncKey,
+		IsAdmin: s.fsm.IsAdmin(user.ID),
 	}
 	if ctxUser.ID == id || s.fsm.IsAdmin(ctxUser.ID) {
 		resp.Usage = user.Usage
@@ -1961,6 +1969,14 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 	if inode.OwnerID == user.ID {
 		return nil
 	}
+	// Group Ownership?
+	if strings.HasPrefix(inode.OwnerID, ":") {
+		gid := strings.TrimPrefix(inode.OwnerID, ":")
+		inGroup, _ := s.fsm.IsUserInGroup(user.ID, gid)
+		if inGroup {
+			return nil
+		}
+	}
 	// World Read
 	if (inode.Mode & 0004) != 0 {
 		return nil
@@ -2031,10 +2047,8 @@ func (s *Server) removeNodeInternal(id string) error {
 }
 
 func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id string) {
-	log.Printf("GROUP: handleGetGroup(%s) starting", id)
 	user, ok := r.Context().Value(userContextKey).(*User)
 	if !ok || user == nil {
-		log.Printf("GROUP: handleGetGroup(%s) unauthorized", id)
 		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -2052,7 +2066,6 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 		return json.Unmarshal(plain, &group)
 	})
 	if err != nil {
-		log.Printf("GROUP: handleGetGroup(%s) retrieval failed: %v", id, err)
 		s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
 		return
 	}
@@ -2073,7 +2086,6 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 
 	isAdmin := s.fsm.IsAdmin(user.ID)
 	if !authorized && !isAdmin {
-		log.Printf("GROUP: handleGetGroup(%s) forbidden for user %s", id, user.ID)
 		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 		return
 	}
@@ -2346,10 +2358,6 @@ func (s *Server) sealResponse(user *User, payload []byte) ([]byte, error) {
 }
 
 func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID string) error {
-	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-	if bypass && s.fsm.IsAdmin(user.ID) {
-		return nil
-	}
 	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(inodeID))
@@ -2366,6 +2374,18 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 	}
 
 	if inode.OwnerID == user.ID {
+		return nil
+	}
+	// Group Ownership?
+	if strings.HasPrefix(inode.OwnerID, ":") {
+		gid := strings.TrimPrefix(inode.OwnerID, ":")
+		inGroup, _ := s.fsm.IsUserInGroup(user.ID, gid)
+		if inGroup {
+			return nil
+		}
+	}
+	// World Write
+	if (inode.Mode & 0002) != 0 {
 		return nil
 	}
 	if inode.GroupID != "" {
@@ -2625,15 +2645,33 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 	w.Write(b)
 }
 
+func (s *Server) RedactUser(u *User) {
+	u.SignKey = nil
+	u.EncKey = nil
+}
+
+func (s *Server) RedactGroup(g *Group) {
+	g.EncKey = nil
+	g.SignKey = nil
+	g.EncryptedSignKey = nil
+	g.Lockbox = nil
+	g.RegistryLockbox = nil
+	g.EncryptedRegistry = nil
+	g.Members = nil // Bulk lists shouldn't reveal member IDs
+}
+
+func (s *Server) RedactNode(n *Node) {
+	n.PublicKey = nil
+	n.SignKey = nil
+}
+
 func (s *Server) handleClusterUsers(w http.ResponseWriter, r *http.Request) {
 	var users []User
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		return s.fsm.ForEach(tx, []byte("users"), func(k, v []byte) error {
 			var u User
 			if err := json.Unmarshal(v, &u); err == nil {
-				// Redact public keys in bulk list
-				u.SignKey = nil
-				u.EncKey = nil
+				s.RedactUser(&u)
 				users = append(users, u)
 			}
 			return nil
@@ -2664,12 +2702,7 @@ func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
 
 	// Redact sensitive fields in bulk list
 	for i := range groups {
-		groups[i].EncKey = nil
-		groups[i].SignKey = nil
-		groups[i].EncryptedSignKey = nil
-		groups[i].Lockbox = nil
-		groups[i].RegistryLockbox = nil
-		groups[i].EncryptedRegistry = nil
+		s.RedactGroup(&groups[i])
 	}
 
 	if nextCursor != "" {
@@ -2693,9 +2726,7 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		return s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
-				// Redact public keys in bulk list
-				n.PublicKey = nil
-				n.SignKey = nil
+				s.RedactNode(&n)
 				nodes = append(nodes, n)
 			}
 			return nil

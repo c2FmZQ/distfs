@@ -51,7 +51,7 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 		return err
 	}
 
-	lb := c.createLockbox(ctx, rootKey, 0755, "")
+	lb := c.createLockbox(ctx, rootKey, 0755, c.userID, "")
 	newInode := metadata.Inode{
 		ID:       c.rootID,
 		Type:     metadata.DirType,
@@ -62,7 +62,6 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 		NLink:    1,
 	}
 	newInode.SetFileKey(rootKey)
-	newInode.SetAuthorizedSigners([]string{c.userID})
 	newInode.Version = 1
 	_, err = c.createInode(ctx, newInode)
 	if err != nil {
@@ -248,6 +247,10 @@ func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.I
 
 // AddEntry creates a new directory entry.
 func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string, uid, gid uint32) (*metadata.Inode, []byte, error) {
+	return c.addEntryInternal(ctx, parentID, parentKey, name, iType, r, size, symlinkTarget, mode, groupID, uid, gid, MkdirOptions{})
+}
+
+func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKey []byte, name string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, groupID string, uid, gid uint32, opts MkdirOptions) (*metadata.Inode, []byte, error) {
 	mac := hmac.New(sha256.New, parentKey)
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
@@ -297,6 +300,11 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 	// 3. ATOMIC ADD (Child Create + Parent Update)
 	err = c.withConflictRetry(ctx, func() error {
 		// 1. Prepare Child Inode
+		ownerID := c.userID
+		if opts.OwnerID != "" {
+			ownerID = opts.OwnerID
+		}
+
 		newInode := metadata.Inode{
 			ID: newID,
 			Links: map[string]bool{
@@ -306,8 +314,8 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 			Mode:          mode,
 			Children:      make(map[string]string),
 			ChunkManifest: chunkEntries,
-			Lockbox:       c.createLockbox(ctx, newKey, mode, groupID),
-			OwnerID:       c.userID,
+			Lockbox:       c.createLockbox(ctx, newKey, mode, ownerID, groupID),
+			OwnerID:       ownerID,
 			GroupID:       groupID,
 			CTime:         time.Now().UnixNano(),
 			NLink:         1,
@@ -318,6 +326,8 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 		newInode.SetFileKey(newKey)
 		newInode.SetMTime(time.Now().UnixNano())
 		newInode.SetInlineData(inlineData)
+		newInode.SetUID(uid)
+		newInode.SetGID(gid)
 		newInode.Size = uint64(size)
 		if size == 0 {
 			newInode.Size = uint64(len(inlineData))
@@ -366,9 +376,19 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 }
 
 // Mkdir creates a directory.
+// MkdirOptions provides optional parameters for directory creation.
+type MkdirOptions struct {
+	OwnerID string
+}
+
 // Mkdir creates a new directory at the specified path.
 func (c *Client) Mkdir(ctx context.Context, path string, perm fs.FileMode) error {
-	return c.addEntry(ctx, path, metadata.DirType, nil, 0, "", uint32(perm))
+	return c.MkdirExtended(ctx, path, perm, MkdirOptions{})
+}
+
+// MkdirExtended creates a new directory with optional parameters.
+func (c *Client) MkdirExtended(ctx context.Context, path string, perm fs.FileMode, opts MkdirOptions) error {
+	return c.addEntry(ctx, path, metadata.DirType, nil, 0, "", uint32(perm), opts)
 }
 
 // MkdirAll creates a directory and all parent directories.
@@ -391,7 +411,7 @@ func (c *Client) MkdirAll(ctx context.Context, path string) error {
 
 // CreateFile creates a file with the given content.
 func (c *Client) CreateFile(ctx context.Context, path string, r io.Reader, size int64) error {
-	return c.addEntry(ctx, path, metadata.FileType, r, size, "", 0600)
+	return c.addEntry(ctx, path, metadata.FileType, r, size, "", 0600, MkdirOptions{})
 }
 
 // Chmod changes the mode of a file or directory.
@@ -414,7 +434,7 @@ func (c *Client) Chown(ctx context.Context, path string, ownerID, groupID string
 // Symlink creates a symbolic link.
 // Symlink creates a symbolic link at linkPath pointing to target.
 func (c *Client) Symlink(ctx context.Context, target, linkPath string) error {
-	return c.addEntry(ctx, linkPath, metadata.SymlinkType, nil, 0, target, 0777)
+	return c.addEntry(ctx, linkPath, metadata.SymlinkType, nil, 0, target, 0777, MkdirOptions{})
 }
 
 // Rename moves or renames a directory entry.
@@ -827,7 +847,7 @@ func (c *Client) LinkRaw(ctx context.Context, parentID string, parentKey []byte,
 	})
 }
 
-func (c *Client) addEntry(ctx context.Context, path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32) error {
+func (c *Client) addEntry(ctx context.Context, path string, iType metadata.InodeType, r io.Reader, size int64, symlinkTarget string, mode uint32, opts MkdirOptions) error {
 	path = strings.Trim(path, "/")
 	if path == "" {
 		return fmt.Errorf("cannot create root")
@@ -861,17 +881,46 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 		return metadata.ErrExists
 	}
 
-	_, _, err = c.AddEntry(ctx, parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, parentInode.GroupID, 0, 0)
+	groupID := parentInode.GroupID
+	if strings.HasPrefix(opts.OwnerID, ":") {
+		groupID = strings.TrimPrefix(opts.OwnerID, ":")
+	}
+
+	_, _, err = c.addEntryInternal(ctx, parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, groupID, 0, 0, opts)
 	if err != nil {
 		return fmt.Errorf("addEntry AddEntry failed: %w", err)
 	}
 	return nil
 }
 
-func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, groupID string) crypto.Lockbox {
+func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, ownerID, groupID string) crypto.Lockbox {
 	lb := crypto.NewLockbox()
 	if c.decKey != nil {
 		lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
+	}
+
+	// Always add the owner if they are different from the current user
+	if ownerID != "" && ownerID != c.userID {
+		if strings.HasPrefix(ownerID, ":") {
+			// Group Owner
+			gid := strings.TrimPrefix(ownerID, ":")
+			group, err := c.GetGroup(ctx, gid)
+			if err == nil {
+				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				if err == nil {
+					lb.AddRecipient(gid, gpk, key)
+				}
+			}
+		} else {
+			// User Owner
+			user, err := c.GetUser(ctx, ownerID)
+			if err == nil {
+				upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+				if err == nil {
+					lb.AddRecipient(ownerID, upk, key)
+				}
+			}
+		}
 	}
 	if (mode & 0004) != 0 {
 		wpk, err := c.GetWorldPublicKey(ctx)

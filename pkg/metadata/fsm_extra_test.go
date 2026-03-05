@@ -414,49 +414,6 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	}
 }
 
-func TestFSM_AdminChmod_Success(t *testing.T) {
-	fsm := createTestFSM(t)
-	defer fsm.Close()
-
-	sk, _ := crypto.GenerateIdentityKey()
-	fsm.db.Update(func(tx *bolt.Tx) error {
-		u := User{ID: "admin", SignKey: sk.Public()}
-		return fsm.Put(tx, []byte("users"), []byte("admin"), MustMarshalJSON(u))
-	})
-	adminBytes, _ := json.Marshal("admin")
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: adminBytes, UserID: "bootstrap"}.Marshal()})
-
-	// 1. Create Inode
-	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0644, OwnerID: "u1"}
-	// Use u1 for creation to test admin bypass later
-	u1sk, _ := crypto.GenerateIdentityKey()
-	fsm.db.Update(func(tx *bolt.Tx) error {
-		u := User{ID: "u1", SignKey: u1sk.Public()}
-		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
-	})
-	inode.SignInodeForTest("u1", u1sk)
-	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
-
-	// 2. AdminChmod
-	req := AdminChmodRequest{InodeID: "00000000000000000000000000000001", Mode: 0777}
-	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAdminChmod, Data: rb, UserID: "admin"}.Marshal()})
-
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
-		var res Inode
-		json.Unmarshal(v, &res)
-		if res.Mode != 0775 { // 0777 sanitized to 0775
-			return fmt.Errorf("AdminChmod failed: %o", res.Mode)
-		}
-		return nil
-	})
-	if err != nil {
-		t.Error(err)
-	}
-}
-
 func TestFSM_GetLeases_Extra(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()

@@ -226,7 +226,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
-	i1u := Inode{ID: "00000000000000000000000000000011", Mode: 0777, Version: 2, NLink: 1}
+	i1u := Inode{ID: "00000000000000000000000000000011", OwnerID: "u1", Mode: 0777, Version: 2, NLink: 1}
 	i1u.SignInodeForTest("u2", u2Sign)
 	batchU := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1u), UserID: "u2"}}
 	payloadU, _ := json.Marshal(batchU)
@@ -240,7 +240,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	}
 
 	// 6. User 1 successfully deletes their own inode (Implicit via UpdateInode NLink=0)
-	i1d := Inode{ID: "00000000000000000000000000000011", Mode: 0644, Version: 2, NLink: 0}
+	i1d := Inode{ID: "00000000000000000000000000000011", OwnerID: "u1", Mode: 0644, Version: 2, NLink: 0}
 	i1d.SignInodeForTest("u1", u1Sign)
 	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1d), UserID: "u1"}}
 	payloadD, _ := json.Marshal(batchD)
@@ -822,75 +822,6 @@ func TestQuotaEnforcement(t *testing.T) {
 	res = f.Response()
 	if err, ok := res.(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
 		t.Errorf("Expected ErrQuotaExceeded, got %T: %v (IsQuota=%v)", res, res, errors.Is(err, ErrQuotaExceeded))
-	}
-}
-
-func TestAdminChownQuota(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
-
-	u1 := "user1"
-	sk1, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: sk1.Public()})
-
-	u2 := "user2"
-	sk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: sk2.Public()})
-
-	// Set u2 Quota to 1 Inode
-	maxInodes := uint64(1)
-	req := SetUserQuotaRequest{UserID: u2, MaxInodes: &maxInodes}
-	reqBytes, _ := json.Marshal(req)
-	if err := node.Raft.Apply(LogCommand{Type: CmdSetUserQuota, Data: reqBytes}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Failed to set user quota: %v", err)
-	}
-
-	// u1 creates a file
-	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Size: 100}
-	inode.SignInodeForTest(u1, sk1)
-	iBytes, _ := json.Marshal(inode)
-	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes, UserID: u1}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Failed to create inode: %v", err)
-	}
-
-	// Admin chown 0000000000000000000000000000000f from u1 to u2
-	// u2 has 0 files, limit 1. Transfer should SUCCEED.
-	// Current BUG: checkQuota(u2, delta=1) sees u2 usage=0, limit=1 -> OK.
-	// Wait, actually the bug is if u2 ALREADY has 1 file?
-	// Let's test the limit case.
-
-	// If u2 has 1 file already.
-	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: u2, Size: 100}
-	inode2.SignInodeForTest(u2, sk2)
-	iBytes2, _ := json.Marshal(inode2)
-	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes2, UserID: u2}.Marshal(), 5*time.Second).Error(); err != nil {
-		t.Fatalf("Failed to create inode2: %v", err)
-	}
-
-	// Now u2 is at limit (1/1).
-	// Transfer 0000000000000000000000000000000f from u1 to u2 should FAIL.
-	chReq := AdminChownRequest{InodeID: "0000000000000000000000000000000f", OwnerID: &u2}
-	chBytes, _ := json.Marshal(chReq)
-	f := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes, UserID: u1}.Marshal(), 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatal(err)
-	}
-	if err, ok := f.Response().(error); !ok || !errors.Is(err, ErrQuotaExceeded) {
-		t.Errorf("Expected ErrQuotaExceeded, got %v", f.Response())
-	}
-
-	// Transfer 0000000000000000000000000000002f from u2 back to u2 (identity transfer)
-	// Current BUG: usage is 1/1. checkQuota(u2, delta=1) sees 1+1 > 1 -> FAILS.
-	// Fixed: updateUsage(u2, delta=-1) makes usage 0. checkQuota(u2, delta=1) sees 0+1 <= 1 -> OK.
-	chReq2 := AdminChownRequest{InodeID: "0000000000000000000000000000002f", OwnerID: &u2}
-	chBytes2, _ := json.Marshal(chReq2)
-	f2 := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes2, UserID: u1}.Marshal(), 5*time.Second)
-	if err := f2.Error(); err != nil {
-		t.Fatal(err)
-	}
-	if err, ok := f2.Response().(error); ok && err != nil {
-		t.Errorf("Identity chown failed: %v", err)
 	}
 }
 

@@ -67,7 +67,6 @@ func dumpInode(i *metadata.Inode) {
 	fmt.Printf("  Group: %s\n", i.GroupID)
 	fmt.Printf("  Version: %d\n", i.Version)
 	fmt.Printf("  SignerID: %s\n", i.GetSignerID())
-	fmt.Printf("  AuthorizedSigners: %v\n", i.GetAuthorizedSigners())
 
 	if target := i.GetSymlinkTarget(); target != "" {
 		fmt.Printf("  SymlinkTarget: %s\n", target)
