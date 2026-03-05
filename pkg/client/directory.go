@@ -324,11 +324,11 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			ChunkManifest: chunkEntries,
 			Lockbox:       lb,
 
-			OwnerID:       ownerID,
-			GroupID:       groupID,
-			CTime:         time.Now().UnixNano(),
-			NLink:         1,
-			Version:       1,
+			OwnerID: ownerID,
+			GroupID: groupID,
+			CTime:   time.Now().UnixNano(),
+			NLink:   1,
+			Version: 1,
 		}
 		newInode.SetName(name)
 		newInode.SetSymlinkTarget(symlinkTarget)
@@ -379,6 +379,18 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 	if err != nil {
 		return nil, nil, err
 	}
+
+	// Cache the newly generated key immediately so VerifyInode can succeed
+	// during the subsequent getInode call, even if we aren't in the lockbox
+	// (e.g., when an Admin provisions a directory for another user).
+	c.keyMu.Lock()
+	c.keyCache[newID] = fileMetadata{
+		key:     newKey,
+		groupID: groupID,
+		linkTag: parentID + ":" + encName,
+		inlined: size == 0 && len(inlineData) > 0,
+	}
+	c.keyMu.Unlock()
 
 	finalInode, err := c.getInode(ctx, newID)
 	return finalInode, newKey, err
@@ -891,7 +903,15 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	}
 
 	groupID := parentInode.GroupID
-	if strings.HasPrefix(opts.OwnerID, ":") {
+	if opts.OwnerID != "" && opts.OwnerID != c.userID {
+		if strings.HasPrefix(opts.OwnerID, ":") {
+			groupID = strings.TrimPrefix(opts.OwnerID, ":")
+		} else {
+			// Provisioning for another user: clear the parent's group to avoid lockbox errors
+			// if the new user isn't a member of the parent's group.
+			groupID = ""
+		}
+	} else if strings.HasPrefix(opts.OwnerID, ":") {
 		groupID = strings.TrimPrefix(opts.OwnerID, ":")
 	}
 
