@@ -513,7 +513,7 @@ func cmdMkdir(ctx context.Context, args []string) {
 	opts := client.MkdirOptions{}
 	if *ownerID != "" {
 		resolvedOwner := *ownerID
-		if strings.Contains(resolvedOwner, "@") && !strings.HasPrefix(resolvedOwner, ":") {
+		if strings.Contains(resolvedOwner, "@") {
 			// Resolve email to UserID.
 			if *adminFlag {
 				id, err := c.AdminLookup(ctx, resolvedOwner, "CLI mkdir --owner")
