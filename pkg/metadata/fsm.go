@@ -55,27 +55,25 @@ const (
 	CmdUpdateInode       CommandType = 2
 	CmdDeleteInode       CommandType = 3
 	CmdRegisterNode      CommandType = 4
-	CmdCreateUser        CommandType = 6
-	CmdCreateGroup       CommandType = 7
-	CmdUpdateGroup       CommandType = 8
-	CmdAddChild          CommandType = 9
-	CmdAddChunkReplica   CommandType = 11
-	CmdSetAttr           CommandType = 13
-	CmdGCRemove          CommandType = 15
-	CmdSetUserQuota      CommandType = 17
-	CmdRotateKey         CommandType = 18
-	CmdInitWorld         CommandType = 19
-	CmdStoreKeySync      CommandType = 20
-	CmdBatch             CommandType = 21
-	CmdAcquireLeases     CommandType = 22
-	CmdReleaseLeases     CommandType = 23
-	CmdPromoteAdmin      CommandType = 24
-	CmdStoreMetrics      CommandType = 27
-	CmdSetGroupQuota     CommandType = 28
-	CmdSetClusterSignKey CommandType = 29
-	CmdRemoveNode        CommandType = 30
-	CmdRotateFSMKey      CommandType = 31
-	CmdReencryptValue    CommandType = 32
+	CmdCreateUser        CommandType = 5
+	CmdCreateGroup       CommandType = 6
+	CmdUpdateGroup       CommandType = 7
+	CmdAddChunkReplica   CommandType = 8
+	CmdGCRemove          CommandType = 9
+	CmdSetUserQuota      CommandType = 10
+	CmdRotateKey         CommandType = 11
+	CmdInitWorld         CommandType = 12
+	CmdStoreKeySync      CommandType = 13
+	CmdBatch             CommandType = 14
+	CmdAcquireLeases     CommandType = 15
+	CmdReleaseLeases     CommandType = 16
+	CmdPromoteAdmin      CommandType = 17
+	CmdStoreMetrics      CommandType = 18
+	CmdSetGroupQuota     CommandType = 19
+	CmdSetClusterSignKey CommandType = 20
+	CmdRemoveNode        CommandType = 21
+	CmdRotateFSMKey      CommandType = 22
+	CmdReencryptValue    CommandType = 23
 )
 
 type LogCommand struct {
