@@ -286,7 +286,7 @@ func (s *Server) loadClusterSignKey() {
 
 	var encPriv []byte
 	var err error
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 5; i++ {
 		err = s.fsm.db.View(func(tx *bolt.Tx) error {
 			plain, err := s.fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
 			if err != nil {
@@ -309,7 +309,11 @@ func (s *Server) loadClusterSignKey() {
 			log.Printf("ERROR: Failed to fetch cluster sign key from FSM: %v", err)
 			return
 		}
-		time.Sleep(1 * time.Second)
+		select {
+		case <-s.stopCh:
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
 	if encPriv == nil {
@@ -2776,7 +2780,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	var resp *http.Response
 	var lastDiscoveryErr error
 
-	for i := 0; i < 30; i++ {
+	for i := 0; i < 5; i++ {
 		discoveryReq, err := http.NewRequest("GET", infoURL, nil)
 		if err != nil {
 			s.writeError(w, r, ErrCodeInternal, "invalid address", http.StatusBadRequest)
@@ -2791,7 +2795,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		}
 		lastDiscoveryErr = err
 		log.Printf("DEBUG: Discovery of %s failed (attempt %d): %v", req.Address, i+1, err)
-		time.Sleep(1 * time.Second)
+		time.Sleep(100 * time.Millisecond)
 	}
 
 	if resp == nil {
@@ -2893,8 +2897,8 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	var lastPushErr error
 	alreadyBootstrapped := false
 
-	for i := 0; i < 30; i++ {
-		pushReq, err := http.NewRequest("POST", bootstrapURL, bytes.NewReader(encPayload))
+	for i := 0; i < 5; i++ {
+		pushReq, err := http.NewRequestWithContext(r.Context(), "POST", bootstrapURL, bytes.NewReader(encPayload))
 		if err != nil {
 			log.Printf("ERROR: Failed to create bootstrap push request: %v", err)
 			s.writeError(w, r, ErrCodeInternal, "failed to create push request", http.StatusInternalServerError)
@@ -2924,7 +2928,11 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 			lastPushErr = err
 		}
 		log.Printf("DEBUG: Push to %s failed (attempt %d): %v", bootstrapURL, i+1, lastPushErr)
-		time.Sleep(1 * time.Second)
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(100 * time.Millisecond):
+		}
 	}
 
 	if pushResp != nil {

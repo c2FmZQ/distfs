@@ -50,7 +50,13 @@ type RaftNode struct {
 
 // NewRaftNode creates and bootstraps a new Raft node with mTLS and encryption.
 func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *NodeKey, clusterSecret []byte) (*RaftNode, error) {
-	config := raft.DefaultConfig()
+	return NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir, st, nodeKey, clusterSecret, nil)
+}
+
+func NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *NodeKey, clusterSecret []byte, config *raft.Config) (*RaftNode, error) {
+	if config == nil {
+		config = raft.DefaultConfig()
+	}
 	config.LocalID = raft.ServerID(nodeID)
 	// NoSnapshotRestoreOnStart default is false.
 

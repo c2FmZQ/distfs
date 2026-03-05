@@ -509,7 +509,13 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
 	st := storage.New(tmpDir, mk)
 	nodeKey, _ := LoadOrGenerateNodeKey(st, "node.key", nil)
-	node2, _ := NewRaftNode("node2", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"))
+
+	config := raft.DefaultConfig()
+	config.HeartbeatTimeout = 50 * time.Millisecond
+	config.ElectionTimeout = 50 * time.Millisecond
+	config.LeaderLeaseTimeout = 50 * time.Millisecond
+
+	node2, _ := NewRaftNodeWithConfig("node2", "127.0.0.1:0", "", tmpDir, st, nodeKey, []byte("test-cluster-secret"), config)
 	defer node2.Shutdown()
 
 	signKey, _ := crypto.GenerateIdentityKey()
