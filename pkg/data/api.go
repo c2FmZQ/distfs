@@ -235,6 +235,13 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 		if err := json.Unmarshal(b, &st); err != nil {
 			return fmt.Errorf("invalid session token structure")
 		}
+
+		// Verify server's signature over the session token
+		payload, _ := json.Marshal(st.Token)
+		if !crypto.VerifySignature(pubKey, payload, st.Signature) {
+			return fmt.Errorf("invalid session token signature")
+		}
+
 		h := sha256.Sum256([]byte(st.Token.Nonce))
 		if !bytes.Equal(h[:], cap.SessionBinding) {
 			return fmt.Errorf("capability token is not bound to this session")

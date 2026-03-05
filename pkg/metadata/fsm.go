@@ -100,13 +100,14 @@ type ReencryptRequest struct {
 }
 
 type LeaseRequest struct {
-	InodeIDs  []string       `json:"inode_ids"`
-	SessionID string         `json:"session_id"`
-	Nonce     string         `json:"nonce,omitempty"`
-	Duration  int64          `json:"duration"`
-	UserID    string         `json:"user_id,omitempty"`
-	Type      LeaseType      `json:"type,omitempty"`
-	Lockbox   crypto.Lockbox `json:"lockbox,omitempty"`
+	InodeIDs     []string       `json:"inode_ids"`
+	SessionID    string         `json:"session_id"`
+	Nonce        string         `json:"nonce,omitempty"`
+	Duration     int64          `json:"duration"`
+	UserID       string         `json:"user_id,omitempty"`
+	Type         LeaseType      `json:"type,omitempty"`
+	Lockbox      crypto.Lockbox `json:"lockbox,omitempty"`
+	Placeholders []Inode        `json:"placeholders,omitempty"`
 }
 
 type RotateKeyRequest struct {
@@ -1616,7 +1617,24 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 		if !isPath && IsInodeID(id) {
 			inode := inodes[i]
 			if inode == nil {
-				inode = &Inode{ID: id, OwnerID: req.UserID, Lockbox: req.Lockbox, Version: 1}
+				// Find provided placeholder
+				for _, p := range req.Placeholders {
+					if p.ID == id {
+						// Verify placeholder signature
+						if err := fsm.verifyInodeSignature(tx, &p, req.UserID); err != nil {
+							return fmt.Errorf("invalid placeholder signature for %s: %w", id, err)
+						}
+						// Ensure it's marked as a valid placeholder (Version 1, no chunks, etc)
+						if p.Version != 1 || len(p.ChunkManifest) > 0 || p.Size > 0 {
+							return fmt.Errorf("provided inode %s is not a valid placeholder", id)
+						}
+						inode = &p
+						break
+					}
+				}
+				if inode == nil {
+					return fmt.Errorf("no signed placeholder provided for new inode %s", id)
+				}
 			}
 			if inode.Leases == nil {
 				inode.Leases = make(map[string]LeaseInfo)

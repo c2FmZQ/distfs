@@ -461,17 +461,29 @@ func TestFSM_GetLeases_Extra(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+
 	id1 := "00000000000000000000000000000001"
+
+	// Create placeholder
+	placeholder := Inode{ID: id1, Type: FileType, OwnerID: "u1", Version: 1}
+	placeholder.SignInodeForTest("u1", sk)
+
 	// 1. Acquire Lease
 	req := LeaseRequest{
-		UserID:    "u1",
-		InodeIDs:  []string{id1},
-		Duration:  int64(time.Hour),
-		SessionID: "session1",
-		Type:      LeaseExclusive,
+		UserID:       "u1",
+		InodeIDs:     []string{id1},
+		Duration:     int64(time.Hour),
+		SessionID:    "session1",
+		Type:         LeaseExclusive,
+		Placeholders: []Inode{placeholder},
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: rb}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: rb, UserID: "u1"}.Marshal()})
 
 	// 2. GetLeases
 	leases, err := fsm.GetLeases()

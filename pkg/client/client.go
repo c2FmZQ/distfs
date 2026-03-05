@@ -49,11 +49,6 @@ type contextKey string
 
 const adminBypassContextKey contextKey = "admin-bypass"
 
-var (
-	// ErrUnvalidated is returned when an inode's integrity or authorization cannot be verified.
-	ErrUnvalidated = errors.New("inode integrity or authorization could not be validated")
-)
-
 // GetServerSignKey fetches the cluster's public signing key (ML-DSA).
 func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	c.keyMu.RLock()
@@ -1511,14 +1506,11 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	var valid []*metadata.Inode
 	for _, inode := range inodes {
 		if err := c.VerifyInode(ctx, inode); err != nil {
-			if err == ErrUnvalidated {
-				continue
-			}
-			return nil, err
+			log.Printf("DEBUG CLIENT: getInodes skipping inode %s due to verification failure: %v", inode.ID, err)
+			continue
 		}
 		valid = append(valid, inode)
 	}
-
 	return valid, nil
 }
 
@@ -2191,18 +2183,6 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		pathID = "path:root:" + c.rootID
 	}
 
-	// Acquire lease first to prevent concurrent writers.
-	nonce := leaseNonce
-	if nonce == "" {
-		nonce = generateID()
-		err := c.withConflictRetry(ctx, func() error {
-			return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	var fileKey []byte
 	var oldInodeID string
 
@@ -2237,6 +2217,20 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	}
 	inode.SetName(fileName)
 	inode.SetFileKey(fileKey)
+	// Acquire lease first to prevent concurrent writers on this path.
+	nonce := leaseNonce
+	if nonce == "" {
+		nonce = generateID()
+		err := c.withConflictRetry(ctx, func() error {
+			return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{
+				Type:  metadata.LeaseExclusive,
+				Nonce: nonce,
+			})
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
 
 	lctx, cancel := context.WithCancel(context.Background())
 	w := &FileWriter{
@@ -3178,8 +3172,7 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 
 		if len(fileKey) == 0 {
 			// If we can't decrypt, we can't verify the full integrity or see names.
-			// Return ErrUnvalidated to signal that this inode should be filtered out.
-			return ErrUnvalidated
+			return fmt.Errorf("failed to decrypt file key: %w", crypto.ErrRecipientNotFound)
 		}
 
 		var blob metadata.InodeClientBlob
@@ -3201,13 +3194,7 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	authSigners := inode.GetAuthorizedSigners()
 
 	if signerID == "" {
-		// If there are authorized signers, we expect a signature.
-		if len(authSigners) > 0 {
-			return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
-		}
-		// No signer and no auth list? This is a bootstrap file (e.g. Root)
-		// Or it's unvalidated because it's not signed.
-		return ErrUnvalidated
+		return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
 	}
 
 	// 2. Verify Signatures
@@ -4087,8 +4074,56 @@ func (c *Client) SetAttr(ctx context.Context, path string, attr metadata.SetAttr
 
 // SetAttrByID updates the attributes of an inode by ID. Returns the updated inode.
 func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) (*metadata.Inode, error) {
+	var ownerPK *mlkem.EncapsulationKey768
+	var groupPK *mlkem.EncapsulationKey768
+	var worldPK *mlkem.EncapsulationKey768
+
+	// 1. Pre-fetch any required public keys before entering the atomic update
+	// (which holds the controlMu semaphore).
+	if attr.OwnerID != nil {
+		u, err := c.GetUser(ctx, *attr.OwnerID)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch new owner: %w", err)
+		}
+		pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal new owner key: %w", err)
+		}
+		ownerPK = pk
+	}
+
+	targetMode := inode.Mode
+	if attr.Mode != nil {
+		targetMode = *attr.Mode
+	}
+	targetGroupID := inode.GroupID
+	if attr.GroupID != nil {
+		targetGroupID = *attr.GroupID
+	}
+
+	worldRead := (targetMode & 0004) != 0
+	groupRW := (targetMode & 0060) != 0
+
+	if worldRead {
+		wpk, err := c.GetWorldPublicKey(ctx)
+		if err == nil {
+			worldPK = wpk
+		}
+	}
+
+	if targetGroupID != "" && groupRW {
+		group, err := c.GetGroup(ctx, targetGroupID)
+		if err == nil {
+			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+			if err == nil {
+				groupPK = gpk
+			}
+		}
+	}
+
+	// 2. Perform Atomic Update
 	updated, err := c.UpdateInode(ctx, inode.ID, func(i *metadata.Inode) error {
-		// 1. Update local fields
+		// Update local fields
 		if attr.Mode != nil {
 			i.Mode = *attr.Mode
 		}
@@ -4105,18 +4140,9 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 			i.SetMTime(*attr.MTime)
 		}
 
-		// 2. Handle Lockbox updates (Owner, World & Group)
-		// Ensure new owner has access
-		if attr.OwnerID != nil {
-			u, err := c.GetUser(ctx, *attr.OwnerID)
-			if err != nil {
-				return fmt.Errorf("failed to fetch new owner: %w", err)
-			}
-			pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey)
-			if err != nil {
-				return fmt.Errorf("failed to unmarshal new owner key: %w", err)
-			}
-			i.Lockbox.AddRecipient(*attr.OwnerID, pk, key)
+		// Update Lockbox (using pre-fetched keys)
+		if ownerPK != nil {
+			i.Lockbox.AddRecipient(*attr.OwnerID, ownerPK, key)
 		}
 
 		worldRead := (i.Mode & 0004) != 0
@@ -4124,11 +4150,8 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 
 		// 2.1 World Access
 		_, worldInLockbox := i.Lockbox[metadata.WorldID]
-		if worldRead && !worldInLockbox {
-			wpk, err := c.GetWorldPublicKey(ctx)
-			if err == nil {
-				i.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
-			}
+		if worldRead && worldPK != nil {
+			i.Lockbox.AddRecipient(metadata.WorldID, worldPK, key)
 		} else if !worldRead && worldInLockbox {
 			delete(i.Lockbox, metadata.WorldID)
 		}
@@ -4136,16 +4159,8 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		// 2.2 Group Access
 		if i.GroupID != "" {
 			_, groupInLockbox := i.Lockbox[i.GroupID]
-			if groupRW && !groupInLockbox {
-				group, err := c.GetGroup(ctx, i.GroupID)
-				if err != nil {
-					return fmt.Errorf("failed to fetch group: %w", err)
-				}
-				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				if err != nil {
-					return fmt.Errorf("failed to unmarshal group key: %w", err)
-				}
-				i.Lockbox.AddRecipient(i.GroupID, gpk, key)
+			if groupRW && groupPK != nil {
+				i.Lockbox.AddRecipient(i.GroupID, groupPK, key)
 			} else if !groupRW && groupInLockbox {
 				delete(i.Lockbox, i.GroupID)
 			}
@@ -4430,9 +4445,10 @@ func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, e
 }
 
 type LeaseOptions struct {
-	Type    metadata.LeaseType
-	Nonce   string
-	Lockbox crypto.Lockbox
+	Type         metadata.LeaseType
+	Nonce        string
+	Lockbox      crypto.Lockbox
+	Placeholders []metadata.Inode
 	// OnExpired is called if the background renewal loop fails (e.g., network partition)
 	// and the lease actually expires on the server.
 	OnExpired func(id string, err error)
@@ -4454,11 +4470,12 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 	}
 
 	req := metadata.LeaseRequest{
-		InodeIDs: leaseIDs,
-		Duration: int64(duration),
-		Lockbox:  opts.Lockbox,
-		Type:     opts.Type,
-		Nonce:    opts.Nonce,
+		InodeIDs:     leaseIDs,
+		Duration:     int64(duration),
+		Lockbox:      opts.Lockbox,
+		Type:         opts.Type,
+		Nonce:        opts.Nonce,
+		Placeholders: opts.Placeholders,
 	}
 	data, _ := json.Marshal(req)
 
@@ -5032,6 +5049,36 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 		return fmt.Errorf("failed to unlock inode for re-sealing: %w", unlockErr)
 	}
 
+	var ownerPK *mlkem.EncapsulationKey768
+	var groupPK *mlkem.EncapsulationKey768
+
+	if req.OwnerID != nil {
+		newUser, err := c.GetUser(ctx, *req.OwnerID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch new owner %s: %w", *req.OwnerID, err)
+		}
+		pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
+		if err != nil {
+			return fmt.Errorf("failed to unmarshal new owner key: %w", err)
+		}
+		ownerPK = pubKey
+	}
+
+	targetGroupID := inode.GroupID
+	if req.GroupID != nil {
+		targetGroupID = *req.GroupID
+	}
+
+	if targetGroupID != "" {
+		group, err := c.GetGroup(ctx, targetGroupID)
+		if err == nil {
+			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+			if err == nil {
+				groupPK = gpk
+			}
+		}
+	}
+
 	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
 		// Ensure admin is an authorized signer since they are signing this update
 		signers := i.GetAuthorizedSigners()
@@ -5048,28 +5095,14 @@ func (c *Client) AdminChown(ctx context.Context, inodeID string, req metadata.Ad
 
 		if req.OwnerID != nil {
 			i.OwnerID = *req.OwnerID
-			// If we have the key, add the new owner to the lockbox
-			newUser, err := c.GetUser(ctx, i.OwnerID)
-			if err != nil {
-				return fmt.Errorf("failed to fetch new owner %s: %w", i.OwnerID, err)
+			if ownerPK != nil {
+				i.Lockbox.AddRecipient(i.OwnerID, ownerPK, key)
 			}
-			pubKey, err := crypto.UnmarshalEncapsulationKey(newUser.EncKey)
-			if err != nil {
-				return fmt.Errorf("failed to unmarshal new owner key: %w", err)
-			}
-			i.Lockbox.AddRecipient(i.OwnerID, pubKey, key)
 		}
 		if req.GroupID != nil {
 			i.GroupID = *req.GroupID
-			// If we have the key, add the new group to the lockbox
-			if i.GroupID != "" {
-				group, err := c.GetGroup(ctx, i.GroupID)
-				if err == nil {
-					gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-					if err == nil {
-						i.Lockbox.AddRecipient(i.GroupID, gpk, key)
-					}
-				}
+			if i.GroupID != "" && groupPK != nil {
+				i.Lockbox.AddRecipient(i.GroupID, groupPK, key)
 			}
 		}
 		return nil
@@ -5087,6 +5120,29 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 	key, unlockErr := c.UnlockInode(ctx, inode)
 	if unlockErr != nil {
 		return fmt.Errorf("failed to unlock inode for re-sealing: %w", unlockErr)
+	}
+
+	var worldPK *mlkem.EncapsulationKey768
+	var groupPK *mlkem.EncapsulationKey768
+
+	worldRead := (mode & 0004) != 0
+	groupRW := (mode & 0060) != 0
+
+	if worldRead {
+		wpk, err := c.GetWorldPublicKey(ctx)
+		if err == nil {
+			worldPK = wpk
+		}
+	}
+
+	if inode.GroupID != "" && groupRW {
+		group, err := c.GetGroup(ctx, inode.GroupID)
+		if err == nil {
+			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+			if err == nil {
+				groupPK = gpk
+			}
+		}
 	}
 
 	_, err = c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
@@ -5111,11 +5167,8 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 
 		// 2.1 World Access
 		_, worldInLockbox := i.Lockbox[metadata.WorldID]
-		if worldRead && !worldInLockbox {
-			wpk, err := c.GetWorldPublicKey(ctx)
-			if err == nil {
-				i.Lockbox.AddRecipient(metadata.WorldID, wpk, key)
-			}
+		if worldRead && worldPK != nil {
+			i.Lockbox.AddRecipient(metadata.WorldID, worldPK, key)
 		} else if !worldRead && worldInLockbox {
 			delete(i.Lockbox, metadata.WorldID)
 		}
@@ -5123,16 +5176,8 @@ func (c *Client) AdminChmod(ctx context.Context, inodeID string, mode uint32) er
 		// 2.2 Group Access
 		if i.GroupID != "" {
 			_, groupInLockbox := i.Lockbox[i.GroupID]
-			if groupRW && !groupInLockbox {
-				group, err := c.GetGroup(ctx, i.GroupID)
-				if err != nil {
-					return fmt.Errorf("failed to fetch group: %w", err)
-				}
-				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				if err != nil {
-					return fmt.Errorf("failed to unmarshal group key: %w", err)
-				}
-				i.Lockbox.AddRecipient(i.GroupID, gpk, key)
+			if groupRW && groupPK != nil {
+				i.Lockbox.AddRecipient(i.GroupID, groupPK, key)
 			} else if !groupRW && groupInLockbox {
 				delete(i.Lockbox, i.GroupID)
 			}

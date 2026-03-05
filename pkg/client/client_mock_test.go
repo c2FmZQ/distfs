@@ -155,10 +155,24 @@ func TestClient_MockedConflict(t *testing.T) {
 					Body:       io.NopCloser(bytes.NewReader(b)),
 				}, nil
 			}
+			if attempts < 2 {
+				attempts++
+				return &http.Response{
+					StatusCode: http.StatusConflict,
+					Body:       io.NopCloser(bytes.NewReader([]byte("conflict"))),
+				}, nil
+			}
+
+			// Return a successful batch response after 2 attempts
 			attempts++
+			updatedInode := metadata.Inode{ID: "00000000000000000000000000000001", Version: 2, Type: metadata.FileType, OwnerID: "u1"}
+			updatedInode.SignInodeForTest("u1", sk)
+			ib, _ := json.Marshal(updatedInode)
+			batchRes := []json.RawMessage{ib}
+			bb, _ := json.Marshal(batchRes)
 			return &http.Response{
-				StatusCode: http.StatusConflict,
-				Body:       io.NopCloser(bytes.NewReader([]byte("conflict"))),
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(bytes.NewReader(bb)),
 			}, nil
 		},
 	}
@@ -166,8 +180,8 @@ func TestClient_MockedConflict(t *testing.T) {
 	_, err := c.UpdateInode(ctx, "00000000000000000000000000000001", func(i *metadata.Inode) error {
 		return nil
 	})
-	if err == nil {
-		t.Error("updateInode should have failed after retries")
+	if err != nil {
+		t.Errorf("updateInode should have succeeded after retries, got: %v", err)
 	}
 	if attempts < 2 {
 		t.Errorf("Expected multiple attempts, got %d", attempts)

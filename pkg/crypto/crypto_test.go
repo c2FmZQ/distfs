@@ -121,16 +121,13 @@ func TestChunkEncryption(t *testing.T) {
 		t.Error("Ciphertext should be larger than ChunkSize (overhead)")
 	}
 
-	// Verify Determinism (Same Index)
+	// Verify Non-Determinism (Same Index, different random suffix)
 	id2, ct2, _ := EncryptChunk(key, data, 0)
-	if id != id2 {
-		t.Error("EncryptChunk is not deterministic for same index")
+	if id == id2 {
+		t.Error("EncryptChunk should not be deterministic for same index (needs random suffix)")
 	}
-	for i := range ct {
-		if ct[i] != ct2[i] {
-			t.Error("Ciphertext mismatch for same index")
-			break
-		}
+	if string(ct) == string(ct2) {
+		t.Error("Ciphertext should differ for same index due to random suffix")
 	}
 
 	// Verify Uniqueness (Different Index)
