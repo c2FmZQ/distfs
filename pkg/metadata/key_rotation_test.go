@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	"github.com/hashicorp/raft"
@@ -22,10 +23,16 @@ func TestFSMKeyRotation(t *testing.T) {
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
 
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+
 	// 1. Create Inode (Gen 1)
-	inode := Inode{ID: "0000000000000000000000000000000f", Type: FileType}
+	inode := Inode{ID: "0000000000000000000000000000000f", Type: FileType, OwnerID: "u1"}
+	inode.SignInodeForTest("u1", sk)
 	iBytes, _ := json.Marshal(inode)
-	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes, "")
+	if _, err := server.ApplyRaftCommandInternal(CmdCreateInode, iBytes, "u1"); err != nil {
+		t.Fatalf("Create Inode Gen 1 failed: %v", err)
+	}
 
 	// 2. Rotate FSM Key (To Gen 2)
 	err := server.RotateFSMKey()
@@ -34,9 +41,12 @@ func TestFSMKeyRotation(t *testing.T) {
 	}
 
 	// 3. Create Inode (Gen 2)
-	inode2 := Inode{ID: "0000000000000000000000000000002f", Type: FileType}
+	inode2 := Inode{ID: "0000000000000000000000000000002f", Type: FileType, OwnerID: "u1"}
+	inode2.SignInodeForTest("u1", sk)
 	iBytes2, _ := json.Marshal(inode2)
-	server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2, "")
+	if _, err := server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2, "u1"); err != nil {
+		t.Fatalf("Create Inode Gen 2 failed: %v", err)
+	}
 
 	// 4. Verify decryption of both
 	err = server.FSM().DB().View(func(tx *bolt.Tx) error {
@@ -157,10 +167,14 @@ func TestKeyRotation(t *testing.T) {
 		t.Fatal("Node did not become leader")
 	}
 
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+
 	// 2. Apply Log 1 (Gen 1)
-	inode1 := Inode{ID: "inode-1", Type: FileType}
+	inode1 := Inode{ID: "inode-1", Type: FileType, OwnerID: "u1"}
+	inode1.SignInodeForTest("u1", sk)
 	data1, _ := json.Marshal(inode1)
-	cmd1 := LogCommand{Type: CmdCreateInode, Data: data1}
+	cmd1 := LogCommand{Type: CmdCreateInode, Data: data1, UserID: "u1"}
 	b1, _ := json.Marshal(cmd1)
 	if err := node.Raft.Apply(b1, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Apply 1 failed: %v", err)
@@ -175,9 +189,10 @@ func TestKeyRotation(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// 4. Apply Log 2 (Gen 2)
-	inode2 := Inode{ID: "inode-2", Type: FileType}
+	inode2 := Inode{ID: "inode-2", Type: FileType, OwnerID: "u1"}
+	inode2.SignInodeForTest("u1", sk)
 	data2, _ := json.Marshal(inode2)
-	cmd2 := LogCommand{Type: CmdCreateInode, Data: data2}
+	cmd2 := LogCommand{Type: CmdCreateInode, Data: data2, UserID: "u1"}
 	b2, _ := json.Marshal(cmd2)
 	if err := node.Raft.Apply(b2, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Apply 2 failed: %v", err)
@@ -190,9 +205,10 @@ func TestKeyRotation(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// 6. Apply Log 3 (Gen 3)
-	inode3 := Inode{ID: "inode-3", Type: FileType}
+	inode3 := Inode{ID: "inode-3", Type: FileType, OwnerID: "u1"}
+	inode3.SignInodeForTest("u1", sk)
 	data3, _ := json.Marshal(inode3)
-	cmd3 := LogCommand{Type: CmdCreateInode, Data: data3}
+	cmd3 := LogCommand{Type: CmdCreateInode, Data: data3, UserID: "u1"}
 	b3, _ := json.Marshal(cmd3)
 	if err := node.Raft.Apply(b3, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Apply 3 failed: %v", err)

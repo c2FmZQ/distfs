@@ -54,7 +54,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
 	ts := httptest.NewServer(metaServer)
 
 	// User
@@ -73,7 +73,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	if err != nil {
 		t.Fatalf("failed to fetch cluster sign pk: %v", err)
 	}
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
 	dataTS := httptest.NewServer(dataServer)
 
 	// Register real data node

@@ -21,9 +21,9 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	distfuse "github.com/c2FmZQ/distfs/pkg/fuse"
 	"github.com/c2FmZQ/tpm"
-	)
+)
 
-	func setupTPMHasher(configPath string) {
+func setupTPMHasher(configPath string) {
 	config.TPMHasher = func(password []byte) ([]byte, error) {
 		tpmDev, err := tpm.New()
 		if err != nil {
@@ -60,9 +60,9 @@ import (
 		}
 		return []byte(hex.EncodeToString(boundHash)), nil
 	}
-	}
+}
 
-	func main() {
+func main() {
 	mountpoint := flag.String("mount", "", "Mount point")
 	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
 	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")

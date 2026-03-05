@@ -1,13 +1,15 @@
 services:
   test-auth:
+    container_name: test-auth
     build: .
     entrypoint: ["/bin/test-auth", "-addr", ":8080"]
     ports:
       - "8090:8080"
 
   storage-node-1:
+    container_name: storage-node-1
     build: .
-    command: ["-id", "node-1", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-1:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-1:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-1:8080", "-bootstrap", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh"]
+    command: ["-id", "node-1", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-1:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-1:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-1:8080", "-bootstrap", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh", "-allow-insecure"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000001
     volumes:
@@ -18,8 +20,9 @@ services:
       - test-auth
 
   storage-node-2:
+    container_name: storage-node-2
     build: .
-    command: ["-id", "node-2", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-2:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-2:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-2:8080", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh"]
+    command: ["-id", "node-2", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-2:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-2:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-2:8080", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh", "-allow-insecure"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000002
     volumes:
@@ -28,8 +31,9 @@ services:
       - test-auth
 
   storage-node-3:
+    container_name: storage-node-3
     build: .
-    command: ["-id", "node-3", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-3:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-3:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-3:8080", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh"]
+    command: ["-id", "node-3", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-3:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-3:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-3:8080", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh", "-allow-insecure"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000003
     volumes:
@@ -38,6 +42,7 @@ services:
       - test-auth
 
   e2e-runner:
+    container_name: e2e-runner
     build: .
     entrypoint: ["/bin/test-all-e2e.sh"]
     depends_on:

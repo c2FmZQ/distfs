@@ -963,7 +963,7 @@ func TestClient_SyncFile(t *testing.T) {
 
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
 
-	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{}, true, true)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -1046,7 +1046,7 @@ func TestClient_ChunkDataOps(t *testing.T) {
 
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
 
-	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{}, true, true)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
@@ -1071,7 +1071,7 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	}
 
 	// 2. DownloadChunkData
-	downloaded, err := c.DownloadChunkData(ctx, inode.ID, entry.ID, entry.URLs, fileKey)
+	downloaded, err := c.DownloadChunkData(ctx, inode.ID, entry.ID, entry.URLs, fileKey, 0)
 	if err != nil {
 		t.Fatalf("DownloadChunkData failed: %v", err)
 	}
@@ -1099,7 +1099,7 @@ func TestClient_OpenBlobWrite(t *testing.T) {
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
 	csk := metadata.GetClusterSignKey(metaNode.FSM)
-	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{}, true, true)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 

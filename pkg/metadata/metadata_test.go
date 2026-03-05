@@ -98,7 +98,7 @@ func TestMetadataCluster(t *testing.T) {
 	}
 	inode.SignInodeForTest("u1", userSignKey)
 	inodeBytes, _ := json.Marshal(inode)
-	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes}}
+	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
 	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
@@ -142,7 +142,7 @@ func TestMetadataCluster(t *testing.T) {
 	inode.Version = 2
 	inode.NLink = 0
 	inode.SignInodeForTest("u1", userSignKey)
-	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode)}}
+	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: "u1"}}
 	payloadD, _ := json.Marshal(batchD)
 	bodyD := sealTestRequest(t, "u1", userSignKey, serverEK, payloadD)
 
@@ -178,19 +178,19 @@ func TestSecurity_AccessControl(t *testing.T) {
 	// 1. Setup Users
 	u1Dec, _ := crypto.GenerateEncryptionKey()
 	u1Sign, _ := crypto.GenerateIdentityKey()
-	u1 := User{ID: "u1", SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
+	u1 := User{ID: "u1", UID: 1001, SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
 	CreateUser(t, node, u1)
 
 	u2Dec, _ := crypto.GenerateEncryptionKey()
 	u2Sign, _ := crypto.GenerateIdentityKey()
-	u2 := User{ID: "u2", SignKey: u2Sign.Public(), EncKey: u2Dec.EncapsulationKey().Bytes()}
+	u2 := User{ID: "u2", UID: 1002, SignKey: u2Sign.Public(), EncKey: u2Dec.EncapsulationKey().Bytes()}
 	CreateUser(t, node, u2)
 
 	// 2. User 1 creates a private inode (0600)
 	i1 := Inode{ID: "00000000000000000000000000000011", OwnerID: "u1", Mode: 0600}
 	i1.SignInodeForTest("u1", u1Sign)
 	i1Bytes, _ := json.Marshal(i1)
-	batch := []LogCommand{{Type: CmdCreateInode, Data: i1Bytes}}
+	batch := []LogCommand{{Type: CmdCreateInode, Data: i1Bytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
 	body := SealTestRequest(t, "u1", u1Sign, serverEK, payload)
 	token1 := LoginSessionForTest(t, ts, "u1", u1Sign)
@@ -214,7 +214,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 
 	// 4. User 2 attempts to DELETE User 1's inode (Should fail)
 	idBytes, _ := json.Marshal("00000000000000000000000000000011")
-	delBatch := []LogCommand{{Type: CmdDeleteInode, Data: idBytes}}
+	delBatch := []LogCommand{{Type: CmdDeleteInode, Data: idBytes, UserID: "u2"}}
 	delPayload, _ := json.Marshal(delBatch)
 	delBody := SealTestRequest(t, "u2", u2Sign, serverEK, delPayload)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(delBody))
@@ -228,7 +228,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	// 5. User 2 attempts to UPDATE User 1's inode (Should fail)
 	i1u := Inode{ID: "00000000000000000000000000000011", Mode: 0777, Version: 2, NLink: 1}
 	i1u.SignInodeForTest("u2", u2Sign)
-	batchU := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1u)}}
+	batchU := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1u), UserID: "u2"}}
 	payloadU, _ := json.Marshal(batchU)
 	bodyU := SealTestRequest(t, "u2", u2Sign, serverEK, payloadU)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyU))
@@ -242,7 +242,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	// 6. User 1 successfully deletes their own inode (Implicit via UpdateInode NLink=0)
 	i1d := Inode{ID: "00000000000000000000000000000011", Mode: 0644, Version: 2, NLink: 0}
 	i1d.SignInodeForTest("u1", u1Sign)
-	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1d)}}
+	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1d), UserID: "u1"}}
 	payloadD, _ := json.Marshal(batchD)
 	bodyD := SealTestRequest(t, "u1", u1Sign, serverEK, payloadD)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyD))
@@ -305,7 +305,7 @@ func TestIdentityRegistry(t *testing.T) {
 	}
 	group.Signature = userSignKey.Sign(group.Hash())
 	objBytes, _ := json.Marshal(group)
-	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes}}
+	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
 	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
@@ -389,7 +389,7 @@ func TestKeySync(t *testing.T) {
 
 	u1Dec, _ := crypto.GenerateEncryptionKey()
 	u1Sign, _ := crypto.GenerateIdentityKey()
-	u1 := User{ID: userID, SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
+	u1 := User{ID: userID, UID: 1001, SignKey: u1Sign.Public(), EncKey: u1Dec.EncapsulationKey().Bytes()}
 	CreateUser(t, node, u1)
 
 	// Mint JWT
@@ -454,10 +454,20 @@ func TestFSMRestore(t *testing.T) {
 	}
 	defer fsm.Close()
 
-	inode := Inode{ID: "restore-test"}
+	sk, _ := crypto.GenerateIdentityKey()
+	err = fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", UID: 1001, SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	inode := Inode{ID: "restore-test", Version: 1, OwnerID: "u1"}
+	inode.SignInodeForTest("u1", sk)
 	data, _ := json.Marshal(inode)
 	err = fsm.db.Update(func(tx *bolt.Tx) error {
-		resp := fsm.executeCreateInode(tx, data)
+		resp := fsm.executeCreateInode(tx, data, "u1")
 		if err, ok := resp.(error); ok {
 			return err
 		}
@@ -566,7 +576,7 @@ func TestChunkPagination(t *testing.T) {
 	}
 	inode.SignInodeForTest("u1", userSignKey)
 	inodeBytes, _ := json.Marshal(inode)
-	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes}}
+	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
 	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
 
@@ -651,7 +661,7 @@ func TestAccounting(t *testing.T) {
 	// 1. Create User
 	userID := "acc-user"
 	sk, _ := crypto.GenerateIdentityKey()
-	user := User{ID: userID, SignKey: sk.Public()}
+	user := User{ID: userID, UID: 1001, SignKey: sk.Public()}
 	CreateUser(t, node, user)
 
 	// Helper to check usage
@@ -685,7 +695,7 @@ func TestAccounting(t *testing.T) {
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
-	cmd := LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmd := LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ := json.Marshal(cmd)
 	f := node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -702,7 +712,7 @@ func TestAccounting(t *testing.T) {
 	inode.Version = 2 // Client increments
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
-	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ = json.Marshal(cmd)
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -719,7 +729,7 @@ func TestAccounting(t *testing.T) {
 	inode.Version = 3
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
-	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ = json.Marshal(cmd)
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -740,7 +750,7 @@ func TestQuotaEnforcement(t *testing.T) {
 
 	userID := "quota-user"
 	sk, _ := crypto.GenerateIdentityKey()
-	user := User{ID: userID, SignKey: sk.Public()}
+	user := User{ID: userID, UID: 1001, SignKey: sk.Public()}
 	CreateUser(t, node, user)
 
 	// 1. Set Quota (1 Inode, 500 Bytes)
@@ -752,7 +762,7 @@ func TestQuotaEnforcement(t *testing.T) {
 		MaxInodes: &maxInodes,
 	}
 	reqBytes, _ := json.Marshal(req)
-	cmd := LogCommand{Type: CmdSetUserQuota, Data: reqBytes}
+	cmd := LogCommand{Type: CmdSetUserQuota, Data: reqBytes, UserID: "admin"}
 	cmdBytes, _ := json.Marshal(cmd)
 	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Set quota failed: %v", err)
@@ -762,7 +772,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
-	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ = json.Marshal(cmd)
 	if err := node.Raft.Apply(cmdBytes, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Create file 1 failed: %v", err)
@@ -772,7 +782,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, Size: 100, NLink: 1}
 	inode2.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode2)
-	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes}
+	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ = json.Marshal(cmd)
 	f := node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -788,7 +798,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	inode.Version = 2
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
-	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ = json.Marshal(cmd)
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -803,7 +813,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	inode.Version = 3
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode)
-	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes}
+	cmd = LogCommand{Type: CmdUpdateInode, Data: inodeBytes, UserID: userID}
 	cmdBytes, _ = json.Marshal(cmd)
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -822,11 +832,11 @@ func TestAdminChownQuota(t *testing.T) {
 
 	u1 := "user1"
 	sk1, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: sk1.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: sk1.Public()})
 
 	u2 := "user2"
 	sk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, SignKey: sk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: sk2.Public()})
 
 	// Set u2 Quota to 1 Inode
 	maxInodes := uint64(1)
@@ -840,7 +850,7 @@ func TestAdminChownQuota(t *testing.T) {
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Size: 100}
 	inode.SignInodeForTest(u1, sk1)
 	iBytes, _ := json.Marshal(inode)
-	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes, UserID: u1}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Failed to create inode: %v", err)
 	}
 
@@ -854,7 +864,7 @@ func TestAdminChownQuota(t *testing.T) {
 	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: u2, Size: 100}
 	inode2.SignInodeForTest(u2, sk2)
 	iBytes2, _ := json.Marshal(inode2)
-	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes2}.Marshal(), 5*time.Second).Error(); err != nil {
+	if err := node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: iBytes2, UserID: u2}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Failed to create inode2: %v", err)
 	}
 
@@ -862,7 +872,7 @@ func TestAdminChownQuota(t *testing.T) {
 	// Transfer 0000000000000000000000000000000f from u1 to u2 should FAIL.
 	chReq := AdminChownRequest{InodeID: "0000000000000000000000000000000f", OwnerID: &u2}
 	chBytes, _ := json.Marshal(chReq)
-	f := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes}.Marshal(), 5*time.Second)
+	f := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes, UserID: u1}.Marshal(), 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatal(err)
 	}
@@ -875,7 +885,7 @@ func TestAdminChownQuota(t *testing.T) {
 	// Fixed: updateUsage(u2, delta=-1) makes usage 0. checkQuota(u2, delta=1) sees 0+1 <= 1 -> OK.
 	chReq2 := AdminChownRequest{InodeID: "0000000000000000000000000000002f", OwnerID: &u2}
 	chBytes2, _ := json.Marshal(chReq2)
-	f2 := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes2}.Marshal(), 5*time.Second)
+	f2 := node.Raft.Apply(LogCommand{Type: CmdAdminChown, Data: chBytes2, UserID: u1}.Marshal(), 5*time.Second)
 	if err := f2.Error(); err != nil {
 		t.Fatal(err)
 	}
@@ -951,7 +961,7 @@ func TestSecurity_IDOR_User(t *testing.T) {
 	// 4. Admin requests User 2 (Should be FULL)
 	// Promote user1 to admin
 	u1IDBytes, _ := json.Marshal(u1ID)
-	if err := node.Raft.Apply(LogCommand{Type: CmdPromoteAdmin, Data: u1IDBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+	if err := node.Raft.Apply(LogCommand{Type: CmdPromoteAdmin, Data: u1IDBytes, UserID: "bootstrap"}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Failed to promote user1: %v", err)
 	}
 

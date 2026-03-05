@@ -45,7 +45,7 @@ func TestPathCache(t *testing.T) {
 	// Create a custom handler to count Inode GET requests
 	var getInodeCount uint64
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
 	metaServer.StopKeyRotation()
 
 	tsMeta := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +73,7 @@ func TestPathCache(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{})
+	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{

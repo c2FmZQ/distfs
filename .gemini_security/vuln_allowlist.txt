@@ -1,0 +1,9 @@
+Vulnerability: PII Leak in Logs (DumpInodes)
+Location: pkg/metadata/fsm.go
+Line Content: log.Printf("    Inode %s (%s): Owner=%s Group=%s Version=%d Children=%d Links=%d NLink=%d Unlinked=%v Size=%d", inode.ID, inode.GetName(), ...)
+Justification: inode.GetName() returns an unexported, non-JSON field that is not populated on the server, resulting in an empty string. No PII is actually leaked.
+
+Vulnerability: Authentication Bypass (Test Utility Risk)
+Location: cmd/test-auth/main.go
+Line Content: http.HandleFunc("/mint", func(w http.ResponseWriter, r *http.Request) { ... })
+Justification: This binary is explicitly a test utility and is not intended for production deployment. Its insecure nature is acceptable within the test infrastructure context.

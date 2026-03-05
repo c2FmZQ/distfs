@@ -36,8 +36,10 @@ if [ $SKIP_UNIT -eq 0 ]; then
     if ! go test -race -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
         cat "$LOG_DIR/unit-tests.log" >> $REPORT
         echo '```' >> $REPORT
-        echo "Unit Tests Failed (Continuing to E2E)"
-        UNIT_FAILED=1
+        echo "Unit Tests Failed"
+        exit 1
+        #echo "Unit Tests Failed (Continuing to E2E)"
+        #NIT_FAILED=1
     fi
     grep "ok" "$LOG_DIR/unit-tests.log" >> $REPORT || true
     grep "FAIL" "$LOG_DIR/unit-tests.log" >> $REPORT || true

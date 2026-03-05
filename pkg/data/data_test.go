@@ -109,12 +109,15 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 	tmpDir := t.TempDir()
 	stChunks, _ := createTestStorage(t, tmpDir)
 	store, _ := NewDiskStore(stChunks)
-	dataSrv := NewServer(store, clusterPub, nil, NoopValidator{})
+	dataSrv := NewServer(store, clusterPub, nil, NoopValidator{}, true, true)
 
 	// Validate valid token
 	authReq, _ := http.NewRequest("GET", "/v1/data/chunk1", nil)
 	tokenStr := base64.StdEncoding.EncodeToString(signedToken.Marshal())
 	authReq.Header.Set("Authorization", "Bearer "+tokenStr)
+
+	// Session Locking: Provide the actual session token used to issue the capability
+	authReq.Header.Set("Session-Token", token1)
 
 	err = dataSrv.Internal_Authenticate(authReq, "chunk1", "W")
 	if err != nil {
@@ -282,7 +285,7 @@ func TestAPI(t *testing.T) {
 	store, _ := NewDiskStore(st)
 
 	pub, sk := setupTestAuth(t)
-	server := NewServer(store, pub, nil, NoopValidator{})
+	server := NewServer(store, pub, nil, NoopValidator{}, true, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -406,7 +409,7 @@ func TestAPI_Delete(t *testing.T) {
 	store, _ := NewDiskStore(st)
 
 	pub, sk := setupTestAuth(t)
-	server := NewServer(store, pub, nil, NoopValidator{})
+	server := NewServer(store, pub, nil, NoopValidator{}, true, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -505,7 +508,7 @@ func TestData_DiskStoreExtra(t *testing.T) {
 func TestData_APIHandlersExtra(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 
 	id1 := "1111111111111111111111111111111111111111111111111111111111111111"
 	id2 := "2222222222222222222222222222222222222222222222222222222222222222"
@@ -559,7 +562,7 @@ func TestData_APIHandlersExtra(t *testing.T) {
 	}
 
 	// 5. handleReplicate (Denied by Validator)
-	serverDeny := NewServer(ds, usk.Public(), nil, DenyAllValidator{})
+	serverDeny := NewServer(ds, usk.Public(), nil, DenyAllValidator{}, true, true)
 	req, _ = http.NewRequest("POST", "/v1/data/"+id2+"/replicate", bytes.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer "+token2)
 	rr = httptest.NewRecorder()
@@ -611,7 +614,7 @@ func TestData_APIHandlersExtra(t *testing.T) {
 	}
 
 	// 10. Authentication failures
-	sNoKey := NewServer(ds, nil, nil, nil)
+	sNoKey := NewServer(ds, nil, nil, nil, true, true)
 	req, _ = http.NewRequest("GET", "/v1/data/"+id2, nil)
 	aerr := sNoKey.Internal_Authenticate(req, id2, "R")
 	if aerr == nil || !strings.Contains(aerr.Error(), "cluster signing key not available") {
@@ -685,13 +688,13 @@ func TestData_NewServerExtra(t *testing.T) {
 	ds, _ := createTestStore(t)
 
 	// 1. With FSM
-	s1 := NewServer(ds, nil, &metadata.MetadataFSM{}, nil)
+	s1 := NewServer(ds, nil, &metadata.MetadataFSM{}, nil, true, true)
 	if s1.validator == nil {
 		t.Error("Validator should be set from FSM")
 	}
 
 	// 2. Without FSM, without Validator
-	s2 := NewServer(ds, nil, nil, nil)
+	s2 := NewServer(ds, nil, nil, nil, true, true)
 	if _, ok := s2.validator.(DenyAllValidator); !ok {
 		t.Errorf("Expected DenyAllValidator, got %T", s2.validator)
 	}
@@ -801,11 +804,11 @@ func TestData_DiskStoreErrors(t *testing.T) {
 func TestData_ReplicationErrors(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 
 	// 1. Replicate missing chunk
 	id := "3333333333333333333333333333333333333333333333333333333333333333"
-	err := server.replicate(id, "http://localhost:1234", "", "token")
+	err := server.replicate(id, "http://localhost:1234", "", "token", "")
 	if err == nil {
 		t.Error("replicate should fail for missing chunk")
 	}
@@ -832,7 +835,7 @@ func TestData_Scrubber_QuarantineFail(t *testing.T) {
 func TestServer_Get_Abort(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 
 	id := "4444444444444444444444444444444444444444444444444444444444444444"
 	// Write large chunk to make Copy take time
@@ -854,13 +857,13 @@ func TestServer_Get_Abort(t *testing.T) {
 
 func TestData_Replication_NetworkError(t *testing.T) {
 	ds, _ := createTestStore(t)
-	server := NewServer(ds, nil, nil, NoopValidator{})
+	server := NewServer(ds, nil, nil, NoopValidator{}, true, true)
 
 	id := "5555555555555555555555555555555555555555555555555555555555555555"
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
 
 	// Replicate to invalid address
-	err := server.replicate(id, "http://invalid.domain", "", "token")
+	err := server.replicate(id, "http://invalid.domain", "", "token", "")
 	if err == nil {
 		t.Error("replicate should fail for invalid domain")
 	}
@@ -906,7 +909,7 @@ func TestData_Internal_Authenticate(t *testing.T) {
 	sk, _ := crypto.GenerateIdentityKey()
 	pub := sk.Public()
 	store, _ := NewDiskStore(storage.New(t.TempDir(), nil))
-	server := NewServer(store, pub, nil, NoopValidator{})
+	server := NewServer(store, pub, nil, NoopValidator{}, true, true)
 
 	cid := "0000000000000000000000000000000000000000000000000000000000000000"
 
@@ -1015,7 +1018,7 @@ func TestData_DiskStore_WriteChunk_Idempotency(t *testing.T) {
 
 func TestData_API_MethodNotAllowed(t *testing.T) {
 	ds, _ := NewDiskStore(storage.New(t.TempDir(), nil))
-	server := NewServer(ds, nil, nil, NoopValidator{})
+	server := NewServer(ds, nil, nil, NoopValidator{}, true, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -1043,7 +1046,7 @@ func TestData_API_GetReadError(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
 	ms := &mockStore{Store: ds, readErr: fmt.Errorf("injected read error")}
-	server := NewServer(ms, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ms, usk.Public(), nil, NoopValidator{}, true, true)
 
 	id := strings.Repeat("a", 64)
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
@@ -1061,7 +1064,7 @@ func TestData_API_GetReadError(t *testing.T) {
 func TestData_API_PutError(t *testing.T) {
 	ds, tmpDir := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 
 	id := strings.Repeat("a", 64)
 
@@ -1082,7 +1085,7 @@ func TestData_API_PutError(t *testing.T) {
 func TestData_API_ReplicateMalformed(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 
 	id := strings.Repeat("e", 64)
 	token := signToken(t, usk, []string{id}, "R")
@@ -1139,7 +1142,7 @@ func TestData_Scrubber_ListError(t *testing.T) {
 func TestData_API_DeleteError(t *testing.T) {
 	ds, tmpDir := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 
 	id := strings.Repeat("d", 64)
 	ds.WriteChunk(id, bytes.NewReader([]byte("data")))
@@ -1162,7 +1165,7 @@ func TestData_API_DeleteError(t *testing.T) {
 func TestData_API_MissingChunks(t *testing.T) {
 	ds, _ := createTestStore(t)
 	usk, _ := crypto.GenerateIdentityKey()
-	server := NewServer(ds, usk.Public(), nil, NoopValidator{})
+	server := NewServer(ds, usk.Public(), nil, NoopValidator{}, true, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

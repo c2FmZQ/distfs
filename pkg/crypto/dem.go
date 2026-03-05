@@ -15,6 +15,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -66,4 +67,27 @@ func DecryptDEM(key, ciphertext []byte) ([]byte, error) {
 	}
 	nonce, ciphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
 	return aesgcm.Open(nil, nonce, ciphertext, nil)
+}
+
+// DecryptDEMWithNonce decrypts with an explicitly provided expected nonce.
+func DecryptDEMWithNonce(key, nonce, ciphertext []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	aesgcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	// The ciphertext passed to this function includes the prepended nonce from the Seal operation.
+	// We extract it and compare it to the expected nonce.
+	nonceSize := aesgcm.NonceSize()
+	if len(ciphertext) < nonceSize {
+		return nil, fmt.Errorf("ciphertext too short")
+	}
+	actualNonce, innerCiphertext := ciphertext[:nonceSize], ciphertext[nonceSize:]
+	if !bytes.Equal(actualNonce, nonce) {
+		return nil, fmt.Errorf("nonce mismatch: possible chunk reordering or corruption detected")
+	}
+	return aesgcm.Open(nil, actualNonce, innerCiphertext, nil)
 }

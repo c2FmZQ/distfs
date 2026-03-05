@@ -872,3 +872,24 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update all `scripts/test-*.sh` scripts to pass `-disable-doh` to `distfs` and `distfs-fuse` commands, as the local Docker network relies on standard DNS, not public DoH resolvers.
 *   **Step 45.5: Verification**
     *   **Action:** Run `go test -failfast ./...` and `./scripts/run-tests.sh --skip-unit` to ensure the fallback resolver works correctly in the test environment while the code is wired for ECH by default.
+
+---
+
+## Phase 46: Security & Privacy Hardening (Audit Remediation)
+**Goal:** Address high-severity security and privacy vulnerabilities identified during the nation-state threat model audit.
+
+*   **Step 46.1: Client-Side Integrity Enforcement (Filtering)**
+    *   **Action:** Refactor `VerifyInode` in `pkg/client/client.go` to strictly enforce verification.
+    *   **Action:** Implement client-side policy to **hide/filter** inodes that cannot be validated (key missing or signature failed) by default, protecting users from "ghosting" or metadata spoofing.
+*   **Step 46.2: Data Privacy: Synthetic HMAC Nonces**
+    *   **Action:** Refactor `EncryptChunk` and `DecryptChunk` in `pkg/crypto/chunk.go` to use a synthetic nonce: `nonce = HMAC-SHA256(FileKey, chunkIndex)[:12]`.
+    *   **Action:** Update `pkg/client/client.go` to pass the `chunkIndex` during decryption. This defeats cross-user content correlation.
+*   **Step 46.3: Capability Token Binding (Session Locking)**
+    *   **Action:** Add `SessionID` to the `CapabilityToken` struct in `pkg/metadata/types.go`.
+    *   **Action:** Modify `handleIssueToken` in `pkg/metadata/server.go` to bind the token to the user's current `SessionID`.
+    *   **Action:** Update `pkg/data/api.go` to verify the `Session-Token` header against the token.
+*   **Step 46.4: Network Privacy: Enforce ECH for Public Traffic**
+    *   **Action:** Ensure `ech.Transport` is strictly enforced for all public `https://` connections.
+*   **Step 46.5: Verification & Tests**
+    *   **Action:** Add unit tests for signature enforcement and unique `ChunkID` generation for identical data in different files.
+    *   **Action:** Ensure all E2E tests pass.

@@ -25,14 +25,14 @@ func TestAdminCUI(t *testing.T) {
 	user1ID := "admin-user"
 	dk1, _ := crypto.GenerateEncryptionKey()
 	sk1, _ := crypto.GenerateIdentityKey()
-	u1 := metadata.User{ID: user1ID, SignKey: sk1.Public(), EncKey: dk1.EncapsulationKey().Bytes()}
+	u1 := metadata.User{ID: user1ID, UID: 1001, SignKey: sk1.Public(), EncKey: dk1.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, u1)
 
 	// 2. Create Second User (Should NOT be Admin)
 	user2ID := "normal-user"
 	dk2, _ := crypto.GenerateEncryptionKey()
 	sk2, _ := crypto.GenerateIdentityKey()
-	u2 := metadata.User{ID: user2ID, SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes()}
+	u2 := metadata.User{ID: user2ID, UID: 1002, SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, u2)
 
 	// 3. Verify Admin Status
@@ -120,7 +120,7 @@ func TestAdminAPI(t *testing.T) {
 	userID := "admin-user"
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
-	u := metadata.User{ID: userID, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
+	u := metadata.User{ID: userID, UID: 1001, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, u)
 
 	// 2. Setup Admin Client
@@ -179,7 +179,7 @@ func TestAdminAPI(t *testing.T) {
 }
 
 func TestAdminOverrides(t *testing.T) {
-	node, ts, _, _, _ := metadata.SetupCluster(t)
+	node, ts, _, _, server := metadata.SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -187,19 +187,19 @@ func TestAdminOverrides(t *testing.T) {
 	adminID := "admin"
 	dkA, _ := crypto.GenerateEncryptionKey()
 	skA, _ := crypto.GenerateIdentityKey()
-	uA := metadata.User{ID: adminID, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
+	uA := metadata.User{ID: adminID, UID: 1001, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, uA)
-	// Promote user to admin (the command uses ID, which is already HMAC'd in our metadata.User if using standard flows, but here we provide it directly)
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: metadata.MustMarshalJSON(uA.ID)}.Marshal(), 5*time.Second).Error(); err != nil {
+	// Promote user to admin
+	if _, err := server.ApplyRaftCommandInternal(metadata.CmdPromoteAdmin, metadata.MustMarshalJSON(uA.ID), "bootstrap"); err != nil {
 		t.Fatal(err)
 	}
-	time.Sleep(1 * time.Second)
+	time.Sleep(100 * time.Millisecond)
 
 	// 2. Create User B
 	userID := "userB"
 	dkB, _ := crypto.GenerateEncryptionKey()
 	skB, _ := crypto.GenerateIdentityKey()
-	uB := metadata.User{ID: userID, SignKey: skB.Public(), EncKey: dkB.EncapsulationKey().Bytes()}
+	uB := metadata.User{ID: userID, UID: 1002, SignKey: skB.Public(), EncKey: dkB.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, uB)
 
 	// 3. Create a File owned by Admin
@@ -226,7 +226,9 @@ func TestAdminOverrides(t *testing.T) {
 	inode.SignInodeForTest(adminID, skA)
 
 	iBytes, _ := json.Marshal(inode)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: iBytes}.Marshal(), 5*time.Second)
+	if _, err := server.ApplyRaftCommandInternal(metadata.CmdCreateInode, iBytes, adminID); err != nil {
+		t.Fatal(err)
+	}
 
 	time.Sleep(100 * time.Millisecond)
 

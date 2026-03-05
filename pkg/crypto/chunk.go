@@ -15,6 +15,7 @@
 package crypto
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -22,6 +23,16 @@ import (
 )
 
 const ChunkSize = 1024 * 1024 // 1 MB
+
+// DeriveChunkNonce generates a synthetic nonce from the file key and chunk index.
+func DeriveChunkNonce(fileKey []byte, chunkIndex uint64) []byte {
+	mac := hmac.New(sha256.New, fileKey)
+	idx := make([]byte, 8)
+	binary.BigEndian.PutUint64(idx, chunkIndex)
+	mac.Write([]byte("CHUNK_NONCE_V1"))
+	mac.Write(idx)
+	return mac.Sum(nil)[:12]
+}
 
 // EncryptChunk pads plaintext to 1MB, encrypts it using chunkIndex for uniqueness, and returns the ChunkID (Hash) and Ciphertext.
 func EncryptChunk(fileKey []byte, plaintext []byte, chunkIndex uint64) (chunkID string, ciphertext []byte, err error) {
@@ -33,10 +44,8 @@ func EncryptChunk(fileKey []byte, plaintext []byte, chunkIndex uint64) (chunkID 
 	padded := make([]byte, ChunkSize)
 	copy(padded, plaintext)
 
-	// Deterministic Nonce based on Chunk Index (BigEndian, 12 bytes)
-	// This ensures uniqueness per chunk within a file (assuming unique fileKey).
-	nonce := make([]byte, 12)
-	binary.BigEndian.PutUint64(nonce[4:], chunkIndex)
+	// Synthetic HMAC Nonce
+	nonce := DeriveChunkNonce(fileKey, chunkIndex)
 
 	// Encrypt
 	ct, err := EncryptDEMWithNonce(fileKey, nonce, padded)
@@ -53,6 +62,7 @@ func EncryptChunk(fileKey []byte, plaintext []byte, chunkIndex uint64) (chunkID 
 
 // DecryptChunk decrypts the ciphertext. It returns the full 1MB padded block.
 // The caller is responsible for truncating to the actual useful data size (tracked in metadata).
-func DecryptChunk(fileKey []byte, ciphertext []byte) ([]byte, error) {
-	return DecryptDEM(fileKey, ciphertext)
+func DecryptChunk(fileKey []byte, chunkIndex uint64, ciphertext []byte) ([]byte, error) {
+	nonce := DeriveChunkNonce(fileKey, chunkIndex)
+	return DecryptDEMWithNonce(fileKey, nonce, ciphertext)
 }

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -106,7 +107,7 @@ func TestClient_MockedConflict(t *testing.T) {
 	ctx := context.Background()
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
-	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk)
+	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk).WithAdmin(true)
 
 	// Pre-login to avoid login logic in mock
 	c.sessionToken = "fake"
@@ -116,8 +117,39 @@ func TestClient_MockedConflict(t *testing.T) {
 	c.httpClient.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			if req.Method == "GET" {
-				res := metadata.Inode{ID: "00000000000000000000000000000001", Version: 1}
-				b, _ := json.Marshal(res)
+				if strings.Contains(req.URL.Path, "/v1/user/") {
+					res := metadata.User{ID: "u1", SignKey: sk.Public()}
+					b, _ := json.Marshal(res)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(bytes.NewReader(b)),
+					}, nil
+				}
+				// Create a valid inode with ClientBlob and Lockbox
+				fileKey := make([]byte, 32)
+				inode := metadata.Inode{
+					ID:      "00000000000000000000000000000001",
+					Version: 1,
+					Type:    metadata.FileType,
+					OwnerID: "u1",
+					Lockbox: make(crypto.Lockbox),
+				}
+				inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey)
+
+				blob := metadata.InodeClientBlob{
+					SignerID:          "u1",
+					AuthorizedSigners: []string{"u1"},
+				}
+				plainBlob, _ := json.Marshal(blob)
+				encBlob, _ := crypto.EncryptDEM(fileKey, plainBlob)
+				inode.ClientBlob = encBlob
+
+				// Also set transient fields for ManifestHash calculation during signing
+				inode.SetSignerID("u1")
+				inode.SetAuthorizedSigners([]string{"u1"})
+				inode.SignInodeForTest("u1", sk)
+
+				b, _ := json.Marshal(inode)
 				return &http.Response{
 					StatusCode: http.StatusOK,
 					Body:       io.NopCloser(bytes.NewReader(b)),

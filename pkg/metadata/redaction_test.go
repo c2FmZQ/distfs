@@ -22,10 +22,10 @@ func TestAdminRedaction(t *testing.T) {
 	adminID := "admin"
 	dkA, _ := crypto.GenerateEncryptionKey()
 	skA, _ := crypto.GenerateIdentityKey()
-	uA := metadata.User{ID: adminID, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
+	uA := metadata.User{ID: adminID, UID: 1001, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, uA)
 	uAIDBytes, _ := json.Marshal(uA.ID)
-	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes}.Marshal(), 5*time.Second).Error(); err != nil {
+	if err := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes, UserID: "bootstrap"}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatal(err)
 	}
 

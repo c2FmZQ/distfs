@@ -23,13 +23,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
 
 func createTestFSM(t *testing.T) *MetadataFSM {
 	tmpDir, _ := os.MkdirTemp("", "fsm_test")
-	fsm, err := NewMetadataFSM("node1", tmpDir+"/fsm.db", []byte("test-cluster-secret"))
+	fsm, err := NewMetadataFSM("node1", tmpDir+"/fsm.db", []byte("test-cluster-secret-32-bytes-long!!"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,16 +41,24 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+
 	// 1. Create Inode
 	inode := Inode{
-		ID:   "00000000000000000000000000000001",
-		Type: FileType,
+		ID:      "00000000000000000000000000000001",
+		Type:    FileType,
+		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1"}},
 		},
 	}
+	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
 
 	// 2. Add Replica
 	req := AddReplicaRequest{
@@ -78,49 +87,74 @@ func TestFSM_AddChild_Success(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
-	p1 := Inode{ID: "p1", Type: DirType}
-	pb1, _ := json.Marshal(p1)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: pb1}.Marshal()})
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
 
-	c1 := Inode{ID: "c1", Type: FileType}
+	p1 := Inode{ID: "p1", Type: DirType, OwnerID: "u1", NLink: 1}
+	p1.SignInodeForTest("u1", sk)
+	pb1, _ := json.Marshal(p1)
+	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: pb1, UserID: "u1"}.Marshal()})
+	if fsm.containsError(res) {
+		t.Fatalf("Create parent failed: %v", res)
+	}
+
+	c1 := Inode{ID: "c1", Type: FileType, OwnerID: "u1", NLink: 1}
+	c1.SignInodeForTest("u1", sk)
 	cb1, _ := json.Marshal(c1)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: cb1}.Marshal()})
+	res = fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: cb1, UserID: "u1"}.Marshal()})
+	if fsm.containsError(res) {
+		t.Fatalf("Create child failed: %v", res)
+	}
 
 	// Add path lease for file1
 	lReq := LeaseRequest{
 		InodeIDs:  []string{"path:p1:file1"},
 		Duration:  int64(time.Hour),
-		SessionID: "s1",
+		SessionID: "session1",
+		UserID:    "u1",
 		Type:      LeaseExclusive,
 	}
 	lb, _ := json.Marshal(lReq)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: lb}.Marshal()})
-
-	p1.NLink = 1
-	p1.Children = map[string]string{"file1": "c1"}
-	p1.Version = 2
-	pb2, _ := json.Marshal(p1)
+	res = fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: lb, UserID: "u1", SessionNonce: "session1"}.Marshal()})
+	if fsm.containsError(res) {
+		t.Fatalf("Acquire lease failed: %v", res)
+	}
 
 	c1.NLink = 2
 	c1.Links = map[string]bool{"p1:file1": true}
 	c1.Version = 2
+	c1.SignInodeForTest("u1", sk)
 	cb2, _ := json.Marshal(c1)
 
-	cmds := []LogCommand{
-		{Type: CmdUpdateInode, Data: cb2, SessionID: "s1"},
-		{Type: CmdUpdateInode, Data: pb2, SessionID: "s1", LeaseBindings: map[string]string{"file1": "path:p1:file1"}},
-	}
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdBatch, Data: json.RawMessage(LogCommand{Type: CmdBatch}.Marshal())}.Marshal()}) // Wait, recursive batching?
-	// Actually, just execute them manually via applyBatchTx or similar.
-	// But let's use the simplest way: fsm.Apply with a batch command.
-	batch := LogCommand{
-		Type:   CmdBatch,
-		Data:   json.RawMessage(mustMarshal(cmds)),
-		Atomic: true,
-	}
-	fsm.Apply(&raft.Log{Data: batch.Marshal()})
+	p1.Children = map[string]string{"file1": "c1"}
+	p1.Version = 2
+	p1.SignInodeForTest("u1", sk)
+	pb2, _ := json.Marshal(p1)
 
-	err := fsm.db.View(func(tx *bolt.Tx) error {
+	batchCmds := []LogCommand{
+		{Type: CmdUpdateInode, Data: cb2, UserID: "u1", SessionNonce: "session1"},
+		{Type: CmdUpdateInode, Data: pb2, UserID: "u1", SessionNonce: "session1", LeaseBindings: map[string]string{"file1": "path:p1:file1"}},
+	}
+	batchData, err := json.Marshal(batchCmds)
+	if err != nil {
+		t.Fatalf("Failed to marshal batch: %v", err)
+	}
+	batch := LogCommand{
+		Type:         CmdBatch,
+		Data:         batchData,
+		Atomic:       true,
+		UserID:       "u1",
+		SessionNonce: "session1",
+	}
+	res = fsm.Apply(&raft.Log{Data: batch.Marshal()})
+	if fsm.containsError(res) {
+		t.Fatalf("Batch Apply failed: %v", res)
+	}
+
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("p1"))
 		var res Inode
 		if err := json.Unmarshal(v, &res); err != nil {
@@ -315,15 +349,23 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+
 	inode := Inode{
-		ID:   "00000000000000000000000000000001",
-		Type: FileType,
+		ID:      "00000000000000000000000000000001",
+		Type:    FileType,
+		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1"}},
 		},
 	}
+	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
 
 	// Acquire exclusive lease for update
 	lReq := LeaseRequest{
@@ -338,13 +380,18 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	// 1. enqueueGC (via UpdateInode with NLink=0)
 	inode.NLink = 0
 	inode.Version = 2
+	inode.SignInodeForTest("u1", sk)
 	ib2, _ := json.Marshal(inode)
 	cmdUpdate := LogCommand{
-		Type:      CmdUpdateInode,
-		Data:      ib2,
-		SessionID: "s1",
+		Type:         CmdUpdateInode,
+		Data:         ib2,
+		UserID:       "u1",
+		SessionNonce: "s1",
 	}
-	fsm.Apply(&raft.Log{Data: cmdUpdate.Marshal()})
+	res := fsm.Apply(&raft.Log{Data: cmdUpdate.Marshal()})
+	if fsm.containsError(res) {
+		t.Fatalf("UpdateInode failed: %v", res)
+	}
 
 	// 2. Release lease to trigger final deletion
 	relReq := LeaseRequest{
@@ -352,7 +399,7 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 		SessionID: "s1",
 	}
 	relB, _ := json.Marshal(relReq)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReleaseLeases, Data: relB}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReleaseLeases, Data: relB, UserID: "u1"}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("garbage_collection"))
@@ -371,15 +418,30 @@ func TestFSM_AdminChmod_Success(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "admin", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("admin"), MustMarshalJSON(u))
+	})
+	adminBytes, _ := json.Marshal("admin")
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: adminBytes, UserID: "bootstrap"}.Marshal()})
+
 	// 1. Create Inode
-	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0644}
+	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0644, OwnerID: "u1"}
+	// Use u1 for creation to test admin bypass later
+	u1sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: u1sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+	inode.SignInodeForTest("u1", u1sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
 
 	// 2. AdminChmod
 	req := AdminChmodRequest{InodeID: "00000000000000000000000000000001", Mode: 0777}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAdminChmod, Data: rb}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAdminChmod, Data: rb, UserID: "admin"}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
@@ -425,17 +487,25 @@ func TestFSM_SetAttr_Extra(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+
 	// 1. Create Inode
 	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0600, OwnerID: "u1"}
+	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
 
 	// 2. SetAttr via UpdateInode
 	inode.NLink = 1
 	inode.Mode = 0644
 	inode.Version = 2
+	inode.SignInodeForTest("u1", sk)
 	ib2, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: ib2}.Marshal()})
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: ib2, UserID: "u1"}.Marshal()})
 
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
@@ -465,9 +535,17 @@ func TestFSM_Restore_Full(t *testing.T) {
 	fsm := createTestFSM(t)
 	defer fsm.Close()
 
+	sk, _ := crypto.GenerateIdentityKey()
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+	})
+
 	// 1. Add some data
-	ib, _ := json.Marshal(Inode{ID: "00000000000000000000000000000001", Type: FileType})
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib}.Marshal()})
+	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, OwnerID: "u1", Version: 1}
+	inode.SignInodeForTest("u1", sk)
+	ib, _ := json.Marshal(inode)
+	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
 
 	// 2. Snapshot
 	snap, _ := fsm.Snapshot()

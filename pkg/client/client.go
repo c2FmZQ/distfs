@@ -49,6 +49,11 @@ type contextKey string
 
 const adminBypassContextKey contextKey = "admin-bypass"
 
+var (
+	// ErrUnvalidated is returned when an inode's integrity or authorization cannot be verified.
+	ErrUnvalidated = errors.New("inode integrity or authorization could not be validated")
+)
+
 // GetServerSignKey fetches the cluster's public signing key (ML-DSA).
 func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	c.keyMu.RLock()
@@ -397,6 +402,29 @@ func (c *Client) UserID() string {
 	return c.userID
 }
 
+func (c *Client) getSessionToken() string {
+	c.sessionMu.RLock()
+	defer c.sessionMu.RUnlock()
+	return c.sessionToken
+}
+
+func (c *Client) getSessionNonce() string {
+	c.sessionMu.RLock()
+	token := c.sessionToken
+	c.sessionMu.RUnlock()
+
+	if token == "" {
+		return ""
+	}
+	if b, err := base64.StdEncoding.DecodeString(token); err == nil {
+		var st metadata.SignedSessionToken
+		if err := json.Unmarshal(b, &st); err == nil {
+			return st.Token.Nonce
+		}
+	}
+	return ""
+}
+
 // Login performs the challenge-response handshake to obtain a session token.
 func (c *Client) Login(ctx context.Context) error {
 	c.loginMu.Lock()
@@ -504,6 +532,23 @@ func (c *Client) clearPathCache() {
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
 	clear(c.pathCache)
+}
+
+func (c *Client) ensureSession(ctx context.Context) error {
+	if c.userID == "" || c.signKey == nil || c.decKey == nil {
+		return nil
+	}
+	c.sessionMu.RLock()
+	token := c.sessionToken
+	expiry := c.sessionExpiry
+	c.sessionMu.RUnlock()
+
+	if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
+		if err := c.Login(ctx); err != nil {
+			return fmt.Errorf("session login failed: %w", err)
+		}
+	}
+	return nil
 }
 
 func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) error {
@@ -811,6 +856,9 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 		if token != "" {
 			req.Header.Set("Authorization", "Bearer "+token)
 		}
+		if sess := c.getSessionToken(); sess != "" {
+			req.Header.Set("Session-Token", sess)
+		}
 
 		resp, err := c.httpClient.Do(req)
 		if err != nil {
@@ -876,6 +924,9 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				}
 				if token != "" {
 					req.Header.Set("Authorization", "Bearer "+token)
+				}
+				if sess := c.getSessionToken(); sess != "" {
+					req.Header.Set("Session-Token", sess)
 				}
 
 				resp, err := c.httpClient.Do(req)
@@ -1304,7 +1355,7 @@ func (c *Client) PrepareCreate(ctx context.Context, inode metadata.Inode) (metad
 	if err != nil {
 		return metadata.LogCommand{}, err
 	}
-	return metadata.LogCommand{Type: metadata.CmdCreateInode, Data: data}, nil
+	return metadata.LogCommand{Type: metadata.CmdCreateInode, Data: data, UserID: c.userID}, nil
 }
 
 func (c *Client) PrepareUpdate(ctx context.Context, inode metadata.Inode) (metadata.LogCommand, error) {
@@ -1316,12 +1367,12 @@ func (c *Client) PrepareUpdate(ctx context.Context, inode metadata.Inode) (metad
 	if err != nil {
 		return metadata.LogCommand{}, err
 	}
-	return metadata.LogCommand{Type: metadata.CmdUpdateInode, Data: data}, nil
+	return metadata.LogCommand{Type: metadata.CmdUpdateInode, Data: data, UserID: c.userID}, nil
 }
 
 func (c *Client) PrepareDelete(id string) (metadata.LogCommand, error) {
 	data, _ := json.Marshal(id)
-	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: data}, nil
+	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: data, UserID: c.userID}, nil
 }
 
 // DeleteInode deletes an inode by ID. It performs an atomic update setting NLink to 0.
@@ -1457,13 +1508,18 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	}
 
 	// Phase 31: Verification
+	var valid []*metadata.Inode
 	for _, inode := range inodes {
 		if err := c.VerifyInode(ctx, inode); err != nil {
+			if err == ErrUnvalidated {
+				continue
+			}
 			return nil, err
 		}
+		valid = append(valid, inode)
 	}
 
-	return inodes, nil
+	return valid, nil
 }
 
 func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32) error {
@@ -1859,7 +1915,7 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 		ct, err := r.client.downloadChunk(r.ctx, chunkEntry.ID, chunkEntry.URLs, token)
 		var pt []byte
 		if err == nil {
-			pt, err = crypto.DecryptChunk(r.fileKey, ct)
+			pt, err = crypto.DecryptChunk(r.fileKey, uint64(idx), ct)
 		}
 
 		res.data = pt
@@ -1971,7 +2027,7 @@ func (r *FileReader) read(p []byte) (int, error) {
 				if err != nil {
 					return totalRead, err
 				}
-				pt, err = crypto.DecryptChunk(r.fileKey, ct)
+				pt, err = crypto.DecryptChunk(r.fileKey, uint64(chunkIdx), ct)
 				if err != nil {
 					return totalRead, err
 				}
@@ -2505,11 +2561,11 @@ func (c *Client) FetchChunk(ctx context.Context, id string, key []byte, chunkIdx
 	if err != nil {
 		return nil, err
 	}
-	return crypto.DecryptChunk(key, ct)
+	return crypto.DecryptChunk(key, uint64(chunkIdx), ct)
 }
 
 // DownloadChunkData downloads and decrypts a single chunk from a set of node URLs.
-func (c *Client) DownloadChunkData(ctx context.Context, inodeID string, chunkID string, urls []string, key []byte) ([]byte, error) {
+func (c *Client) DownloadChunkData(ctx context.Context, inodeID string, chunkID string, urls []string, key []byte, chunkIndex uint64) ([]byte, error) {
 	token, err := c.issueToken(ctx, inodeID, []string{chunkID}, "R")
 	if err != nil {
 		return nil, err
@@ -2518,7 +2574,7 @@ func (c *Client) DownloadChunkData(ctx context.Context, inodeID string, chunkID 
 	if err != nil {
 		return nil, err
 	}
-	return crypto.DecryptChunk(key, enc)
+	return crypto.DecryptChunk(key, chunkIndex, enc)
 }
 
 // UploadChunkData encrypts and uploads a single chunk to the cluster.
@@ -3121,9 +3177,9 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		}
 
 		if len(fileKey) == 0 {
-			// If we can't decrypt, we can't verify the full integrity or see names,
-			// but we should allow the inode to be returned so metadata like Size/Mode can be seen.
-			return nil
+			// If we can't decrypt, we can't verify the full integrity or see names.
+			// Return ErrUnvalidated to signal that this inode should be filtered out.
+			return ErrUnvalidated
 		}
 
 		var blob metadata.InodeClientBlob
@@ -3149,7 +3205,9 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		if len(authSigners) > 0 {
 			return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
 		}
-		return nil
+		// No signer and no auth list? This is a bootstrap file (e.g. Root)
+		// Or it's unvalidated because it's not signed.
+		return ErrUnvalidated
 	}
 
 	// 2. Verify Signatures
@@ -4305,6 +4363,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 		if err == nil {
 			return nil
 		}
+		log.Printf("DEBUG CLIENT withConflictRetry: got error: %v", err)
 		var apiErr *APIError
 		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) ||
 			errors.Is(err, metadata.ErrConflict) ||
@@ -4649,6 +4708,7 @@ func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseI
 		}
 	}
 }
+
 // AdminListNodes returns an iterator over all storage nodes in the cluster.
 func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 	return func(yield func(*metadata.Node) bool) {
@@ -5143,7 +5203,7 @@ func (c *Client) PrepareCreateGroup(ctx context.Context, group metadata.Group) (
 	if err != nil {
 		return metadata.LogCommand{}, err
 	}
-	return metadata.LogCommand{Type: metadata.CmdCreateGroup, Data: data}, nil
+	return metadata.LogCommand{Type: metadata.CmdCreateGroup, Data: data, UserID: c.userID}, nil
 }
 
 func (c *Client) PrepareUpdateGroup(ctx context.Context, group metadata.Group) (metadata.LogCommand, error) {
@@ -5155,7 +5215,7 @@ func (c *Client) PrepareUpdateGroup(ctx context.Context, group metadata.Group) (
 	if err != nil {
 		return metadata.LogCommand{}, err
 	}
-	return metadata.LogCommand{Type: metadata.CmdUpdateGroup, Data: data}, nil
+	return metadata.LogCommand{Type: metadata.CmdUpdateGroup, Data: data, UserID: c.userID}, nil
 }
 
 func (c *Client) UpdateGroup(ctx context.Context, id string, fn GroupUpdateFunc) (*metadata.Group, error) {

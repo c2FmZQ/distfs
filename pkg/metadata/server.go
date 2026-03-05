@@ -134,8 +134,20 @@ type challengeEntry struct {
 	CreatedAt time.Time
 }
 
+type schemeSwitchingTransport struct {
+	standard  http.RoundTripper
+	protected http.RoundTripper
+}
+
+func (t *schemeSwitchingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" {
+		return t.protected.RoundTrip(req)
+	}
+	return t.standard.RoundTrip(req)
+}
+
 // NewServer creates a new Metadata Server.
-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool, allowInsecure bool) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
 	remote := jwks.NewRemote(retryClient, nil)
@@ -145,13 +157,26 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		resolver = ech.InsecureGoResolver()
 	}
 
-	echTransport := ech.NewTransport()
-	echTransport.TLSConfig = clientTLSConfig
-	echTransport.Resolver = resolver
+	createTransport := func(tlsCfg *tls.Config) http.RoundTripper {
+		protected := ech.NewTransport()
+		protected.TLSConfig = tlsCfg
+		protected.Resolver = resolver
 
-	discoveryTransport := ech.NewTransport()
-	discoveryTransport.Resolver = resolver
-	discoveryTransport.TLSConfig = func() *tls.Config {
+		if !allowInsecure {
+			return protected
+		}
+
+		standard := http.DefaultTransport.(*http.Transport).Clone()
+		standard.TLSClientConfig = tlsCfg
+		return &schemeSwitchingTransport{
+			standard:  standard,
+			protected: protected,
+		}
+	}
+
+	echTransport := createTransport(clientTLSConfig)
+
+	discoveryTLSConfig := func() *tls.Config {
 		if clientTLSConfig == nil {
 			return nil
 		}
@@ -162,6 +187,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		}
 		return cfg
 	}()
+	discoveryTransport := createTransport(discoveryTLSConfig)
 
 	s := &Server{
 		nodeID:     nodeID,
@@ -1232,6 +1258,18 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		Mode:   req.Mode,
 		Exp:    time.Now().Add(10 * time.Minute).Unix(),
 	}
+
+	// Session Locking: Bind to SHA256(SessionID)
+	if sess := r.Header.Get("Session-Token"); sess != "" {
+		if b, err := base64.StdEncoding.DecodeString(sess); err == nil {
+			var st SignedSessionToken
+			if err := json.Unmarshal(b, &st); err == nil {
+				h := sha256.Sum256([]byte(st.Token.Nonce))
+				capToken.SessionBinding = h[:]
+			}
+		}
+	}
+
 	if len(capToken.Chunks) == 0 {
 		// If empty, allow all chunks in inode?
 		for _, c := range inode.ChunkManifest {
@@ -1288,7 +1326,6 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	log.Printf("DEBUG: handleBatch user=%s session=%s", user.ID, r.Header.Get("Session-Token"))
 
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, 10*1024*1024))
 	if err != nil {
@@ -1371,14 +1408,30 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	sessionToken := r.Header.Get("Session-Token")
+	sessionNonce := ""
+	if sess := r.Header.Get("Session-Token"); sess != "" {
+		if b, err := base64.StdEncoding.DecodeString(sess); err == nil {
+			var st SignedSessionToken
+			if err := json.Unmarshal(b, &st); err == nil {
+				sessionNonce = st.Token.Nonce
+			} else {
+				log.Printf("DEBUG SERVER handleBatch: Unmarshal session failed: %v", err)
+			}
+		} else {
+			log.Printf("DEBUG SERVER handleBatch: Decode session failed: %v", err)
+		}
+	} else {
+		log.Printf("DEBUG SERVER handleBatch: Session-Token header is empty")
+	}
+	log.Printf("DEBUG SERVER handleBatch: extracted sessionNonce=%s from header", sessionNonce)
 
 	// Phase 41/42: Client-submitted batches are always atomic.
 	logCmd := LogCommand{
-		Type:      CmdBatch,
-		Data:      body,
-		Atomic:    true,
-		SessionID: sessionToken,
+		Type:         CmdBatch,
+		Data:         body,
+		Atomic:       true,
+		UserID:       user.ID,
+		SessionNonce: sessionNonce,
 	}
 
 	f := s.raft.Apply(logCmd.Marshal(), 10*time.Second)
@@ -2100,8 +2153,11 @@ func (s *Server) ApplyRaftCommandRaw(w http.ResponseWriter, r *http.Request, cmd
 
 // ApplyRaftCommandWithHook proposes a Raft command and executes a hook on the result before responding.
 func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request, cmdType CommandType, data []byte, successCode int, hook func(interface{}) interface{}) {
-	sessionID := r.Header.Get("Session-Token")
-	resp, err := s.ApplyRaftCommandInternal(cmdType, data, sessionID)
+	userID := ""
+	if user, ok := r.Context().Value(userContextKey).(*User); ok && user != nil {
+		userID = user.ID
+	}
+	resp, err := s.ApplyRaftCommandInternal(cmdType, data, userID)
 	if err != nil {
 		if w == nil {
 			return
@@ -2170,16 +2226,16 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 }
 
 // ApplyRaftCommandInternal proposes a command to Raft from an internal server context.
-func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, sessionID string) (interface{}, error) {
+func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, userID string) (interface{}, error) {
 	if s.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("not leader")
 	}
 
 	cmd := &LogCommand{
-		Type:      cmdType,
-		Data:      data,
-		SessionID: sessionID,
-		Atomic:    cmdType == CmdBatch,
+		Type:   cmdType,
+		Data:   data,
+		UserID: userID,
+		Atomic: cmdType == CmdBatch,
 	}
 
 	if cmd.Atomic {
@@ -3286,14 +3342,26 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionNonce := ""
+	if b, err := base64.StdEncoding.DecodeString(sessionToken); err == nil {
+		var st SignedSessionToken
+		if err := json.Unmarshal(b, &st); err == nil {
+			sessionNonce = st.Token.Nonce
+		}
+	}
+	if sessionNonce == "" {
+		s.writeError(w, r, ErrCodeUnauthorized, "invalid session token", http.StatusUnauthorized)
+		return
+	}
+
 	var req LeaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Use Session Token as the unique owner ID for the lease
-	req.SessionID = sessionToken
+	// Use Session Nonce as the unique owner ID for the lease
+	req.SessionID = sessionNonce
 	req.UserID = user.ID
 	if req.Duration == 0 {
 		req.Duration = int64(2 * time.Minute) // Default duration
@@ -3316,13 +3384,25 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	sessionNonce := ""
+	if b, err := base64.StdEncoding.DecodeString(sessionToken); err == nil {
+		var st SignedSessionToken
+		if err := json.Unmarshal(b, &st); err == nil {
+			sessionNonce = st.Token.Nonce
+		}
+	}
+	if sessionNonce == "" {
+		s.writeError(w, r, ErrCodeUnauthorized, "invalid session token", http.StatusUnauthorized)
+		return
+	}
+
 	var req LeaseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	req.SessionID = sessionToken
+	req.SessionID = sessionNonce
 	req.UserID = user.ID
 	body, _ := json.Marshal(req)
 	s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)

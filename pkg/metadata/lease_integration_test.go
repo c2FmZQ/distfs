@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -30,14 +31,20 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 
 	pathID := fmt.Sprintf("path:%s:%s", parentID, nameHMAC)
 
+	sk, _ := crypto.GenerateIdentityKey()
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+
 		p := Inode{ID: parentID, Type: DirType, Version: 1, OwnerID: "u1", NLink: 1}
+		p.SignInodeForTest("u1", sk)
 		pb, _ := json.Marshal(p)
-		fsm.executeCreateInode(tx, pb)
+		fsm.executeCreateInode(tx, pb, "u1")
 
 		c := Inode{ID: childID, Type: FileType, Version: 1, OwnerID: "u1", NLink: 1}
+		c.SignInodeForTest("u1", sk)
 		cb, _ := json.Marshal(c)
-		fsm.executeCreateInode(tx, cb)
+		fsm.executeCreateInode(tx, cb, "u1")
 		return nil
 	})
 	if err != nil {
@@ -51,10 +58,12 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				ID:       parentID,
 				Type:     DirType,
 				Version:  2,
+				OwnerID:  "u1",
 				Children: map[string]string{nameHMAC: childID},
 			}
+			update.SignInodeForTest("u1", sk)
 			data, _ := json.Marshal(update)
-			res := fsm.executeUpdateInode(tx, data, "session1", nil)
+			res := fsm.executeUpdateInode(tx, data, "u1", "session1", nil)
 			if err, ok := res.(error); !ok || err == nil {
 				return fmt.Errorf("expected error for missing path lease, got %v", res)
 			}
@@ -76,7 +85,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:      LeaseExclusive,
 			}
 			lb, _ := json.Marshal(lReq)
-			resL := fsm.executeAcquireLeases(tx, lb)
+			resL := fsm.executeAcquireLeases(tx, lb, "session2")
 			if err, ok := resL.(error); ok && err != nil {
 				return err
 			}
@@ -86,11 +95,13 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				ID:       parentID,
 				Type:     DirType,
 				Version:  2,
+				OwnerID:  "u1",
 				Children: map[string]string{nameHMAC: childID},
 			}
+			update.SignInodeForTest("u1", sk)
 			data, _ := json.Marshal(update)
 			bindings := map[string]string{nameHMAC: pathID}
-			res := fsm.executeUpdateInode(tx, data, "session1", bindings)
+			res := fsm.executeUpdateInode(tx, data, "u1", "session1", bindings)
 			if err, ok := res.(error); !ok || err == nil {
 				return fmt.Errorf("expected error for wrong session lease, got %v", res)
 			}
@@ -110,17 +121,18 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				SessionID: "session2",
 			}
 			relB, _ := json.Marshal(relReq)
-			fsm.executeReleaseLeases(tx, relB)
+			fsm.executeReleaseLeases(tx, relB, "session2")
 
 			// Acquire lease for session1
 			lReq := LeaseRequest{
 				InodeIDs:  []string{pathID},
 				Duration:  int64(time.Hour),
 				SessionID: "session1",
+				UserID:    "u1",
 				Type:      LeaseExclusive,
 			}
 			lb, _ := json.Marshal(lReq)
-			fsm.executeAcquireLeases(tx, lb)
+			fsm.executeAcquireLeases(tx, lb, "session1")
 
 			// Prepare Parent Update (adding child)
 			pUpdate := Inode{
@@ -130,21 +142,24 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				NLink:    1, // Keep parent link count
 				Children: map[string]string{nameHMAC: childID},
 			}
+			pUpdate.SignInodeForTest("u1", sk)
 			pData, _ := json.Marshal(pUpdate)
 
-			// Prepare Child Update (incrementing NLink and adding Link back)
+			// Prepare Child Update
 			cUpdate := Inode{
 				ID:      childID,
 				Type:    FileType,
+				OwnerID: "u1",
 				Version: 2,
-				NLink:   2, // Was 1
+				NLink:   2,
 				Links:   map[string]bool{parentID + ":" + nameHMAC: true},
 			}
+			cUpdate.SignInodeForTest("u1", sk)
 			cData, _ := json.Marshal(cUpdate)
 
 			cmds := []LogCommand{
-				{Type: CmdUpdateInode, Data: cData, SessionID: "session1"},
-				{Type: CmdUpdateInode, Data: pData, SessionID: "session1", LeaseBindings: map[string]string{nameHMAC: pathID}},
+				{Type: CmdUpdateInode, Data: cData, UserID: "u1", SessionNonce: "session1"},
+				{Type: CmdUpdateInode, Data: pData, UserID: "u1", SessionNonce: "session1", LeaseBindings: map[string]string{nameHMAC: pathID}},
 			}
 
 			results := fsm.executeBatchCommands(tx, cmds, 0, true)
@@ -169,21 +184,24 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				NLink:    1,
 				Children: map[string]string{},
 			}
+			pUpdate.SignInodeForTest("u1", sk)
 			pData, _ := json.Marshal(pUpdate)
 
-			// Prepare Child Update (decrementing NLink)
+			// Prepare Child Update
 			cUpdate := Inode{
 				ID:      childID,
 				Type:    FileType,
+				OwnerID: "u1",
 				Version: 3,
-				NLink:   1, // Was 2
+				NLink:   1,
 				Links:   map[string]bool{},
 			}
+			cUpdate.SignInodeForTest("u1", sk)
 			cData, _ := json.Marshal(cUpdate)
 
 			cmds := []LogCommand{
-				{Type: CmdUpdateInode, Data: cData, SessionID: "session1"},
-				{Type: CmdUpdateInode, Data: pData, SessionID: "session1", LeaseBindings: map[string]string{nameHMAC: pathID}},
+				{Type: CmdUpdateInode, Data: cData, UserID: "u1", SessionNonce: "session1"},
+				{Type: CmdUpdateInode, Data: pData, UserID: "u1", SessionNonce: "session1", LeaseBindings: map[string]string{nameHMAC: pathID}},
 			}
 
 			results := fsm.executeBatchCommands(tx, cmds, 0, true)
@@ -207,10 +225,17 @@ func TestFSM_MultiInodeLeases(t *testing.T) {
 		"00000000000000000000000000000002",
 		"00000000000000000000000000000003",
 	}
+	sk, _ := crypto.GenerateIdentityKey()
+
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		u := User{ID: "u1", SignKey: sk.Public()}
+		fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
+
 		for _, id := range ids {
-			ib, _ := json.Marshal(Inode{ID: id, Type: FileType, Version: 1, OwnerID: "u1", NLink: 1})
-			fsm.executeCreateInode(tx, ib)
+			inode := Inode{ID: id, Type: FileType, Version: 1, OwnerID: "u1", NLink: 1}
+			inode.SignInodeForTest("u1", sk)
+			ib, _ := json.Marshal(inode)
+			fsm.executeCreateInode(tx, ib, "u1")
 		}
 		return nil
 	})
@@ -229,7 +254,7 @@ func TestFSM_MultiInodeLeases(t *testing.T) {
 				Nonce:     "n1",
 			}
 			data, _ := json.Marshal(req)
-			res := fsm.executeAcquireLeases(tx, data)
+			res := fsm.executeAcquireLeases(tx, data, req.SessionID)
 			if err, ok := res.(error); ok && err != nil {
 				return err
 			}
@@ -261,7 +286,7 @@ func TestFSM_MultiInodeLeases(t *testing.T) {
 				Nonce:     "n2",
 			}
 			data, _ := json.Marshal(req)
-			res := fsm.executeAcquireLeases(tx, data)
+			res := fsm.executeAcquireLeases(tx, data, req.SessionID)
 			if err, ok := res.(error); !ok || err == nil {
 				return fmt.Errorf("expected conflict error, got %v", res)
 			}

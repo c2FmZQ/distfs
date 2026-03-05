@@ -727,7 +727,7 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 		if h.stagingManifest != nil {
 			if entry, ok := h.stagingManifest[pageIdx]; ok {
 				// Evicted but uncommitted chunk
-				page, err := h.file.fs.client.DownloadChunkData(ctx, inodeID, entry.ID, entry.URLs, fileKey)
+				page, err := h.file.fs.client.DownloadChunkData(ctx, inodeID, entry.ID, entry.URLs, fileKey, uint64(pageIdx))
 				if err != nil {
 					return mapError(err)
 				}
@@ -804,7 +804,7 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 			// Check staging first (evicted page)
 			if entry, staged := h.stagingManifest[pageIdx]; staged {
 				// Fetch back for modification (Read-Modify-Write)
-				data, err := h.file.fs.client.DownloadChunkData(ctx, inodeID, entry.ID, entry.URLs, fileKey)
+				data, err := h.file.fs.client.DownloadChunkData(ctx, inodeID, entry.ID, entry.URLs, fileKey, uint64(pageIdx))
 				if err != nil {
 					return mapError(err)
 				}

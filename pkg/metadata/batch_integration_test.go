@@ -156,7 +156,7 @@ func TestBatchAtomicity(t *testing.T) {
 	batchBytes, _ := json.Marshal(batch)
 
 	// Apply batch - Atomic should be true for individual user batches
-	_, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes, "")
+	_, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes, u1)
 	if err != nil && !errors.Is(err, metadata.ErrAtomicRollback) {
 		t.Fatalf("Raft apply failed: %v", err)
 	}

@@ -15,6 +15,8 @@
 package data
 
 import (
+	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -29,6 +31,7 @@ import (
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"github.com/c2FmZQ/ech"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -54,18 +57,29 @@ func (n NoopValidator) ValidateNode(address string) error {
 
 // Server is the HTTP server for the Data Node API.
 type Server struct {
-	store      Store
-	metaPubKey []byte
-	fsm        *metadata.MetadataFSM
-	validator  Validator
-	client     *http.Client
-
+	store            Store
+	metaPubKey       []byte
+	fsm              *metadata.MetadataFSM
+	validator        Validator
+	client           *http.Client
 	cachedMetaPubKey []byte
 	cacheMu          sync.RWMutex
 }
 
-// NewServer creates a new Data Node API server.
-func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM, validator Validator) *Server {
+type schemeSwitchingTransport struct {
+	standard  http.RoundTripper
+	protected http.RoundTripper
+}
+
+func (t *schemeSwitchingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.URL.Scheme == "https" {
+		return t.protected.RoundTrip(req)
+	}
+	return t.standard.RoundTrip(req)
+}
+
+// NewServer creates a new Data Server.
+func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM, validator Validator, disableDoH bool, allowInsecure bool) *Server {
 	if validator == nil {
 		if fsm != nil {
 			validator = fsm
@@ -73,12 +87,35 @@ func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM, valida
 			validator = DenyAllValidator{}
 		}
 	}
+
+	var transport http.RoundTripper
+	if !allowInsecure {
+		e := ech.NewTransport()
+		if disableDoH {
+			e.Resolver = ech.InsecureGoResolver()
+		}
+		transport = e
+	} else {
+		standard := http.DefaultTransport.(*http.Transport).Clone()
+		protected := ech.NewTransport()
+		if disableDoH {
+			protected.Resolver = ech.InsecureGoResolver()
+		}
+		transport = &schemeSwitchingTransport{
+			standard:  standard,
+			protected: protected,
+		}
+	}
+
 	return &Server{
 		store:      store,
 		metaPubKey: metaPubKey,
 		fsm:        fsm,
 		validator:  validator,
-		client:     &http.Client{Timeout: 10 * time.Second},
+		client: &http.Client{
+			Transport: transport,
+			Timeout:   10 * time.Second,
+		},
 	}
 }
 
@@ -184,6 +221,26 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 		return fmt.Errorf("token expired")
 	}
 
+	// Verify Session Binding if present
+	if len(cap.SessionBinding) > 0 {
+		sess := r.Header.Get("Session-Token")
+		if sess == "" {
+			return fmt.Errorf("missing session token required by capability")
+		}
+		b, err := base64.StdEncoding.DecodeString(sess)
+		if err != nil {
+			return fmt.Errorf("invalid session token encoding")
+		}
+		var st metadata.SignedSessionToken
+		if err := json.Unmarshal(b, &st); err != nil {
+			return fmt.Errorf("invalid session token structure")
+		}
+		h := sha256.Sum256([]byte(st.Token.Nonce))
+		if !bytes.Equal(h[:], cap.SessionBinding) {
+			return fmt.Errorf("capability token is not bound to this session")
+		}
+	}
+
 	hasPermission := false
 	for _, m := range strings.Split(cap.Mode, "") {
 		if m == requiredMode {
@@ -248,10 +305,11 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id stri
 
 	// Parallel Fan-out
 	token := r.Header.Get("Authorization")
+	sessionToken := r.Header.Get("Session-Token")
 	errCh := make(chan error, len(req.Targets))
 	for _, target := range req.Targets {
 		go func(t string) {
-			errCh <- s.replicate(id, t, "", token)
+			errCh <- s.replicate(id, t, "", token, sessionToken)
 		}(target)
 	}
 
@@ -287,11 +345,12 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 	if replicas != "" {
 		targets := strings.Split(replicas, ",")
 		token := r.Header.Get("Authorization")
+		sessionToken := r.Header.Get("Session-Token")
 
 		errCh := make(chan error, len(targets))
 		for _, target := range targets {
 			go func(t string) {
-				errCh <- s.replicate(id, t, "", token)
+				errCh <- s.replicate(id, t, "", token, sessionToken)
 			}(target)
 		}
 
@@ -311,7 +370,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 	w.WriteHeader(http.StatusCreated)
 }
 
-func (s *Server) replicate(id, target, remaining, token string) error {
+func (s *Server) replicate(id, target, remaining, token, sessionToken string) error {
 	if err := s.validator.ValidateNode(target); err != nil {
 		log.Printf("Data: Replication validation failed for %s: %v", target, err)
 		return fmt.Errorf("invalid replication target: %w", err)
@@ -334,6 +393,9 @@ func (s *Server) replicate(id, target, remaining, token string) error {
 	}
 	if token != "" {
 		req.Header.Set("Authorization", token)
+	}
+	if sessionToken != "" {
+		req.Header.Set("Session-Token", sessionToken)
 	}
 
 	resp, err := s.client.Do(req)

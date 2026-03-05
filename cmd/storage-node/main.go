@@ -108,10 +108,11 @@ func main() {
 		oidcURL          = flag.String("oidc-discovery-url", "", "OIDC Discovery URL")
 		raftSecret       = flag.String("raft-secret", "", "Shared secret for cluster operations")
 
-		tlsCert = flag.String("tls-cert", "", "TLS certificate for public API")
-		tlsKey  = flag.String("tls-key", "", "TLS key for public API")
-		useTPM  = flag.Bool("use-tpm", false, "Use TPM for hardware-bound security")
-		disableDoH = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
+		tlsCert       = flag.String("tls-cert", "", "TLS certificate for public API")
+		tlsKey        = flag.String("tls-key", "", "TLS key for public API")
+		useTPM        = flag.Bool("use-tpm", false, "Use TPM for hardware-bound security")
+		disableDoH    = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
+		allowInsecure = flag.Bool("allow-insecure", false, "Allow plaintext HTTP for node-to-node communication (tests only)")
 	)
 	flag.Parse()
 
@@ -346,7 +347,7 @@ func main() {
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey, *disableDoH)
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey, *disableDoH, *allowInsecure)
 	metaServer.SetRaftAddress(*raftAdvertise)
 	metaServer.SetAPIURL(*apiURL)
 	metaServer.SetTLSPublicKey(raftKey.Public())
@@ -366,7 +367,7 @@ func main() {
 	if pub, err := rn.FSM.GetClusterSignPublicKey(); err == nil {
 		metaPubKey = pub
 	}
-	dataServer := data.NewServer(store, metaPubKey, rn.FSM, rn.FSM)
+	dataServer := data.NewServer(store, metaPubKey, rn.FSM, rn.FSM, *disableDoH, *allowInsecure)
 
 	// 5. Combined Router (Public)
 	publicMux := http.NewServeMux()

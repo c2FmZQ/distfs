@@ -35,13 +35,13 @@ import (
 )
 
 var (
-	serverURL = flag.String("server", "http://localhost:8080", "Metadata Server URL")
-	jwt       = flag.String("jwt", "", "OIDC JWT for authentication")
-	mode      = flag.String("mode", "put", "Bench mode: put, get, mkdir")
-	workers   = flag.Int("workers", 10, "Number of concurrent workers")
-	count     = flag.Int("count", 100, "Total number of operations to perform")
-	size      = flag.Int64("size", 1024, "Size of files for put mode (in bytes)")
-	adminFlag = flag.Bool("admin", false, "Enable admin bypass mode")
+	serverURL  = flag.String("server", "http://localhost:8080", "Metadata Server URL")
+	jwt        = flag.String("jwt", "", "OIDC JWT for authentication")
+	mode       = flag.String("mode", "put", "Bench mode: put, get, mkdir")
+	workers    = flag.Int("workers", 10, "Number of concurrent workers")
+	count      = flag.Int("count", 100, "Total number of operations to perform")
+	size       = flag.Int64("size", 1024, "Size of files for put mode (in bytes)")
+	adminFlag  = flag.Bool("admin", false, "Enable admin bypass mode")
 	disableDoH = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
 )
 

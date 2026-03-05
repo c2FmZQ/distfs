@@ -254,7 +254,10 @@ func (c *Client) AddEntry(ctx context.Context, parentID string, parentKey []byte
 	pathID := "path:" + parentID + ":" + encName
 
 	// 1. Acquire Exclusive Path Lease
-	nonce := generateID()
+	nonce := c.getSessionNonce()
+	if nonce == "" {
+		nonce = generateID()
+	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
 	}); err != nil {
@@ -450,7 +453,10 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 	pathNew := "path:" + newParentID + ":" + encNewName
 
 	// 1. Acquire Exclusive Path Leases
-	nonce := generateID()
+	nonce := c.getSessionNonce()
+	if nonce == "" {
+		nonce = generateID()
+	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathOld, pathNew}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
 	}); err != nil {
@@ -611,7 +617,10 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 	pathID := "path:" + parentID + ":" + encName
 
 	// 1. Acquire Exclusive Path Lease
-	nonce := generateID()
+	nonce := c.getSessionNonce()
+	if nonce == "" {
+		nonce = generateID()
+	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
 	}); err != nil {
@@ -764,7 +773,10 @@ func (c *Client) LinkRaw(ctx context.Context, parentID string, parentKey []byte,
 	pathID := "path:" + parentID + ":" + encName
 
 	// 1. Acquire Exclusive Path Lease
-	nonce := generateID()
+	nonce := c.getSessionNonce()
+	if nonce == "" {
+		nonce = generateID()
+	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
 	}); err != nil {

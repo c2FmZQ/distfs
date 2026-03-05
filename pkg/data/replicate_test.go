@@ -24,7 +24,7 @@ func TestReplicateChain(t *testing.T) {
 		st, _ := createTestStorage(t, tmpDir)
 		store, _ := NewDiskStore(st)
 		stores[i] = store
-		server := NewServer(store, pub, nil, NoopValidator{})
+		server := NewServer(store, pub, nil, NoopValidator{}, true, true)
 		ts := httptest.NewServer(server)
 		servers[i] = ts
 		defer ts.Close()
@@ -77,11 +77,11 @@ func TestReplicateEndpoint(t *testing.T) {
 
 	pub, sk := setupTestAuth(t)
 
-	server0 := NewServer(store0, pub, nil, NoopValidator{})
+	server0 := NewServer(store0, pub, nil, NoopValidator{}, true, true)
 	ts0 := httptest.NewServer(server0)
 	defer ts0.Close()
 
-	server1 := NewServer(store1, pub, nil, NoopValidator{})
+	server1 := NewServer(store1, pub, nil, NoopValidator{}, true, true)
 	ts1 := httptest.NewServer(server1)
 	defer ts1.Close()
 
@@ -120,7 +120,7 @@ func TestParallelReplication(t *testing.T) {
 		st, _ := createTestStorage(t, tmpDir)
 		store, _ := NewDiskStore(st)
 		stores[i] = store
-		server := NewServer(store, pub, nil, NoopValidator{})
+		server := NewServer(store, pub, nil, NoopValidator{}, true, true)
 		ts := httptest.NewServer(server)
 		servers[i] = ts
 		defer ts.Close()
@@ -163,7 +163,7 @@ func TestParallelReplicationFailure(t *testing.T) {
 		st, _ := createTestStorage(t, tmpDir)
 		store, _ := NewDiskStore(st)
 		stores[i] = store
-		server := NewServer(store, pub, nil, NoopValidator{})
+		server := NewServer(store, pub, nil, NoopValidator{}, true, true)
 		ts := httptest.NewServer(server)
 		servers[i] = ts
 		defer ts.Close()

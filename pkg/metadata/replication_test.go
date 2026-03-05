@@ -29,7 +29,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
 
 	sk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: "u1", SignKey: sk.Public()})
+	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
 
 	// 2. Setup Inode with under-replication (n1, n3 are owners, but n3 will be "dead" soon)
 	inode := Inode{
@@ -41,7 +41,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 		},
 	}
 	inode.SignInodeForTest("u1", sk)
-	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode)}.Marshal(), 5*time.Second)
+	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode), UserID: "u1"}.Marshal(), 5*time.Second)
 
 	// 3. Mock Data Node for n1
 	var mu sync.Mutex

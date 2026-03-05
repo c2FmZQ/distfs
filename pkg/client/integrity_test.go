@@ -37,7 +37,7 @@ func TestManifestIntegrity(t *testing.T) {
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	raftSecret := "supersecret"
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0, metadata.NewNodeVault(st), nodeDecKey, true)
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0, metadata.NewNodeVault(st), nodeDecKey, true, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -265,7 +265,7 @@ func TestGroupIntegrity(t *testing.T) {
 
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0, metadata.NewNodeVault(st), nodeDecKey, true)
+	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0, metadata.NewNodeVault(st), nodeDecKey, true, true)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

@@ -33,6 +33,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	udk, _ := crypto.GenerateEncryptionKey()
 	user := User{
 		ID:      u1,
+		UID:     1001,
 		SignKey: usk.Public(),
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
@@ -108,7 +109,9 @@ func TestServer_MiscHandlers(t *testing.T) {
 	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Type: FileType}
 	inode.SignInodeForTest(u1, usk)
 	ib, _ := json.Marshal(inode)
-	server.ApplyRaftCommandInternal(CmdCreateInode, ib, "")
+	if res, err := server.ApplyRaftCommandInternal(CmdCreateInode, ib, u1); err != nil || server.fsm.containsError(res) {
+		t.Fatalf("Create Inode failed: err=%v, res=%v", err, res)
+	}
 
 	issueReq := struct {
 		InodeID string   `json:"inode_id"`
@@ -147,7 +150,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	inode.SignInodeForTest(u1, usk)
 	ib2, _ := json.Marshal(inode)
 	batch := []LogCommand{
-		{Type: CmdUpdateInode, Data: ib2},
+		{Type: CmdUpdateInode, Data: ib2, UserID: u1},
 	}
 	bb, _ := json.Marshal(batch)
 	sealedB := SealTestRequest(t, u1, usk, ek, bb)
@@ -219,6 +222,7 @@ func TestServer_AdminHandlers(t *testing.T) {
 	udk, _ := crypto.GenerateEncryptionKey()
 	user := User{
 		ID:      u1,
+		UID:     1001,
 		SignKey: usk.Public(),
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
@@ -288,7 +292,7 @@ func TestServer_ClusterAdminHandlers(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	user := User{ID: u1, SignKey: usk.Public()}
+	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, node, user)
 	server.ApplyRaftCommandInternal(CmdPromoteAdmin, MustMarshalJSON(u1), "")
 	token := LoginSessionForTest(t, ts, u1, usk)
@@ -360,18 +364,18 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, SignKey: usk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public()})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// 1. World Readable file (owned by u1)
 	inodeW := Inode{ID: "world", OwnerID: u1, Type: FileType, Mode: 0644}
 	inodeW.SignInodeForTest(u1, usk)
 	ibW, _ := json.Marshal(inodeW)
-	server.ApplyRaftCommandInternal(CmdCreateInode, ibW, "")
+	server.ApplyRaftCommandInternal(CmdCreateInode, ibW, "u1")
 
 	// u2 should be able to get R token
 	issueReq := struct {
@@ -409,7 +413,7 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	user := User{ID: u1, SignKey: usk.Public()}
+	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, node, user)
 
 	// 1. Invalid JSON
@@ -438,7 +442,7 @@ func TestServer_LoginExtraErrors(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	user := User{ID: u1, SignKey: usk.Public()}
+	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, node, user)
 
 	// 1. Missing challenge entry
@@ -510,7 +514,7 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true)
+	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true, true)
 
 	// node2 has no leader
 	req, _ := http.NewRequest("GET", "/v1/meta/batch/root", nil)
@@ -548,7 +552,7 @@ func TestServer_BatchErrors(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	user := User{ID: u1, SignKey: usk.Public()}
+	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, node, user)
 	token := LoginSessionForTest(t, ts, u1, usk)
 
@@ -572,7 +576,7 @@ func TestServer_ApplyBatch_Errors(t *testing.T) {
 
 	// 1. Manually call applyBatch with malformed data
 	req := batchRequest{
-		cmds:  []*LogCommand{{Type: CmdCreateInode, Data: []byte("invalid-json")}},
+		cmds:  []*LogCommand{{Type: CmdCreateInode, Data: []byte("invalid-json"), UserID: "u1"}},
 		resps: []chan interface{}{make(chan interface{}, 1)},
 	}
 	server.applyBatch(req)
@@ -590,7 +594,7 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 	token1 := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Fetch missing inode
@@ -614,21 +618,21 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, SignKey: usk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public()})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// u1 owns 0000000000000000000000000000000f
 	inode1 := Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Type: FileType}
 	inode1.SignInodeForTest(u1, usk)
 	i0000000000000000000000000000000b, _ := json.Marshal(inode1)
-	server.ApplyRaftCommandInternal(CmdCreateInode, i0000000000000000000000000000000b, "")
+	server.ApplyRaftCommandInternal(CmdCreateInode, i0000000000000000000000000000000b, "u1")
 
 	// u2 tries to update 0000000000000000000000000000000f via batch
-	batch := []LogCommand{{Type: CmdUpdateInode, Data: i0000000000000000000000000000000b}}
+	batch := []LogCommand{{Type: CmdUpdateInode, Data: i0000000000000000000000000000000b, UserID: u2}}
 	bb, _ := json.Marshal(batch)
 	sealed := SealTestRequest(t, u2, usk2, ek, bb)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
@@ -667,7 +671,7 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()})
 	token := LoginSessionForTest(t, ts, u1, usk)
 
@@ -707,7 +711,7 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 	node.FSM.Apply(&raft.Log{Data: LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()})
 	token := LoginSessionForTest(t, ts, u1, usk)
 
@@ -744,8 +748,8 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
-	server.ApplyRaftCommandInternal(CmdPromoteAdmin, MustMarshalJSON(u1), "")
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	server.ApplyRaftCommandInternal(CmdPromoteAdmin, MustMarshalJSON(u1), "bootstrap")
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. handleRemoveNode (Success)
@@ -766,9 +770,11 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 
 	// 2. handleAddChild (Success via batch UpdateInode)
 	dir := Inode{ID: "dir1", Type: DirType, OwnerID: u1, NLink: 1}
+	dir.SignInodeForTest(u1, usk)
 	file := Inode{ID: "file1", Type: FileType, OwnerID: u1, NLink: 1}
-	server.ApplyRaftCommandInternal(CmdCreateInode, MustMarshalJSON(dir), "")
-	server.ApplyRaftCommandInternal(CmdCreateInode, MustMarshalJSON(file), "")
+	file.SignInodeForTest(u1, usk)
+	server.ApplyRaftCommandInternal(CmdCreateInode, MustMarshalJSON(dir), u1)
+	server.ApplyRaftCommandInternal(CmdCreateInode, MustMarshalJSON(file), u1)
 
 	time.Sleep(200 * time.Millisecond)
 
@@ -787,7 +793,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 			Data:          MustMarshalJSON(dir),
 			LeaseBindings: map[string]string{"0000000000000000000000000000000f": ""},
 		},
-		{Type: CmdUpdateInode, Data: MustMarshalJSON(file)},
+		{Type: CmdUpdateInode, Data: MustMarshalJSON(file), UserID: u1},
 	}
 	bbA, _ := json.Marshal(batchA)
 	sealedA := SealTestRequest(t, u1, usk, ek, bbA)
@@ -866,14 +872,14 @@ func TestServer_handleBatch_More(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Batch Create
 	inode := Inode{ID: "0000000000000000000000000000000b", Type: DirType, OwnerID: u1}
 	inode.SignInodeForTest(u1, usk)
 	batch := []LogCommand{
-		{Type: CmdCreateInode, Data: MustMarshalJSON(inode)},
+		{Type: CmdCreateInode, Data: MustMarshalJSON(inode), UserID: u1},
 	}
 	bb, _ := json.Marshal(batch)
 	sealed := SealTestRequest(t, u1, usk, ek, bb)
@@ -890,7 +896,7 @@ func TestServer_handleBatch_More(t *testing.T) {
 	inode.NLink = 0
 	inode.SignInodeForTest(u1, usk)
 	batchD := []LogCommand{
-		{Type: CmdUpdateInode, Data: MustMarshalJSON(inode)},
+		{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1},
 	}
 	bbD, _ := json.Marshal(batchD)
 	sealedD := SealTestRequest(t, u1, usk, ek, bbD)
@@ -911,11 +917,11 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, SignKey: usk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public()})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// 1. Group Readable
@@ -924,7 +930,7 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 
 	inode := Inode{ID: "0000000000000000000000000000000a", OwnerID: u1, GroupID: "g1", Mode: 0640, Type: FileType}
 	inode.SignInodeForTest(u1, usk)
-	server.ApplyRaftCommandInternal(CmdCreateInode, MustMarshalJSON(inode), "")
+	server.ApplyRaftCommandInternal(CmdCreateInode, MustMarshalJSON(inode), "u1")
 	time.Sleep(100 * time.Millisecond)
 
 	// u2 should get R token
@@ -968,6 +974,7 @@ func TestServer_SetAttr(t *testing.T) {
 	udk, _ := crypto.GenerateEncryptionKey()
 	user := User{
 		ID:      u1,
+		UID:     1001,
 		SignKey: usk.Public(),
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
@@ -985,13 +992,15 @@ func TestServer_SetAttr(t *testing.T) {
 	}
 	inode.SignInodeForTest(u1, usk)
 	ib, _ := json.Marshal(inode)
-	server.ApplyRaftCommandInternal(CmdCreateInode, ib, "")
+	if res, err := server.ApplyRaftCommandInternal(CmdCreateInode, ib, u1); err != nil || server.fsm.containsError(res) {
+		t.Fatalf("Create Inode failed: err=%v, res=%v", err, res)
+	}
 
 	// Update attributes via batch UpdateInode
 	inode.Mode = 0755
 	inode.Version = 2
 	inode.SignInodeForTest(u1, usk)
-	batch := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode)}}
+	batch := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1}}
 	bb, _ := json.Marshal(batch)
 	sealed := SealTestRequest(t, u1, usk, ek, bb)
 
@@ -1025,7 +1034,7 @@ func TestServer_SetAttr(t *testing.T) {
 	// Test unauthorized (different user)
 	u2 := "bob"
 	usk2, _ := crypto.GenerateIdentityKey()
-	user2 := User{ID: u2, SignKey: usk2.Public()}
+	user2 := User{ID: u2, UID: 1002, SignKey: usk2.Public()}
 	CreateUser(t, node, user2)
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
@@ -1033,7 +1042,7 @@ func TestServer_SetAttr(t *testing.T) {
 	inode.Mode = 0777
 	inode.Version = 2
 	inode.SignInodeForTest(u2, usk2) // Signed by Bob
-	batch2 := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode)}}
+	batch2 := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1}}
 	bb2, _ := json.Marshal(batch2)
 	sealed2 := SealTestRequest(t, u2, usk2, ek, bb2)
 	req2, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed2))
@@ -1060,7 +1069,7 @@ func TestServer_HealthAndStatus(t *testing.T) {
 
 	// Cluster Status (under Admin)
 	u1 := "admin"
-	user := User{ID: u1, SignKey: usk.Public()}
+	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, node, user)
 	server.ApplyRaftCommandInternal(CmdPromoteAdmin, MustMarshalJSON(u1), "")
 	token := LoginSessionForTest(t, ts, u1, usk)
@@ -1125,7 +1134,7 @@ func TestServer_Forwarding(t *testing.T) {
 	s1.ApplyRaftCommandInternal(CmdRegisterNode, n1b, "")
 
 	nodeDecKey2, _ := crypto.GenerateEncryptionKey()
-	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2, true)
+	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2, true, true)
 	ts2 := httptest.NewServer(s2)
 	defer ts2.Close()
 

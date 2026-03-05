@@ -18,6 +18,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -82,7 +83,8 @@ const (
 type LogCommand struct {
 	Type          CommandType       `json:"type"`
 	Data          json.RawMessage   `json:"data"`
-	SessionID     string            `json:"session_id,omitempty"`
+	UserID        string            `json:"uid,omitempty"`
+	SessionNonce  string            `json:"sid,omitempty"`
 	LeaseBindings map[string]string `json:"lease_bindings,omitempty"` // nameHMAC -> pathID
 	Atomic        bool              `json:"atomic,omitempty"`         // Roll back entire transaction on any sub-command error
 }
@@ -162,11 +164,10 @@ func (s *MetadataSnapshot) Persist(sink raft.SnapshotSink) error {
 func (s *MetadataSnapshot) Release() {}
 
 type MetadataFSM struct {
-	nodeID     string
-	db         *bolt.DB
-	path       string
-	OnSnapshot func() error
-
+	nodeID        string
+	db            *bolt.DB
+	path          string
+	OnSnapshot    func() error
 	clusterSecret []byte
 	keyRing       *crypto.KeyRing
 	trusted       map[string]bool
@@ -276,24 +277,36 @@ func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error)
 	return crypto.DecryptDEM(key, data[4:])
 }
 
-func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket, key, value []byte) error {
-	enc, err := fsm.EncryptValue(bucket, value)
-	if err != nil {
-		return err
-	}
-	return tx.Bucket(bucket).Put(key, enc)
-}
-
 func (fsm *MetadataFSM) Get(tx *bolt.Tx, bucket, key []byte) ([]byte, error) {
-	v := tx.Bucket(bucket).Get(key)
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return nil, fmt.Errorf("bucket %s missing", string(bucket))
+	}
+	v := b.Get(key)
 	if v == nil {
 		return nil, nil
 	}
 	return fsm.DecryptValue(bucket, v)
 }
 
+func (fsm *MetadataFSM) Put(tx *bolt.Tx, bucket, key, value []byte) error {
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("bucket %s missing", string(bucket))
+	}
+	enc, err := fsm.EncryptValue(bucket, value)
+	if err != nil {
+		return err
+	}
+	return b.Put(key, enc)
+}
+
 func (fsm *MetadataFSM) Delete(tx *bolt.Tx, bucket, key []byte) error {
-	return tx.Bucket(bucket).Delete(key)
+	b := tx.Bucket(bucket)
+	if b == nil {
+		return fmt.Errorf("bucket %s missing", string(bucket))
+	}
+	return b.Delete(key)
 }
 
 func (fsm *MetadataFSM) ForEach(tx *bolt.Tx, bucket []byte, fn func(k, v []byte) error) error {
@@ -573,11 +586,11 @@ func nlinkVal(i *Inode) uint32 {
 func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) interface{} {
 	switch cmd.Type {
 	case CmdCreateInode:
-		return fsm.executeCreateInode(tx, cmd.Data)
+		return fsm.executeCreateInode(tx, cmd.Data, cmd.UserID)
 	case CmdUpdateInode:
-		return fsm.executeUpdateInode(tx, cmd.Data, cmd.SessionID, cmd.LeaseBindings)
+		return fsm.executeUpdateInode(tx, cmd.Data, cmd.UserID, cmd.SessionNonce, cmd.LeaseBindings)
 	case CmdDeleteInode:
-		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionID)
+		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionNonce)
 	case CmdRegisterNode:
 		return fsm.executeRegisterNode(tx, cmd.Data)
 	case CmdCreateUser:
@@ -585,7 +598,7 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	case CmdCreateGroup:
 		return fsm.executeCreateGroup(tx, cmd.Data)
 	case CmdUpdateGroup:
-		return fsm.executeUpdateGroup(tx, cmd.Data, cmd.SessionID)
+		return fsm.executeUpdateGroup(tx, cmd.Data, cmd.UserID)
 	case CmdAddChunkReplica:
 		return fsm.executeAddChunkReplica(tx, cmd.Data)
 	case CmdGCRemove:
@@ -599,15 +612,15 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	case CmdStoreKeySync:
 		return fsm.executeStoreKeySync(tx, cmd.Data)
 	case CmdAcquireLeases:
-		return fsm.executeAcquireLeases(tx, cmd.Data)
+		return fsm.executeAcquireLeases(tx, cmd.Data, cmd.SessionNonce)
 	case CmdReleaseLeases:
-		return fsm.executeReleaseLeases(tx, cmd.Data)
+		return fsm.executeReleaseLeases(tx, cmd.Data, cmd.SessionNonce)
 	case CmdPromoteAdmin:
 		return fsm.executePromoteAdmin(tx, cmd.Data)
 	case CmdAdminChown:
-		return fsm.executeAdminChown(tx, cmd.Data, cmd.SessionID)
+		return fsm.executeAdminChown(tx, cmd.Data, cmd.UserID)
 	case CmdAdminChmod:
-		return fsm.executeAdminChmod(tx, cmd.Data, cmd.SessionID)
+		return fsm.executeAdminChmod(tx, cmd.Data, cmd.UserID)
 	case CmdStoreMetrics:
 		return fsm.executeStoreMetrics(tx, cmd.Data)
 	case CmdSetGroupQuota:
@@ -624,8 +637,11 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 		var subCmds []LogCommand
 		json.Unmarshal(cmd.Data, &subCmds)
 		for i := range subCmds {
-			if subCmds[i].SessionID == "" {
-				subCmds[i].SessionID = cmd.SessionID
+			if subCmds[i].UserID == "" {
+				subCmds[i].UserID = cmd.UserID
+			}
+			if subCmds[i].SessionNonce == "" {
+				subCmds[i].SessionNonce = cmd.SessionNonce
 			}
 		}
 		return fsm.executeBatchCommands(tx, subCmds, depth+1, cmd.Atomic)
@@ -633,20 +649,35 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	return fmt.Errorf("unknown command")
 }
 
-func (fsm *MetadataFSM) checkLease(inode *Inode, sessionID string) error {
+func (fsm *MetadataFSM) resolveSessionUser(sessionID string) (string, error) {
+	if sessionID == "" {
+		return "", fmt.Errorf("missing session ID")
+	}
+	b, err := base64.StdEncoding.DecodeString(sessionID)
+	if err != nil {
+		return "", fmt.Errorf("invalid session encoding")
+	}
+	var st SignedSessionToken
+	if err := json.Unmarshal(b, &st); err != nil {
+		return "", fmt.Errorf("failed to unmarshal session: %w", err)
+	}
+	return st.Token.UserID, nil
+}
+
+func (fsm *MetadataFSM) checkLease(inode *Inode, sessionNonce string) error {
 	if inode == nil || len(inode.Leases) == 0 {
 		return nil
 	}
 	now := time.Now().UnixNano()
 	for _, l := range inode.Leases {
-		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionID {
+		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionNonce {
 			return fmt.Errorf("exclusive lease held by another session")
 		}
 	}
 	return nil
 }
 
-func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionID string) error {
+func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionNonce string) error {
 	if path == "" {
 		return nil
 	}
@@ -661,16 +692,52 @@ func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionID string) erro
 	json.Unmarshal(plain, &leases)
 	now := time.Now().UnixNano()
 	for _, l := range leases {
-		if l.Expiry > now && l.SessionID != sessionID {
+		if l.Expiry > now && l.SessionID != sessionNonce {
 			return fmt.Errorf("%w: path %s: lease held by session %s", ErrConflict, path, l.SessionID)
 		}
 	}
 	return nil
 }
 
-func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) verifyInodeSignature(tx *bolt.Tx, inode *Inode, userID string) error {
+	if len(inode.UserSig) == 0 {
+		return fmt.Errorf("missing UserSig")
+	}
+
+	if userID == "" {
+		return fmt.Errorf("signature verification failed: missing UserID")
+	}
+
+	// 1. Fetch User SignKey
+	v, err := fsm.Get(tx, []byte("users"), []byte(userID))
+	if err != nil {
+		return fmt.Errorf("failed to fetch user: %w", err)
+	}
+	if v == nil {
+		return fmt.Errorf("user %s not found", userID)
+	}
+	var user User
+	if err := json.Unmarshal(v, &user); err != nil {
+		return fmt.Errorf("failed to unmarshal user: %w", err)
+	}
+
+	// 2. Verify Signature
+	hash := inode.ManifestHash()
+	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
+		return fmt.Errorf("invalid UserSig for user %s", userID)
+	}
+
+	return nil
+}
+
+func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID string) interface{} {
 	var inode Inode
 	json.Unmarshal(data, &inode)
+
+	if err := fsm.verifyInodeSignature(tx, &inode, userID); err != nil {
+		return err
+	}
+
 	if inode.CTime == 0 {
 		inode.CTime = time.Now().UnixNano()
 	}
@@ -688,32 +755,44 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte) interface{}
 		}
 	}
 	inode.Version = 1
-	fsm.saveInodeWithPages(tx, &inode)
+	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
+		return err
+	}
 	if inode.OwnerID != "" {
 		fsm.updateUsage(tx, inode.OwnerID, inode.GroupID, 1, int64(inode.Size))
 	}
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID string, leaseBindings map[string]string) interface{} {
+func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, sessionNonce string, leaseBindings map[string]string) interface{} {
 	var update Inode
 	json.Unmarshal(data, &update)
+
+	if err := fsm.verifyInodeSignature(tx, &update, userID); err != nil {
+		return err
+	}
 
 	var fields map[string]json.RawMessage
 	json.Unmarshal(data, &fields)
 
-	plain, _ := fsm.Get(tx, []byte("inodes"), []byte(update.ID))
+	plain, err := fsm.Get(tx, []byte("inodes"), []byte(update.ID))
+	if err != nil {
+		log.Printf("DEBUG FSM executeUpdateInode: Get error for %s: %v", update.ID, err)
+	}
 	if plain == nil {
+		log.Printf("DEBUG FSM executeUpdateInode: Inode %s not found (err=%v)", update.ID, err)
 		return ErrNotFound
 	}
 	var inode Inode
 	json.Unmarshal(plain, &inode)
 
 	if update.Version != inode.Version+1 {
+		log.Printf("DEBUG FSM executeUpdateInode: Version conflict for %s (update.Version=%d, inode.Version=%d)", update.ID, update.Version, inode.Version)
 		return ErrConflict
 	}
 
-	if err := fsm.checkLease(&inode, sessionID); err != nil {
+	if err := fsm.checkLease(&inode, sessionNonce); err != nil {
+		log.Printf("DEBUG FSM executeUpdateInode: Lease conflict for %s: %v", update.ID, err)
 		return err
 	}
 	if inode.Type == DirType {
@@ -724,7 +803,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 				if !ok {
 					return fmt.Errorf("%w: missing lease binding for change to entry %s", ErrLeaseRequired, nameHMAC)
 				}
-				if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
+				if err := fsm.checkPathLease(tx, pathID, sessionNonce); err != nil {
 					return err
 				}
 			}
@@ -735,7 +814,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 				if !ok {
 					return fmt.Errorf("%w: missing lease binding for new entry %s", ErrLeaseRequired, nameHMAC)
 				}
-				if err := fsm.checkPathLease(tx, pathID, sessionID); err != nil {
+				if err := fsm.checkPathLease(tx, pathID, sessionNonce); err != nil {
 					return err
 				}
 			}
@@ -839,7 +918,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, sessionID s
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
 	var id string
 	if err := json.Unmarshal(data, &id); err != nil {
 		id = string(data)
@@ -850,7 +929,7 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionID s
 	}
 	var inode Inode
 	json.Unmarshal(plain, &inode)
-	if err := fsm.checkLease(&inode, sessionID); err != nil {
+	if err := fsm.checkLease(&inode, sessionNonce); err != nil {
 		return err
 	}
 	if inode.NLink > 0 {
@@ -1174,7 +1253,7 @@ func (fsm *MetadataFSM) executeStoreKeySync(tx *bolt.Tx, data []byte) interface{
 	return fsm.Put(tx, []byte("keysync"), []byte(req.UserID), encoded)
 }
 
-func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, userID string) interface{} {
 	var req AdminChownRequest
 	json.Unmarshal(data, &req)
 	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
@@ -1186,6 +1265,10 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID st
 	}
 	var inode Inode
 	json.Unmarshal(plain, &inode)
+
+	if !fsm.IsAdmin(userID) {
+		return fmt.Errorf("permission denied: only admins can perform chown")
+	}
 
 	newOwner := inode.OwnerID
 	if req.OwnerID != nil {
@@ -1210,7 +1293,7 @@ func (fsm *MetadataFSM) executeAdminChown(tx *bolt.Tx, data []byte, sessionID st
 	return fsm.saveInodeWithPages(tx, &inode)
 }
 
-func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, sessionID string) interface{} {
+func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, userID string) interface{} {
 	var req AdminChmodRequest
 	json.Unmarshal(data, &req)
 	plain, err := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
@@ -1222,6 +1305,10 @@ func (fsm *MetadataFSM) executeAdminChmod(tx *bolt.Tx, data []byte, sessionID st
 	}
 	var inode Inode
 	json.Unmarshal(plain, &inode)
+
+	if !fsm.IsAdmin(userID) {
+		return fmt.Errorf("permission denied: only admins can perform chmod")
+	}
 	inode.Mode = SanitizeMode(req.Mode, inode.Type)
 	inode.Version++
 	return fsm.saveInodeWithPages(tx, &inode)
@@ -1470,9 +1557,15 @@ func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	return &key, err
 }
 
-func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
 	var req LeaseRequest
 	json.Unmarshal(data, &req)
+
+	// If sessionNonce is provided via LogCommand, it takes precedence over req.SessionID
+	if sessionNonce != "" {
+		req.SessionID = sessionNonce
+	}
+
 	now := time.Now().UnixNano()
 	expiry := now + req.Duration
 	inodes := make([]*Inode, len(req.InodeIDs))
@@ -1518,7 +1611,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 		info := LeaseInfo{InodeID: id, SessionID: req.SessionID, Nonce: req.Nonce, Expiry: expiry, Type: req.Type}
 		nonce := req.Nonce
 		if nonce == "" {
-			nonce = "legacy-" + req.SessionID
+			nonce = req.SessionID
 		}
 		if !isPath && IsInodeID(id) {
 			inode := inodes[i]
@@ -1551,12 +1644,20 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte) interface
 	return nil
 }
 
-func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
 	var req LeaseRequest
 	json.Unmarshal(data, &req)
+
+	if sessionNonce != "" {
+		req.SessionID = sessionNonce
+	}
+
 	now := time.Now().UnixNano()
 	for _, id := range req.InodeIDs {
 		nonce := req.Nonce
+		if nonce == "" {
+			nonce = req.SessionID
+		}
 		isPath := strings.HasPrefix(id, "path:")
 		if isPath || !IsInodeID(id) {
 			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))

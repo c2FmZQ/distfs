@@ -143,7 +143,7 @@ func TestChunkEncryption(t *testing.T) {
 	}
 
 	// Decrypt
-	plain, err := DecryptChunk(key, ct)
+	plain, err := DecryptChunk(key, 0, ct)
 	if err != nil {
 		t.Fatalf("Decrypt failed: %v", err)
 	}

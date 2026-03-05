@@ -42,29 +42,29 @@ type APIErrorResponse struct {
 
 const (
 	// ErrCodeNotFound indicates the requested resource does not exist.
-	ErrCodeNotFound                = "DISTFS_NOT_FOUND"
+	ErrCodeNotFound = "DISTFS_NOT_FOUND"
 	// ErrCodeExists indicates an attempt to create a resource that already exists.
-	ErrCodeExists                  = "DISTFS_EXISTS"
+	ErrCodeExists = "DISTFS_EXISTS"
 	// ErrCodeVersionConflict indicates an optimistic concurrency failure.
-	ErrCodeVersionConflict         = "DISTFS_VERSION_CONFLICT"
+	ErrCodeVersionConflict = "DISTFS_VERSION_CONFLICT"
 	// ErrCodeLeaseRequired indicates a mutation attempt without holding an exclusive lease.
-	ErrCodeLeaseRequired           = "DISTFS_LEASE_REQUIRED"
+	ErrCodeLeaseRequired = "DISTFS_LEASE_REQUIRED"
 	// ErrCodeQuotaExceeded indicates the user or group has exceeded their storage limit.
-	ErrCodeQuotaExceeded           = "DISTFS_QUOTA_EXCEEDED"
+	ErrCodeQuotaExceeded = "DISTFS_QUOTA_EXCEEDED"
 	// ErrCodeUnauthorized indicates invalid or missing authentication credentials.
-	ErrCodeUnauthorized            = "DISTFS_UNAUTHORIZED"
+	ErrCodeUnauthorized = "DISTFS_UNAUTHORIZED"
 	// ErrCodeForbidden indicates the user lacks permission for the requested action.
-	ErrCodeForbidden               = "DISTFS_FORBIDDEN"
+	ErrCodeForbidden = "DISTFS_FORBIDDEN"
 	// ErrCodeNotLeader indicates the request was sent to a follower node.
-	ErrCodeNotLeader               = "DISTFS_NOT_LEADER"
+	ErrCodeNotLeader = "DISTFS_NOT_LEADER"
 	// ErrCodeInternal indicates an unexpected server-side error or panic.
-	ErrCodeInternal                = "DISTFS_INTERNAL_ERROR"
+	ErrCodeInternal = "DISTFS_INTERNAL_ERROR"
 	// ErrCodeAtomicRollback indicates a sub-command in a batch failed, causing a full rollback.
-	ErrCodeAtomicRollback          = "DISTFS_ATOMIC_ROLLBACK"
+	ErrCodeAtomicRollback = "DISTFS_ATOMIC_ROLLBACK"
 	// ErrCodeStructuralInconsistency indicates a mutation that violates filesystem topology.
 	ErrCodeStructuralInconsistency = "DISTFS_STRUCTURAL_INCONSISTENCY"
 	// ErrCodeQuotaDisabled indicates an attempt to set quota on a group where it is disabled.
-	ErrCodeQuotaDisabled           = "DISTFS_QUOTA_DISABLED"
+	ErrCodeQuotaDisabled = "DISTFS_QUOTA_DISABLED"
 )
 
 // OIDCConfig represents the OpenID Connect configuration needed by clients for authentication.
@@ -639,11 +639,12 @@ type LeaseInfo struct {
 	Type      LeaseType `json:"type"`
 }
 
-// CapabilityToken grants access to specific chunks on Data Nodes.
+// CapabilityToken grants access to specific chunks for a limited time.
 type CapabilityToken struct {
-	Chunks []string `json:"chunks"`
-	Mode   string   `json:"mode"` // "R" or "W"
-	Exp    int64    `json:"exp"`
+	Chunks         []string `json:"chunks"`
+	Mode           string   `json:"mode"` // "R" or "W"
+	Exp            int64    `json:"exp"`
+	SessionBinding []byte   `json:"session_binding,omitempty"` // SHA256(SessionID)
 }
 
 // ClusterSignKey stores the cluster-wide token signing key information.
