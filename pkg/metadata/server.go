@@ -1969,14 +1969,6 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 	if inode.OwnerID == user.ID {
 		return nil
 	}
-	// Group Ownership?
-	if strings.HasPrefix(inode.OwnerID, ":") {
-		gid := strings.TrimPrefix(inode.OwnerID, ":")
-		inGroup, _ := s.fsm.IsUserInGroup(user.ID, gid)
-		if inGroup {
-			return nil
-		}
-	}
 	// World Read
 	if (inode.Mode & 0004) != 0 {
 		return nil
@@ -2375,14 +2367,6 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 
 	if inode.OwnerID == user.ID {
 		return nil
-	}
-	// Group Ownership?
-	if strings.HasPrefix(inode.OwnerID, ":") {
-		gid := strings.TrimPrefix(inode.OwnerID, ":")
-		inGroup, _ := s.fsm.IsUserInGroup(user.ID, gid)
-		if inGroup {
-			return nil
-		}
 	}
 	// World Write
 	if (inode.Mode & 0002) != 0 {

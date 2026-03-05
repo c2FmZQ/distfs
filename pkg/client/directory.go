@@ -904,15 +904,9 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 
 	groupID := parentInode.GroupID
 	if opts.OwnerID != "" && opts.OwnerID != c.userID {
-		if strings.HasPrefix(opts.OwnerID, ":") {
-			groupID = strings.TrimPrefix(opts.OwnerID, ":")
-		} else {
-			// Provisioning for another user: clear the parent's group to avoid lockbox errors
-			// if the new user isn't a member of the parent's group.
-			groupID = ""
-		}
-	} else if strings.HasPrefix(opts.OwnerID, ":") {
-		groupID = strings.TrimPrefix(opts.OwnerID, ":")
+		// Provisioning for another user: clear the parent's group to avoid lockbox errors
+		// if the new user isn't a member of the parent's group.
+		groupID = ""
 	}
 
 	_, _, err = c.addEntryInternal(ctx, parentInode.ID, parentKey, name, iType, r, size, symlinkTarget, mode, groupID, 0, 0, opts)
@@ -935,30 +929,16 @@ func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, own
 			lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
 		}
 	} else {
-		if strings.HasPrefix(effectiveOwner, ":") {
-			// Group Owner
-			gid := strings.TrimPrefix(effectiveOwner, ":")
-			group, err := c.GetGroup(ctx, gid)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch group owner %s: %w", gid, err)
-			}
-			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-			if err != nil {
-				return nil, fmt.Errorf("failed to unmarshal group enc key: %w", err)
-			}
-			lb.AddRecipient(gid, gpk, key)
-		} else {
-			// User Owner
-			user, err := c.GetUser(ctx, effectiveOwner)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch user owner %s: %w", effectiveOwner, err)
-			}
-			upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-			if err != nil {
-				return nil, fmt.Errorf("failed to unmarshal user enc key: %w", err)
-			}
-			lb.AddRecipient(effectiveOwner, upk, key)
+		// User Owner
+		user, err := c.GetUser(ctx, effectiveOwner)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch user owner %s: %w", effectiveOwner, err)
 		}
+		upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal user enc key: %w", err)
+		}
+		lb.AddRecipient(effectiveOwner, upk, key)
 	}
 
 	if (mode & 0004) != 0 {
