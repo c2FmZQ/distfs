@@ -893,3 +893,46 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 46.5: Verification & Tests**
     *   **Action:** Add unit tests for signature enforcement and unique `ChunkID` generation for identical data in different files.
     *   **Action:** Ensure all E2E tests pass.
+
+---
+
+## Phase 47: Architectural Cleanup & Verification Hardening
+**Goal:** Simplify the system by removing obsolete commands and strictly enforcing client-side and server-side integrity via public signer identities and immutable ownership.
+
+*   **Step 47.1: Struct & Schema Refactoring**
+    *   **Action:** Export `SignerID` in `pkg/metadata/Inode` struct and update `ManifestHash` to include it.
+    *   **Action:** Remove `AuthorizedSigners` from `Inode`, `InodeClientBlob`, and all validation logic.
+    *   **Action:** Remove the redundant `Lockbox` field from `LeaseRequest` (placeholders now use full Inode structs).
+*   **Step 47.2: FSM Command & Enforcement Cleanup**
+    *   **Action:** Remove `CmdAdminChown` and `CmdAdminChmod` Raft commands and their handlers from `pkg/metadata/fsm.go`.
+    *   **Action:** Update `executeAcquireLeases` to strictly require client-signed placeholders for new Inode IDs.
+    *   **Action:** Update `executeUpdateInode` to enforce **OwnerID Immutability**: reject any update that attempts to modify an existing inode's `OwnerID`.
+    *   **Action:** Update `executeUpdateInode` to enforce **GroupID Authorization**: if an update modifies `GroupID`, verify that the `SignerID` (the user who signed the mutation) is an authorized member of the target group.
+*   **Step 47.3: Strict Client-Side Verification**
+    *   **Action:** Update `VerifyInode` in `pkg/client/client.go` to enforce:
+        1.  `SignerID` is present.
+        2.  `UserSig` is valid for `SignerID`.
+        3.  `GroupSig` (if present) is valid for `GroupID`.
+        4.  If `GroupSig` is absent AND `SignerID != OwnerID`: Inode must be an empty directory (Admin bypass for `mkdir --owner`).
+*   **Step 47.4: Administrative API & CLI Updates**
+    *   **Action:** Remove `admin-chown` and `admin-chmod` commands from the CLI and `AdminClient` interface.
+    *   **Action:** Add `--owner` flag to `distfs mkdir`, allowing admins to initialize directories for other users.
+    *   **Action:** Standardize redaction in `AdminListUsers`, `AdminListGroups`, and `AdminListNodes`.
+*   **Step 47.5: Verification & Regression Testing**
+    *   **Action:** Implement automated tests to verify the following **Security Assertions**:
+        1.  **[FSM] Owner Immutability:** `CmdUpdateInode` MUST fail if it attempts to change the `OwnerID` of an existing inode.
+        2.  **[FSM] Group Authorization:** `CmdUpdateInode` MUST fail if it sets/changes `GroupID` and the signer is not a member of that group.
+        3.  **[FSM] Admin Creation Bypass:** `CmdCreateInode` MUST fail if `OwnerID != SignerID` unless the signer is a cluster admin.
+        4.  **[Client] Mandatory Signer:** `VerifyInode` MUST reject any inode without a `SignerID`.
+        5.  **[Client] User Signature:** `VerifyInode` MUST reject any inode where `UserSig` does not match the `SignerID`'s public key.
+        6.  **[Client] Group Signature:** `VerifyInode` MUST reject any inode with a `GroupID` that lacks a valid `GroupSig` (unless the signer is an admin creating an empty directory).
+        7.  **[Client] Authority Check:** `VerifyInode` MUST reject any inode where `SignerID != OwnerID` AND `GroupSig` is absent, UNLESS the inode is an empty directory.
+*   **Step 47.6: Security Verification Tests**
+    *   **Action:** Add the following targeted unit tests:
+        1.  **FSM: `TestFSM_OwnerImmutability`**: Verify `executeUpdateInode` rejects owner changes.
+        2.  **FSM: `TestFSM_GroupAuthorization`**: Verify `executeUpdateInode` rejects group assignment if the signer is not a member.
+        3.  **FSM: `TestFSM_AdminCreation`**: Verify `executeCreateInode` allows admin to set any `OwnerID` but restricts regular users to their own ID.
+        4.  **Client: `TestVerifyInode_Signatures`**: Comprehensive test for `SignerID` presence, `UserSig` validity, and `GroupSig` requirements.
+        5.  **Client: `TestVerifyInode_AdminBypass`**: Verify that `SignerID != OwnerID` is accepted ONLY for empty directories.
+    *   **Action:** Update all existing tests to align with the new verification rules.
+    *   **Action:** Run `go test -v ./...` and `./scripts/run-tests.sh`.

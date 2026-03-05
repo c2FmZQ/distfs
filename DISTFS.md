@@ -88,9 +88,9 @@ To maximize user privacy and minimize the server's knowledge of the filesystem c
     *   **Inode:** Encrypted with the **File Key**.
     *   **Group:** Encrypted with the **Group Encryption Key**.
 3.  **Encapsulated Fields:**
-    *   **Inodes:** Filenames (`Name`), symbolic link targets, modification times (`MTime`), small file content (`InlineData`), POSIX ownership (`UID`/`GID`), and the interaction history (`SignerID`, `AuthorizedSigners`).
+    *   **Inodes:** Filenames (`Name`), symbolic link targets, modification times (`MTime`), small file content (`InlineData`), and POSIX ownership (`UID`/`GID`).
     *   **Groups:** Human-readable group names.
-4.  **Integrity:** The `ClientBlob` is included in the cryptographic hash signed by the client. The server verifies the signature to ensure the blob hasn't been tampered with, even though it cannot read the content.
+4.  **Integrity & Attribution:** The `SignerID` is stored in the public `Inode` struct to allow all readers to verify the `ManifestHash` integrity **before** attempting decryption. The `ClientBlob` is included in this signed hash.
 
 ### 3.6 Multi-Device Key Synchronization (Zero-Knowledge Sync)
 To support seamless multi-device usage without compromising the "Trust No One" model, DistFS provides a unified onboarding flow that combines identity initialization, registration, and cloud-backed recovery.
@@ -145,9 +145,10 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 ### 4.2 Metadata Integrity & Attribution
 DistFS ensures the integrity of file metadata (chunk manifests) using **Dual-Signature Authorization**. This prevents a compromised Metadata Server from silently modifying file contents or rolling back to old versions.
 
-*   **Individual Attribution (UserSig):** Every manifest update is signed by the writer's PQC Identity Key (ML-DSA). This provides non-repudiable proof of *who* modified the file.
-*   **Group Authorization (GroupSig):** If a file is modified in a group context, it is also signed with the **Group Signing Key**. This proves the writer was an authorized member of the group at the time of the write.
-*   **Verification:** Readers verify both signatures before processing data chunks. If the signatures do not match the current manifest, the client rejects the file as tampered.
+*   **Signer Attribution:** Every manifest update includes a public `SignerID` and a corresponding `UserSig` signed by that user's PQC Identity Key (ML-DSA). This allows any reader to verify the integrity of the manifest before attempting decryption.
+*   **Ownership Immutability:** To prevent "Quota Hijacking" and maintain non-repudiable attribution, the `OwnerID` of an inode is **immutable** once the inode is created. Ownership cannot be transferred between users.
+*   **Group Authorization (GroupSig):** If a file is assigned to a group, it must be signed with the **Group Signing Key**. Furthermore, the FSM enforces that any update changing the `GroupID` or modifying a group-owned file must be signed by a user who is an authorized member of that group.
+*   **Verification:** Readers verify all signatures against the manifest hash. If the signatures do not match, or if the `SignerID` lacks the required authority (Owner or Group Member), the client rejects the file as tampered.
 
 ### 4.3 Permissions Model
 DistFS follows a strict subset of POSIX permissions designed for Zero-Knowledge security:
@@ -206,11 +207,11 @@ DistFS enforces multi-tenant resource limits at both the User and Group levels t
 1.  **Quota Metrics:** The system tracks two primary metrics:
     *   **Inodes:** The total number of files and directories owned by the entity.
     *   **Bytes:** The total logical size of all data chunks referenced by the entity's inodes.
-2.  **Enforcement Hierarchy (Debtor Resolution):** When an operation (e.g., file creation, write, or ownership transfer) occurs, the server identifies the primary debtor based on the target Inode's `GroupID`:
+2.  **Enforcement Hierarchy (Debtor Resolution):** When an operation (e.g., file creation, write, or group assignment) occurs, the server identifies the primary debtor based on the target Inode's `GroupID`:
     *   **Group Debt:** If the Inode belongs to a group with **`QuotaEnabled: true`**, the Group is charged exclusively. The Group's quota is enforced, and the User's personal quota is ignored.
     *   **User Debt (Fallback):** If the group has **`QuotaEnabled: false`** (or the Inode has no `GroupID`), the individual `OwnerID` (User) is charged. 
-3.  **Security & Loopholes:** The `QuotaEnabled` flag is immutable and set at creation. Users cannot create a group and then enable quota themselves to bypass personal limits; only a cluster Administrator can grant or adjust a Group's quota capacity once the flag is enabled.
-4.  **Atomic Accounting:** Usage counters are updated atomically within the same Raft transaction as the metadata mutation. Ownership transfers (chown/chgrp) automatically decrement usage from the source debtor and increment it for the target, maintaining global consistency.
+3.  **Security & Immutability:** The `QuotaEnabled` flag and the Inode `OwnerID` are immutable. This prevents users from maliciously shifting storage costs to other users. Assignment to a group is only permitted if the signer is a member of that group.
+4.  **Atomic Accounting:** Usage counters are updated atomically within the same Raft transaction as the metadata mutation.
 4.  **Admin Management:** Resource limits are managed by cluster administrators via the Admin CLI. Limits can be updated dynamically without affecting existing data availability.
 
 ### 4.9 Multiple Roots & Client Chroot
@@ -376,11 +377,9 @@ DistFS provides a comprehensive administrative interface for cluster operators. 
     *   **User Management:** Monitor anonymized usage (`TotalBytes`, `InodeCount`) and adjust quotas.
     *   **Group Management:** Monitor group usage and manage group resource quotas.
     *   **Node Operations:** Monitor storage node health, join new nodes, or decommission existing ones.
-    *   **Metadata Overrides (Namespace Management):**
-        *   **admin-chown:** Reassign ownership of a path to a different user (by email). 
-            *   **LIMITATION:** This modifies the UID/GID for quota and namespace purposes. It **DOES NOT** grant the new owner access to encrypted file data, as the administrator cannot re-key the Lockbox.
-        *   **admin-chmod:** Modify permission bits of any path to resolve lockouts or reclaim names.
-            *   **LIMITATION:** This only modifies metadata visibility. It **DOES NOT** grant access to encrypted data if the requester is not already a recipient in the Lockbox.
+    *   **Administrative Namespace Setup:**
+        *   **mkdir --owner:** Admins can create new empty directories owned by any user. This allows administrators to set up user home directories or shared project spaces without having access to the users' private keys or file content.
+        *   **Redaction:** Administrative listing APIs (Users, Groups, Nodes) return redacted records, stripping private keys and other sensitive material to maintain the Zero-Knowledge boundary.
     *   **Distributed Lock Visibility:** Real-time monitoring of active Inode leases and lock ownership to diagnose contention.
     *   **System Metrics:** Visualize cluster performance, including Raft commit latency, I/O throughput, and disk utilization across nodes.
     *   **Blind Lookup:** Resolve a plaintext email to its HMAC Hash to locate specific user records.
