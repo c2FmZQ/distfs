@@ -7,6 +7,7 @@ import (
 	"iter"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -812,4 +813,138 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Root inode %s initialized successfully.\n", id)
+}
+
+func cmdAdminAudit(ctx context.Context, args []string) {
+	c := loadClient()
+
+	fmt.Println("=== DISTFS SYSTEM AUDIT & STRUCTURAL INTEGRITY ===")
+	fmt.Println("Running linearizable leader scan...")
+	fmt.Println("")
+
+	roots, orphans, reports, users, groups, nodes, gc, allInodes, err := c.AdminAuditForest(ctx)
+	if err != nil {
+		log.Fatalf("Audit failed: %v", err)
+	}
+
+	fmt.Println("TREE FOREST:")
+	visited := make(map[string]bool)
+
+	var printTree func(id string, nameHMAC string, indent string, isLast bool)
+	printTree = func(id string, nameHMAC string, indent string, isLast bool) {
+		inode, ok := allInodes[id]
+		if !ok {
+			fmt.Printf("%s%s [MISSING INODE]\n", indent, id)
+			return
+		}
+
+		marker := "├── "
+		if isLast {
+			marker = "└── "
+		}
+
+		display := nameHMAC
+		if display == "" {
+			display = inode.ID[:8]
+		}
+
+		info := fmt.Sprintf("[%s] [Owner: %s] [Mode: %04o]", inode.ID[:8], inode.OwnerID[:8], inode.Mode)
+		if inode.Type == metadata.DirType {
+			fmt.Printf("%s%s%s/ %s\n", indent, marker, display, info)
+		} else {
+			fmt.Printf("%s%s%s %s [Size: %d]\n", indent, marker, display, info, inode.Size)
+		}
+
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+
+		if inode.Type == metadata.DirType && len(inode.Children) > 0 {
+			newIndent := indent + "│   "
+			if isLast {
+				newIndent = indent + "    "
+			}
+
+			// Sort children by HMAC for deterministic output
+			hmacs := make([]string, 0, len(inode.Children))
+			for h := range inode.Children {
+				hmacs = append(hmacs, h)
+			}
+			sort.Strings(hmacs)
+
+			for i, h := range hmacs {
+				childID := inode.Children[h]
+				printTree(childID, h, newIndent, i == len(hmacs)-1)
+			}
+		}
+	}
+
+	for _, root := range roots {
+		title := "Implicit Root"
+		if root.ID == metadata.RootID {
+			title = "Canonical Root"
+		}
+		fmt.Printf("%s: %s\n", title, root.ID)
+		printTree(root.ID, "", "", true)
+		fmt.Println("")
+	}
+
+	if len(orphans) > 0 {
+		fmt.Println("ORPHANED / DISCONNECTED INODES:")
+		for _, o := range orphans {
+			fmt.Printf("! %s [Owner: %s] [Size: %d] [Links: %d]\n", o.ID, o.OwnerID[:8], o.Size, len(o.Links))
+		}
+		fmt.Println("")
+	}
+
+	fmt.Println("ACTOR REGISTRY:")
+	for _, u := range users {
+		adminStr := ""
+		if u.IsAdmin {
+			adminStr = " [ADMIN]"
+		}
+		fmt.Printf("User: %s [UID: %d] [Usage: %d files, %d bytes] [Quota: %d/%d]%s\n",
+			u.ID[:16], u.UID, u.Usage.InodeCount, u.Usage.TotalBytes, u.Quota.MaxInodes, u.Quota.MaxBytes, adminStr)
+	}
+	for _, g := range groups {
+		fmt.Printf("Group: %s [GID: %d] [Usage: %d files, %d bytes] [Quota: %d/%d] [Members: %d]\n",
+			g.ID[:16], g.GID, g.Usage.InodeCount, g.Usage.TotalBytes, g.Quota.MaxInodes, g.Quota.MaxBytes, g.MemberCount)
+	}
+	fmt.Println("")
+
+	fmt.Println("INFRASTRUCTURE:")
+	for _, n := range nodes {
+		fmt.Printf("Node: %s [%s] [Status: %s] [Storage: %d/%d MB]\n",
+			n.ID, n.Address, n.Status, n.Used/(1024*1024), n.Capacity/(1024*1024))
+	}
+	fmt.Println("")
+
+	fmt.Println("LIFECYCLE:")
+	fmt.Printf("GC Queue Depth: %d chunks pending deletion\n", len(gc))
+	fmt.Println("")
+
+	if len(reports) > 0 {
+		fmt.Println("INTEGRITY VIOLATIONS DETECTED:")
+		for _, r := range reports {
+			fmt.Printf("FAIL: [%s] Target: %s - %s\n", r.Type, r.TargetID, r.Message)
+		}
+	} else {
+		fmt.Println("INTEGRITY CHECK: PASS")
+	}
+	fmt.Println("")
+}
+
+func findRedactedInode(roots, orphans []*metadata.RedactedInode, id string) (*metadata.RedactedInode, bool) {
+	for _, r := range roots {
+		if r.ID == id {
+			return r, true
+		}
+	}
+	for _, o := range orphans {
+		if o.ID == id {
+			return o, true
+		}
+	}
+	return nil, false
 }

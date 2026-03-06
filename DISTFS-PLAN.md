@@ -825,11 +825,6 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Add FSM unit tests for structural inconsistency rejection.
     *   **Action:** Rerun `TestAddEntryRegression` and `TestFUSE_POSIXCompliance` to verify metadata stability.
 
-### Phase 43 Testing Strategy:
-1.  **Inconsistent Batch Test:** Attempt to add a file to a directory without incrementing the file's `NLink` in the same batch; verify the server rejects the batch.
-2.  **Orphaned Entry Test:** Attempt to create an Inode without linking it in any parent; verify rejection (except for Root).
-3.  **Non-Empty Rmdir Test:** Verify `os.Remove` fails on a directory containing files.
-
 ---
 
 ## Phase 44: Hardware Security (TPM Integration)
@@ -848,10 +843,6 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 44.5: Testing & Verification**
     *   **Action:** Verify the standard (non-TPM) build path works unmodified.
     *   **Action:** Manually test node bootstrap and client mounting on a TPM-enabled instance.
-
-### Phase 44 Testing Strategy:
-1.  **Backward Compatibility:** Run all existing E2E tests without `-use-tpm` to ensure `ed25519` defaults remain fully functional.
-2.  **TPM Interface Integrity:** Ensure unit tests for `node_identity.go` pass when providing a mock or interface-compliant TPM key struct.
 
 ---
 
@@ -936,3 +927,36 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
         5.  **Client: `TestVerifyInode_AdminBypass`**: Verify that `SignerID != OwnerID` is accepted ONLY for empty directories.
     *   **Action:** Update all existing tests to align with the new verification rules.
     *   **Action:** Run `go test -v ./...` and `./scripts/run-tests.sh`.
+
+---
+
+## Phase 48: System Audit & Structural Integrity
+**Goal:** Implement a comprehensive, privacy-safe audit command to visualize all filesystem trees, identify orphans, and validate the consistency of all internal metadata, indices, and infrastructure.
+
+*   **Step 48.1: Define Redacted Schema & Audit Records**
+    *   **Action:** Define `RedactedInode`, `RedactedUser`, `RedactedGroup`, and `AuditRecord` (enum-style union) in `pkg/metadata/types.go`.
+    *   **Action:** Include `InconsistencyReport` record type to flag server-side validation failures.
+    *   **Action:** Ensure `RedactedInode` captures `Links`, `Children`, `RecipientIDs` (User/Group typed), `BlobSize`, and `ChunkPageCount`.
+*   **Step 48.2: Streaming Validation Endpoint (Server)**
+    *   **Action:** Implement `handleAudit` in `pkg/metadata/server.go` using **NDJSON streaming** from a linearizable leader snapshot.
+    *   **Action:** Perform **Server-Side Integrity Checks** during the scan:
+        *   **Link Symmetry:** Cross-verify `Parent.Children` against `Child.Links`.
+        *   **Index Alignment:** Validate `uids`/`gids` buckets match primary `User`/`Group` records.
+        *   **Membership Health:** Verify `user_memberships` and `owner_groups` indices match actual group state.
+        *   **Accounting:** Verify if logical `Inode` sizes for an owner match the `Usage` counters in the `User` record.
+    *   **Action:** Stream redacted records for: `inodes`, `users`, `groups`, `nodes`, `garbage_collection`, `unlinked_inodes`, and `leases`.
+*   **Step 48.3: Client Library Forest Reconstruction**
+    *   **Action:** Add `AdminAudit(ctx context.Context, handler func(AuditRecord) error) error` to `pkg/client/client.go`.
+    *   **Action:** Implement "Forest" building with **Cycle Detection** and explicit **Canonical Root** (ID based) vs. **Implicit Root** (Link based) categorization.
+    *   **Action:** Track visited nodes to identify and report disconnected **Orphans**.
+*   **Step 48.4: CLI Visualization & Health Reporting**
+    *   **Action:** Add `admin-audit` command to `cmd/distfs/main.go`.
+    *   **Action:** Implement hierarchical ASCII tree output for the forest.
+    *   **Action:** Provide summary sections:
+        *   **Infrastructure:** Storage node health and public key fingerprints.
+        *   **Lifecycle:** GC queue depth and stale Unlinked Inodes (leases expired but not reaped).
+        *   **Integrity:** Pass/Fail status for all index and symmetry checks (highlight failures in red).
+*   **Step 48.5: Testing & Validation**
+    *   **Action:** **Unit Test:** Verify `handleAudit` correctly streams NDJSON and redacts all key material.
+    *   **Action:** **Corruption Simulation Test:** Manually inject an asymmetric link into BoltDB and verify the audit correctly identifies and reports it as an inconsistency.
+    *   **Action:** **Forest Test:** Verify tree reconstruction with deep nesting, hardlinks, and circular references.

@@ -42,6 +42,7 @@ var (
 	useTPM      = flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
 	adminFlag   = flag.Bool("admin", false, "Enable admin bypass mode")
 	disableDoH  = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
+	rootID      = flag.String("root", "", "Specify target root directory ID")
 )
 
 func setupTPMHasher() {
@@ -144,6 +145,8 @@ func main() {
 		cmdAdminGroupQuota(ctx, args)
 	case "admin-promote":
 		cmdAdminPromote(ctx, args)
+	case "admin-audit":
+		cmdAdminAudit(ctx, args)
 	case "admin-create-root":
 		cmdAdminCreateRoot(ctx, args)
 	case "whoami":
@@ -198,6 +201,7 @@ func usage() {
 	fmt.Println("  admin-remove <id>               Remove a node from the cluster (by node ID)")
 	fmt.Println("  admin-user-quota <email> <max_bytes> <max_inodes> Set user quota (Admin only)")
 	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
+	fmt.Println("  admin-audit                     Run a comprehensive system integrity and structural audit")
 	fmt.Println("  admin-create-root [id]          Initialize a new root inode (Admin only, defaults to standard root)")
 	fmt.Println("  whoami                          Display your user ID")
 	fmt.Println("  dump-inodes [path|id]           Recursively dump inode metadata for debugging")
@@ -259,12 +263,17 @@ func loadClient() *client.Client {
 		log.Fatalf("failed to unmarshal server key: %v", err)
 	}
 
-	return c.WithIdentity(conf.UserID, dk).
+	c = c.WithIdentity(conf.UserID, dk).
 		WithSignKey(sk).
 		WithServerKey(svKey).
 		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
 		WithAdmin(*adminFlag).
 		WithDisableDoH(*disableDoH)
+
+	if *rootID != "" {
+		c = c.WithRootID(*rootID)
+	}
+	return c
 }
 
 func saveClient(c *client.Client) {

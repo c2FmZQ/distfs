@@ -25,9 +25,10 @@ COPY scripts/test-contact-exchange.sh /bin/test-contact-exchange.sh
 COPY scripts/test-dump-inodes.sh /bin/test-dump-inodes.sh
 COPY scripts/test-quota-cmd.sh /bin/test-quota-cmd.sh
 COPY scripts/test-ls-e2e.sh /bin/test-ls-e2e.sh
+COPY scripts/test-audit.sh /bin/test-audit.sh
 COPY scripts/benchmark.sh /bin/benchmark.sh
 COPY scripts/test-fuse-load.sh /bin/test-fuse-load.sh
 COPY scripts/test-all-e2e.sh /bin/test-all-e2e.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-group-quota.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-contact-exchange.sh /bin/test-dump-inodes.sh /bin/test-quota-cmd.sh /bin/test-ls-e2e.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-group-quota.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-contact-exchange.sh /bin/test-dump-inodes.sh /bin/test-quota-cmd.sh /bin/test-ls-e2e.sh /bin/test-audit.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
 
 ENTRYPOINT ["/bin/storage-node"]

@@ -707,3 +707,81 @@ type SetGroupQuotaRequest struct {
 	MaxBytes  *uint64 `json:"max_bytes,omitempty"`
 	MaxInodes *uint64 `json:"max_inodes,omitempty"`
 }
+
+// Phase 48: Audit Types
+
+// RedactedInode represents a version of an Inode safe for cluster-wide audit.
+// It contains no cryptographic keys or private plaintext blobs.
+type RedactedInode struct {
+	ID                 string               `json:"id"`
+	Links              map[string]bool      `json:"links"`
+	Type               InodeType            `json:"type"`
+	OwnerID            string               `json:"owner_id"`
+	GroupID            string               `json:"group_id"`
+	Mode               uint32               `json:"mode"`
+	Size               uint64               `json:"size"`
+	CTime              int64                `json:"ctime"`
+	NLink              uint32               `json:"nlink"`
+	Children           map[string]string    `json:"children,omitempty"`
+	Version            uint64               `json:"version"`
+	IsSystem           bool                 `json:"is_system"`
+	Leases             map[string]LeaseInfo `json:"leases,omitempty"`
+	Unlinked           bool                 `json:"unlinked,omitempty"`
+	SignerID           string               `json:"signer_id"`
+	BlobSize           int                  `json:"blob_size"`
+	ChunkPageCount     int                  `json:"chunk_page_count"`
+	RecipientIDs       []string             `json:"recipient_ids"` // List of User/Group IDs in lockbox
+	RegistryRecipients []string             `json:"registry_recipients,omitempty"`
+}
+
+// RedactedUser represents a user record safe for cluster-wide audit.
+type RedactedUser struct {
+	ID      string    `json:"id"`
+	UID     uint32    `json:"uid"`
+	Usage   UserUsage `json:"usage"`
+	Quota   UserQuota `json:"quota"`
+	IsAdmin bool      `json:"is_admin"`
+}
+
+// RedactedGroup represents a group record safe for cluster-wide audit.
+type RedactedGroup struct {
+	ID           string    `json:"id"`
+	GID          uint32    `json:"gid"`
+	OwnerID      string    `json:"owner_id"`
+	Usage        UserUsage `json:"usage"`
+	Quota        UserQuota `json:"quota"`
+	QuotaEnabled bool      `json:"quota_enabled"`
+	MemberCount  int       `json:"member_count"`
+	IsSystem     bool      `json:"is_system"`
+}
+
+// InconsistencyReport flags a structural or logical corruption found during audit.
+type InconsistencyReport struct {
+	Type     string `json:"type"` // e.g. "LINK_ASYMMETRY", "QUOTA_MISMATCH"
+	TargetID string `json:"target_id"`
+	Message  string `json:"message"`
+}
+
+// AuditRecordType defines the type of record in the streaming audit log.
+type AuditRecordType string
+
+const (
+	AuditInode         AuditRecordType = "inode"
+	AuditUser          AuditRecordType = "user"
+	AuditGroup         AuditRecordType = "group"
+	AuditNode          AuditRecordType = "node"
+	AuditLease         AuditRecordType = "lease"
+	AuditGC            AuditRecordType = "gc"
+	AuditInconsistency AuditRecordType = "inconsistency"
+)
+
+// AuditRecord is a single entry in the NDJSON audit stream.
+type AuditRecord struct {
+	Type    AuditRecordType      `json:"type"`
+	Inode   *RedactedInode       `json:"inode,omitempty"`
+	User    *RedactedUser        `json:"user,omitempty"`
+	Group   *RedactedGroup       `json:"group,omitempty"`
+	Node    *Node                `json:"node,omitempty"`
+	Report  *InconsistencyReport `json:"report,omitempty"`
+	GCChunk string               `json:"gc_chunk,omitempty"`
+}

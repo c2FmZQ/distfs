@@ -2550,6 +2550,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 	case path == "promote" && r.Method == http.MethodPost:
 		s.handleAdminPromote(w, r)
+	case path == "audit" && r.Method == http.MethodGet:
+		s.handleAudit(w, r)
 	case path == "quota/user" && r.Method == http.MethodPost:
 		s.handleSetUserQuota(w, r)
 	case path == "quota/group" && r.Method == http.MethodPost:
@@ -2693,6 +2695,277 @@ func (s *Server) handleClusterGroups(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-DistFS-Next-Cursor", nextCursor)
 	}
 	s.writeJSON(w, r, groups, http.StatusOK)
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	// 1. Authorization
+	user, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || user == nil || !s.fsm.IsAdmin(user.ID) {
+		s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.WriteHeader(http.StatusOK)
+	encoder := json.NewEncoder(w)
+
+	// 2. Perform Audit in a single View transaction
+	s.fsm.db.View(func(tx *bolt.Tx) error {
+		// A. Nodes
+		s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil {
+				// Redact keys
+				n.PublicKey = nil
+				n.SignKey = nil
+				encoder.Encode(AuditRecord{Type: AuditNode, Node: &n})
+			}
+			return nil
+		})
+
+		// B. Users & Quota Validation
+		userUsage := make(map[string]UserUsage)
+		s.fsm.ForEach(tx, []byte("users"), func(k, v []byte) error {
+			var u User
+			if err := json.Unmarshal(v, &u); err == nil {
+				// Index Check
+				uidKey := uint32ToBytes(u.UID)
+				mappedID, _ := s.fsm.Get(tx, []byte("uids"), uidKey)
+				if string(mappedID) != u.ID {
+					encoder.Encode(AuditRecord{
+						Type: AuditInconsistency,
+						Report: &InconsistencyReport{
+							Type:     "INDEX_MISMATCH",
+							TargetID: u.ID,
+							Message:  fmt.Sprintf("UID %d maps to %s, expected %s", u.UID, string(mappedID), u.ID),
+						},
+					})
+				}
+
+				encoder.Encode(AuditRecord{
+					Type: AuditUser,
+					User: &RedactedUser{
+						ID:      u.ID,
+						UID:     u.UID,
+						Usage:   u.Usage,
+						Quota:   u.Quota,
+						IsAdmin: s.fsm.IsAdmin(u.ID),
+					},
+				})
+			}
+			return nil
+		})
+
+		// C. Groups
+		s.fsm.ForEach(tx, []byte("groups"), func(k, v []byte) error {
+			var g Group
+			if err := json.Unmarshal(v, &g); err == nil {
+				// Index Check
+				gidKey := uint32ToBytes(g.GID)
+				mappedID, _ := s.fsm.Get(tx, []byte("gids"), gidKey)
+				if string(mappedID) != g.ID {
+					encoder.Encode(AuditRecord{
+						Type: AuditInconsistency,
+						Report: &InconsistencyReport{
+							Type:     "INDEX_MISMATCH",
+							TargetID: g.ID,
+							Message:  fmt.Sprintf("GID %d maps to %s, expected %s", g.GID, string(mappedID), g.ID),
+						},
+					})
+				}
+
+				encoder.Encode(AuditRecord{
+					Type: AuditGroup,
+					Group: &RedactedGroup{
+						ID:           g.ID,
+						GID:          g.GID,
+						OwnerID:      g.OwnerID,
+						Usage:        g.Usage,
+						Quota:        g.Quota,
+						QuotaEnabled: g.QuotaEnabled,
+						MemberCount:  len(g.Members),
+						IsSystem:     g.IsSystem,
+					},
+				})
+			}
+			return nil
+		})
+
+		// D. Inodes & Link Symmetry
+		groupUsage := make(map[string]UserUsage)
+		s.fsm.ForEach(tx, []byte("inodes"), func(k, v []byte) error {
+			var i Inode
+			if err := json.Unmarshal(v, &i); err == nil {
+				// Accounting: Accumulate usage for validation
+				targetUser := i.OwnerID
+				targetGroup := i.GroupID
+
+				isGroupBilled := false
+				if targetGroup != "" {
+					gPlain, _ := s.fsm.Get(tx, []byte("groups"), []byte(targetGroup))
+					if gPlain != nil {
+						var g Group
+						json.Unmarshal(gPlain, &g)
+						if g.QuotaEnabled {
+							isGroupBilled = true
+						}
+					}
+				}
+
+				if isGroupBilled {
+					curr := groupUsage[targetGroup]
+					curr.InodeCount++
+					curr.TotalBytes += int64(i.Size)
+					groupUsage[targetGroup] = curr
+				} else if targetUser != "" {
+					curr := userUsage[targetUser]
+					curr.InodeCount++
+					curr.TotalBytes += int64(i.Size)
+					userUsage[targetUser] = curr
+				}
+
+				// Redaction
+				recipients := make([]string, 0, len(i.Lockbox))
+				for rid := range i.Lockbox {
+					recipients = append(recipients, rid)
+				}
+
+				ri := &RedactedInode{
+					ID:             i.ID,
+					Links:          i.Links,
+					Type:           i.Type,
+					OwnerID:        i.OwnerID,
+					GroupID:        i.GroupID,
+					Mode:           i.Mode,
+					Size:           i.Size,
+					CTime:          i.CTime,
+					NLink:          i.NLink,
+					Children:       i.Children,
+					Version:        i.Version,
+					IsSystem:       i.IsSystem,
+					Leases:         i.Leases,
+					Unlinked:       i.Unlinked,
+					SignerID:       i.SignerID,
+					BlobSize:       len(i.ClientBlob),
+					ChunkPageCount: len(i.ChunkPages),
+					RecipientIDs:   recipients,
+				}
+
+				// Structural Symmetry Check
+				if i.Type == DirType {
+					for nameHMAC, childID := range i.Children {
+						childPlain, _ := s.fsm.Get(tx, []byte("inodes"), []byte(childID))
+						if childPlain == nil {
+							encoder.Encode(AuditRecord{
+								Type: AuditInconsistency,
+								Report: &InconsistencyReport{
+									Type:     "DANGLING_CHILD",
+									TargetID: i.ID,
+									Message:  fmt.Sprintf("child %s (%s) not found", nameHMAC, childID),
+								},
+							})
+						} else {
+							var child Inode
+							if err := json.Unmarshal(childPlain, &child); err != nil {
+								encoder.Encode(AuditRecord{
+									Type: AuditInconsistency,
+									Report: &InconsistencyReport{
+										Type:     "CORRUPT_METADATA",
+										TargetID: childID,
+										Message:  fmt.Sprintf("failed to decode child inode: %v", err),
+									},
+								})
+								continue
+							}
+							expectedLink := i.ID + ":" + nameHMAC
+							if !child.Links[expectedLink] {
+								encoder.Encode(AuditRecord{
+									Type: AuditInconsistency,
+									Report: &InconsistencyReport{
+										Type:     "ASYMMETRIC_LINK",
+										TargetID: childID,
+										Message:  fmt.Sprintf("child missing link back to parent %s", i.ID),
+									},
+								})
+							}
+						}
+					}
+				}
+
+				encoder.Encode(AuditRecord{Type: AuditInode, Inode: ri})
+			}
+			return nil
+		})
+
+		// E. GC & Lifecycle
+		s.fsm.ForEach(tx, []byte("garbage_collection"), func(k, v []byte) error {
+			encoder.Encode(AuditRecord{Type: AuditGC, GCChunk: string(k)})
+			return nil
+		})
+
+		s.fsm.ForEach(tx, []byte("unlinked_inodes"), func(k, v []byte) error {
+			id := string(k)
+			encoder.Encode(AuditRecord{Type: AuditLease, GCChunk: id}) // Reuse field
+			return nil
+		})
+
+		for uid, calc := range userUsage {
+			uPlain, _ := s.fsm.Get(tx, []byte("users"), []byte(uid))
+			if uPlain != nil {
+				var u User
+				if err := json.Unmarshal(uPlain, &u); err != nil {
+					encoder.Encode(AuditRecord{
+						Type: AuditInconsistency,
+						Report: &InconsistencyReport{
+							Type:     "CORRUPT_METADATA",
+							TargetID: uid,
+							Message:  fmt.Sprintf("failed to decode user record: %v", err),
+						},
+					})
+					continue
+				}
+				if u.Usage.InodeCount != calc.InodeCount || u.Usage.TotalBytes != calc.TotalBytes {
+					encoder.Encode(AuditRecord{
+						Type: AuditInconsistency,
+						Report: &InconsistencyReport{
+							Type:     "USER_QUOTA_MISMATCH",
+							TargetID: uid,
+							Message:  fmt.Sprintf("DB: {Inodes:%d, Bytes:%d}, Calculated: {Inodes:%d, Bytes:%d}", u.Usage.InodeCount, u.Usage.TotalBytes, calc.InodeCount, calc.TotalBytes),
+						},
+					})
+				}
+			}
+		}
+		for gid, calc := range groupUsage {
+			gPlain, _ := s.fsm.Get(tx, []byte("groups"), []byte(gid))
+			if gPlain != nil {
+				var g Group
+				if err := json.Unmarshal(gPlain, &g); err != nil {
+					encoder.Encode(AuditRecord{
+						Type: AuditInconsistency,
+						Report: &InconsistencyReport{
+							Type:     "CORRUPT_METADATA",
+							TargetID: gid,
+							Message:  fmt.Sprintf("failed to decode group record: %v", err),
+						},
+					})
+					continue
+				}
+				if g.Usage.InodeCount != calc.InodeCount || g.Usage.TotalBytes != calc.TotalBytes {
+					encoder.Encode(AuditRecord{
+						Type: AuditInconsistency,
+						Report: &InconsistencyReport{
+							Type:     "GROUP_QUOTA_MISMATCH",
+							TargetID: gid,
+							Message:  fmt.Sprintf("DB: {Inodes:%d, Bytes:%d}, Calculated: {Inodes:%d, Bytes:%d}", g.Usage.InodeCount, g.Usage.TotalBytes, calc.InodeCount, calc.TotalBytes),
+						},
+					})
+				}
+			}
+		}
+
+		return nil
+	})
 }
 
 func (s *Server) handleClusterLeases(w http.ResponseWriter, r *http.Request) {

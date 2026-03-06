@@ -127,6 +127,7 @@ run_test "Contact Exchange" "/bin/test-contact-exchange.sh" || FAILED=1
 run_test "Dump Inodes Debugging" "/bin/test-dump-inodes.sh" || FAILED=1
 run_test "Quota Command" "/bin/test-quota-cmd.sh" || FAILED=1
 run_test "Enhanced LS E2E" "/bin/test-ls-e2e.sh" || FAILED=1
+run_test "System Audit & Integrity" "/bin/test-audit.sh" || FAILED=1
 
 echo "" | tee -a $REPORT_FILE
 echo "--- PERFORMANCE BENCHMARKS ---" | tee -a $REPORT_FILE

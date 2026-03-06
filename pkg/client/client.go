@@ -4846,6 +4846,148 @@ func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string,
 	return result.ID, err
 }
 
+// AdminAudit streams redacted audit records from the server.
+func (c *Client) AdminAudit(ctx context.Context, handler func(metadata.AuditRecord) error) error {
+	return c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
+		defer c.releaseControl()
+
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/admin/audit", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(ctx, req); err != nil {
+			return err
+		}
+
+		// Phase 48: Audit requires sealing. For GET we must set the header
+		// to indicate we expect standard unsealing behavior on the response.
+		req.Header.Set("X-DistFS-Sealed", "true")
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(ctx, resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return c.newAPIError(resp, body)
+		}
+
+		decoder := json.NewDecoder(body)
+		for decoder.More() {
+			var record metadata.AuditRecord
+			if err := decoder.Decode(&record); err != nil {
+				return fmt.Errorf("audit stream decode error: %w", err)
+			}
+			if err := handler(record); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// AdminAuditForest captures all audit records and organizes the Inodes into directory trees.
+// TODO: For very large clusters, this full in-memory buffering should be refactored
+// to use a disk-backed store or a multi-pass approach to avoid OOM.
+func (c *Client) AdminAuditForest(ctx context.Context) (roots []*metadata.RedactedInode, orphans []*metadata.RedactedInode, reports []metadata.InconsistencyReport, users []metadata.RedactedUser, groups []metadata.RedactedGroup, nodes []metadata.Node, gc []string, allInodes map[string]*metadata.RedactedInode, err error) {
+	allInodes = make(map[string]*metadata.RedactedInode)
+
+	err = c.AdminAudit(ctx, func(record metadata.AuditRecord) error {
+
+		switch record.Type {
+		case metadata.AuditInode:
+			allInodes[record.Inode.ID] = record.Inode
+		case metadata.AuditUser:
+			users = append(users, *record.User)
+		case metadata.AuditGroup:
+			groups = append(groups, *record.Group)
+		case metadata.AuditNode:
+			nodes = append(nodes, *record.Node)
+		case metadata.AuditGC:
+			gc = append(gc, record.GCChunk)
+		case metadata.AuditInconsistency:
+			reports = append(reports, *record.Report)
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+
+	// 1. Identify Roots
+	visited := make(map[string]bool)
+
+	// Start with canonical root
+	if r, ok := allInodes[metadata.RootID]; ok {
+		roots = append(roots, r)
+	}
+
+	// Find implicit roots (0 links and not canonical root)
+	for id, inode := range allInodes {
+		if id == metadata.RootID {
+			continue
+		}
+		if len(inode.Links) == 0 {
+			roots = append(roots, inode)
+		}
+	}
+
+	// 2. Mark visited nodes via DFS (to find orphans)
+	var traverse func(id string, path map[string]bool)
+	traverse = func(id string, path map[string]bool) {
+		if visited[id] {
+			return
+		}
+		visited[id] = true
+
+		inode, ok := allInodes[id]
+		if !ok {
+			return
+		}
+
+		if inode.Type == metadata.DirType {
+			newPath := make(map[string]bool)
+			for k, v := range path {
+				newPath[k] = v
+			}
+			newPath[id] = true
+
+			for _, childID := range inode.Children {
+				if newPath[childID] {
+					reports = append(reports, metadata.InconsistencyReport{
+						Type:     "CYCLE_DETECTED",
+						TargetID: childID,
+						Message:  fmt.Sprintf("infinite recursion at %s", childID),
+					})
+					continue
+				}
+				traverse(childID, newPath)
+			}
+		}
+	}
+
+	for _, root := range roots {
+		traverse(root.ID, make(map[string]bool))
+	}
+
+	// 3. Identify Orphans
+	for id, inode := range allInodes {
+		if !visited[id] {
+			orphans = append(orphans, inode)
+		}
+	}
+
+	return
+}
+
 // AdminPromote grants administrative privileges to a user.
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
