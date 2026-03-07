@@ -960,3 +960,34 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** **Unit Test:** Verify `handleAudit` correctly streams NDJSON and redacts all key material.
     *   **Action:** **Corruption Simulation Test:** Manually inject an asymmetric link into BoltDB and verify the audit correctly identifies and reports it as an inconsistency.
     *   **Action:** **Forest Test:** Verify tree reconstruction with deep nesting, hardlinks, and circular references.
+
+---
+
+## Phase 49: OOB Identity Discovery & Governed Registration
+**Goal:** Implement a Distributed Directory Service for Out-Of-Band identity verification and a "Locked by Default" registration flow to enforce Zero-Trust access control.
+
+*   **Step 49.1: "Locked by Default" FSM Implementation**
+    *   **Action:** Add `Locked bool` to the `User` struct in `pkg/metadata/types.go`.
+    *   **Action:** Update `executeCreateUser` in `pkg/metadata/fsm.go` to set `Locked = true` for all new users (except the very first bootstrap admin).
+    *   **Action:** Update `MetadataServer` request handlers to immediately return `403 Forbidden` if the authenticated user is `Locked`, **EXCEPT** for `/v1/user/keysync` (to allow multi-device setup while pending approval) and `/v1/user/me`.
+    *   **Action:** Add `CmdAdminSetUserLock` to the FSM to allow admins to lock/unlock accounts.
+*   **Step 49.2: Distributed Directory Schema**
+    *   **Action:** Define `DirectoryEntry` struct in `pkg/client/client.go` to store Username, Email, Full Name, PQC Keys, VerifierID, and Attestation Signature.
+*   **Step 49.3: System Backbone Bootstrapping**
+    *   **Action:** Update `cmdAdminCreateRoot` in `cmd/distfs/admin.go`.
+    *   **Action:** Provision the `registry` and `users` groups (owned by `admin` group, quota enabled).
+    *   **Action:** Provision the `/registry` (mode `0775`) and `/users` (mode `0755`) directories.
+    *   **Action:** Add the bootstrap administrator's own signed `DirectoryEntry` to `/registry/admin.user` (must be created with mode `0644` so all users can read it).
+*   **Step 49.4: Registry CLI Integration & OOB Handshake**
+    *   **Action:** Add `--registry` global flag to `cmd/distfs/main.go` (default: `/registry`).
+    *   **Action:** Implement `distfs registry-add [--unlock] [--quota <lim>] [--home] <username> <email>`.
+    *   **Action:** Implement the OOB Handshake: fetch keys from server, display deterministic verification code, prompt for admin confirmation.
+    *   **Action:** If confirmed, generate, sign, and upload the `DirectoryEntry` to the registry. **Crucially, the file must be created with `0644` (World-Readable) permissions** so non-admins can resolve the identity.
+    *   **Action:** Process `--unlock`, `--quota`, and `--home` flags independently if provided.
+*   **Step 49.5: Username Resolution**
+    *   **Action:** Refactor CLI commands (`group-add`, `share`, `mkdir --owner`) to support O(1) username resolution by fetching `<username>.user` from the configured `--registry`.
+    *   **Action:** Ensure that if an email address is provided instead of a username, the CLI bypasses the registry and uses the server's unverified lookup.
+    *   **Action:** Implement `distfs registry-list` and `distfs registry-info`.
+*   **Step 49.6: Testing & Validation**
+    *   **Action:** **Unit Test:** Verify `Locked` users cannot access data but *can* push/pull KeySync backups.
+    *   **Action:** **Integration Test:** Verify a non-admin user can successfully resolve and verify a peer's identity by reading a `0644` attestation file from `/registry`.
