@@ -991,3 +991,52 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 49.6: Testing & Validation**
     *   **Action:** **Unit Test:** Verify `Locked` users cannot access data but *can* push/pull KeySync backups.
     *   **Action:** **Integration Test:** Verify a non-admin user can successfully resolve and verify a peer's identity by reading a `0644` attestation file from `/registry`.
+
+---
+
+## Phase 50: Cryptographic Provenance (The Immutable Owner)
+**Goal:** Prevent "Unverifiable Writes" by cryptographically anchoring Inode ownership and explicitly signing any delegation of write authority, ensuring that compromised metadata servers cannot self-sign malicious payload replacements.
+
+*   **Step 50.1: Cryptographic ID Commitment**
+    *   **Action:** Add `Nonce []byte` to the `Inode` struct in `pkg/metadata/types.go`.
+    *   **Action:** Update `generateID` in `pkg/client/directory.go` (and wherever else Inodes are created) to compute `Inode.ID = hex(SHA256(OwnerID || Nonce))[:32]` instead of a random UUID.
+    *   **Action:** Update `VerifyInode` in `pkg/client/client.go` to explicitly hash the Inode's `OwnerID` with its `Nonce` and assert that it equals `Inode.ID`.
+*   **Step 50.2: Owner Delegation Signature**
+    *   **Action:** Add `OwnerDelegationSig []byte` to the `Inode` struct.
+    *   **Action:** Update `ManifestHash` to include `GroupID` in a way that allows it to be signed independently (or just require the `OwnerDelegationSig` to cover `(Inode.ID, GroupID)`).
+    *   **Action:** Update `Client.UpdateInode` (and `Client.SetAttr`) so that if the `GroupID` is changed by the Owner, the client generates a signature over the new `GroupID` using the Owner's private key and stores it in `OwnerDelegationSig`.
+*   **Step 50.3: Strict Verification Engine**
+    *   **Action:** Update `VerifyInode` logic: If `SignerID != OwnerID`, the client MUST extract the `GroupID` that purportedly authorizes the `SignerID`. It MUST then verify `OwnerDelegationSig` against the true `OwnerID`'s public key to prove the Owner authorized this `GroupID`.
+    *   **Action:** Reject the Inode if the delegation signature is missing or invalid.
+*   **Step 50.4: Testing & Validation**
+    *   **Action:** **Unit Test:** Create an Inode, manually alter its `OwnerID` in the struct, and verify that `VerifyInode` rejects it due to the ID Commitment mismatch.
+    *   **Action:** **Unit Test:** Manually alter a file's `GroupID` and sign the payload as the new group without updating `OwnerDelegationSig`. Verify `VerifyInode` rejects the file.
+
+---
+
+## Phase 51: POSIX Access Control Lists (ACLs)
+**Goal:** Implement full POSIX.1e draft ACLs within the metadata layer, properly expanding the cryptographic Lockbox for granted users and supporting directory inheritance (Default ACLs).
+
+*   **Step 51.1: Native ACL Schema**
+    *   **Action:** Define `POSIXAccess` struct in `pkg/metadata/types.go` mapping string IDs (Users/Groups) to `uint32` Mode bits (0-7).
+    *   **Action:** Add `AccessACL` and `DefaultACL` pointers to the `Inode` struct.
+    *   **Action:** Update `ManifestHash` to include a deterministically sorted byte representation of both ACL maps.
+*   **Step 51.2: Server-Side Authorization Engine**
+    *   **Action:** Refactor `checkReadPermission` and `checkWritePermission` in `pkg/metadata/server.go`.
+    *   **Action:** Implement the strict POSIX fallback algorithm: Owner -> Named User (ACL) -> Owning Group -> Named Group (ACL) -> Other.
+    *   **Action:** Enforce the ACL `Mask` boundary on all Named User and Group checks.
+*   **Step 51.3: The Cryptographic Expansion (Lockbox)**
+    *   **Action:** Refactor `Client.createLockbox` to accept the `POSIXAccess` struct.
+    *   **Action:** Implement logic to fetch public keys (`GetUser` / `GetGroup`) for EVERY recipient granted effective read permission (`Mode & 0004 != 0`) after applying the Mask, adding them to the Lockbox.
+*   **Step 51.4: FUSE Extended Attributes (xattrs)**
+    *   **Action:** Implement `Getxattr` and `Setxattr` in `pkg/fuse/fs.go` specifically handling `system.posix_acl_access` and `system.posix_acl_default`.
+    *   **Action:** Implement a binary struct encoder/decoder to translate the Go map to the raw binary payload expected by the Linux kernel VFS.
+    *   **Action:** Ensure that FUSE properly translates local OS UIDs/GIDs to DistFS String IDs via the client cache during `Setxattr`.
+*   **Step 51.5: Default ACL Inheritance**
+    *   **Action:** Update `c.addEntryInternal` and `c.OpenBlobWriteWithLease` to fetch the parent directory's `DefaultACL` before creation.
+    *   **Action:** Copy the `DefaultACL` to the new Inode's `AccessACL` (and `DefaultACL` if it's a directory).
+    *   **Action:** Trigger the Lockbox Cryptographic Expansion over the newly inherited ACLs so the file is instantly readable by inherited groups.
+*   **Step 51.6: Testing & Validation**
+    *   **Action:** **Unit Test:** Provide varied ACL combinations (Users, Groups, Mask) to `checkReadPermission` and assert expected boolean outcomes.
+    *   **Action:** **Integration Test:** Run a suite using native Linux `setfacl` and `getfacl` binaries inside the FUSE mount, verifying that access works correctly via standard shell users.
+    *   **Action:** **Inheritance Test:** Create a nested directory structure and verify that a newly created file correctly inherits the `DefaultACL` and is readable by the designated group without manual intervention.

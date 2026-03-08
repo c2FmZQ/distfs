@@ -247,6 +247,21 @@ DistFS employs a strict "Zero-Trust" posture for new registrations, preventing u
     *   **Unlock & Quota:** The admin issues an FSM command to set `Locked: false` and provisions an initial quota.
     *   **Workspace:** The admin provisions a home directory (`/users/<username>`) and grants the user traversal rights by adding them to the `users` group.
 
+### 4.12 Cryptographic Provenance (The Immutable Owner)
+DistFS uses opaque UUIDs for Inodes rather than a strict Merkle Tree (which causes severe concurrency bottlenecks). To prevent a compromised server from modifying an Inode's metadata to swap its `OwnerID` or `GroupID` (and thus allowing an attacker to self-sign malicious payloads), DistFS enforces strict cryptographic provenance.
+
+1.  **Cryptographic ID Commitment:** When a client creates a new Inode, the `Inode.ID` is generated as a cryptographic hash of the creator's `UserID` and a random nonce (`ID = Hash(OwnerID || Nonce)`). The `Nonce` is stored in the Inode. During `VerifyInode`, the client independently verifies this hash. If a compromised server changes the `OwnerID` in the database, the hash verification will fail, guaranteeing that the `OwnerID` is mathematically immutable and bound to the ID referenced by the parent directory.
+2.  **Owner Delegation Signature:** If the `OwnerID` grants write access to a `GroupID` or a specific user via an ACL, they must cryptographically sign that delegation. The `Inode` struct includes an `OwnerDelegationSig`. When evaluating an Inode signed by someone other than the `OwnerID`, the client first verifies the `OwnerDelegationSig` using the true Owner's public key. If valid, it proves the Owner explicitly authorized the current ACLs/Group assignments, closing the "Self-Signed Bypass" vulnerability.
+
+### 4.13 Access Control Lists (POSIX ACLs)
+DistFS implements POSIX.1e draft standard Access Control Lists natively within the metadata layer. This allows fine-grained, user-level access delegations without requiring the creation of administrative groups.
+
+1.  **Schema Mapping:** ACLs are stored natively in the `Inode` struct as `AccessACL` and `DefaultACL`. They adhere strictly to the POSIX algorithm, evaluating permissions in the order of: Owner -> Named Users -> Primary Group -> Named Groups -> Other, intersected with the `Mask` entry.
+2.  **Cryptographic Expansion (The Lockbox Cost):** To maintain end-to-end encryption, the FSM guarantees that any user or group granted *effective read permission* via an ACL is included in the cryptographic Lockbox. If an ACL grants 10 specific users read access, the client must fetch 10 public keys and encapsulate the file key 10 times, resulting in a larger metadata footprint (~1 KB per recipient).
+3.  **Default ACLs (Directory Inheritance):** DistFS supports `DefaultACL` entries on directories. Any file or directory created within inherits these permissions.
+    *   *Cost Acknowledgment:* Unlike local filesystems where inheritance is merely a bitwise copy, DistFS inheritance triggers cryptographic operations. When a client creates a file in a directory with Default ACLs, it must proactively build the expanded Lockbox before the file can be committed to the cluster.
+4.  **FUSE Integration:** The FUSE client exposes these ACLs via the standard `system.posix_acl_access` and `system.posix_acl_default` extended attributes (xattrs). This allows standard Linux utilities like `setfacl` and `getfacl` to work seamlessly within the mount.
+
 ---
 
 ## 5. Data Layer (Data Roles)
