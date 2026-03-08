@@ -219,16 +219,16 @@ type GroupUpdateFunc func(*metadata.Group) error
 
 // DirectoryEntry represents a signed identity attestation in the DistFS registry.
 type DirectoryEntry struct {
-	Username  string `json:"username"`
-	FullName  string `json:"full_name"`
-	Email     string `json:"email"`
-	UserID    string `json:"uid"`
-	EncKey    []byte `json:"ek"` // ML-KEM Public Key
-	SignKey   []byte `json:"sk"` // ML-DSA Public Key
-	HomeDir   string `json:"home_dir,omitempty"`
+	Username   string `json:"username"`
+	FullName   string `json:"full_name"`
+	Email      string `json:"email"`
+	UserID     string `json:"uid"`
+	EncKey     []byte `json:"ek"` // ML-KEM Public Key
+	SignKey    []byte `json:"sk"` // ML-DSA Public Key
+	HomeDir    string `json:"home_dir,omitempty"`
 	VerifierID string `json:"verifier_id"`
-	Timestamp int64  `json:"ts"`
-	Signature []byte `json:"sig"` // Signature by Verifier over all other fields
+	Timestamp  int64  `json:"ts"`
+	Signature  []byte `json:"sig"` // Signature by Verifier over all other fields
 }
 
 // Client is the primary entry point for interacting with a DistFS cluster.
@@ -277,7 +277,7 @@ type Client struct {
 	mutationLocks map[string]*sync.Mutex
 
 	onLeaseExpired func(id string, err error)
-	
+
 	registryDir string
 }
 
@@ -4834,22 +4834,23 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 
 // ResolveUsername attempts to resolve a user identifier to a DistFS UserID.
 // It prioritizes the local registry, then falls back to admin-only server lookup for emails.
-func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string, error) {
+func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string, *DirectoryEntry, error) {
 	if metadata.IsInodeID(identifier) {
-		return identifier, nil // Already a 32-char hex ID (e.g., group ID or root ID)
+		return identifier, nil, nil // Already a 32-char hex ID (e.g., group ID or root ID)
 	}
-	
+
 	if len(identifier) == 64 {
 		if _, err := hex.DecodeString(identifier); err == nil {
-			return identifier, nil // Already a 64-char hex User ID
+			return identifier, nil, nil // Already a 64-char hex User ID
 		}
 	}
 
 	if strings.Contains(identifier, "@") {
 		if c.admin {
-			return c.AdminLookup(ctx, identifier, "Username Resolution")
+			id, err := c.AdminLookup(ctx, identifier, "Username Resolution")
+			return id, nil, err
 		}
-		return "", fmt.Errorf("email resolution requires admin privileges (use registry username instead)")
+		return "", nil, fmt.Errorf("email resolution requires admin privileges (use registry username instead)")
 	}
 
 	// Try the registry
@@ -4866,17 +4867,17 @@ func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string
 	err := c.ReadDataFile(ctx, filePath, &entry)
 	if err != nil {
 		if isNotFound(err) {
-			return "", fmt.Errorf("user '%s' not found in registry %s", identifier, regPath)
+			return "", nil, fmt.Errorf("user '%s' not found in registry %s", identifier, regPath)
 		}
-		return "", fmt.Errorf("failed to read registry entry for %s: %w", identifier, err)
+		return "", nil, fmt.Errorf("failed to read registry entry for %s: %w", identifier, err)
 	}
 
 	// TODO: Phase 49 - Verify the entry signature using the VerifierID's public key
 	// This requires pulling the Verifier's key from the server (or recursively from the registry).
-	// For this initial implementation, we trust the registry file if we could read it 
+	// For this initial implementation, we trust the registry file if we could read it
 	// (meaning we have read access to the registry group).
 
-	return entry.UserID, nil
+	return entry.UserID, &entry, nil
 }
 
 // AdminLookup resolves a plaintext email to its HMAC-derived User ID.

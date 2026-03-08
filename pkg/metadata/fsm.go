@@ -1225,7 +1225,7 @@ func (fsm *MetadataFSM) executeAdminSetUserLock(tx *bolt.Tx, data []byte) interf
 	}
 	var user User
 	json.Unmarshal(plain, &user)
-	
+
 	// Prevent locking the last admin out
 	if req.Locked && fsm.IsAdmin(user.ID) {
 		return fmt.Errorf("cannot lock an administrator account")

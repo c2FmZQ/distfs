@@ -27,10 +27,10 @@ func TestDebugLockedKeysync(t *testing.T) {
 	metadata.CreateUser(t, node, metadata.User{ID: u2, UID: 1002, SignKey: usk2.Public(), EncKey: udk2.EncapsulationKey().Bytes(), Locked: true})
 
 	c := NewClient(ts.URL).WithIdentity(u2, udk2).WithSignKey(usk2)
-	
+
 	svKey, _ := crypto.UnmarshalEncapsulationKey(ek)
 	c = c.WithServerKey(svKey)
-	
+
 	c.EnsureRoot(context.Background())
 
 	err := c.PushKeySync(context.Background(), &metadata.KeySyncBlob{Ciphertext: []byte("test")})

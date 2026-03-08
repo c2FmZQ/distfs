@@ -63,7 +63,7 @@ type AdminClient interface {
 	AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error]
 	AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error]
 	AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node]
-	ResolveUsername(ctx context.Context, identifier string) (string, error)
+	ResolveUsername(ctx context.Context, identifier string) (string, *client.DirectoryEntry, error)
 	AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error
 	AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error
 	AdminPromote(ctx context.Context, userID string) error
@@ -330,7 +330,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			email := m.lookupInput.Value()
 			if email != "" {
 				return m, func() tea.Msg {
-					id, err := m.client.ResolveUsername(m.ctx, email)
+					id, _, err := m.client.ResolveUsername(m.ctx, email)
 					if err != nil {
 						return lookupMsg(fmt.Sprintf("Error: %v", err))
 					}
@@ -590,7 +590,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.ResolveUsername(m.ctx, email)
+				id, _, err := m.client.ResolveUsername(m.ctx, email)
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -626,7 +626,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.ResolveUsername(m.ctx, email)
+				id, _, err := m.client.ResolveUsername(m.ctx, email)
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -735,7 +735,7 @@ func cmdAdminPromote(ctx context.Context, args []string) {
 	// Resolve email/username to UserID
 	userID := email
 	if !isHexID(email) {
-		id, err := c.ResolveUsername(ctx, email)
+		id, _, err := c.ResolveUsername(ctx, email)
 		if err != nil {
 			log.Fatalf("failed to resolve user %s: %v", email, err)
 		}
@@ -757,7 +757,7 @@ func cmdAdminUserQuota(ctx context.Context, args []string) {
 
 	userID := email
 	if !isHexID(email) {
-		id, err := c.ResolveUsername(ctx, email)
+		id, _, err := c.ResolveUsername(ctx, email)
 		if err != nil {
 			log.Fatalf("failed to resolve user %s: %v", email, err)
 		}
@@ -812,7 +812,7 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 
 	c := loadClient()
 	c = c.WithRootID(id)
-	
+
 	if err := c.EnsureRoot(ctx); err != nil {
 		log.Fatal(err)
 	}
@@ -1031,7 +1031,7 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	// 1. Server Discovery
 	userID := email
 	if !isHexID(email) {
-		id, err := c.ResolveUsername(ctx, email)
+		id, _, err := c.ResolveUsername(ctx, email)
 		if err != nil {
 			log.Fatalf("Failed to resolve email to UserID: %v", err)
 		}
@@ -1079,7 +1079,9 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 		Username: username,
 		Email:    email,
 		UserID:   user.ID,
-		// Omit keys/signatures in this simulation, actual implementation would sign this
+		EncKey:   user.EncKey,
+		SignKey:  user.SignKey,
+		// TODO: Sign this entry with the admin's (verifier's) private key
 	}
 
 	err = c.SaveDataFile(ctx, regPath, entry)
@@ -1128,7 +1130,7 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 		if err != nil && !strings.Contains(err.Error(), "already exists") {
 			log.Fatalf("Failed to access /users directory: %v", err)
 		}
-		
+
 		opts := client.MkdirOptions{OwnerID: user.ID}
 		err = c.MkdirExtended(ctx, homePath, 0700, opts)
 		if err != nil {
@@ -1151,7 +1153,7 @@ func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
 
 	userID := email
 	if !isHexID(email) {
-		id, err := c.ResolveUsername(ctx, email)
+		id, _, err := c.ResolveUsername(ctx, email)
 		if err != nil {
 			log.Fatalf("failed to resolve user %s: %v", email, err)
 		}
@@ -1161,7 +1163,7 @@ func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
 	if err := c.AdminSetUserLock(ctx, userID, lock); err != nil {
 		log.Fatal(err)
 	}
-	
+
 	if lock {
 		fmt.Printf("User %s has been locked.\n", userID)
 	} else {

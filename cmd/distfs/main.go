@@ -532,7 +532,7 @@ func cmdMkdir(ctx context.Context, args []string) {
 
 	opts := client.MkdirOptions{}
 	if *ownerID != "" {
-		resolvedOwner, err := c.ResolveUsername(ctx, *ownerID)
+		resolvedOwner, _, err := c.ResolveUsername(ctx, *ownerID)
 		if err != nil {
 			log.Fatalf("failed to resolve owner %s: %v", *ownerID, err)
 		}
@@ -646,9 +646,20 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 		}
 	} else {
 		var err error
-		userID, err = c.ResolveUsername(ctx, userArg)
+		var entry *client.DirectoryEntry
+		userID, entry, err = c.ResolveUsername(ctx, userArg)
 		if err != nil {
 			log.Fatalf("Failed to resolve user %s: %v", userArg, err)
+		}
+		if entry != nil && entry.EncKey != nil {
+			// Phase 49: Convert Registry Entry to ContactInfo for OOB pinning
+			ci = &client.ContactInfo{
+				UserID:    entry.UserID,
+				EncKey:    entry.EncKey,
+				SignKey:   entry.SignKey,
+				Timestamp: entry.Timestamp,
+				Signature: entry.Signature,
+			}
 		}
 	}
 
