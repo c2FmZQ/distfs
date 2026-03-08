@@ -34,7 +34,12 @@ func TestGroupDiscovery(t *testing.T) {
 	clientBob := client.NewClient(ts.URL)
 	clientBob = clientBob.WithIdentity("bob", uBobDK).WithSignKey(uBobSign).WithServerKey(serverPK)
 	if err := clientBob.Login(t.Context()); err != nil {
-		t.Fatalf("Bob login failed: %v", err)
+		t.Fatalf("Login Bob failed: %v", err)
+	}
+
+	// Unlock Bob so he can participate in the cluster
+	if err := clientAlice.AdminSetUserLock(t.Context(), "bob", false); err != nil {
+		t.Fatalf("Unlock Bob failed: %v", err)
 	}
 
 	// 2. Alice creates Group A (Direct Owner)

@@ -43,6 +43,7 @@ var (
 	adminFlag   = flag.Bool("admin", false, "Enable admin bypass mode")
 	disableDoH  = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
 	rootID      = flag.String("root", "", "Specify target root directory ID")
+	registryDir = flag.String("registry", "/registry", "Directory to use for identity verification")
 )
 
 func setupTPMHasher() {
@@ -139,6 +140,12 @@ func main() {
 		cmdAdminJoin(ctx, args)
 	case "admin-remove":
 		cmdAdminRemove(ctx, args)
+	case "registry-add":
+		cmdRegistryAdd(ctx, args)
+	case "admin-lock-user":
+		cmdAdminLockUser(ctx, args, true)
+	case "admin-unlock-user":
+		cmdAdminLockUser(ctx, args, false)
 	case "admin-user-quota":
 		cmdAdminUserQuota(ctx, args)
 	case "admin-group-quota":
@@ -201,6 +208,9 @@ func usage() {
 	fmt.Println("  admin-remove <id>               Remove a node from the cluster (by node ID)")
 	fmt.Println("  admin-user-quota <email> <max_bytes> <max_inodes> Set user quota (Admin only)")
 	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
+	fmt.Println("  admin-lock-user <email>         Lock a user account")
+	fmt.Println("  admin-unlock-user <email>       Unlock a user account")
+	fmt.Println("  registry-add [--unlock] [--quota <limit>] [--home] <username> <email> Verify and add a user to the registry")
 	fmt.Println("  admin-audit                     Run a comprehensive system integrity and structural audit")
 	fmt.Println("  admin-create-root [id]          Initialize a new root inode (Admin only, defaults to standard root)")
 	fmt.Println("  whoami                          Display your user ID")
@@ -268,7 +278,8 @@ func loadClient() *client.Client {
 		WithServerKey(svKey).
 		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
 		WithAdmin(*adminFlag).
-		WithDisableDoH(*disableDoH)
+		WithDisableDoH(*disableDoH).
+		WithRegistry(*registryDir)
 
 	if *rootID != "" {
 		c = c.WithRootID(*rootID)
@@ -521,22 +532,9 @@ func cmdMkdir(ctx context.Context, args []string) {
 
 	opts := client.MkdirOptions{}
 	if *ownerID != "" {
-		resolvedOwner := *ownerID
-		if strings.Contains(resolvedOwner, "@") {
-			// Resolve email to UserID.
-			if *adminFlag {
-				id, err := c.AdminLookup(ctx, resolvedOwner, "CLI mkdir --owner")
-				if err != nil {
-					log.Fatalf("failed to resolve owner %s via admin: %v", resolvedOwner, err)
-				}
-				resolvedOwner = id
-			} else {
-				user, err := c.GetUser(ctx, resolvedOwner)
-				if err != nil {
-					log.Fatalf("failed to resolve owner %s: %v", resolvedOwner, err)
-				}
-				resolvedOwner = user.ID
-			}
+		resolvedOwner, err := c.ResolveUsername(ctx, *ownerID)
+		if err != nil {
+			log.Fatalf("failed to resolve owner %s: %v", *ownerID, err)
 		}
 		opts.OwnerID = resolvedOwner
 	}
@@ -645,6 +643,12 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 				fmt.Println("Aborted.")
 				return
 			}
+		}
+	} else {
+		var err error
+		userID, err = c.ResolveUsername(ctx, userArg)
+		if err != nil {
+			log.Fatalf("Failed to resolve user %s: %v", userArg, err)
 		}
 	}
 

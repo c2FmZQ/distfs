@@ -65,14 +65,24 @@ func CreateUser(t *testing.T, raftNode *RaftNode, user User) {
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
 	cmdBytes, _ := json.Marshal(cmd)
-	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := future.Error(); err != nil {
-		t.Fatalf("Create user raft apply failed: %v", err)
+	future := raftNode.Raft.Apply(cmdBytes, 10*time.Second)
+	err := future.Error()
+	if err != nil {
+		t.Fatalf("CreateUser failed: %v", err)
 	}
 	if resp := future.Response(); resp != nil {
 		if err, ok := resp.(error); ok {
 			t.Fatalf("Create user fsm failed: %v", err)
 		}
+	}
+
+	// Explicitly unlock if the test specified Locked: false
+	if !user.Locked {
+		req := AdminSetUserLockRequest{UserID: user.ID, Locked: false}
+		reqBytes, _ := json.Marshal(req)
+		unlockCmd := LogCommand{Type: CmdAdminSetUserLock, Data: reqBytes}
+		unlockBytes, _ := json.Marshal(unlockCmd)
+		raftNode.Raft.Apply(unlockBytes, 10*time.Second)
 	}
 }
 

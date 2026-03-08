@@ -15,11 +15,13 @@ done
 echo "Initializing user2 (Group Member)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-group@example.com")
 distfs -disable-doh -use-pinentry=false -config "$CONFIG2" init --new -server http://storage-node-1:8080 -jwt "$JWT2"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "user2-group@example.com"
 U2_ID=$(distfs -disable-doh -use-pinentry=false -config "$CONFIG2" whoami)
 
 echo "Initializing user3 (Non-Member)..."
 JWT3=$(wget -qO- "http://test-auth:8080/mint?email=user3-group@example.com")
 distfs -disable-doh -use-pinentry=false -config "$CONFIG3" init --new -server http://storage-node-1:8080 -jwt "$JWT3"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "user3-group@example.com"
 
 echo "User 1: Creating group 'project-x'..."
 distfs -disable-doh -use-pinentry=false -config "$CONFIG1" group-create project-x > /tmp/group-out.txt

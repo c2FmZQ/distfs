@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"iter"
 	"log"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -61,7 +63,7 @@ type AdminClient interface {
 	AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error]
 	AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error]
 	AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node]
-	AdminLookup(ctx context.Context, email, reason string) (string, error)
+	ResolveUsername(ctx context.Context, identifier string) (string, error)
 	AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error
 	AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error
 	AdminPromote(ctx context.Context, userID string) error
@@ -328,7 +330,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			email := m.lookupInput.Value()
 			if email != "" {
 				return m, func() tea.Msg {
-					id, err := m.client.AdminLookup(m.ctx, email, "Blind Lookup Tool")
+					id, err := m.client.ResolveUsername(m.ctx, email)
 					if err != nil {
 						return lookupMsg(fmt.Sprintf("Error: %v", err))
 					}
@@ -588,7 +590,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.AdminLookup(m.ctx, email, "Quota Management")
+				id, err := m.client.ResolveUsername(m.ctx, email)
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -624,7 +626,7 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg {
 			userID := email
 			if !isHexID(email) {
-				id, err := m.client.AdminLookup(m.ctx, email, "Quota Management")
+				id, err := m.client.ResolveUsername(m.ctx, email)
 				if err != nil {
 					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
 				}
@@ -730,12 +732,12 @@ func cmdAdminPromote(ctx context.Context, args []string) {
 	email := args[0]
 	c := loadClient()
 
-	// Resolve email to UserID
+	// Resolve email/username to UserID
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(ctx, email, "CLI promote")
+		id, err := c.ResolveUsername(ctx, email)
 		if err != nil {
-			log.Fatalf("failed to resolve email %s: %v", email, err)
+			log.Fatalf("failed to resolve user %s: %v", email, err)
 		}
 		userID = id
 	}
@@ -755,9 +757,9 @@ func cmdAdminUserQuota(ctx context.Context, args []string) {
 
 	userID := email
 	if !isHexID(email) {
-		id, err := c.AdminLookup(ctx, email, "CLI user quota")
+		id, err := c.ResolveUsername(ctx, email)
 		if err != nil {
-			log.Fatalf("failed to resolve email %s: %v", email, err)
+			log.Fatalf("failed to resolve user %s: %v", email, err)
 		}
 		userID = id
 	}
@@ -809,10 +811,72 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 	}
 
 	c := loadClient()
-	if err := c.WithRootID(id).EnsureRoot(ctx); err != nil {
+	c = c.WithRootID(id)
+	
+	if err := c.EnsureRoot(ctx); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Root inode %s initialized successfully.\n", id)
+
+	// Phase 49: System Backbone Bootstrapping
+	// Only do this for the canonical root to avoid cluttering secondary roots.
+	if id == metadata.RootID {
+		fmt.Println("Bootstrapping system backbone...")
+
+		// 1. Create Admin Group
+		adminGroup, err := c.CreateGroup(ctx, "admin", false)
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			log.Printf("Warning: failed to create admin group: %v", err)
+		}
+
+		// 2. Create System Groups (owned by admin group)
+		var registryGroupID, usersGroupID string
+		if adminGroup != nil {
+			// Registry Group
+			regGroup, err := c.CreateGroup(ctx, "registry", true) // Quota enabled
+			if err == nil {
+				registryGroupID = regGroup.ID
+				// Chown to admin group
+				_, err = c.UpdateGroup(ctx, regGroup.ID, func(g *metadata.Group) error {
+					g.OwnerID = ":" + adminGroup.ID
+					return nil
+				})
+			}
+
+			// Users Group
+			usrGroup, err := c.CreateGroup(ctx, "users", true) // Quota enabled
+			if err == nil {
+				usersGroupID = usrGroup.ID
+				// Chown to admin group
+				_, err = c.UpdateGroup(ctx, usrGroup.ID, func(g *metadata.Group) error {
+					g.OwnerID = ":" + adminGroup.ID
+					return nil
+				})
+			}
+		}
+
+		// 3. Create Backbone Directories
+		// /registry
+		optsReg := client.MkdirOptions{}
+		if err := c.MkdirExtended(ctx, "/registry", 0775, optsReg); err != nil && !strings.Contains(err.Error(), "already exists") {
+			log.Printf("Warning: failed to create /registry: %v", err)
+		} else if registryGroupID != "" {
+			c.SetAttr(ctx, "/registry", metadata.SetAttrRequest{GroupID: &registryGroupID})
+		}
+
+		// /users
+		optsUsr := client.MkdirOptions{}
+		if err := c.MkdirExtended(ctx, "/users", 0755, optsUsr); err != nil && !strings.Contains(err.Error(), "already exists") {
+			log.Printf("Warning: failed to create /users: %v", err)
+		} else if usersGroupID != "" {
+			c.SetAttr(ctx, "/users", metadata.SetAttrRequest{GroupID: &usersGroupID})
+		}
+
+		// 4. Initial Registry Entry (Admin self-attestation)
+		// To do this, we need GenerateContactString logic adapted for DirectoryEntry.
+		// For now, we print a message that it should be done via registry-add.
+		fmt.Println("Backbone provisioned. Use 'distfs registry-add' to populate the registry.")
+	}
 }
 
 func cmdAdminAudit(ctx context.Context, args []string) {
@@ -947,4 +1011,160 @@ func findRedactedInode(roots, orphans []*metadata.RedactedInode, id string) (*me
 		}
 	}
 	return nil, false
+}
+
+func cmdRegistryAdd(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("registry-add", flag.ExitOnError)
+	unlock := fs.Bool("unlock", false, "Unlock the user account after verification")
+	quota := fs.String("quota", "", "Set user quota (format: bytes,inodes e.g. 1000000,5000)")
+	home := fs.Bool("home", false, "Provision a home directory in /users/<username>")
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		log.Fatal("usage: registry-add [--unlock] [--quota <bytes,inodes>] [--home] <username> <email>")
+	}
+	username := fs.Arg(0)
+	email := fs.Arg(1)
+
+	c := loadClient()
+
+	// 1. Server Discovery
+	userID := email
+	if !isHexID(email) {
+		id, err := c.ResolveUsername(ctx, email)
+		if err != nil {
+			log.Fatalf("Failed to resolve email to UserID: %v", err)
+		}
+		userID = id
+	}
+
+	user, err := c.GetUser(ctx, userID)
+	if err != nil {
+		log.Fatalf("Failed to fetch user from server: %v", err)
+	}
+
+	// 2. OOB Handshake (Simulation for CLI)
+	// Compute a deterministic "verification code" based on the user's public keys.
+	h := crypto.NewHash()
+	h.Write(user.EncKey)
+	h.Write(user.SignKey)
+	codeBytes := h.Sum(nil)
+	codeStr := fmt.Sprintf("%02X-%02X-%02X", codeBytes[0], codeBytes[1], codeBytes[2])
+
+	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
+	fmt.Printf("User: %s (%s)\n", username, email)
+	fmt.Printf("Please contact this user out-of-band (e.g., via phone or Signal).\n")
+	fmt.Printf("Ask them to verify their security code matches: %s\n", codeStr)
+	fmt.Printf("-----------------------------------------\n")
+	fmt.Printf("Does the code match? [y/N]: ")
+
+	var response string
+	fmt.Scanln(&response)
+	if strings.ToLower(strings.TrimSpace(response)) != "y" {
+		log.Fatal("Verification aborted.")
+	}
+
+	// 3. Attestation & Registry Update
+	// For simplicity in this iteration, we create an empty file with the Username
+	// to represent the attestation. In a real scenario, this would be a signed JSON blob.
+	regPath := *registryDir + "/" + username + ".user"
+
+	// Ensure registry directory exists
+	err = c.Mkdir(ctx, *registryDir, 0775)
+	if err != nil && !strings.Contains(err.Error(), "already exists") {
+		log.Fatalf("Failed to access registry directory: %v", err)
+	}
+
+	entry := client.DirectoryEntry{
+		Username: username,
+		Email:    email,
+		UserID:   user.ID,
+		// Omit keys/signatures in this simulation, actual implementation would sign this
+	}
+
+	err = c.SaveDataFile(ctx, regPath, entry)
+	if err != nil {
+		log.Fatalf("Failed to write registry entry: %v", err)
+	}
+
+	mode := uint32(0644)
+	if err := c.SetAttr(ctx, regPath, metadata.SetAttrRequest{Mode: &mode}); err != nil {
+		log.Fatalf("Failed to make registry entry world-readable: %v", err)
+	}
+
+	fmt.Printf("Successfully added %s to the registry.\n", username)
+
+	// 4. Handle Flags
+	if *unlock {
+		err := c.AdminSetUserLock(ctx, user.ID, false)
+		if err != nil {
+			log.Fatalf("Failed to unlock user: %v", err)
+		}
+		fmt.Println("User unlocked.")
+	}
+
+	if *quota != "" {
+		parts := strings.Split(*quota, ",")
+		if len(parts) != 2 {
+			log.Fatalf("Invalid quota format. Expected bytes,inodes")
+		}
+		bytesLim, _ := strconv.ParseUint(parts[0], 10, 64)
+		inodesLim, _ := strconv.ParseUint(parts[1], 10, 64)
+		err := c.AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
+			UserID:    user.ID,
+			MaxBytes:  &bytesLim,
+			MaxInodes: &inodesLim,
+		})
+		if err != nil {
+			log.Fatalf("Failed to set quota: %v", err)
+		}
+		fmt.Printf("User quota set: %d bytes, %d inodes.\n", bytesLim, inodesLim)
+	}
+
+	if *home {
+		homePath := "/users/" + username
+		// Ensure /users exists
+		err = c.Mkdir(ctx, "/users", 0755)
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			log.Fatalf("Failed to access /users directory: %v", err)
+		}
+		
+		opts := client.MkdirOptions{OwnerID: user.ID}
+		err = c.MkdirExtended(ctx, homePath, 0700, opts)
+		if err != nil {
+			log.Fatalf("Failed to provision home directory: %v", err)
+		}
+		fmt.Printf("Provisioned home directory: %s\n", homePath)
+	}
+}
+
+func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
+	if len(args) < 1 {
+		if lock {
+			log.Fatal("usage: admin-lock-user <email|username>")
+		} else {
+			log.Fatal("usage: admin-unlock-user <email|username>")
+		}
+	}
+	email := args[0]
+	c := loadClient()
+
+	userID := email
+	if !isHexID(email) {
+		id, err := c.ResolveUsername(ctx, email)
+		if err != nil {
+			log.Fatalf("failed to resolve user %s: %v", email, err)
+		}
+		userID = id
+	}
+
+	if err := c.AdminSetUserLock(ctx, userID, lock); err != nil {
+		log.Fatal(err)
+	}
+	
+	if lock {
+		fmt.Printf("User %s has been locked.\n", userID)
+	} else {
+		fmt.Printf("User %s has been unlocked.\n", userID)
+	}
 }

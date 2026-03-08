@@ -179,12 +179,20 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 
 		// Ensure root exists and capture anchor
 		if err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
-			return fmt.Errorf("failed to ensure root: %w", err)
+			if apiErr, ok := err.(*APIError); ok && apiErr.Code == metadata.ErrCodeForbidden {
+				// User is locked, which is expected for new accounts in a zero-trust setup.
+				// We can't fetch the root anchor yet, but onboarding is otherwise complete.
+				fmt.Println("Notice: Account is currently locked pending administrator approval.")
+			} else {
+				return fmt.Errorf("failed to ensure root: %w", err)
+			}
 		}
 		rid, rowner, rver := c.GetRootAnchor()
-		conf.RootID = rid
-		conf.RootOwner = rowner
-		conf.RootVersion = rver
+		if rid != "" {
+			conf.RootID = rid
+			conf.RootOwner = rowner
+			conf.RootVersion = rver
+		}
 
 		// Capture passphrase once
 		password, err := config.GetPassword("Enter passphrase to protect your account: ", true)

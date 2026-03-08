@@ -364,11 +364,11 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false})
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// 1. World Readable file (owned by u1)
@@ -624,11 +624,11 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false})
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// u1 owns 0000000000000000000000000000000f
@@ -923,11 +923,11 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false})
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public()})
+	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false})
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// 1. Group Readable

@@ -74,6 +74,7 @@ const (
 	CmdRemoveNode        CommandType = 21
 	CmdRotateFSMKey      CommandType = 22
 	CmdReencryptValue    CommandType = 23
+	CmdAdminSetUserLock  CommandType = 24
 )
 
 type LogCommand struct {
@@ -625,6 +626,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 		return fsm.executeRotateFSMKey(tx, cmd.Data)
 	case CmdReencryptValue:
 		return fsm.executeReencryptValue(tx, cmd.Data)
+	case CmdAdminSetUserLock:
+		return fsm.executeAdminSetUserLock(tx, cmd.Data)
 	case CmdBatch:
 		var subCmds []LogCommand
 		json.Unmarshal(cmd.Data, &subCmds)
@@ -1018,6 +1021,10 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 		isFirst = false
 	}
 
+	if !isFirst {
+		user.Locked = true
+	}
+
 	encoded, _ := json.Marshal(user)
 	fsm.Put(tx, []byte("users"), []byte(user.ID), encoded)
 	fsm.Put(tx, []byte("uids"), uint32ToBytes(user.UID), []byte(user.ID))
@@ -1199,6 +1206,32 @@ func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{
 	if req.MaxInodes != nil {
 		user.Quota.MaxInodes = int64(*req.MaxInodes)
 	}
+	encoded, _ := json.Marshal(user)
+	return fsm.Put(tx, []byte("users"), []byte(req.UserID), encoded)
+}
+
+func (fsm *MetadataFSM) executeAdminSetUserLock(tx *bolt.Tx, data []byte) interface{} {
+	var req AdminSetUserLockRequest
+	err := json.Unmarshal(data, &req)
+	if err != nil {
+		return err
+	}
+	plain, err := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+	if err != nil {
+		return err
+	}
+	if plain == nil {
+		return ErrNotFound
+	}
+	var user User
+	json.Unmarshal(plain, &user)
+	
+	// Prevent locking the last admin out
+	if req.Locked && fsm.IsAdmin(user.ID) {
+		return fmt.Errorf("cannot lock an administrator account")
+	}
+
+	user.Locked = req.Locked
 	encoded, _ := json.Marshal(user)
 	return fsm.Put(tx, []byte("users"), []byte(req.UserID), encoded)
 }

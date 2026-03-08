@@ -838,6 +838,7 @@ func TestSecurity_IDOR_User(t *testing.T) {
 		SignKey: sk1.Public(),
 		Quota:   UserQuota{MaxInodes: 100},
 		Usage:   UserUsage{InodeCount: 10},
+		Locked:  false,
 	})
 
 	u2ID := "user2"
@@ -847,6 +848,7 @@ func TestSecurity_IDOR_User(t *testing.T) {
 		SignKey: sk2.Public(),
 		Quota:   UserQuota{MaxInodes: 200},
 		Usage:   UserUsage{InodeCount: 20},
+		Locked:  false,
 	})
 
 	// Login as User 1

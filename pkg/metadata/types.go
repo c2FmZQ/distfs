@@ -153,6 +153,7 @@ type User struct {
 	Usage   UserUsage `json:"usage"`
 	Quota   UserQuota `json:"quota"`
 	IsAdmin bool      `json:"is_admin"`
+	Locked  bool      `json:"locked"`
 }
 
 // RegisterUserRequest is the payload for user registration.
@@ -708,6 +709,12 @@ type SetGroupQuotaRequest struct {
 	MaxInodes *uint64 `json:"max_inodes,omitempty"`
 }
 
+// AdminSetUserLockRequest is the payload for locking/unlocking a user.
+type AdminSetUserLockRequest struct {
+	UserID string `json:"user_id"`
+	Locked bool   `json:"locked"`
+}
+
 // Phase 48: Audit Types
 
 // RedactedInode represents a version of an Inode safe for cluster-wide audit.
@@ -741,6 +748,7 @@ type RedactedUser struct {
 	Usage   UserUsage `json:"usage"`
 	Quota   UserQuota `json:"quota"`
 	IsAdmin bool      `json:"is_admin"`
+	Locked  bool      `json:"locked"`
 }
 
 // RedactedGroup represents a group record safe for cluster-wide audit.

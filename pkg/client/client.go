@@ -217,6 +217,20 @@ type InodeUpdateFunc func(*metadata.Inode) error
 // GroupUpdateFunc is a callback used to modify a group during an atomic update.
 type GroupUpdateFunc func(*metadata.Group) error
 
+// DirectoryEntry represents a signed identity attestation in the DistFS registry.
+type DirectoryEntry struct {
+	Username  string `json:"username"`
+	FullName  string `json:"full_name"`
+	Email     string `json:"email"`
+	UserID    string `json:"uid"`
+	EncKey    []byte `json:"ek"` // ML-KEM Public Key
+	SignKey   []byte `json:"sk"` // ML-DSA Public Key
+	HomeDir   string `json:"home_dir,omitempty"`
+	VerifierID string `json:"verifier_id"`
+	Timestamp int64  `json:"ts"`
+	Signature []byte `json:"sig"` // Signature by Verifier over all other fields
+}
+
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
@@ -263,6 +277,8 @@ type Client struct {
 	mutationLocks map[string]*sync.Mutex
 
 	onLeaseExpired func(id string, err error)
+	
+	registryDir string
 }
 
 // NewClient creates a new DistFS client.
@@ -338,6 +354,13 @@ func (c *Client) WithRootAnchor(id, owner string, version uint64) *Client {
 	c2.rootID = id
 	c2.rootOwner = owner
 	c2.rootVersion = version
+	return &c2
+}
+
+// WithRegistry sets the directory path used for username resolution.
+func (c *Client) WithRegistry(dir string) *Client {
+	c2 := *c
+	c2.registryDir = dir
 	return &c2
 }
 
@@ -699,6 +722,14 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 }
 func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.ReadCloser, error) {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
+		// If the server rejected our request before unsealing it (e.g. 403 Forbidden),
+		// it did not cache our session key. We must invalidate our local cache to
+		// ensure the next request falls back to Full KEM.
+		if resp.StatusCode >= 400 {
+			c.sessionMu.Lock()
+			c.sessionKey = nil
+			c.sessionMu.Unlock()
+		}
 		return resp.Body, nil
 	}
 
@@ -4801,6 +4832,53 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 	return status, err
 }
 
+// ResolveUsername attempts to resolve a user identifier to a DistFS UserID.
+// It prioritizes the local registry, then falls back to admin-only server lookup for emails.
+func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string, error) {
+	if metadata.IsInodeID(identifier) {
+		return identifier, nil // Already a 32-char hex ID (e.g., group ID or root ID)
+	}
+	
+	if len(identifier) == 64 {
+		if _, err := hex.DecodeString(identifier); err == nil {
+			return identifier, nil // Already a 64-char hex User ID
+		}
+	}
+
+	if strings.Contains(identifier, "@") {
+		if c.admin {
+			return c.AdminLookup(ctx, identifier, "Username Resolution")
+		}
+		return "", fmt.Errorf("email resolution requires admin privileges (use registry username instead)")
+	}
+
+	// Try the registry
+	regPath := c.registryDir
+	if regPath == "" {
+		regPath = "/registry"
+	}
+	if !strings.HasSuffix(regPath, "/") {
+		regPath += "/"
+	}
+	filePath := regPath + identifier + ".user"
+
+	var entry DirectoryEntry
+	err := c.ReadDataFile(ctx, filePath, &entry)
+	if err != nil {
+		if isNotFound(err) {
+			return "", fmt.Errorf("user '%s' not found in registry %s", identifier, regPath)
+		}
+		return "", fmt.Errorf("failed to read registry entry for %s: %w", identifier, err)
+	}
+
+	// TODO: Phase 49 - Verify the entry signature using the VerifierID's public key
+	// This requires pulling the Verifier's key from the server (or recursively from the registry).
+	// For this initial implementation, we trust the registry file if we could read it 
+	// (meaning we have read access to the registry group).
+
+	return entry.UserID, nil
+}
+
 // AdminLookup resolves a plaintext email to its HMAC-derived User ID.
 func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string, error) {
 	payload, _ := json.Marshal(map[string]string{
@@ -5083,6 +5161,47 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 		}
 
 		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		body, err := c.unsealResponse(ctx, resp)
+		if err != nil {
+			return err
+		}
+		defer body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return c.newAPIError(resp, body)
+		}
+		return nil
+	})
+}
+
+// AdminSetUserLock locks or unlocks a user account.
+func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked bool) error {
+	req := metadata.AdminSetUserLockRequest{
+		UserID: userID,
+		Locked: locked,
+	}
+	data, _ := json.Marshal(req)
+	return c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
+		defer c.releaseControl()
+
+		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/lock", nil)
+		if err != nil {
+			return err
+		}
+		if err := c.authenticateRequest(ctx, hReq); err != nil {
+			return err
+		}
+		if err := c.sealBody(ctx, hReq, data); err != nil {
+			return err
+		}
+
+		resp, err := c.httpClient.Do(hReq)
 		if err != nil {
 			return err
 		}

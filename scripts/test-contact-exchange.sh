@@ -11,10 +11,12 @@ done
 echo "Initializing Alice (Owner)..."
 JWT_A=$(wget -qO- "http://test-auth:8080/mint?email=alice-contact@example.com")
 distfs -disable-doh -use-pinentry=false -config /tmp/alice.json init --new -server http://storage-node-1:8080 -jwt "$JWT_A"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "alice-contact@example.com"
 
 echo "Initializing Bob (Member)..."
 JWT_B=$(wget -qO- "http://test-auth:8080/mint?email=bob-contact@example.com")
 distfs -disable-doh -use-pinentry=false -config /tmp/bob.json init --new -server http://storage-node-1:8080 -jwt "$JWT_B"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "bob-contact@example.com"
 
 echo "Bob: Generating contact info..."
 BOB_CONTACT=$(distfs -disable-doh -use-pinentry=false -config /tmp/bob.json contact-info | grep "distfs-contact:v1:")
@@ -39,6 +41,7 @@ fi
 echo "Initializing Carol..."
 JWT_C=$(wget -qO- "http://test-auth:8080/mint?email=carol-contact@example.com")
 distfs -disable-doh -use-pinentry=false -config /tmp/carol.json init --new -server http://storage-node-1:8080 -jwt "$JWT_C"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "carol-contact@example.com"
 CAROL_CONTACT=$(distfs -disable-doh -use-pinentry=false -config /tmp/carol.json contact-info | grep "distfs-contact:v1:")
 
 echo "Alice: Adding Carol via contact string (with interactive confirmation)..."

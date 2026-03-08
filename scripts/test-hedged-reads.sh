@@ -19,6 +19,7 @@ echo "Initializing Account..."
 JWT=$(wget -qO- "$AUTH_URL/mint?email=hedge-user@example.com")
 # We'll use a new identity for this test to ensure clean state
 distfs -disable-doh -use-pinentry=false -config "$CONFIG" init --new -server "$SERVER_URL" -jwt "$JWT"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "hedge-user@example.com"
 USER_ID=$(distfs -disable-doh -use-pinentry=false -config "$CONFIG" whoami)
 
 # Admin: Provision Home

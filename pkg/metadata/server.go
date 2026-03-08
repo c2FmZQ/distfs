@@ -654,6 +654,14 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if user != nil {
+		if user.Locked {
+			// Locked users can only access endpoints necessary for unlocking/setup
+			if r.URL.Path != "/v1/user/keysync" && r.URL.Path != "/v1/user/me" {
+				s.writeError(w, r, ErrCodeForbidden, "account is locked pending administrator approval", http.StatusForbidden)
+				return
+			}
+		}
+
 		// Handle Sealed Request (Layer 7 E2EE)
 		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
 			payload, err := s.unsealRequest(w, r, user)
@@ -2550,6 +2558,8 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleRegisterNode(w, r)
 	case path == "promote" && r.Method == http.MethodPost:
 		s.handleAdminPromote(w, r)
+	case path == "lock" && r.Method == http.MethodPost:
+		s.handleAdminSetUserLock(w, r)
 	case path == "audit" && r.Method == http.MethodGet:
 		s.handleAudit(w, r)
 	case path == "quota/user" && r.Method == http.MethodPost:
@@ -3280,6 +3290,20 @@ func (s *Server) handleAdminPromote(w http.ResponseWriter, r *http.Request) {
 	}
 	data, _ := json.Marshal(req.UserID)
 	s.ApplyRaftCommandRaw(w, r, CmdPromoteAdmin, data, http.StatusOK)
+}
+
+func (s *Server) handleAdminSetUserLock(w http.ResponseWriter, r *http.Request) {
+	var req AdminSetUserLockRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "invalid request", http.StatusBadRequest)
+		return
+	}
+	if req.UserID == "" {
+		s.writeError(w, r, ErrCodeInternal, "userID required", http.StatusBadRequest)
+		return
+	}
+	data, _ := json.Marshal(req)
+	s.ApplyRaftCommandRaw(w, r, CmdAdminSetUserLock, data, http.StatusOK)
 }
 
 func (s *Server) handleSetUserQuota(w http.ResponseWriter, r *http.Request) {

@@ -63,6 +63,15 @@ distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/confi
 distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0775 /
 
 # 2. Provision Users and Workspaces under /users/
+echo "Provisioning /users base directory..."
+USERS_GROUP_OUT=$(distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create users || true)
+USERS_GID=$(echo "$USERS_GROUP_OUT" | grep "ID:" | awk '{print $2}' || echo "")
+if [ -z "$USERS_GID" ]; then
+    USERS_GID="users" # Fallback if it already existed and we couldn't parse it easily
+fi
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /users || true
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0755 /users || true
+
 provision_user() {
     name=$1
     email=$2
@@ -74,13 +83,12 @@ provision_user() {
     U_OUT=$(distfs -disable-doh -use-pinentry=false -config "$conf" init --new -server http://storage-node-1:8080 -jwt "$U_JWT")
     U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
     
-    # Provision directory via Global Admin
-    distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$U_ID" "$path"
+    # Provision directory and unlock via Global Admin
+    echo "y" | distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --unlock --home "$name" "$email"
+    
+    # Add to users group to allow traversal
+    distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
 }
-
-echo "Provisioning /users base directory..."
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /users
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0755 /users
 
 provision_user "fuse-user" "fuse-user@example.com"
 provision_user "gc-user" "gc-user@example.com"
@@ -99,12 +107,13 @@ mkdir -p /tmp/bench-dir
 BENCH_OUT=$(distfs -disable-doh -use-pinentry=false -config "/tmp/bench-dir/config.json" init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT")
 BENCH_ID=$(echo "$BENCH_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
-# Provision /bench-workspace via Global Admin
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$BENCH_ID" /bench-workspace
+# Provision, unlock, and assign to admin group
+echo "y" | distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --unlock bench-user bench-user@example.com
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
 
 # Promote and add to Administrators group
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user@example.com
-distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" "$BENCH_ID"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
 
 # Provision HA directory (world-writable for test flexibility)
 echo "Provisioning /ha..."
@@ -128,6 +137,7 @@ run_test "Dump Inodes Debugging" "/bin/test-dump-inodes.sh" || FAILED=1
 run_test "Quota Command" "/bin/test-quota-cmd.sh" || FAILED=1
 run_test "Enhanced LS E2E" "/bin/test-ls-e2e.sh" || FAILED=1
 run_test "System Audit & Integrity" "/bin/test-audit.sh" || FAILED=1
+run_test "OOB Identity & Registry" "/bin/test-registry.sh" || FAILED=1
 
 echo "" | tee -a $REPORT_FILE
 echo "--- PERFORMANCE BENCHMARKS ---" | tee -a $REPORT_FILE

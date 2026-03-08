@@ -36,6 +36,8 @@ JWT_SYNC=$(wget -qO- "$AUTH_URL/mint?email=sync-test-unique@example.com")
 OUT=$(/bin/distfs -disable-doh -use-pinentry=false -config "$CONFIG1" init --new -server "$SERVER_URL" -jwt "$JWT_SYNC")
 USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
+/bin/distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "sync-test-unique@example.com"
+
 echo "Admin: Provisioning home directory for $USER_ID..."
 /bin/distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$USER_ID" "/users/$USER_ID" || true
 

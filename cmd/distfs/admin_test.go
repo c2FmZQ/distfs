@@ -63,7 +63,7 @@ func (m *mockAdminClient) AdminListNodes(ctx context.Context) iter.Seq[*metadata
 		}
 	}
 }
-func (m *mockAdminClient) AdminLookup(ctx context.Context, email, reason string) (string, error) {
+func (m *mockAdminClient) ResolveUsername(ctx context.Context, identifier string) (string, error) {
 	return "user-id-123", m.err
 }
 func (m *mockAdminClient) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {

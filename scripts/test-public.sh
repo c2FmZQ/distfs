@@ -14,6 +14,7 @@ done
 echo "Initializing Reader (user2)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-public@example.com")
 distfs -disable-doh -use-pinentry=false -config "$CONFIG2" init --new -server http://storage-node-1:8080 -jwt "$JWT2"
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "user2-public@example.com"
 
 echo "User 1 (Owner): Granting world read to workspace /users/public-user..."
 distfs -disable-doh -use-pinentry=false -config "$CONFIG1" chmod 0755 /users/public-user

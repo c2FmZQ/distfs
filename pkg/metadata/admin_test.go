@@ -31,7 +31,7 @@ func TestAdminCUI(t *testing.T) {
 	user2ID := "normal-user"
 	dk2, _ := crypto.GenerateEncryptionKey()
 	sk2, _ := crypto.GenerateIdentityKey()
-	u2 := metadata.User{ID: user2ID, UID: 1002, SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes()}
+	u2 := metadata.User{ID: user2ID, UID: 1002, SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes(), Locked: false}
 	metadata.CreateUser(t, node, u2)
 
 	// 3. Verify Admin Status
