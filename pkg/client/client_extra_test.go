@@ -789,7 +789,9 @@ func TestVerifyInode_Signatures(t *testing.T) {
 	dk := c.DecKey() // Need decryption key for VerifyInode
 
 	// 1. Missing SignerID (FAIL)
-	inode := &metadata.Inode{ID: "f1", OwnerID: u1ID, Type: metadata.FileType, Version: 1}
+	nonce1 := []byte("nonce-for-f1-123")
+	f1ID := metadata.GenerateInodeID(u1ID, nonce1)
+	inode := &metadata.Inode{ID: f1ID, Nonce: nonce1, OwnerID: u1ID, Type: metadata.FileType, Version: 1}
 	err := c.VerifyInode(ctx, inode)
 	if err == nil {
 		t.Error("VerifyInode should reject inode with missing SignerID")
@@ -840,7 +842,9 @@ func TestVerifyInode_AdminBypass(t *testing.T) {
 	skA := c.SignKey()
 
 	// 1. Admin creates empty directory for other user (SUCCESS)
-	inode := &metadata.Inode{ID: "dir1", OwnerID: "userB", Type: metadata.DirType, Version: 1}
+	nonce1 := []byte("nonce-dir1")
+	dir1ID := metadata.GenerateInodeID("userB", nonce1)
+	inode := &metadata.Inode{ID: dir1ID, Nonce: nonce1, OwnerID: "userB", Type: metadata.DirType, Version: 1}
 	inode.SetSignerID(adminID)
 	inode.ClientBlob = nil // Admin creation doesn't provide ClientBlob
 	inode.UserSig = skA.Sign(inode.ManifestHash())
@@ -850,8 +854,11 @@ func TestVerifyInode_AdminBypass(t *testing.T) {
 	}
 
 	// 2. Admin creates non-empty directory for other user (FAIL)
+	nonce2 := []byte("nonce-dir2")
+	dir2ID := metadata.GenerateInodeID("userB", nonce2)
 	inode2 := &metadata.Inode{
-		ID:       "dir2",
+		ID:       dir2ID,
+		Nonce:    nonce2,
 		OwnerID:  "userB",
 		Type:     metadata.DirType,
 		Version:  1,
@@ -866,7 +873,9 @@ func TestVerifyInode_AdminBypass(t *testing.T) {
 	}
 
 	// 3. Admin creates file for other user (FAIL)
-	inode3 := &metadata.Inode{ID: "file1", OwnerID: "userB", Type: metadata.FileType, Version: 1}
+	nonce3 := []byte("nonce-file1")
+	file1ID := metadata.GenerateInodeID("userB", nonce3)
+	inode3 := &metadata.Inode{ID: file1ID, Nonce: nonce3, OwnerID: "userB", Type: metadata.FileType, Version: 1}
 	inode3.SetSignerID(adminID)
 	inode3.ClientBlob = nil
 	inode3.UserSig = skA.Sign(inode3.ManifestHash())

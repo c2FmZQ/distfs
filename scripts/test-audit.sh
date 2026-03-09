@@ -16,9 +16,17 @@ echo "file1" > /tmp/f1.txt
 distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" put /tmp/f1.txt /audit-test/subdir1/file1.bin
 
 echo "2. Creating a secondary root tree..."
-# Use admin-create-root to initialize a completely separate root ID (valid 32-char hex)
-SECOND_ROOT="00000000000000000000000000000002"
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-create-root "$SECOND_ROOT"
+# Use admin-create-root to initialize a completely separate root ID
+# The command will dynamically generate a valid ID based on the user ID and nonce.
+# Provide a dummy string, the CLI overrides it and prints the final ID.
+OUTPUT=$(distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-create-root "00000000000000000000000000000002")
+SECOND_ROOT=$(echo "$OUTPUT" | grep "Root inode" | awk '{print $3}')
+if [ -z "$SECOND_ROOT" ]; then
+    echo "FAIL: Could not extract generated secondary root ID"
+    exit 1
+fi
+echo "Generated Secondary Root: $SECOND_ROOT"
+
 distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" -root "$SECOND_ROOT" mkdir /sec-dir
 
 echo "3. Running Admin Audit..."

@@ -16,6 +16,7 @@ package client
 
 import (
 	"bytes"
+	"crypto/rand"
 	"io"
 	"net/http/httptest"
 	"testing"
@@ -69,12 +70,15 @@ func TestSmallFileInlining(t *testing.T) {
 
 	// 2. Write Small File (Inlined)
 	smallContent := []byte("small file content")
-	if _, err := c.WriteFile(t.Context(), "small-1", bytes.NewReader(smallContent), int64(len(smallContent)), 0644); err != nil {
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	fileID := metadata.GenerateInodeID("user-1", nonce)
+	if _, err := c.WriteFile(t.Context(), fileID, nonce, bytes.NewReader(smallContent), int64(len(smallContent)), 0644); err != nil {
 		t.Fatalf("Write small file failed: %v", err)
 	}
 
 	// 3. Verify Inode state
-	inode, err := c.GetInode(t.Context(), "small-1")
+	inode, err := c.GetInode(t.Context(), fileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -86,7 +90,7 @@ func TestSmallFileInlining(t *testing.T) {
 	}
 
 	// 4. Read back
-	rc, err := c.ReadFile(t.Context(), "small-1", nil)
+	rc, err := c.ReadFile(t.Context(), fileID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,12 +103,12 @@ func TestSmallFileInlining(t *testing.T) {
 	// 5. Grow file beyond InlineLimit (Eviction)
 	largeSize := metadata.InlineLimit + 100
 	largeContent := bytes.Repeat([]byte("A"), largeSize)
-	if _, err := c.WriteFile(t.Context(), "small-1", bytes.NewReader(largeContent), int64(len(largeContent)), 0644); err != nil {
+	if _, err := c.WriteFile(t.Context(), fileID, nil, bytes.NewReader(largeContent), int64(len(largeContent)), 0644); err != nil {
 		t.Fatalf("Grow file failed: %v", err)
 	}
 
 	// 6. Verify Eviction
-	inode, err = c.GetInode(t.Context(), "small-1")
+	inode, err = c.GetInode(t.Context(), fileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +120,7 @@ func TestSmallFileInlining(t *testing.T) {
 	}
 
 	// 7. Read back large
-	rc, err = c.ReadFile(t.Context(), "small-1", nil)
+	rc, err = c.ReadFile(t.Context(), fileID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

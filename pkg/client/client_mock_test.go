@@ -4,6 +4,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -109,6 +110,10 @@ func TestClient_MockedConflict(t *testing.T) {
 	sk, _ := crypto.GenerateIdentityKey()
 	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk).WithAdmin(true)
 
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	inodeID := metadata.GenerateInodeID("u1", nonce)
+
 	// Pre-login to avoid login logic in mock
 	c.sessionToken = "fake"
 	c.sessionExpiry = time.Now().Add(time.Hour)
@@ -128,7 +133,8 @@ func TestClient_MockedConflict(t *testing.T) {
 				// Create a valid inode with ClientBlob and Lockbox
 				fileKey := make([]byte, 32)
 				inode := metadata.Inode{
-					ID:      "00000000000000000000000000000001",
+					ID:      inodeID,
+					Nonce:   nonce,
 					Version: 1,
 					Type:    metadata.FileType,
 					OwnerID: "u1",
@@ -164,7 +170,11 @@ func TestClient_MockedConflict(t *testing.T) {
 
 			// Return a successful batch response after 2 attempts
 			attempts++
-			updatedInode := metadata.Inode{ID: "00000000000000000000000000000001", Version: 2, Type: metadata.FileType, OwnerID: "u1"}
+			nonce := make([]byte, 16)
+			// For tests, use a valid nonce and ID pair
+			u1ID := "u1"
+			inodeID := metadata.GenerateInodeID(u1ID, nonce)
+			updatedInode := metadata.Inode{ID: inodeID, Nonce: nonce, Version: 2, Type: metadata.FileType, OwnerID: u1ID}
 			updatedInode.SignInodeForTest("u1", sk)
 			ib, _ := json.Marshal(updatedInode)
 			batchRes := []json.RawMessage{ib}
@@ -176,7 +186,7 @@ func TestClient_MockedConflict(t *testing.T) {
 		},
 	}
 
-	_, err := c.UpdateInode(ctx, "00000000000000000000000000000001", func(i *metadata.Inode) error {
+	_, err := c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
 		return nil
 	})
 	if err != nil {

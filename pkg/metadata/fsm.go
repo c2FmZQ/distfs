@@ -884,6 +884,12 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	if update.GroupSig != nil {
 		inode.GroupSig = update.GroupSig
 	}
+	if update.OwnerDelegationSig != nil {
+		inode.OwnerDelegationSig = update.OwnerDelegationSig
+	}
+	if update.Nonce != nil {
+		inode.Nonce = update.Nonce
+	}
 	if update.SignerID != "" {
 		inode.SignerID = update.SignerID
 	}

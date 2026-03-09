@@ -15,6 +15,7 @@
 package metadata
 
 import (
+	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -415,10 +416,12 @@ type Inode struct {
 	Leases        map[string]LeaseInfo `json:"leases,omitempty"` // Nonce -> LeaseInfo
 	Unlinked      bool                 `json:"unlinked,omitempty"`
 
-	// Manifest Integrity (Phase 31 & 47)
-	SignerID string `json:"signer_id,omitempty"`
-	UserSig  []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
-	GroupSig []byte `json:"group_sig,omitempty"`
+	// Manifest Integrity (Phase 31 & 47 & 50)
+	Nonce              []byte `json:"nonce,omitempty"` // Cryptographic commitment to OwnerID
+	SignerID           string `json:"signer_id,omitempty"`
+	UserSig            []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
+	GroupSig           []byte `json:"group_sig,omitempty"`
+	OwnerDelegationSig []byte `json:"owner_delegation_sig,omitempty"` // Phase 50: Owner's signature over (ID + GroupID)
 
 	// Client-side transient state (unexported, not in JSON)
 	name          string
@@ -446,6 +449,23 @@ func (i *Inode) GetSignerID() string       { return i.SignerID }
 func (i *Inode) SetSignerID(s string)      { i.SignerID = s }
 func (i *Inode) GetFileKey() []byte        { return i.fileKey }
 func (i *Inode) SetFileKey(k []byte)       { i.fileKey = k }
+
+// GenerateInodeID computes a cryptographically verifiable Inode ID bound to the creator's OwnerID.
+// ID = hex(SHA256(OwnerID || Nonce))[:32]
+func GenerateInodeID(ownerID string, nonce []byte) string {
+	h := sha256.New()
+	h.Write([]byte(ownerID))
+	h.Write(nonce)
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+func (i *Inode) DelegationHash() []byte {
+	h := crypto.NewHash()
+	h.Write([]byte("delegation_v1|"))
+	h.Write([]byte("id:" + i.ID + "|"))
+	h.Write([]byte("group:" + i.GroupID + "|"))
+	return h.Sum(nil)
+}
 
 // ManifestHash calculates a cryptographic hash of the inode's manifest and critical metadata.
 func (i *Inode) ManifestHash() []byte {
@@ -548,6 +568,12 @@ func (i *Inode) ManifestHash() []byte {
 			h.Write(entry.DEMCiphertext)
 			h.Write([]byte(","))
 		}
+		h.Write([]byte("|"))
+	}
+
+	if len(i.OwnerDelegationSig) > 0 {
+		h.Write([]byte("owner_delegation_sig:"))
+		h.Write(i.OwnerDelegationSig)
 		h.Write([]byte("|"))
 	}
 

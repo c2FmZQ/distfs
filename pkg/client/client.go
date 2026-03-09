@@ -1190,6 +1190,12 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 
 	inode.SetSignerID(c.userID)
 	inode.Mode = metadata.SanitizeMode(inode.Mode, inode.Type)
+
+	// Phase 50.2: Owner Delegation Signature
+	if c.userID == inode.OwnerID && inode.GroupID != "" {
+		inode.OwnerDelegationSig = c.signKey.Sign(inode.DelegationHash())
+	}
+
 	hash := inode.ManifestHash()
 	inode.UserSig = c.signKey.Sign(hash)
 
@@ -1534,7 +1540,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	return valid, nil
 }
 
-func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32) error {
+func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
@@ -1588,6 +1594,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, iType metadat
 		}
 		inode = metadata.Inode{
 			ID:            id,
+			Nonce:         nonce,
 			Type:          iType,
 			Links:         links,
 			Mode:          mode,
@@ -1705,7 +1712,7 @@ func (c *Client) uploadDataInternal(ctx context.Context, id string, fileKey []by
 }
 
 // WriteFile writes a file. Returns the FileKey used.
-func (c *Client) WriteFile(ctx context.Context, id string, r io.Reader, size int64, mode uint32) ([]byte, error) {
+func (c *Client) WriteFile(ctx context.Context, id string, nonce []byte, r io.Reader, size int64, mode uint32) ([]byte, error) {
 	c.keyMu.RLock()
 	meta, ok := c.keyCache[id]
 	c.keyMu.RUnlock()
@@ -1751,7 +1758,7 @@ func (c *Client) WriteFile(ctx context.Context, id string, r io.Reader, size int
 		}
 	}
 
-	if err := c.writeInodeContent(ctx, id, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC, 0, 0); err != nil {
+	if err := c.writeInodeContent(ctx, id, nonce, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC, 0, 0); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -1838,7 +1845,7 @@ func (c *Client) NewReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 
 	nonce := leaseNonce
 	if nonce == "" {
-		nonce = generateID()
+		nonce = generateNonce()
 		// POSIX compliance: acquire shared usage lease
 		err := c.AcquireLeases(ctx, []string{id}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
 		if err != nil {
@@ -2222,10 +2229,10 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		rand.Read(fileKey)
 	}
 
-	// Always generate new UUID for atomic swap
-	uidBytes := make([]byte, 16)
-	rand.Read(uidBytes)
-	newID := hex.EncodeToString(uidBytes)
+	// Always generate new ID for atomic swap via cryptographic commitment
+	inodeNonce := make([]byte, 16)
+	rand.Read(inodeNonce)
+	newID := metadata.GenerateInodeID(c.userID, inodeNonce)
 
 	lb, err := c.createLockbox(ctx, fileKey, 0600, c.userID, groupID)
 	if err != nil {
@@ -2234,6 +2241,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 
 	inode := &metadata.Inode{
 		ID:      newID,
+		Nonce:   inodeNonce,
 		Type:    metadata.FileType,
 		Mode:    0600,
 		OwnerID: c.userID,
@@ -2248,7 +2256,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	// Acquire lease first to prevent concurrent writers on this path.
 	nonce := leaseNonce
 	if nonce == "" {
-		nonce = generateID()
+		nonce = generateNonce()
 		err := c.withConflictRetry(ctx, func() error {
 			return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{
 				Type:  metadata.LeaseExclusive,
@@ -2825,7 +2833,7 @@ func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader,
 	}
 
 	// 1. Acquire shared filename leases for all path IDs to "freeze" the namespace.
-	nonce := generateID()
+	nonce := generateNonce()
 	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
 	err := c.withConflictRetry(lctx, func() error {
 		return c.AcquireLeases(lctx, pathIDs, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
@@ -2865,7 +2873,7 @@ func (c *Client) NewReaders(ctx context.Context, paths []string) ([]*FileReader,
 	}
 
 	// 4. Acquire shared Inode leases in one batch
-	inodeNonce := generateID()
+	inodeNonce := generateNonce()
 	err = c.AcquireLeases(ctx, ids, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: inodeNonce})
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire inode leases: %w", err)
@@ -2920,7 +2928,7 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 	}
 
 	// Phase 41: Batch acquire all path leases first to prevent livelock with readers.
-	nonce := generateID()
+	nonce := generateNonce()
 	lctx, lcancel := context.WithTimeout(ctx, 30*time.Second)
 	err := c.withConflictRetry(lctx, func() error {
 		return c.AcquireLeases(lctx, pathIDs, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
@@ -3108,7 +3116,7 @@ func (c *Client) OpenManyForUpdate(ctx context.Context, names []string, data []a
 	}
 
 	// 1. Acquire path-based exclusive leases for all files
-	nonce := generateID()
+	nonce := generateNonce()
 	if err := c.AcquireLeases(ctx, pathIDs, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce}); err != nil {
 		return nil, err
 	}
@@ -3223,6 +3231,17 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		return fmt.Errorf("missing manifest signature for inode %s", inode.ID)
 	}
 
+	// Phase 50.1: Cryptographic ID Commitment
+	if inode.ID != metadata.RootID && !inode.IsSystem {
+		if len(inode.Nonce) == 0 {
+			return fmt.Errorf("missing cryptographic nonce for inode %s", inode.ID)
+		}
+		expectedID := metadata.GenerateInodeID(inode.OwnerID, inode.Nonce)
+		if inode.ID != expectedID {
+			return fmt.Errorf("inode ID commitment mismatch for %s: expected %s", inode.ID, expectedID)
+		}
+	}
+
 	// 2. Verify Signatures
 	hash := inode.ManifestHash()
 	user, err := c.GetUser(ctx, signerID)
@@ -3244,7 +3263,24 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	}
 
 	// 3. Check Authorization
-	authorized := (signerID == inode.OwnerID) || groupValid
+	authorized := false
+	if signerID == inode.OwnerID {
+		authorized = true
+	} else if groupValid {
+		// Phase 50.3: Strict Verification Engine
+		if len(inode.OwnerDelegationSig) == 0 {
+			return fmt.Errorf("missing owner delegation signature on inode %s", inode.ID)
+		}
+
+		owner, err := c.GetUser(ctx, inode.OwnerID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch owner %s for delegation check: %w", inode.OwnerID, err)
+		}
+		if !crypto.VerifySignature(owner.SignKey, inode.DelegationHash(), inode.OwnerDelegationSig) {
+			return fmt.Errorf("invalid owner delegation signature on inode %s", inode.ID)
+		}
+		authorized = true
+	}
 
 	if !authorized {
 		// Admin Bypass for mkdir --owner:

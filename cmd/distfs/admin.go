@@ -816,11 +816,12 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 	if err := c.EnsureRoot(ctx); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Root inode %s initialized successfully.\n", id)
+	actualRootID, _, _ := c.GetRootAnchor()
+	fmt.Printf("Root inode %s initialized successfully.\n", actualRootID)
 
 	// Phase 49: System Backbone Bootstrapping
 	// Only do this for the canonical root to avoid cluttering secondary roots.
-	if id == metadata.RootID {
+	if actualRootID == metadata.RootID {
 		fmt.Println("Bootstrapping system backbone...")
 
 		// 1. Create Admin Group

@@ -17,6 +17,7 @@ package client
 import (
 	"bytes"
 	"crypto/mlkem"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -176,8 +177,10 @@ func TestClientIntegration(t *testing.T) {
 
 	// 4. Write File (Raw)
 	content := []byte("hello distributed filesystem world")
-	fileID := "00000000000000000000000000000001"
-	key, err := c.WriteFile(t.Context(), fileID, bytes.NewReader(content), int64(len(content)), 0644)
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	fileID := metadata.GenerateInodeID("user-1", nonce)
+	key, err := c.WriteFile(t.Context(), fileID, nonce, bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
@@ -307,7 +310,10 @@ func TestReplication(t *testing.T) {
 
 	// 4. Write
 	content := bytes.Repeat([]byte("replicated data "), 500) // ~8KB
-	_, err = c.WriteFile(t.Context(), "repl-file", bytes.NewReader(content), int64(len(content)), 0644)
+	nonceRepl := make([]byte, 16)
+	rand.Read(nonceRepl)
+	fileID := metadata.GenerateInodeID("user-1", nonceRepl)
+	_, err = c.WriteFile(t.Context(), fileID, nonceRepl, bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -485,8 +491,11 @@ func TestReplicationRepair(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	content := bytes.Repeat([]byte("repair me "), 1000)                                                   // ~10KB
-	_, err = c.WriteFile(t.Context(), "repair-file", bytes.NewReader(content), int64(len(content)), 0644) // Raw write
+	content := bytes.Repeat([]byte("repair me "), 1000) // ~10KB
+	nonceRepair := make([]byte, 16)
+	rand.Read(nonceRepair)
+	fileID := metadata.GenerateInodeID("user-1", nonceRepair)
+	_, err = c.WriteFile(t.Context(), fileID, nonceRepair, bytes.NewReader(content), int64(len(content)), 0644) // Raw write
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -615,7 +624,11 @@ func TestReadAhead(t *testing.T) {
 	content[0] = 'A'
 	content[dataSize-1] = 'Z'
 
-	key, err := c.WriteFile(t.Context(), "readahead-file", bytes.NewReader(content), int64(dataSize), 0644)
+	nonceRA := make([]byte, 16)
+	rand.Read(nonceRA)
+	fileID := metadata.GenerateInodeID("user-1", nonceRA)
+
+	key, err := c.WriteFile(t.Context(), fileID, nonceRA, bytes.NewReader(content), int64(dataSize), 0644)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -626,7 +639,7 @@ func TestReadAhead(t *testing.T) {
 	logMu.Unlock()
 
 	// 4. Read File (Linearly)
-	reader, err := c.NewReader(t.Context(), "readahead-file", key)
+	reader, err := c.NewReader(t.Context(), fileID, key)
 	if err != nil {
 		t.Fatalf("NewReader failed: %v", err)
 	}

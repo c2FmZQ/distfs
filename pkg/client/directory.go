@@ -55,8 +55,16 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	var nonce []byte
+	if c.rootID != metadata.RootID {
+		nonce = make([]byte, 16)
+		rand.Read(nonce)
+		c.rootID = metadata.GenerateInodeID(c.userID, nonce)
+	}
+
 	newInode := metadata.Inode{
 		ID:       c.rootID,
+		Nonce:    nonce,
 		Type:     metadata.DirType,
 		Mode:     0755,
 		Children: make(map[string]string),
@@ -262,7 +270,7 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 	// 1. Acquire Exclusive Path Lease
 	nonce := c.getSessionNonce()
 	if nonce == "" {
-		nonce = generateID()
+		nonce = generateNonce()
 	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
@@ -284,7 +292,15 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 		return nil, nil, metadata.ErrExists
 	}
 
-	newID := generateID()
+	ownerID := c.userID
+	if opts.OwnerID != "" {
+		ownerID = opts.OwnerID
+	}
+
+	inodeNonce := make([]byte, 16)
+	rand.Read(inodeNonce)
+	newID := metadata.GenerateInodeID(ownerID, inodeNonce)
+
 	newKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, newKey); err != nil {
 		return nil, nil, err
@@ -314,7 +330,8 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 		}
 
 		newInode := metadata.Inode{
-			ID: newID,
+			ID:    newID,
+			Nonce: inodeNonce,
 			Links: map[string]bool{
 				parentID + ":" + encName: true,
 			},
@@ -496,7 +513,7 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 	// 1. Acquire Exclusive Path Leases
 	nonce := c.getSessionNonce()
 	if nonce == "" {
-		nonce = generateID()
+		nonce = generateNonce()
 	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathOld, pathNew}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
@@ -660,7 +677,7 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 	// 1. Acquire Exclusive Path Lease
 	nonce := c.getSessionNonce()
 	if nonce == "" {
-		nonce = generateID()
+		nonce = generateNonce()
 	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
@@ -816,7 +833,7 @@ func (c *Client) LinkRaw(ctx context.Context, parentID string, parentKey []byte,
 	// 1. Acquire Exclusive Path Lease
 	nonce := c.getSessionNonce()
 	if nonce == "" {
-		nonce = generateID()
+		nonce = generateNonce()
 	}
 	if err := c.withConflictRetry(ctx, func() error {
 		return c.AcquireLeases(ctx, []string{pathID}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseExclusive, Nonce: nonce})
@@ -893,7 +910,7 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	if existingID, ok := parentInode.Children[encName]; ok {
 		if iType == metadata.FileType {
 			// Update existing file content
-			err := c.writeInodeContent(ctx, existingID, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0)
+			err := c.writeInodeContent(ctx, existingID, nil, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0)
 			if err != nil {
 				return fmt.Errorf("addEntry writeInodeContent (existing) failed: %w", err)
 			}
@@ -963,7 +980,7 @@ func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, own
 	return lb, nil
 }
 
-func generateID() string {
+func generateNonce() string {
 	b := make([]byte, 16)
 	rand.Read(b)
 	return hex.EncodeToString(b)
