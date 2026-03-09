@@ -212,7 +212,7 @@ func usage() {
 	fmt.Println("  admin-unlock-user <email>       Unlock a user account")
 	fmt.Println("  registry-add [--unlock] [--quota <limit>] [--home] <username> <email> Verify and add a user to the registry")
 	fmt.Println("  admin-audit                     Run a comprehensive system integrity and structural audit")
-	fmt.Println("  admin-create-root [id]          Initialize a new root inode (Admin only, defaults to standard root)")
+	fmt.Println("  admin-create-root [-secondary]  Initialize a new root inode (Admin only, defaults to standard root)")
 	fmt.Println("  whoami                          Display your user ID")
 	fmt.Println("  dump-inodes [path|id]           Recursively dump inode metadata for debugging")
 	os.Exit(1)

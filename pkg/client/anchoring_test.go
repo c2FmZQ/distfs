@@ -11,7 +11,7 @@ func TestClient_WithRootID_Anchoring(t *testing.T) {
 	c, _, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
-	if err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
+	if _, err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 

@@ -201,7 +201,7 @@ func TestClientIntegration(t *testing.T) {
 	}
 
 	// 6. FS Integration
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
@@ -396,7 +396,7 @@ func TestDirectories(t *testing.T) {
 	c = c.WithServerKey(serverEK)
 
 	// Ensure Root
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
@@ -733,7 +733,7 @@ func TestGarbageCollection(t *testing.T) {
 	c = c.WithServerKey(serverEK)
 
 	// 3. Create File
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	content := bytes.Repeat([]byte("garbage "), 1000) // ~8KB
@@ -821,7 +821,7 @@ func TestResolvePathComplex(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 

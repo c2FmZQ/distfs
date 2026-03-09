@@ -451,10 +451,11 @@ func (i *Inode) GetFileKey() []byte        { return i.fileKey }
 func (i *Inode) SetFileKey(k []byte)       { i.fileKey = k }
 
 // GenerateInodeID computes a cryptographically verifiable Inode ID bound to the creator's OwnerID.
-// ID = hex(SHA256(OwnerID || Nonce))[:32]
+// ID = hex(SHA256(OwnerID || "|" || Nonce))[:32]
 func GenerateInodeID(ownerID string, nonce []byte) string {
 	h := sha256.New()
 	h.Write([]byte(ownerID))
+	h.Write([]byte("|"))
 	h.Write(nonce)
 	return hex.EncodeToString(h.Sum(nil))[:32]
 }

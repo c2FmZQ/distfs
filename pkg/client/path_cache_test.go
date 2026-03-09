@@ -89,7 +89,7 @@ func TestPathCache(t *testing.T) {
 	// But EnsureRoot uses createInode which signs it.
 	// The problem is that TestPathCache might be seeing an UNSIGNED root if it was pre-created.
 	// Actually EnsureRoot is called below.
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 

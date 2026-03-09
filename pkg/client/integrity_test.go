@@ -73,7 +73,7 @@ func TestManifestIntegrity(t *testing.T) {
 	if err := clientA.Login(t.Context()); err != nil {
 		t.Fatalf("Admin login failed: %v", err)
 	}
-	if err := clientA.EnsureRoot(t.Context()); err != nil {
+	if _, err := clientA.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 

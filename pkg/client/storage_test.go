@@ -67,7 +67,7 @@ func TestStorageAPI_Leases(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
@@ -145,7 +145,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 
 	c := NewClient(tsMeta.URL).WithIdentity("u1", dk).WithSignKey(sk).WithServerKey(serverEK)
 	c.Login(t.Context())
-	c.EnsureRoot(t.Context())
+	_, _ = c.EnsureRoot(t.Context())
 
 	// 2. Prepare file
 	path := "/tx-test.json"

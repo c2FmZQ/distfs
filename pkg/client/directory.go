@@ -33,37 +33,38 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
-// EnsureRoot initializes the root directory inode. It returns an error if it already exists.
-func (c *Client) EnsureRoot(ctx context.Context) error {
+// EnsureRoot initializes the root directory inode. It returns the ID of the initialized root (useful for secondary roots) and an error if it already exists.
+func (c *Client) EnsureRoot(ctx context.Context) (string, error) {
 	inode, err := c.getInode(ctx, c.rootID)
 	if err == nil {
 		c.rootOwner = inode.OwnerID
 		c.rootVersion = inode.Version
-		return metadata.ErrExists
+		return c.rootID, metadata.ErrExists
 	}
 
 	if c.decKey == nil {
-		return fmt.Errorf("cannot create secure root without identity")
+		return "", fmt.Errorf("cannot create secure root without identity")
 	}
 
 	rootKey := make([]byte, 32)
 	if _, err := io.ReadFull(rand.Reader, rootKey); err != nil {
-		return err
+		return "", err
 	}
 
 	lb, err := c.createLockbox(ctx, rootKey, 0755, c.userID, "")
 	if err != nil {
-		return err
+		return "", err
 	}
 	var nonce []byte
-	if c.rootID != metadata.RootID {
+	finalRootID := c.rootID
+	if finalRootID != metadata.RootID {
 		nonce = make([]byte, 16)
 		rand.Read(nonce)
-		c.rootID = metadata.GenerateInodeID(c.userID, nonce)
+		finalRootID = metadata.GenerateInodeID(c.userID, nonce)
 	}
 
 	newInode := metadata.Inode{
-		ID:       c.rootID,
+		ID:       finalRootID,
 		Nonce:    nonce,
 		Type:     metadata.DirType,
 		Mode:     0755,
@@ -78,12 +79,12 @@ func (c *Client) EnsureRoot(ctx context.Context) error {
 	if err != nil {
 		if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusConflict {
 			// Already exists, but we MUST fetch it to capture the anchor (owner/version)
-			_, err = c.getInode(ctx, c.rootID)
-			return err
+			_, err = c.getInode(ctx, finalRootID)
+			return finalRootID, err
 		}
-		return err
+		return "", err
 	}
-	return nil
+	return finalRootID, nil
 }
 
 // ResolvePath resolves a string path to an Inode and its FileKey.

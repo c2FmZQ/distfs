@@ -165,7 +165,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	}
 
 	// 3. Initialize Root once
-	if err := newClient().EnsureRoot(t.Context()); err != nil {
+	if _, err := newClient().EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("Initial EnsureRoot failed: %v", err)
 	}
 

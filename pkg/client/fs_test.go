@@ -82,7 +82,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 

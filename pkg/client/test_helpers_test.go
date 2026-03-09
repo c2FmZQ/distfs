@@ -85,7 +85,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 
 	c := NewClient(ts.URL).WithIdentity(userID, udk).WithSignKey(usk).WithServerKey(ek)
 	c.Login(context.Background())
-	if err := c.EnsureRoot(context.Background()); err != nil {
+	if _, err := c.EnsureRoot(context.Background()); err != nil {
 		t.Fatalf("Failed to ensure root: %v", err)
 	}
 

@@ -72,7 +72,7 @@ func TestAddEntryRegression(t *testing.T) {
 	c = c.WithSignKey(userSignKey)
 	c = c.WithServerKey(serverEK)
 
-	if err := c.EnsureRoot(context.Background()); err != nil {
+	if _, err := c.EnsureRoot(context.Background()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 

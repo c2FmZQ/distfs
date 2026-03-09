@@ -19,7 +19,7 @@ echo "2. Creating a secondary root tree..."
 # Use admin-create-root to initialize a completely separate root ID
 # The command will dynamically generate a valid ID based on the user ID and nonce.
 # Provide a dummy string, the CLI overrides it and prints the final ID.
-OUTPUT=$(distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-create-root "00000000000000000000000000000002")
+OUTPUT=$(distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-create-root -secondary)
 SECOND_ROOT=$(echo "$OUTPUT" | grep "Root inode" | awk '{print $3}')
 if [ -z "$SECOND_ROOT" ]; then
     echo "FAIL: Could not extract generated secondary root ID"

@@ -31,7 +31,7 @@ func TestDebugLockedKeysync(t *testing.T) {
 	svKey, _ := crypto.UnmarshalEncapsulationKey(ek)
 	c = c.WithServerKey(svKey)
 
-	c.EnsureRoot(context.Background())
+	_, _ = c.EnsureRoot(context.Background())
 
 	err := c.PushKeySync(context.Background(), &metadata.KeySyncBlob{Ciphertext: []byte("test")})
 	if err != nil {

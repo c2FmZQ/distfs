@@ -802,26 +802,31 @@ func cmdAdminGroupQuota(ctx context.Context, args []string) {
 }
 
 func cmdAdminCreateRoot(ctx context.Context, args []string) {
-	id := metadata.RootID
-	if len(args) > 0 {
-		id = args[0]
-		if !metadata.IsInodeID(id) {
-			log.Fatalf("invalid inode ID: %s", id)
-		}
-	}
+	fs := flag.NewFlagSet("admin-create-root", flag.ExitOnError)
+	secondary := fs.Bool("secondary", false, "Generate a secondary root inode instead of the canonical system root")
+	fs.Parse(args)
 
 	c := loadClient()
+
+	id := metadata.RootID
+	if *secondary {
+		// Provide a non-canonical placeholder to trigger client's generation logic.
+		// EnsureRoot will detect this is not RootID, generate a proper nonce and ID,
+		// and return the newly generated cryptographically committed ID.
+		id = "secondary-placeholder-id-0000000"
+	}
 	c = c.WithRootID(id)
 
-	if err := c.EnsureRoot(ctx); err != nil {
+	var finalID string
+	var err error
+	if finalID, err = c.EnsureRoot(ctx); err != nil {
 		log.Fatal(err)
 	}
-	actualRootID, _, _ := c.GetRootAnchor()
-	fmt.Printf("Root inode %s initialized successfully.\n", actualRootID)
+	fmt.Printf("Root inode %s initialized successfully.\n", finalID)
 
 	// Phase 49: System Backbone Bootstrapping
 	// Only do this for the canonical root to avoid cluttering secondary roots.
-	if actualRootID == metadata.RootID {
+	if finalID == metadata.RootID {
 		fmt.Println("Bootstrapping system backbone...")
 
 		// 1. Create Admin Group

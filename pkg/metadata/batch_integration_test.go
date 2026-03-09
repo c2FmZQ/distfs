@@ -103,7 +103,7 @@ func TestSessionKeyMemoization(t *testing.T) {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 

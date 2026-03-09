@@ -178,7 +178,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
 
 		// Ensure root exists and capture anchor
-		if err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
+		if _, err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
 			if apiErr, ok := err.(*APIError); ok && apiErr.Code == metadata.ErrCodeForbidden {
 				// User is locked, which is expected for new accounts in a zero-trust setup.
 				// We can't fetch the root anchor yet, but onboarding is otherwise complete.

@@ -449,14 +449,14 @@ func TestClient_EnsureRootExtra(t *testing.T) {
 	defer ts.Close()
 
 	// 1. Root already exists
-	err := c.EnsureRoot(ctx)
+	_, err := c.EnsureRoot(ctx)
 	if err != metadata.ErrExists {
 		t.Errorf("EnsureRoot should fail with ErrExists if root already exists, got %v", err)
 	}
 
 	// 2. No identity
 	cNoId := NewClient(ts.URL)
-	err = cNoId.EnsureRoot(ctx)
+	_, err = cNoId.EnsureRoot(ctx)
 	if err == nil {
 		t.Error("EnsureRoot should fail without identity")
 	}

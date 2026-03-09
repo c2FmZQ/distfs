@@ -207,7 +207,7 @@ func TestAdminMkdirOwner(t *testing.T) {
 	}
 
 	// 3.5 Initialize Root
-	if err := c.EnsureRoot(t.Context()); err != nil {
+	if _, err := c.EnsureRoot(t.Context()); err != nil {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
