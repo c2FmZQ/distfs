@@ -1,67 +1,60 @@
-# DistFS: A Research File System for Zero-Knowledge, Post-Quantum Environments
+# DistFS: Reconciling POSIX Semantics with Zero-Knowledge, Post-Quantum File Storage
 
-DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system designed to explore the boundaries of zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.
+DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system. It is designed as a research platform to explore the boundaries of strict zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.
 
-This project serves as a research platform demonstrating how to map standard, highly-dynamic file system semantics—such as atomic renames, granular POSIX Access Control Lists (ACLs), and differential sync—into a completely opaque, untrusted distributed storage infrastructure without leaking structure or content.
+The core tension DistFS resolves is the apparent incompatibility between high-fidelity POSIX environments (which require complex, dynamic metadata manipulation like granular ACLs and atomic renames) and a strict zero-knowledge model (where the server cannot read or verify metadata without exposing it). 
 
----
-
-## Core Research Pillars
-
-DistFS is built upon three foundational technical principles:
-
-1.  **Strict Zero-Knowledge Privacy:** The server infrastructure must never possess plaintext user data, filenames, or directory structures. All encryption, decryption, and access-control matrix expansions occur exclusively at the client boundary.
-2.  **Consensus-Driven Metadata:** File system state, namespace consistency, and distributed locking are managed by a Raft consensus cluster to prevent split-brain scenarios and ensure a unified view across all distributed clients.
-3.  **Post-Quantum Readiness:** All identity management, key encapsulation, and server-client communication are secured using National Institute of Standards and Technology (NIST) standardized Post-Quantum Cryptography (ML-KEM-768/Crystals-Kyber) to safeguard against future quantum-cryptanalytic threats.
+We invite researchers, cryptographers, and systems engineers to review, attack, and contribute to this architecture.
 
 ---
 
-## Key Security Features & Architectural Mechanisms
+## 1. Threat Model & Security Assumptions
 
-The following details the specific mechanisms DistFS uses to enforce its security guarantees while maintaining high-performance file system operations.
+DistFS operates under an aggressive "Harvest Now, Decrypt Later" threat model where the entire network and storage infrastructure are assumed to be hostile.
 
-### 1. Cryptographic Provenance (The Immutable Owner)
-In a zero-knowledge system, a compromised metadata server could theoretically alter the `OwnerID` of a file, allowing a malicious actor to rewrite the file and self-sign the payload. 
-**The Mechanism:** DistFS solves this by mathematically binding the opaque `Inode ID` to the creator's identity via a cryptographic commitment (`ID = hex(SHA256(OwnerID || "|" || Nonce))[:32]`). 
-**The Benefit:** The file's true ownership is immutable and verifiable by any client. The server cannot silently reassign ownership or spoof payloads, guaranteeing strict data provenance.
-
-### 2. POSIX ACL Cryptographic Expansion (The Lockbox)
-Implementing POSIX.1e Access Control Lists (ACLs) in an E2EE environment presents a unique challenge: the server can enforce access rules, but the client still needs the decryption key.
-**The Mechanism:** DistFS implements a dynamic "Lockbox." When a FUSE client executes a `setfacl` command to grant a specific user read access, the client fetches that user's public key, encrypts the AES-256-GCM `File Key`, and appends this ciphertext to the Inode's metadata Lockbox. 
-**The Benefit:** It provides high-fidelity POSIX ACL interoperability natively through FUSE xattrs (`system.posix_acl_access`), while preserving true mathematical end-to-end encryption. The server enforces the POSIX mask algorithm but remains blind to the data.
-
-### 3. Layer 7 End-to-End Encryption (Sealing)
-Standard TLS only protects data in transit to the edge proxy or load balancer. 
-**The Mechanism:** DistFS implements "Sealed Requests." Every sensitive API mutation is encrypted against a rotating, post-quantum `Cluster Epoch Key` and cryptographically signed using the client's ML-DSA identity key.
-**The Benefit:** Intermediate infrastructure (proxies, WAFs, load balancers) cannot observe, intercept, or manipulate the metadata layer. The file system topology remains completely opaque to network intermediaries.
-
-### 4. The "Dark Registry" (Anonymized Identity)
-Traditional systems leak PII (emails, usernames) in their internal databases.
-**The Mechanism:** DistFS hashes all user and group identities using `HMAC-SHA256(Email, ClusterSecret)`.
-**The Benefit:** The server operates on opaque cryptographic UUIDs. Even if the entire BoltDB database is exfiltrated, user emails and access patterns cannot be reverse-engineered without the heavily guarded `ClusterSecret`.
-
-### 5. Out-Of-Band (OOB) Governed Identity Verification
-To prevent Sybil attacks where an adversary registers thousands of identities, DistFS separates authentication from authorization.
-**The Mechanism:** After authenticating via OpenID Connect (OIDC), the user's PQC identity is placed in a `Locked` state. The user exchanges a 6-digit cryptographic verification code Out-Of-Band with a cluster Administrator. The Admin then signs an attestation to unlock the account.
-**The Benefit:** Enforces a Zero-Trust onboarding model where only explicitly verified physical devices are granted storage quotas and network access.
-
-### 6. Hedged Reads & Differential Synchronization
-Operating a file system over a network introduces significant latency hurdles.
-**The Mechanism:** 
-*   **Hedged Reads:** When fetching a 1MB encrypted chunk, the client queries the primary replica. If it does not respond within a strict sub-second threshold, the client fires parallel requests to secondary replicas. The first to return successfully cancels the others.
-*   **Differential Sync (Fsync):** `fsync` operations do not re-upload the entire file. The client tracks dirty 1MB pages in memory and only encrypts and commits the specifically modified chunks, seamlessly updating the Raft metadata manifest.
-**The Benefit:** Mitigates network tail latency and provides near-native file modification performance despite the heavy cryptographic overhead.
+*   **Malicious Infrastructure:** We assume the network is compromised, load balancers are tapped, and metadata servers are actively hostile (e.g., attempting to forge file ownership or roll back state).
+*   **The Trusted Boundary:** The client machine (and its local memory/FUSE mount) is the *only* trusted boundary. All encryption, decryption, and access-control matrix expansions occur exclusively here.
+*   **Out of Scope:** Endpoint compromise (malware on the user's laptop) and absolute denial of service (a server operator simply deleting all hard drives).
 
 ---
 
-## System Architecture
+## 2. Key Cryptographic Mechanisms (Architectural Differentiators)
+
+To survive in a hostile environment while providing a standard UNIX-like experience, DistFS introduces several novel architectural mechanisms.
+
+### 2.1 Post-Quantum Cryptography (PQC) at Layer 7
+While modern infrastructure often relies on terminating TLS at an ingress proxy (exposing plaintext metadata to the internal network), DistFS bakes NIST-standardized PQC directly into the application layer. Every Remote Procedure Call (RPC) mutation is a **Sealed Request** encrypted with ML-KEM-768 (Crystals-Kyber) against the cluster's active, rotating Epoch Key. This protects the namespace against future quantum-cryptanalytic attacks even if the internal data center network is fully compromised.
+
+### 2.2 Zero-Knowledge POSIX ACLs (The Lockbox)
+Providing granular POSIX.1e Access Control Lists (ACLs) in an E2EE file system requires mapping standard kernel permissions to complex cryptographic key distribution. DistFS maps standard Linux FUSE xattrs (`system.posix_acl_access`) directly into a dynamic cryptographic "Lockbox." 
+
+When a user runs `setfacl -m u:alice:rwx file.txt`, the client intercepts the command, fetches Alice's public key, encrypts the file's symmetric AES-256-GCM key, appends it to the Lockbox, and generates a new ML-DSA signature over the state. The server strictly enforces the POSIX mask algorithm but remains mathematically blind to the actual file data.
+
+### 2.3 Cryptographic Provenance vs. Server Authority
+In traditional networked file systems (NFS, Ceph), the metadata server acts as the absolute authority; a compromised server can trivially reassign the `OwnerID` of a file and overwrite the data. DistFS treats its own metadata servers as untrusted. 
+
+An Inode's ID is a mathematical commitment (`ID = hex(SHA256(OwnerID || "|" || Nonce))[:32]`). Furthermore, delegating write access requires a cryptographic `OwnerDelegationSig`. A compromised server literally *cannot* forge file ownership, reassign files, or spoof payloads without failing the client-side cryptographic verification engine.
+
+### 2.4 The "Dark Registry" and OOB Governance
+Enterprise file systems typically ingest plaintext Personally Identifiable Information (PII) like emails or usernames into their internal databases. DistFS utilizes a **Dark Registry** where user identities are derived from `HMAC-SHA256(Email, ClusterSecret)`. 
+
+Furthermore, successfully authenticating via Single Sign-On (SSO/OIDC) does *not* immediately grant access. DistFS enforces a Zero-Trust onboarding model requiring an Out-Of-Band (OOB) cryptographic handshake: an Administrator must manually verify a device's 6-digit code and sign a blockchain-style attestation to unlock the account.
+
+### 2.5 Unified Consensus-Driven Metadata + E2EE Sharding
+Systems that distribute encrypted blocks over peer-to-peer pools often struggle to provide the strongly ordered, atomic consistency required for standard application workloads (e.g., rapid atomic renames, locking, strict directory DAGs). 
+
+DistFS solves this by using a highly consistent Raft/BoltDB cluster purely to manage the encrypted namespace. This is married to a highly scalable, parallel fan-out storage pool for encrypted 1MB data chunks. It includes tail-latency mitigation (Hedged Reads) and differential syncing where `fsync` only encrypts and uploads dirty chunks rather than full files.
+
+---
+
+## 3. System Architecture
 
 DistFS employs a unified node architecture where a single binary (`storage-node`) performs both metadata and data storage roles. 
 
-1.  **Metadata Role:** 3-5 nodes run a strongly consistent BoltDB-backed Raft FSM, managing Inodes, leases, and the Dark Registry.
+1.  **Metadata Role:** 3-5 nodes run a strongly consistent BoltDB-backed Raft FSM, managing Inodes, distributed leases, and the Dark Registry.
 2.  **Data Role:** All nodes in the cluster participate in an eventually consistent, parallel fan-out storage pool handling the 1MB encrypted data chunks.
 
-```
+```text
 Client (FUSE)  <-- Sealed JSON / PQC -->  Metadata Cluster (Raft)
       |                                        |
       +------- Encrypted Chunks -------------- + --> Data Node Pool
@@ -69,14 +62,17 @@ Client (FUSE)  <-- Sealed JSON / PQC -->  Metadata Cluster (Raft)
 
 ---
 
-## Getting Started
+## 4. Give It a Try (User Manual)
 
-### Prerequisites
-*   Linux (kernel support for FUSE 3 required).
-*   `fuse3` and `libfuse3-dev` installed locally.
-*   Go 1.25 or higher.
+We encourage you to deploy a local test cluster and experiment with the system. 
 
-### Installation
+### 4.1 Prerequisites
+*   **Operating System:** Linux (kernel support for FUSE 3 required).
+*   **Software:** `fuse3` and `libfuse3-dev` installed locally.
+*   **Environment:** Go 1.25 or higher for building from source.
+
+### 4.2 Installation
+Clone the repository and build the core binaries:
 ```bash
 git clone https://github.com/c2FmZQ/distfs.git
 cd distfs
@@ -85,19 +81,69 @@ go build ./cmd/distfs-fuse
 go build ./cmd/storage-node
 ```
 
-### Quick Local Cluster
+### 4.3 Spin Up a Local Cluster
+You can quickly bootstrap a single-node testing cluster:
 ```bash
 export DISTFS_MASTER_KEY="local-dev-secret"
 ./storage-node --id local-1 --bootstrap --api-addr :8080 --raft-bind :8081
 ```
 
-### Initializing a Client
+### 4.4 The Unified Onboarding Flow
+DistFS streamlines client initialization by integrating identity generation, OIDC authentication, and secure configuration backup.
+
+**Initialize a new account (This will prompt you for an OIDC token if configured):**
 ```bash
 ./distfs init --new -server http://localhost:8080
+```
+
+*Note: In a fully secured cluster, an Administrator must unlock your account before you can store data.*
+
+### 4.5 CLI Command Reference
+The `distfs` binary provides a set of tools for manual interaction with the encrypted file system.
+
+*   **Namespace Operations:**
+    *   `./distfs ls <path>`
+    *   `./distfs mkdir <path>`
+    *   `./distfs rm <path>`
+    *   `./distfs mv <old_path> <new_path>`
+*   **Data Operations:**
+    *   `./distfs put <local_file> <remote_path>`
+    *   `./distfs get <remote_path> <local_file>`
+
+### 4.6 FUSE Integration (POSIX Testing)
+Mount the encrypted filesystem directly to your local OS to test POSIX behavior, including ACLs and differential sync.
+
+```bash
+mkdir ~/my-distfs
 ./distfs-fuse -mount ~/my-distfs
 ```
+
+Once mounted, you can test the Zero-Knowledge POSIX ACLs natively:
+```bash
+echo "Top secret" > ~/my-distfs/secret.txt
+setfacl -m u:user-uuid-here:r-- ~/my-distfs/secret.txt
+```
+*The FUSE daemon intercepts the `setxattr` call, fetches the target user's public key, and instantly expands the cryptographic Lockbox.*
+
+### 4.7 Cluster Administration
+The cluster provides an interactive, PQC-powered administrative console:
+```bash
+./distfs admin
+```
+The console provides visibility into Raft replication state, anonymized user inventory, and storage accounting. It is also used to process OOB verifications and explicitly initialize storage roots.
+
+---
+
+## 5. Feedback and Contributions
+
+DistFS is an active research project. We are constantly looking to improve the cryptographic models, performance heuristics, and architectural security. 
+
+*   **Security Audits:** If you find a flaw in the cryptographic provenance, Lockbox expansion, or sealing algorithms, please open an issue.
+*   **Performance:** Phase 52 introduced significant GC and latency optimizations (`sync.Pool`, O(1) indices). We welcome benchmarking data and PRs for further zero-copy network paths.
+*   **Contributions:** Pull requests are highly encouraged. Please ensure all modifications pass the rigorous test suite: `./scripts/run-tests.sh`.
 
 ---
 
 ## License
+
 Copyright 2026 TTBT Enterprises LLC. Licensed under the Apache License, Version 2.0.
