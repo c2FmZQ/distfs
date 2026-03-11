@@ -864,7 +864,16 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 		// 3. Create Backbone Directories
 		// /registry
 		optsReg := client.MkdirOptions{}
-		if err := c.MkdirExtended(ctx, "/registry", 0775, optsReg); err != nil && !strings.Contains(err.Error(), "already exists") {
+		if usersGroupID != "" {
+			optsReg.AccessACL = &metadata.POSIXAccess{
+				Groups: map[string]uint32{usersGroupID: 5}, // r-x
+			}
+			optsReg.DefaultACL = &metadata.POSIXAccess{
+				Groups: map[string]uint32{usersGroupID: 4}, // r-- for inherited files
+			}
+		}
+
+		if err := c.MkdirExtended(ctx, "/registry", 0770, optsReg); err != nil && !strings.Contains(err.Error(), "already exists") {
 			log.Printf("Warning: failed to create /registry: %v", err)
 		} else if registryGroupID != "" {
 			c.SetAttr(ctx, "/registry", metadata.SetAttrRequest{GroupID: &registryGroupID})

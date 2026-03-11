@@ -51,7 +51,7 @@ func (c *Client) EnsureRoot(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	lb, err := c.createLockbox(ctx, rootKey, 0755, c.userID, "")
+	lb, err := c.createLockbox(ctx, rootKey, 0755, c.userID, "", nil)
 	if err != nil {
 		return "", err
 	}
@@ -325,7 +325,60 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			ownerID = opts.OwnerID
 		}
 
-		lb, err := c.createLockbox(ctx, newKey, mode, ownerID, groupID)
+		// 2. Fetch Latest Parent
+		parent, err := c.getInode(ctx, parentID)
+		if err != nil {
+			return fmt.Errorf("failed to fetch parent: %w", err)
+		}
+
+		// Phase 51.5: Default ACL Inheritance
+		var accessACL *metadata.POSIXAccess
+		var defaultACL *metadata.POSIXAccess
+		if parent.DefaultACL != nil {
+			// Inherit DefaultACL as the AccessACL
+			accessACL = &metadata.POSIXAccess{
+				Users:  make(map[string]uint32),
+				Groups: make(map[string]uint32),
+			}
+			for k, v := range parent.DefaultACL.Users {
+				accessACL.Users[k] = v
+			}
+			for k, v := range parent.DefaultACL.Groups {
+				accessACL.Groups[k] = v
+			}
+			if parent.DefaultACL.Mask != nil {
+				m := *parent.DefaultACL.Mask
+				accessACL.Mask = &m
+			}
+
+			// If it's a directory, it also inherits the DefaultACL
+			if iType == metadata.DirType {
+				defaultACL = &metadata.POSIXAccess{
+					Users:  make(map[string]uint32),
+					Groups: make(map[string]uint32),
+				}
+				for k, v := range parent.DefaultACL.Users {
+					defaultACL.Users[k] = v
+				}
+				for k, v := range parent.DefaultACL.Groups {
+					defaultACL.Groups[k] = v
+				}
+				if parent.DefaultACL.Mask != nil {
+					m := *parent.DefaultACL.Mask
+					defaultACL.Mask = &m
+				}
+			}
+		}
+
+		// Explicit options override inherited defaults (if provided)
+		if opts.AccessACL != nil {
+			accessACL = opts.AccessACL
+		}
+		if opts.DefaultACL != nil {
+			defaultACL = opts.DefaultACL
+		}
+
+		lb, err := c.createLockbox(ctx, newKey, mode, ownerID, groupID, accessACL)
 		if err != nil {
 			return err
 		}
@@ -341,6 +394,8 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			Children:      make(map[string]string),
 			ChunkManifest: chunkEntries,
 			Lockbox:       lb,
+			AccessACL:     accessACL,
+			DefaultACL:    defaultACL,
 
 			OwnerID: ownerID,
 			GroupID: groupID,
@@ -358,12 +413,6 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 		newInode.Size = uint64(size)
 		if size == 0 {
 			newInode.Size = uint64(len(inlineData))
-		}
-
-		// 2. Fetch Latest Parent
-		parent, err := c.getInode(ctx, parentID)
-		if err != nil {
-			return fmt.Errorf("failed to fetch parent: %w", err)
 		}
 
 		// Final existence check to prevent overwriting
@@ -417,7 +466,9 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 // Mkdir creates a directory.
 // MkdirOptions provides optional parameters for directory creation.
 type MkdirOptions struct {
-	OwnerID string
+	OwnerID    string
+	AccessACL  *metadata.POSIXAccess
+	DefaultACL *metadata.POSIXAccess
 }
 
 // Mkdir creates a new directory at the specified path.
@@ -911,7 +962,7 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	if existingID, ok := parentInode.Children[encName]; ok {
 		if iType == metadata.FileType {
 			// Update existing file content
-			err := c.writeInodeContent(ctx, existingID, nil, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0)
+			err := c.writeInodeContent(ctx, existingID, nil, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0, opts.AccessACL)
 			if err != nil {
 				return fmt.Errorf("addEntry writeInodeContent (existing) failed: %w", err)
 			}
@@ -934,7 +985,7 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	return nil
 }
 
-func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, ownerID, groupID string) (crypto.Lockbox, error) {
+func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, ownerID, groupID string, acl *metadata.POSIXAccess) (crypto.Lockbox, error) {
 	lb := crypto.NewLockbox()
 
 	effectiveOwner := ownerID
@@ -967,7 +1018,7 @@ func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, own
 		lb.AddRecipient(metadata.WorldID, wpk, key)
 	}
 
-	if groupID != "" && (mode&0060) != 0 {
+	if groupID != "" && (mode&0040) != 0 {
 		group, err := c.GetGroup(ctx, groupID)
 		if err != nil {
 			return nil, fmt.Errorf("failed to fetch group %s: %w", groupID, err)
@@ -978,6 +1029,37 @@ func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, own
 		}
 		lb.AddRecipient(groupID, gpk, key)
 	}
+
+	// Add users/groups granted read access via POSIX ACL
+	if acl != nil {
+		for uid, bits := range acl.Users {
+			if (bits & 4) != 0 { // Has read permission
+				user, err := c.GetUser(ctx, uid)
+				if err != nil {
+					return nil, fmt.Errorf("failed to fetch ACL user %s: %w", uid, err)
+				}
+				upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+				if err != nil {
+					return nil, fmt.Errorf("failed to unmarshal ACL user enc key: %w", err)
+				}
+				lb.AddRecipient(uid, upk, key)
+			}
+		}
+		for gid, bits := range acl.Groups {
+			if (bits & 4) != 0 { // Has read permission
+				group, err := c.GetGroup(ctx, gid)
+				if err != nil {
+					return nil, fmt.Errorf("failed to fetch ACL group %s: %w", gid, err)
+				}
+				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+				if err != nil {
+					return nil, fmt.Errorf("failed to unmarshal ACL group enc key: %w", err)
+				}
+				lb.AddRecipient(gid, gpk, key)
+			}
+		}
+	}
+
 	return lb, nil
 }
 

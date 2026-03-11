@@ -1,8 +1,8 @@
 # Copyright 2026 TTBT Enterprises LLC
 FROM alpine:latest
 
-# Install fuse3 for the fuse-tester container
-RUN apk add --no-cache fuse3
+# Install fuse3 and acl for the fuse-tester container
+RUN apk add --no-cache fuse3 tzdata jq curl acl
 
 COPY bin/storage-node /bin/storage-node
 COPY bin/distfs /bin/distfs
@@ -27,9 +27,10 @@ COPY scripts/test-quota-cmd.sh /bin/test-quota-cmd.sh
 COPY scripts/test-ls-e2e.sh /bin/test-ls-e2e.sh
 COPY scripts/test-audit.sh /bin/test-audit.sh
 COPY scripts/test-registry.sh /bin/test-registry.sh
+COPY scripts/test-posix-acls.sh /bin/test-posix-acls.sh
 COPY scripts/benchmark.sh /bin/benchmark.sh
 COPY scripts/test-fuse-load.sh /bin/test-fuse-load.sh
 COPY scripts/test-all-e2e.sh /bin/test-all-e2e.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-group-quota.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-contact-exchange.sh /bin/test-dump-inodes.sh /bin/test-quota-cmd.sh /bin/test-ls-e2e.sh /bin/test-audit.sh /bin/test-registry.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-group-quota.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-contact-exchange.sh /bin/test-dump-inodes.sh /bin/test-quota-cmd.sh /bin/test-ls-e2e.sh /bin/test-audit.sh /bin/test-registry.sh /bin/test-posix-acls.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
 
 ENTRYPOINT ["/bin/storage-node"]

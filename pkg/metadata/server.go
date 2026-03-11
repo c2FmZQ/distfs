@@ -1954,6 +1954,59 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	w.Write(data)
 }
 
+// evaluatePOSIXAccess checks permissions against the POSIX.1e ACL specification.
+func evaluatePOSIXAccess(inode *Inode, userID string, inOwningGroup bool, userGroups []string, requiredMode uint32) bool {
+	// Normalize required mode to 3-bit space (e.g. 0400 -> 4)
+	req := requiredMode
+	if req >= 0010 {
+		req = requiredMode >> 6
+	}
+
+	// 1. Owner
+	if inode.OwnerID == userID {
+		ownerBits := (inode.Mode >> 6) & 7
+		return (ownerBits & req) != 0
+	}
+
+	mask := uint32(7) // default no mask
+	if inode.AccessACL != nil && inode.AccessACL.Mask != nil {
+		mask = *inode.AccessACL.Mask
+	}
+
+	// 2. Named Users
+	if inode.AccessACL != nil && inode.AccessACL.Users != nil {
+		if bits, ok := inode.AccessACL.Users[userID]; ok {
+			return (bits & mask & req) != 0
+		}
+	}
+
+	// 3. Groups (Owning Group + Named Groups)
+	matchedGroup := false
+	var groupUnion uint32 = 0
+
+	if inOwningGroup {
+		matchedGroup = true
+		groupUnion |= (inode.Mode >> 3) & 7
+	}
+
+	if inode.AccessACL != nil && inode.AccessACL.Groups != nil {
+		for _, gid := range userGroups {
+			if bits, ok := inode.AccessACL.Groups[gid]; ok {
+				matchedGroup = true
+				groupUnion |= bits
+			}
+		}
+	}
+
+	if matchedGroup {
+		return (groupUnion & mask & req) != 0
+	}
+
+	// 4. Other
+	otherBits := inode.Mode & 7
+	return (otherBits & req) != 0
+}
+
 func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string) error {
 	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
 	if bypass && s.fsm.IsAdmin(user.ID) {
@@ -1974,20 +2027,16 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 		return err
 	}
 
-	if inode.OwnerID == user.ID {
-		return nil
-	}
-	// World Read
-	if (inode.Mode & 0004) != 0 {
-		return nil
-	}
-	// Group Read
+	inOwningGroup := false
 	if inode.GroupID != "" {
-		inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
-		if inGroup && (inode.Mode&0040) != 0 {
-			return nil
-		}
+		inOwningGroup, _ = s.fsm.IsUserInGroup(user.ID, inode.GroupID)
 	}
+	userGroups, _ := s.fsm.GetUserGroupIDs(user.ID)
+
+	if evaluatePOSIXAccess(&inode, user.ID, inOwningGroup, userGroups, 0004) {
+		return nil
+	}
+
 	return fmt.Errorf("forbidden")
 }
 
@@ -2373,19 +2422,16 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 		return err
 	}
 
-	if inode.OwnerID == user.ID {
-		return nil
-	}
-	// World Write
-	if (inode.Mode & 0002) != 0 {
-		return nil
-	}
+	inOwningGroup := false
 	if inode.GroupID != "" {
-		inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
-		if inGroup && (inode.Mode&0020) != 0 {
-			return nil
-		}
+		inOwningGroup, _ = s.fsm.IsUserInGroup(user.ID, inode.GroupID)
 	}
+	userGroups, _ := s.fsm.GetUserGroupIDs(user.ID)
+
+	if evaluatePOSIXAccess(&inode, user.ID, inOwningGroup, userGroups, 0002) {
+		return nil
+	}
+
 	return fmt.Errorf("forbidden")
 }
 

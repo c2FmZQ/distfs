@@ -1191,9 +1191,12 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	inode.SetSignerID(c.userID)
 	inode.Mode = metadata.SanitizeMode(inode.Mode, inode.Type)
 
-	// Phase 50.2: Owner Delegation Signature
-	if c.userID == inode.OwnerID && inode.GroupID != "" {
-		inode.OwnerDelegationSig = c.signKey.Sign(inode.DelegationHash())
+	// Phase 50.2 & 51.1: Owner Delegation Signature
+	// The Owner must sign the delegation state if any non-owner authority is granted (Group or ACLs)
+	if c.userID == inode.OwnerID {
+		if inode.GroupID != "" || inode.AccessACL != nil || inode.DefaultACL != nil {
+			inode.OwnerDelegationSig = c.signKey.Sign(inode.DelegationHash())
+		}
 	}
 
 	hash := inode.ManifestHash()
@@ -1540,7 +1543,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	return valid, nil
 }
 
-func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32) error {
+func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32, accessACL *metadata.POSIXAccess) error {
 	if r == nil {
 		r = bytes.NewReader(nil)
 	}
@@ -1572,6 +1575,28 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 				inode.Lockbox.AddRecipient(groupID, gpk, fileKey)
 			}
 		}
+		// Expand lockbox for ACL recipients
+		if inode.AccessACL != nil {
+			for uid, bits := range inode.AccessACL.Users {
+				if (bits & 4) != 0 {
+					user, err := c.GetUser(ctx, uid)
+					if err == nil {
+						upk, _ := crypto.UnmarshalEncapsulationKey(user.EncKey)
+						inode.Lockbox.AddRecipient(uid, upk, fileKey)
+					}
+				}
+			}
+			for gid, bits := range inode.AccessACL.Groups {
+				if (bits & 4) != 0 {
+					group, err := c.GetGroup(ctx, gid)
+					if err == nil {
+						gpk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
+						inode.Lockbox.AddRecipient(gid, gpk, fileKey)
+					}
+				}
+			}
+		}
+
 		if name != "" {
 			inode.SetName(name)
 		}
@@ -1582,7 +1607,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 		inode.SetMTime(time.Now().UnixNano())
 		inode.SetFileKey(fileKey)
 	} else if apiErr, ok := err.(*APIError); ok && apiErr.StatusCode == http.StatusNotFound {
-		lb, err := c.createLockbox(ctx, fileKey, mode, c.userID, groupID)
+		lb, err := c.createLockbox(ctx, fileKey, mode, c.userID, groupID, accessACL)
 		if err != nil {
 			return err
 		}
@@ -1603,6 +1628,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 			Lockbox:       lb,
 			OwnerID:       c.userID,
 			GroupID:       groupID,
+			AccessACL:     accessACL,
 			CTime:         time.Now().UnixNano(),
 			NLink:         1,
 			Version:       1,
@@ -1758,7 +1784,7 @@ func (c *Client) WriteFile(ctx context.Context, id string, nonce []byte, r io.Re
 		}
 	}
 
-	if err := c.writeInodeContent(ctx, id, nonce, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC, 0, 0); err != nil {
+	if err := c.writeInodeContent(ctx, id, nonce, metadata.FileType, fileKey, r, size, "", nil, mode, groupID, parentID, nameHMAC, 0, 0, nil); err != nil {
 		return nil, err
 	}
 	return fileKey, nil
@@ -2234,18 +2260,38 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	rand.Read(inodeNonce)
 	newID := metadata.GenerateInodeID(c.userID, inodeNonce)
 
-	lb, err := c.createLockbox(ctx, fileKey, 0600, c.userID, groupID)
+	// Phase 51.5: Default ACL Inheritance
+	var accessACL *metadata.POSIXAccess
+	if pInode.DefaultACL != nil {
+		accessACL = &metadata.POSIXAccess{
+			Users:  make(map[string]uint32),
+			Groups: make(map[string]uint32),
+		}
+		for k, v := range pInode.DefaultACL.Users {
+			accessACL.Users[k] = v
+		}
+		for k, v := range pInode.DefaultACL.Groups {
+			accessACL.Groups[k] = v
+		}
+		if pInode.DefaultACL.Mask != nil {
+			m := *pInode.DefaultACL.Mask
+			accessACL.Mask = &m
+		}
+	}
+
+	lb, err := c.createLockbox(ctx, fileKey, 0600, c.userID, groupID, accessACL)
 	if err != nil {
 		return nil, err
 	}
 
 	inode := &metadata.Inode{
-		ID:      newID,
-		Nonce:   inodeNonce,
-		Type:    metadata.FileType,
-		Mode:    0600,
-		OwnerID: c.userID,
-		GroupID: groupID,
+		ID:        newID,
+		Nonce:     inodeNonce,
+		Type:      metadata.FileType,
+		Mode:      0600,
+		OwnerID:   c.userID,
+		GroupID:   groupID,
+		AccessACL: accessACL,
 		// Links will be updated during commit
 		Links:   map[string]bool{parentID + ":" + nameHMAC: true},
 		Lockbox: lb,
@@ -3267,7 +3313,23 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	if signerID == inode.OwnerID {
 		authorized = true
 	} else if groupValid {
-		// Phase 50.3: Strict Verification Engine
+		authorized = true
+	} else if inode.AccessACL != nil {
+		// Check if signer is granted write via Named User ACL
+		if m, ok := inode.AccessACL.Users[signerID]; ok {
+			if m&0002 != 0 {
+				authorized = true
+			}
+		}
+		// Notice: To claim authority via a named group in the ACL, they'd have to provide a valid GroupSig
+		// for that specific group, which we'd need to verify. Since we only verify the primary GroupSig above,
+		// secondary group write access via ACL would require more complex signature chains.
+		// For now, if they are claiming via Named User ACL, we mark authorized = true.
+	}
+
+	if authorized && signerID != inode.OwnerID {
+		// Phase 50.3 & 51.1: Strict Verification Engine
+		// Any delegation of write authority (Primary Group, ACL, etc) MUST be backed by the Owner's signature over the delegation state.
 		if len(inode.OwnerDelegationSig) == 0 {
 			return fmt.Errorf("missing owner delegation signature on inode %s", inode.ID)
 		}
@@ -3279,7 +3341,6 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		if !crypto.VerifySignature(owner.SignKey, inode.DelegationHash(), inode.OwnerDelegationSig) {
 			return fmt.Errorf("invalid owner delegation signature on inode %s", inode.ID)
 		}
-		authorized = true
 	}
 
 	if !authorized {

@@ -33,7 +33,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 	// 2. Setup Inode with under-replication (n1, n3 are owners, but n3 will be "dead" soon)
 	inode := Inode{
-		ID:      "0000000000000000000000000000000f",
+		ID:      "invalid-but-test-mocked",
 		Type:    FileType,
 		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{
@@ -78,7 +78,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 	// 5. Verify Inode updated in FSM
 	err := node.FSM.db.View(func(tx *bolt.Tx) error {
-		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("0000000000000000000000000000000f"))
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("invalid-but-test-mocked"))
 		if err != nil {
 			return err
 		}
@@ -165,7 +165,7 @@ func TestReplication_Repair_Fail(t *testing.T) {
 	// Trigger executeRepair with failing source node
 	source := Node{ID: "n1", Address: "http://invalid"}
 	nodes := map[string]Node{"n2": {ID: "n2", Address: "http://n2"}}
-	server.replMonitor.executeRepair("0000000000000000000000000000000f", "c1", source, []string{"n2"}, nodes)
+	server.replMonitor.executeRepair("invalid-but-test-mocked", "c1", source, []string{"n2"}, nodes)
 	// Should log failure and return
 }
 
@@ -179,7 +179,7 @@ func TestReplication_Repair_RaftFail(t *testing.T) {
 	// Shutdown Raft to force Apply failure
 	node.Raft.Shutdown().Error()
 
-	server.replMonitor.executeRepair("0000000000000000000000000000000f", "c1", source, []string{"n2"}, nodes)
+	server.replMonitor.executeRepair("invalid-but-test-mocked", "c1", source, []string{"n2"}, nodes)
 	// Should log "Failed to apply AddReplica"
 	ts.Close()
 }

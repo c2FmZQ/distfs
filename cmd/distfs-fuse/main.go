@@ -126,6 +126,7 @@ func main() {
 		*mountpoint,
 		fuse.FSName("distfs"),
 		fuse.Subtype("distfs"),
+		fuse.DefaultPermissions(),
 	)
 	if err != nil {
 		log.Fatal(err)

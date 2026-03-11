@@ -91,10 +91,15 @@ func TestMetadataCluster(t *testing.T) {
 	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Test Create Inode
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	inodeID := GenerateInodeID("u1", nonce)
 	inode := Inode{
-		ID:      "inode-1",
+		ID:      inodeID,
+		Nonce:   nonce,
 		OwnerID: "u1",
 		Type:    FileType,
+		Mode:    0600,
 	}
 	inode.SignInodeForTest("u1", userSignKey)
 	inodeBytes, _ := json.Marshal(inode)
@@ -120,7 +125,7 @@ func TestMetadataCluster(t *testing.T) {
 
 	// Test Get Inode
 	token = LoginSessionForTest(t, ts, "u1", userSignKey)
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/"+inodeID, nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
@@ -134,7 +139,7 @@ func TestMetadataCluster(t *testing.T) {
 	opened := UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
 	var got Inode
 	json.Unmarshal(opened, &got)
-	if got.ID != "inode-1" {
+	if got.ID != inodeID {
 		t.Errorf("GET ID mismatch: %s", got.ID)
 	}
 
@@ -159,7 +164,7 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Verify Deleted
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/inode-1", nil)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/"+inodeID, nil)
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -568,10 +573,16 @@ func TestChunkPagination(t *testing.T) {
 		manifest[i] = ChunkEntry{ID: fmt.Sprintf("chunk-%d", i), Nodes: []string{"n1"}}
 	}
 
+	nonce := make([]byte, 16)
+	rand.Read(nonce)
+	inodeID := GenerateInodeID("u1", nonce)
+
 	inode := Inode{
-		ID:            "paginated-file",
+		ID:            inodeID,
+		Nonce:         nonce,
 		Type:          FileType,
 		OwnerID:       "u1",
+		Mode:          0600,
 		ChunkManifest: manifest,
 	}
 	inode.SignInodeForTest("u1", userSignKey)
@@ -597,7 +608,7 @@ func TestChunkPagination(t *testing.T) {
 
 	// Verify via API (Transparent Reconstruction)
 	token = LoginSessionForTest(t, ts, "u1", userSignKey)
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/paginated-file", nil)
+	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/"+inodeID, nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
 	resp, err = http.DefaultClient.Do(req)
@@ -624,7 +635,7 @@ func TestChunkPagination(t *testing.T) {
 	// Verify Internal Storage (BoltDB)
 	// We need to access FSM directly
 	err = node.FSM.db.View(func(tx *bolt.Tx) error {
-		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("paginated-file"))
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte(inodeID))
 		if err != nil {
 			return err
 		}
@@ -692,7 +703,10 @@ func TestAccounting(t *testing.T) {
 	checkUsage(0, 0)
 
 	// 2. Create File
-	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
+	nonce1 := make([]byte, 16)
+	rand.Read(nonce1)
+	id1 := GenerateInodeID(userID, nonce1)
+	inode := Inode{ID: id1, Nonce: nonce1, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd := LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
@@ -769,7 +783,10 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 2. Create File 1 (OK)
-	inode := Inode{ID: "0000000000000000000000000000000f", OwnerID: userID, Size: 100, NLink: 1}
+	nonce1 := make([]byte, 16)
+	rand.Read(nonce1)
+	id1 := GenerateInodeID(userID, nonce1)
+	inode := Inode{ID: id1, Nonce: nonce1, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
@@ -779,7 +796,10 @@ func TestQuotaEnforcement(t *testing.T) {
 	}
 
 	// 3. Create File 2 (Fail: Inode Quota)
-	inode2 := Inode{ID: "0000000000000000000000000000002f", OwnerID: userID, Size: 100, NLink: 1}
+	nonce2 := make([]byte, 16)
+	rand.Read(nonce2)
+	id2 := GenerateInodeID(userID, nonce2)
+	inode2 := Inode{ID: id2, Nonce: nonce2, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644}
 	inode2.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode2)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}

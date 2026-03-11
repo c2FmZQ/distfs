@@ -15,6 +15,7 @@
 package metadata_test
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,11 +142,17 @@ func TestBatchAtomicity(t *testing.T) {
 	// 1. Create Inode 0000000000000000000000000000000f (Valid)
 	// 2. Create Inode 0000000000000000000000000000002f (Should FAIL due to quota)
 
-	i1 := metadata.Inode{ID: "0000000000000000000000000000000f", OwnerID: u1, Type: metadata.FileType}
+	nonce1 := make([]byte, 16)
+	rand.Read(nonce1)
+	id1 := metadata.GenerateInodeID(u1, nonce1)
+	i1 := metadata.Inode{ID: id1, Nonce: nonce1, OwnerID: u1, Type: metadata.FileType, Mode: 0644}
 	i1.SignInodeForTest(u1, sk)
 	i1Bytes, _ := json.Marshal(i1)
 
-	i2 := metadata.Inode{ID: "0000000000000000000000000000002f", OwnerID: u1, Type: metadata.FileType}
+	nonce2 := make([]byte, 16)
+	rand.Read(nonce2)
+	id2 := metadata.GenerateInodeID(u1, nonce2)
+	i2 := metadata.Inode{ID: id2, Nonce: nonce2, OwnerID: u1, Type: metadata.FileType, Mode: 0644}
 	i2.SignInodeForTest(u1, sk)
 	i2Bytes, _ := json.Marshal(i2)
 
@@ -164,11 +171,11 @@ func TestBatchAtomicity(t *testing.T) {
 	// Verify 0000000000000000000000000000000f was NOT created (atomicity check)
 	server.FSM().DB().View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
-		if b.Get([]byte("0000000000000000000000000000000f")) != nil {
-			t.Errorf("Inode 0000000000000000000000000000000f was created despite batch failure")
+		if b.Get([]byte(id1)) != nil {
+			t.Errorf("Inode 1 was created despite batch failure")
 		}
-		if b.Get([]byte("0000000000000000000000000000002f")) != nil {
-			t.Errorf("Inode 0000000000000000000000000000002f was created despite batch failure")
+		if b.Get([]byte(id2)) != nil {
+			t.Errorf("Inode 2 was created despite batch failure")
 		}
 		return nil
 	})

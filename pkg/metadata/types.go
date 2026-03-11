@@ -19,7 +19,9 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"hash"
 	"sort"
+	"strconv"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
@@ -395,6 +397,47 @@ type InodeClientBlob struct {
 	GID           uint32 `json:"gid"`
 }
 
+// POSIXAccess defines POSIX.1e draft standard Access Control Lists.
+// Keys are DistFS User or Group string IDs. Values are the 3-bit mode (0-7).
+type POSIXAccess struct {
+	Users  map[string]uint32 `json:"users,omitempty"`
+	Groups map[string]uint32 `json:"groups,omitempty"`
+	Mask   *uint32           `json:"mask,omitempty"`
+}
+
+func (p *POSIXAccess) writeHash(h hash.Hash) {
+	if p == nil {
+		return
+	}
+	if len(p.Users) > 0 {
+		h.Write([]byte("u:"))
+		keys := make([]string, 0, len(p.Users))
+		for k := range p.Users {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			h.Write([]byte(k + ":" + strconv.Itoa(int(p.Users[k])) + ","))
+		}
+		h.Write([]byte("|"))
+	}
+	if len(p.Groups) > 0 {
+		h.Write([]byte("g:"))
+		keys := make([]string, 0, len(p.Groups))
+		for k := range p.Groups {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			h.Write([]byte(k + ":" + strconv.Itoa(int(p.Groups[k])) + ","))
+		}
+		h.Write([]byte("|"))
+	}
+	if p.Mask != nil {
+		h.Write([]byte("m:" + strconv.Itoa(int(*p.Mask)) + "|"))
+	}
+}
+
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
 	ID            string               `json:"id"`
@@ -415,6 +458,9 @@ type Inode struct {
 	IsSystem      bool                 `json:"is_system"`
 	Leases        map[string]LeaseInfo `json:"leases,omitempty"` // Nonce -> LeaseInfo
 	Unlinked      bool                 `json:"unlinked,omitempty"`
+
+	AccessACL  *POSIXAccess `json:"access_acl,omitempty"`
+	DefaultACL *POSIXAccess `json:"default_acl,omitempty"`
 
 	// Manifest Integrity (Phase 31 & 47 & 50)
 	Nonce              []byte `json:"nonce,omitempty"` // Cryptographic commitment to OwnerID
@@ -465,6 +511,16 @@ func (i *Inode) DelegationHash() []byte {
 	h.Write([]byte("delegation_v1|"))
 	h.Write([]byte("id:" + i.ID + "|"))
 	h.Write([]byte("group:" + i.GroupID + "|"))
+
+	if i.AccessACL != nil {
+		h.Write([]byte("aacl:"))
+		i.AccessACL.writeHash(h)
+	}
+	if i.DefaultACL != nil {
+		h.Write([]byte("dacl:"))
+		i.DefaultACL.writeHash(h)
+	}
+
 	return h.Sum(nil)
 }
 
@@ -491,6 +547,15 @@ func (i *Inode) ManifestHash() []byte {
 		h.Write([]byte("sys:1|"))
 	} else {
 		h.Write([]byte("sys:0|"))
+	}
+
+	if i.AccessACL != nil {
+		h.Write([]byte("aacl:"))
+		i.AccessACL.writeHash(h)
+	}
+	if i.DefaultACL != nil {
+		h.Write([]byte("dacl:"))
+		i.DefaultACL.writeHash(h)
 	}
 
 	h.Write([]byte("client_blob:"))

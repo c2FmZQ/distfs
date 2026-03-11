@@ -342,6 +342,94 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 	return f, h, nil
 }
 
+// Setxattr handles POSIX ACL updates.
+func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	if req.Name != "system.posix_acl_access" && req.Name != "system.posix_acl_default" {
+		return fuse.ErrNoXattr
+	}
+
+	acl, err := DecodeACL(req.Xattr)
+	if err != nil {
+		return fuse.EPERM
+	}
+
+	d.mu.Lock()
+	id := d.inode.ID
+	d.mu.Unlock()
+
+	_, err = d.fs.client.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+		if req.Name == "system.posix_acl_access" {
+			i.AccessACL = acl
+		} else {
+			i.DefaultACL = acl
+		}
+		return nil
+	})
+
+	if err != nil {
+		return mapError(err)
+	}
+	return nil
+}
+
+// Getxattr handles POSIX ACL reads.
+func (d *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	if req.Name != "system.posix_acl_access" && req.Name != "system.posix_acl_default" {
+		return fuse.ErrNoXattr
+	}
+
+	d.mu.Lock()
+	inode := d.inode
+	d.mu.Unlock()
+
+	isDefault := req.Name == "system.posix_acl_default"
+	data, err := EncodeACL(inode, isDefault)
+	if err != nil {
+		return fuse.EIO
+	}
+	if data == nil {
+		return fuse.ErrNoXattr
+	}
+
+	if req.Size == 0 {
+		resp.Xattr = data // In bazil.org/fuse, setting it even when Size == 0 helps it compute the length. Wait, actually we can just set resp.Xattr.
+		return nil
+	}
+
+	if uint32(len(data)) > req.Size {
+		return fuse.ERANGE
+	}
+	resp.Xattr = data
+	return nil
+}
+
+func (d *Dir) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	d.mu.Lock()
+	inode := d.inode
+	d.mu.Unlock()
+
+	var attrs []string
+	if inode.AccessACL != nil {
+		attrs = append(attrs, "system.posix_acl_access")
+	}
+	if inode.DefaultACL != nil {
+		attrs = append(attrs, "system.posix_acl_default")
+	}
+
+	if req.Size == 0 {
+		for _, a := range attrs {
+			resp.Xattr = append(resp.Xattr, []byte(a)...)
+			resp.Xattr = append(resp.Xattr, 0)
+		}
+		return nil
+	}
+
+	for _, a := range attrs {
+		resp.Append(a)
+	}
+	return nil
+}
+
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
 	d.mu.Lock()
 	if d.inode == nil {
@@ -598,6 +686,89 @@ func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 		return "", syscall.EINVAL
 	}
 	return f.inode.GetSymlinkTarget(), nil
+}
+
+// Setxattr handles POSIX ACL updates for files.
+func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	if req.Name != "system.posix_acl_access" {
+		return fuse.ErrNoXattr // Files cannot have default ACLs
+	}
+
+	acl, err := DecodeACL(req.Xattr)
+	if err != nil {
+		return fuse.EPERM
+	}
+
+	f.mu.Lock()
+	id := f.inode.ID
+	f.mu.Unlock()
+
+	updated, err := f.fs.client.UpdateInode(ctx, id, func(i *metadata.Inode) error {
+		i.AccessACL = acl
+		return nil
+	})
+
+	if err != nil {
+		return mapError(err)
+	}
+	f.mu.Lock()
+	f.inode = updated
+	f.mu.Unlock()
+	return nil
+}
+
+// Getxattr handles POSIX ACL reads for files.
+func (f *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	if req.Name != "system.posix_acl_access" {
+		return fuse.ErrNoXattr
+	}
+
+	f.mu.Lock()
+	inode := f.inode
+	f.mu.Unlock()
+
+	data, err := EncodeACL(inode, false)
+	if err != nil {
+		return fuse.EIO
+	}
+	if data == nil {
+		return fuse.ErrNoXattr
+	}
+
+	if req.Size == 0 {
+		resp.Xattr = data
+		return nil
+	}
+
+	if uint32(len(data)) > req.Size {
+		return fuse.ERANGE
+	}
+	resp.Xattr = data
+	return nil
+}
+
+func (f *File) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	f.mu.Lock()
+	inode := f.inode
+	f.mu.Unlock()
+
+	var attrs []string
+	if inode.AccessACL != nil {
+		attrs = append(attrs, "system.posix_acl_access")
+	}
+
+	if req.Size == 0 {
+		for _, a := range attrs {
+			resp.Xattr = append(resp.Xattr, []byte(a)...)
+			resp.Xattr = append(resp.Xattr, 0)
+		}
+		return nil
+	}
+
+	for _, a := range attrs {
+		resp.Append(a)
+	}
+	return nil
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {

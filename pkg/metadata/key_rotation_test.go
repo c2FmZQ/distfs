@@ -27,7 +27,10 @@ func TestFSMKeyRotation(t *testing.T) {
 	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
 
 	// 1. Create Inode (Gen 1)
-	inode := Inode{ID: "0000000000000000000000000000000f", Type: FileType, OwnerID: "u1"}
+	nonce1 := make([]byte, 16)
+	rand.Read(nonce1)
+	id1 := GenerateInodeID("u1", nonce1)
+	inode := Inode{ID: id1, Nonce: nonce1, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode.SignInodeForTest("u1", sk)
 	iBytes, _ := json.Marshal(inode)
 	if _, err := server.ApplyRaftCommandInternal(CmdCreateInode, iBytes, "u1"); err != nil {
@@ -41,7 +44,10 @@ func TestFSMKeyRotation(t *testing.T) {
 	}
 
 	// 3. Create Inode (Gen 2)
-	inode2 := Inode{ID: "0000000000000000000000000000002f", Type: FileType, OwnerID: "u1"}
+	nonce2 := make([]byte, 16)
+	rand.Read(nonce2)
+	id2 := GenerateInodeID("u1", nonce2)
+	inode2 := Inode{ID: id2, Nonce: nonce2, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode2.SignInodeForTest("u1", sk)
 	iBytes2, _ := json.Marshal(inode2)
 	if _, err := server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2, "u1"); err != nil {
@@ -50,11 +56,11 @@ func TestFSMKeyRotation(t *testing.T) {
 
 	// 4. Verify decryption of both
 	err = server.FSM().DB().View(func(tx *bolt.Tx) error {
-		v1, _ := server.FSM().Get(tx, []byte("inodes"), []byte("0000000000000000000000000000000f"))
+		v1, _ := server.FSM().Get(tx, []byte("inodes"), []byte(id1))
 		if v1 == nil {
 			t.Error("0000000000000000000000000000000f missing")
 		}
-		v2, _ := server.FSM().Get(tx, []byte("inodes"), []byte("0000000000000000000000000000002f"))
+		v2, _ := server.FSM().Get(tx, []byte("inodes"), []byte(id2))
 		if v2 == nil {
 			t.Error("0000000000000000000000000000002f missing")
 		}
@@ -72,7 +78,7 @@ func TestFSMKeyRotation(t *testing.T) {
 	// 6. Verify 0000000000000000000000000000000f is now Gen 2 in raw storage
 	server.FSM().DB().View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
-		v1 := b.Get([]byte("0000000000000000000000000000000f"))
+		v1 := b.Get([]byte(id1))
 		if binary.BigEndian.Uint32(v1[:4]) != 2 {
 			t.Errorf("0000000000000000000000000000000f not re-encrypted: gen %d", binary.BigEndian.Uint32(v1[:4]))
 		}
@@ -171,7 +177,10 @@ func TestKeyRotation(t *testing.T) {
 	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
 
 	// 2. Apply Log 1 (Gen 1)
-	inode1 := Inode{ID: "inode-1", Type: FileType, OwnerID: "u1"}
+	nonce1 := make([]byte, 16)
+	rand.Read(nonce1)
+	id1 := GenerateInodeID("u1", nonce1)
+	inode1 := Inode{ID: id1, Nonce: nonce1, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode1.SignInodeForTest("u1", sk)
 	data1, _ := json.Marshal(inode1)
 	cmd1 := LogCommand{Type: CmdCreateInode, Data: data1, UserID: "u1"}
@@ -189,7 +198,10 @@ func TestKeyRotation(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// 4. Apply Log 2 (Gen 2)
-	inode2 := Inode{ID: "inode-2", Type: FileType, OwnerID: "u1"}
+	nonce2 := make([]byte, 16)
+	rand.Read(nonce2)
+	id2 := GenerateInodeID("u1", nonce2)
+	inode2 := Inode{ID: id2, Nonce: nonce2, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode2.SignInodeForTest("u1", sk)
 	data2, _ := json.Marshal(inode2)
 	cmd2 := LogCommand{Type: CmdCreateInode, Data: data2, UserID: "u1"}
@@ -205,7 +217,10 @@ func TestKeyRotation(t *testing.T) {
 	time.Sleep(1 * time.Second)
 
 	// 6. Apply Log 3 (Gen 3)
-	inode3 := Inode{ID: "inode-3", Type: FileType, OwnerID: "u1"}
+	nonce3 := make([]byte, 16)
+	rand.Read(nonce3)
+	id3 := GenerateInodeID("u1", nonce3)
+	inode3 := Inode{ID: id3, Nonce: nonce3, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode3.SignInodeForTest("u1", sk)
 	data3, _ := json.Marshal(inode3)
 	cmd3 := LogCommand{Type: CmdCreateInode, Data: data3, UserID: "u1"}
@@ -237,13 +252,13 @@ func TestKeyRotation(t *testing.T) {
 	// 9. Verify State
 	err = node2.FSM.db.View(func(tx *bolt.Tx) error { // bolt imported
 		b := tx.Bucket([]byte("inodes"))
-		if b.Get([]byte("inode-1")) == nil {
+		if b.Get([]byte(id1)) == nil {
 			return fmt.Errorf("inode-1 missing (lost during snapshot 1?)")
 		}
-		if b.Get([]byte("inode-2")) == nil {
+		if b.Get([]byte(id2)) == nil {
 			return fmt.Errorf("inode-2 missing (lost during snapshot 2?)")
 		}
-		if b.Get([]byte("inode-3")) == nil {
+		if b.Get([]byte(id3)) == nil {
 			return fmt.Errorf("inode-3 missing (failed to decrypt trailing log?)")
 		}
 		return nil

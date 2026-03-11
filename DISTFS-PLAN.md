@@ -1021,6 +1021,8 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Define `POSIXAccess` struct in `pkg/metadata/types.go` mapping string IDs (Users/Groups) to `uint32` Mode bits (0-7).
     *   **Action:** Add `AccessACL` and `DefaultACL` pointers to the `Inode` struct.
     *   **Action:** Update `ManifestHash` to include a deterministically sorted byte representation of both ACL maps.
+    *   **Action:** Update `DelegationHash` to include the deterministically sorted byte representation of both ACL maps, proving the Owner authorized the exact ACL state.
+    *   **Action:** Ensure `VerifyInode` strict verification validates `OwnerDelegationSig` whenever the `SignerID` claims write authority via the `AccessACL`.
 *   **Step 51.2: Server-Side Authorization Engine**
     *   **Action:** Refactor `checkReadPermission` and `checkWritePermission` in `pkg/metadata/server.go`.
     *   **Action:** Implement the strict POSIX fallback algorithm: Owner -> Named User (ACL) -> Owning Group -> Named Group (ACL) -> Other.
