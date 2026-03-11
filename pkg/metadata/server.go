@@ -1956,11 +1956,8 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 
 // evaluatePOSIXAccess checks permissions against the POSIX.1e ACL specification.
 func evaluatePOSIXAccess(inode *Inode, userID string, inOwningGroup bool, userGroups []string, requiredMode uint32) bool {
-	// Normalize required mode to 3-bit space (e.g. 0400 -> 4)
+	// requiredMode must be in the 3-bit space (e.g. 4 for read, 2 for write)
 	req := requiredMode
-	if req >= 0010 {
-		req = requiredMode >> 6
-	}
 
 	// 1. Owner
 	if inode.OwnerID == userID {

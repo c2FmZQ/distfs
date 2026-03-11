@@ -18,6 +18,7 @@ import (
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
 	"github.com/c2FmZQ/distfs/pkg/client"
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
@@ -355,11 +356,32 @@ func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 
 	d.mu.Lock()
 	id := d.inode.ID
+	key := d.key
 	d.mu.Unlock()
 
 	_, err = d.fs.client.UpdateInode(ctx, id, func(i *metadata.Inode) error {
 		if req.Name == "system.posix_acl_access" {
 			i.AccessACL = acl
+			if acl != nil {
+				for uid, bits := range acl.Users {
+					if (bits & 4) != 0 {
+						if user, err := d.fs.client.GetUser(ctx, uid); err == nil {
+							if upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey); err == nil {
+								i.Lockbox.AddRecipient(uid, upk, key)
+							}
+						}
+					}
+				}
+				for gid, bits := range acl.Groups {
+					if (bits & 4) != 0 {
+						if group, err := d.fs.client.GetGroup(ctx, gid); err == nil {
+							if gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey); err == nil {
+								i.Lockbox.AddRecipient(gid, gpk, key)
+							}
+						}
+					}
+				}
+			}
 		} else {
 			i.DefaultACL = acl
 		}
@@ -701,10 +723,31 @@ func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 
 	f.mu.Lock()
 	id := f.inode.ID
+	key := f.key
 	f.mu.Unlock()
 
 	updated, err := f.fs.client.UpdateInode(ctx, id, func(i *metadata.Inode) error {
 		i.AccessACL = acl
+		if acl != nil {
+			for uid, bits := range acl.Users {
+				if (bits & 4) != 0 {
+					if user, err := f.fs.client.GetUser(ctx, uid); err == nil {
+						if upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey); err == nil {
+							i.Lockbox.AddRecipient(uid, upk, key)
+						}
+					}
+				}
+			}
+			for gid, bits := range acl.Groups {
+				if (bits & 4) != 0 {
+					if group, err := f.fs.client.GetGroup(ctx, gid); err == nil {
+						if gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey); err == nil {
+							i.Lockbox.AddRecipient(gid, gpk, key)
+						}
+					}
+				}
+			}
+		}
 		return nil
 	})
 

@@ -131,6 +131,11 @@ func DecodeACL(data []byte) (*metadata.POSIXAccess, error) {
 		Groups: make(map[string]uint32),
 	}
 
+	var mockMapParsed map[uint32]string
+	if mockMap := os.Getenv("DISTFS_MOCK_FUSE_UID_MAP"); mockMap != "" {
+		json.Unmarshal([]byte(mockMap), &mockMapParsed)
+	}
+
 	entryCount := (len(data) - 4) / 8
 	for i := 0; i < entryCount; i++ {
 		var e AclEntry
@@ -148,13 +153,8 @@ func DecodeACL(data []byte) (*metadata.POSIXAccess, error) {
 		case aclUser:
 			// Allow testing integration via FUSE by mapping OS UID to DistFS User ID via ENV var
 			uidStr := fmt.Sprintf("user-%d", e.ID)
-			if mockMap := os.Getenv("DISTFS_MOCK_FUSE_UID_MAP"); mockMap != "" {
-				var mapped map[uint32]string
-				if err := json.Unmarshal([]byte(mockMap), &mapped); err == nil {
-					if id, ok := mapped[e.ID]; ok {
-						uidStr = id
-					}
-				}
+			if id, ok := mockMapParsed[e.ID]; ok {
+				uidStr = id
 			}
 			acl.Users[uidStr] = uint32(e.Perm)
 		case aclGroup:
