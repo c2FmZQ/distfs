@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/ech"
 	bolt "go.etcd.io/bbolt"
@@ -208,7 +209,7 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 	}
 
 	if !crypto.VerifySignature(pubKey, signed.Payload, signed.Signature) {
-		log.Printf("DEBUG: Data Auth Failed! pubKey=%x, payload=%s, sig=%x", pubKey[:16], string(signed.Payload), signed.Signature[:16])
+		logger.Debugf("DEBUG: Data Auth Failed! pubKey=%x, payload=%s, sig=%x", pubKey[:16], string(signed.Payload), signed.Signature[:16])
 		return fmt.Errorf("invalid signature")
 	}
 

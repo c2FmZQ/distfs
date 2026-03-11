@@ -41,6 +41,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/ech"
 )
@@ -1553,7 +1554,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	var valid []*metadata.Inode
 	for _, inode := range inodes {
 		if err := c.VerifyInode(ctx, inode); err != nil {
-			log.Printf("DEBUG CLIENT: getInodes skipping inode %s due to verification failure: %v", inode.ID, err)
+			logger.Debugf("DEBUG CLIENT: getInodes skipping inode %s due to verification failure: %v", inode.ID, err)
 			continue
 		}
 		valid = append(valid, inode)

@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -393,7 +394,7 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 			return err // Trigger BoltDB rollback for simple errors
 		}
 		if cmd.Atomic && fsm.containsError(results) {
-			log.Printf("DEBUG FSM Apply [%s]: Triggering rollback due to atomic failure", fsm.nodeID)
+			logger.Debugf("DEBUG FSM Apply [%s]: Triggering rollback due to atomic failure", fsm.nodeID)
 			subErr := extractError(results)
 			if subErr != nil {
 				return fmt.Errorf("%w: %w", ErrAtomicRollback, subErr)
@@ -777,10 +778,10 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 
 	plain, err := fsm.Get(tx, []byte("inodes"), []byte(update.ID))
 	if err != nil {
-		log.Printf("DEBUG FSM executeUpdateInode: Get error for %s: %v", update.ID, err)
+		logger.Debugf("DEBUG FSM executeUpdateInode: Get error for %s: %v", update.ID, err)
 	}
 	if plain == nil {
-		log.Printf("DEBUG FSM executeUpdateInode: Inode %s not found (err=%v)", update.ID, err)
+		logger.Debugf("DEBUG FSM executeUpdateInode: Inode %s not found (err=%v)", update.ID, err)
 		return ErrNotFound
 	}
 	var inode Inode
@@ -1037,7 +1038,7 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 
 	// Bootstrap: First user is admin
 	if isFirst {
-		log.Printf("DEBUG FSM [%s]: Bootstrapping first user %s as admin", fsm.nodeID, user.ID)
+		logger.Debugf("DEBUG FSM [%s]: Bootstrapping first user %s as admin", fsm.nodeID, user.ID)
 		fsm.Put(tx, []byte("admins"), []byte(user.ID), []byte("true"))
 	}
 
@@ -1049,7 +1050,7 @@ func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{
 	if err := json.Unmarshal(data, &userID); err != nil {
 		userID = string(data)
 	}
-	log.Printf("DEBUG FSM PromoteAdmin [%s]: promoting user %s", fsm.nodeID, userID)
+	logger.Debugf("DEBUG FSM PromoteAdmin [%s]: promoting user %s", fsm.nodeID, userID)
 	return fsm.Put(tx, []byte("admins"), []byte(userID), []byte("true"))
 }
 
@@ -1063,7 +1064,7 @@ func (fsm *MetadataFSM) IsAdmin(userID string) bool {
 	fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("admins"), []byte(userID))
 		isAdmin = v != nil
-		log.Printf("DEBUG FSM IsAdmin [%s]: user=%q isAdmin=%v (val=%q)", fsm.nodeID, userID, isAdmin, string(v))
+		logger.Debugf("DEBUG FSM IsAdmin [%s]: user=%q isAdmin=%v (val=%q)", fsm.nodeID, userID, isAdmin, string(v))
 		return nil
 	})
 	return isAdmin
@@ -1629,7 +1630,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 			inode.Leases[nonce] = info
 			fsm.saveInodeWithPages(tx, inode)
 			encoded, _ := json.Marshal(info)
-			log.Printf("DEBUG FSM [%s]: Indexing lease %s:%s", fsm.nodeID, id, nonce)
+			logger.Debugf("DEBUG FSM [%s]: Indexing lease %s:%s", fsm.nodeID, id, nonce)
 			fsm.Put(tx, []byte("leases"), []byte(id+":"+nonce), encoded)
 		} else {
 			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
@@ -1642,7 +1643,7 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 			}
 			leases[nonce] = info
 			encoded, _ := json.Marshal(leases)
-			log.Printf("DEBUG FSM [%s]: Indexing path lease %s:%s", fsm.nodeID, id, nonce)
+			logger.Debugf("DEBUG FSM [%s]: Indexing path lease %s:%s", fsm.nodeID, id, nonce)
 			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
 		}
 	}
@@ -1679,7 +1680,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 				}
 				if nonce != "" {
 					delete(leases, nonce)
-					log.Printf("DEBUG FSM [%s]: Removing path lease index %s:%s", fsm.nodeID, id, nonce)
+					logger.Debugf("DEBUG FSM [%s]: Removing path lease index %s:%s", fsm.nodeID, id, nonce)
 					if len(leases) == 0 {
 						fsm.Delete(tx, []byte("filename_leases"), []byte(id))
 					} else {
@@ -1706,7 +1707,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 				}
 				if _, ok := inode.Leases[nonce]; ok {
 					delete(inode.Leases, nonce)
-					log.Printf("DEBUG FSM [%s]: Removing lease index %s:%s", fsm.nodeID, id, nonce)
+					logger.Debugf("DEBUG FSM [%s]: Removing lease index %s:%s", fsm.nodeID, id, nonce)
 					fsm.Delete(tx, []byte("leases"), []byte(id+":"+nonce))
 					if inode.Unlinked {
 						active := false
@@ -2001,7 +2002,7 @@ func (fsm *MetadataFSM) GetLeases() ([]LeaseInfo, error) {
 	now := time.Now().UnixNano()
 	err := fsm.db.View(func(tx *bolt.Tx) error {
 		return fsm.ForEach(tx, []byte("leases"), func(k, v []byte) error {
-			log.Printf("DEBUG FSM: GetLeases found key %s", string(k))
+			logger.Debugf("DEBUG FSM: GetLeases found key %s", string(k))
 			var info LeaseInfo
 			if err := json.Unmarshal(v, &info); err == nil {
 				if info.Expiry > now {

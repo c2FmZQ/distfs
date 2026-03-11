@@ -4,7 +4,6 @@ package fuse
 import (
 	"bytes"
 	"context"
-	"log"
 	"os"
 	"path/filepath"
 	"testing"
@@ -15,6 +14,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/hashicorp/raft"
 	"net/http/httptest"
@@ -84,7 +84,7 @@ func TestFUSE_POSIXCompliance(t *testing.T) {
 		t.Fatalf("Mount failed: %v", err)
 	}
 	defer func() {
-		log.Printf("DEBUG TEST: Unmounting %s", mountpoint)
+		logger.Debugf("DEBUG TEST: Unmounting %s", mountpoint)
 		fuse.Unmount(mountpoint)
 		conn.Close()
 		time.Sleep(2 * time.Second) // Give kernel/background flushes time to finish

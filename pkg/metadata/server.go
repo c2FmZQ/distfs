@@ -43,6 +43,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/ech"
 	"github.com/c2FmZQ/tlsproxy/jwks"
 	"github.com/golang-jwt/jwt/v5"
@@ -327,7 +328,7 @@ func (s *Server) loadClusterSignKey() {
 	s.clusterSignMu.Lock()
 	s.clusterSignKey = priv
 	s.clusterSignMu.Unlock()
-	log.Printf("SUCCESS: Loaded cluster signing key (Leader)")
+	logger.Debugf("SUCCESS: Loaded cluster signing key (Leader)")
 }
 
 func (s *Server) discoverOIDC(discoveryURL string) {
@@ -338,17 +339,17 @@ func (s *Server) discoverOIDC(discoveryURL string) {
 	for {
 		resp, err := client.Get(discoveryURL)
 		if err != nil {
-			log.Printf("OIDC discovery failed: %v", err)
+			logger.Debugf("OIDC discovery failed: %v", err)
 		} else {
 			var conf OIDCConfig
 			if err := json.NewDecoder(resp.Body).Decode(&conf); err != nil {
-				log.Printf("failed to decode OIDC discovery: %v", err)
+				logger.Debugf("failed to decode OIDC discovery: %v", err)
 			} else {
 				s.oidcMu.Lock()
 				s.oidcConfig = &conf
 				s.jwks.SetIssuers([]jwks.Issuer{{JWKSURI: conf.JWKSURI}})
 				s.oidcMu.Unlock()
-				log.Printf("OIDC discovery successful for %s", conf.Issuer)
+				logger.Debugf("OIDC discovery successful for %s", conf.Issuer)
 			}
 			resp.Body.Close()
 		}
@@ -686,7 +687,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		ctx := context.WithValue(r.Context(), userContextKey, user)
 		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
-			log.Printf("DEBUG AUTH: User %s provided Admin-Bypass header", user.ID)
+			logger.Debugf("DEBUG AUTH: User %s provided Admin-Bypass header", user.ID)
 			ctx = context.WithValue(ctx, adminBypassContextKey, true)
 		}
 		r = r.WithContext(ctx)
@@ -781,7 +782,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		isAdmin := s.fsm.IsAdmin(user.ID)
 		bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-		log.Printf("DEBUG ADMIN ROUTE [%s]: user=%q isAdmin=%v bypass=%v", s.nodeID, user.ID, isAdmin, bypass)
+		logger.Debugf("DEBUG ADMIN ROUTE [%s]: user=%q isAdmin=%v bypass=%v", s.nodeID, user.ID, isAdmin, bypass)
 		if !isAdmin {
 			s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 			return
@@ -792,7 +793,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Authenticated Standard Routes (Inode / User / Group)
 	if strings.HasPrefix(r.URL.Path, "/v1/user/") || strings.HasPrefix(r.URL.Path, "/v1/group/") || strings.HasPrefix(r.URL.Path, "/v1/meta/") {
-		log.Printf("ROUTER: Path=%s Method=%s", r.URL.Path, r.Method)
+		logger.Debugf("ROUTER: Path=%s Method=%s", r.URL.Path, r.Method)
 		if user == nil {
 			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
@@ -988,7 +989,7 @@ func (s *Server) handleSystemBootstrap(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("SUCCESS: Node bootstrapped with ClusterSecret and FSM KeyRing")
+	logger.Debugf("SUCCESS: Node bootstrapped with ClusterSecret and FSM KeyRing")
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -1109,7 +1110,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.challengeMu.Unlock()
 
 	if !ok || entry.UserID != solve.UserID {
-		log.Printf("DEBUG: handleLogin: invalid challenge or user ID mismatch. entryFound=%v, entryUser=%s, solveUser=%s", ok, entry.UserID, solve.UserID)
+		logger.Debugf("DEBUG: handleLogin: invalid challenge or user ID mismatch. entryFound=%v, entryUser=%s, solveUser=%s", ok, entry.UserID, solve.UserID)
 		s.writeError(w, r, ErrCodeInternal, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
@@ -1122,7 +1123,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if plain == nil {
-			log.Printf("DEBUG: handleLogin: user %s not found in FSM", solve.UserID)
+			logger.Debugf("DEBUG: handleLogin: user %s not found in FSM", solve.UserID)
 			return fmt.Errorf("user not found")
 		}
 		return json.Unmarshal(plain, &user)
@@ -1133,7 +1134,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
-		log.Printf("DEBUG: handleLogin: invalid signature for user %s", solve.UserID)
+		logger.Debugf("DEBUG: handleLogin: invalid signature for user %s", solve.UserID)
 		s.writeError(w, r, ErrCodeInternal, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -1434,15 +1435,15 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(b, &st); err == nil {
 				sessionNonce = st.Token.Nonce
 			} else {
-				log.Printf("DEBUG SERVER handleBatch: Unmarshal session failed: %v", err)
+				logger.Debugf("DEBUG SERVER handleBatch: Unmarshal session failed: %v", err)
 			}
 		} else {
-			log.Printf("DEBUG SERVER handleBatch: Decode session failed: %v", err)
+			logger.Debugf("DEBUG SERVER handleBatch: Decode session failed: %v", err)
 		}
 	} else {
-		log.Printf("DEBUG SERVER handleBatch: Session-Token header is empty")
+		logger.Debugf("DEBUG SERVER handleBatch: Session-Token header is empty")
 	}
-	log.Printf("DEBUG SERVER handleBatch: extracted sessionNonce=%s from header", sessionNonce)
+	logger.Debugf("DEBUG SERVER handleBatch: extracted sessionNonce=%s from header", sessionNonce)
 
 	// Phase 41/42: Client-submitted batches are always atomic.
 	logCmd := LogCommand{
@@ -3135,7 +3136,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		lastDiscoveryErr = err
-		log.Printf("DEBUG: Discovery of %s failed (attempt %d): %v", req.Address, i+1, err)
+		logger.Debugf("DEBUG: Discovery of %s failed (attempt %d): %v", req.Address, i+1, err)
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -3268,7 +3269,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		} else {
 			lastPushErr = err
 		}
-		log.Printf("DEBUG: Push to %s failed (attempt %d): %v", bootstrapURL, i+1, lastPushErr)
+		logger.Debugf("DEBUG: Push to %s failed (attempt %d): %v", bootstrapURL, i+1, lastPushErr)
 		select {
 		case <-r.Context().Done():
 			return
@@ -3287,9 +3288,9 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if alreadyBootstrapped {
-		log.Printf("SUCCESS: Node %s already has ClusterSecret", req.Address)
+		logger.Debugf("SUCCESS: Node %s already has ClusterSecret", req.Address)
 	} else {
-		log.Printf("SUCCESS: Pushed ClusterSecret to joining node %s", req.Address)
+		logger.Debugf("SUCCESS: Pushed ClusterSecret to joining node %s", req.Address)
 	}
 
 	// 4. Add to Raft
@@ -3582,7 +3583,7 @@ func (s *Server) checkAndInitWorld() {
 
 	}
 
-	log.Printf("Initializing World Identity...")
+	logger.Debugf("Initializing World Identity...")
 
 	dk, _ := crypto.GenerateEncryptionKey()
 

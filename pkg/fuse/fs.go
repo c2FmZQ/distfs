@@ -19,6 +19,7 @@ import (
 	"bazil.org/fuse/fs"
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
@@ -35,7 +36,7 @@ func NewFS(c *client.Client) *FS {
 	fsys := &FS{client: c}
 	// Configure lease expiration callback to notify VFS
 	c = c.WithLeaseExpiredCallback(func(id string, err error) {
-		log.Printf("DEBUG FUSE: Lease expired for %s: %v", id, err)
+		logger.Debugf("DEBUG FUSE: Lease expired for %s: %v", id, err)
 		// We don't have easy access to the fuse.Server or mountpoint here to call Invalidate,
 		// but distfs-fuse is mostly stateless anyway.
 		// The main benefit is that the client will refetch on next access.
@@ -551,7 +552,7 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 
 	err := d.fs.client.RemoveEntryRaw(ctx, id, key, req.Name)
 	if err != nil {
-		log.Printf("DEBUG FUSE: Remove(%s) in dir %s failed: %v", req.Name, id, err)
+		logger.Debugf("DEBUG FUSE: Remove(%s) in dir %s failed: %v", req.Name, id, err)
 		return mapError(err)
 	}
 	d.mu.Lock()
@@ -815,7 +816,7 @@ func (f *File) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
-	log.Printf("DEBUG FUSE: Setattr(id=%s valid=%v size=%v)", f.inode.ID, req.Valid, req.Size)
+	logger.Debugf("DEBUG FUSE: Setattr(id=%s valid=%v size=%v)", f.inode.ID, req.Valid, req.Size)
 	f.mu.Lock()
 	inode := f.inode
 	key := f.key
