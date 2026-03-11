@@ -1067,3 +1067,23 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 52.6: Testing & Regression Validation**
     *   **Action:** Run the full `go test -race ./...` suite to prove no concurrency regressions were introduced by caching/pooling.
     *   **Action:** Run system benchmarks (`/bin/benchmark.sh`) to empirically measure the latency and throughput improvements.
+
+---
+
+## Phase 53: Protocol Hardening & Strong Data Consistency
+**Goal:** Address fundamental architectural gaps identified during the research audit, specifically focusing on cryptographic forward secrecy and the metadata-data consistency mismatch.
+
+*   **Step 53.1: Ephemeral PQC-KEM Session Sealing (Forward Secrecy)**
+    *   **Action:** Refactor the "Sealing" layer in `pkg/client/client.go` and `pkg/metadata/server.go`.
+    *   **Action:** Instead of encrypting requests directly for the long-lived Epoch Key, implement a PQC-KEM exchange (ML-KEM-768) per session or per-request to derive an ephemeral symmetric key.
+    *   **Action:** Ensure the server never stores historical ephemeral keys, guaranteeing that a future compromise cannot decrypt past metadata traffic.
+*   **Step 53.2: Synchronous Write-Through Verification (Consistency Gap)**
+    *   **Action:** Modify the chunk upload pipeline in `pkg/client/client.go` (`Put`, `SaveDataFile`).
+    *   **Action:** Enforce a "Quorum-Persisted" acknowledgment from the Data Node pool *before* submitting the final Inode manifest update to the Raft Metadata Leader.
+    *   **Action:** Ensure that any reader who resolves the new metadata version is guaranteed to find the corresponding 1MB data chunks already replicated.
+*   **Step 53.3: Failure Recovery & Atomicity**
+    *   **Action:** Implement a client-side cleanup for orphaned chunks if the Raft metadata commit fails after data nodes have already persisted them.
+    *   **Action:** Add integration tests to simulate network partitions during the "Consistency Gap" window and verify system stability.
+*   **Step 53.4: Testing & Validation**
+    *   **Action:** **Forward Secrecy Test:** Verify that compromising a node's Epoch Key at time T+1 does not allow decryption of metadata payloads captured at time T.
+    *   **Action:** **Consistency Test:** Perform rapid write-read cycles across distributed nodes and verify that 404 errors on chunks are mathematically impossible under the new write-through protocol.

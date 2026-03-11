@@ -1,8 +1,10 @@
 # DistFS: Reconciling POSIX Semantics with Zero-Knowledge, Post-Quantum File Storage
 
-DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system. It is designed as a research platform to explore the boundaries of strict zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.
+DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system. It is designed as a research platform to explore the boundaries of zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.
 
-The core tension DistFS resolves is the fundamental incompatibility between high-fidelity POSIX environments and a strict zero-knowledge model. POSIX file systems require complex, dynamic metadata manipulation—such as granular Access Control Lists (ACLs), atomic renames, hierarchical directory traversal, and distributed locking. Conversely, a zero-knowledge model mandates that the server infrastructure remains mathematically blind to both the data payload and the structural metadata, preventing it from independently evaluating or enforcing these rules.
+The core tension DistFS resolves is the fundamental incompatibility between high-fidelity POSIX environments and a zero-knowledge model. POSIX file systems require complex, dynamic metadata manipulation—such as granular Access Control Lists (ACLs), atomic renames, hierarchical directory traversal, and distributed locking. Conversely, a zero-knowledge model mandates that the server infrastructure remains mathematically blind to the data payload and structural filenames.
+
+Note: While DistFS ensures data and filenames are cryptographically opaque, the server explicitly manages a **Social Metadata Graph** (Group memberships and ACL identifiers) to enforce POSIX semantics. This represents a deliberate trade-off where organizational structure is observable by the infrastructure to enable complex sharing.
 
 DistFS bridges this gap. We invite researchers, cryptographers, and systems engineers to review the architecture, attempt to break the cryptographic provenance, and contribute to the evolution of post-quantum distributed storage.
 
@@ -46,13 +48,16 @@ Furthermore, delegating write access (e.g., via groups or ACLs) requires a crypt
 Enterprise file systems typically ingest plaintext Personally Identifiable Information (PII) like emails, full names, or LDAP attributes into their internal databases, creating massive privacy liabilities.
 
 **The Mechanism:** DistFS utilizes a **Dark Registry**. User identities are derived from an irreversible hash: `HMAC-SHA256(Email, ClusterSecret)`. The server only ever stores and operates on opaque cryptographic UUIDs.
+**The Privacy Boundary:** While the live cluster requires the `ClusterSecret` to function (and could thus deanonymize users via dictionary attacks), this mechanism provides robust **Defense-in-Depth against Offline Leakage**. A stolen database snapshot contains zero plaintext PII and cannot be reverse-engineered without the heavily guarded master secret.
+
 Furthermore, successfully authenticating via Single Sign-On (SSO/OIDC) does *not* grant network access. DistFS enforces a strict Zero-Trust onboarding model requiring an Out-Of-Band (OOB) cryptographic handshake. When a new device registers, its account is marked as `Locked`. The client generates a random 6-digit PIN. An existing Administrator must manually verify this PIN (e.g., over a phone call or in person) and sign a blockchain-style attestation to unlock the account. 
-**The Benefit:** Eradicates Sybil attacks where an adversary registers thousands of identities, and guarantees that even a total database exfiltration leaks zero PII.
+**The Benefit:** Eradicates Sybil attacks where an adversary registers thousands of identities, and guarantees that offline database exfiltration leaks zero PII.
 
 ### 2.5 Unified Consensus-Driven Metadata + E2EE Sharding
 Systems that distribute encrypted blocks over peer-to-peer pools (like IPFS or Tahoe-LAFS) often struggle to provide the strongly ordered, atomic consistency required for standard application workloads (e.g., rapid atomic directory renames, distributed locking, strict DAG traversal).
 
 **The Mechanism:** DistFS implements a clean architectural split. It utilizes a highly consistent HashiCorp Raft and BoltDB cluster purely to manage the encrypted namespace. This guarantees strict ordering for metadata mutations. This namespace points to a highly scalable, eventually consistent, parallel fan-out storage pool handling the 1MB AES-256-GCM encrypted data chunks. 
+**The Scalability Trade-off:** While the data layer scales horizontally to thousands of nodes, the metadata layer is **Strongly Consistent but Single-Leader Limited** via the Raft protocol. This prioritizes correctness, global ordering, and POSIX compliance over infinite metadata throughput.
 **The Benefit:** Combines the rigorous consistency of enterprise SANs with the horizontal scalability and privacy of decentralized cryptographic networks.
 
 ---
