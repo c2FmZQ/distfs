@@ -118,6 +118,13 @@ func TestGroupManagementSecurity(t *testing.T) {
 		}
 		g.Members["bob"] = true
 		encoded, _ := json.Marshal(g)
+
+		// Update the indices since we are bypassing the FSM pipeline
+		mb := tx.Bucket([]byte("user_memberships"))
+		sub, _ := mb.CreateBucketIfNotExists([]byte("bob"))
+		encOne, _ := node.FSM.EncryptValue([]byte("user_memberships"), []byte("1"))
+		sub.Put([]byte(groupID), encOne)
+
 		return node.FSM.Put(tx, []byte("groups"), []byte(groupID), encoded)
 	})
 	if err != nil {
@@ -186,6 +193,13 @@ func TestGroupManagementSecurity(t *testing.T) {
 		}
 		g.Members["bob"] = true
 		encoded, _ := json.Marshal(g)
+
+		// Update the indices since we are bypassing the FSM pipeline
+		mb := tx.Bucket([]byte("user_memberships"))
+		sub, _ := mb.CreateBucketIfNotExists([]byte("bob"))
+		encOne, _ := node.FSM.EncryptValue([]byte("user_memberships"), []byte("1"))
+		sub.Put([]byte("group-b"), encOne)
+
 		return node.FSM.Put(tx, []byte("groups"), []byte("group-b"), encoded)
 	})
 	if err != nil {

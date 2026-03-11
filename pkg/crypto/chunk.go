@@ -22,9 +22,17 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"sync"
 )
 
 const ChunkSize = 1024 * 1024 // 1 MB
+
+var chunkPool = sync.Pool{
+	New: func() interface{} {
+		b := make([]byte, ChunkSize)
+		return &b
+	},
+}
 
 // DeriveChunkNoncePrefix generates a 4-byte position-bound prefix from the file key and chunk index.
 func DeriveChunkNoncePrefix(fileKey []byte, chunkIndex uint64) []byte {
@@ -42,9 +50,15 @@ func EncryptChunk(fileKey []byte, plaintext []byte, chunkIndex uint64) (chunkID 
 		return "", nil, fmt.Errorf("plaintext larger than chunk size")
 	}
 
-	// Pad with zeros to ChunkSize for size hiding
-	padded := make([]byte, ChunkSize)
+	// Phase 52.1: Memory Optimization
+	bp := chunkPool.Get().(*[]byte)
+	padded := *bp
+	// Explicitly zero out the buffer before use to prevent cross-file cryptographic data leakage
+	clear(padded)
 	copy(padded, plaintext)
+	defer func() {
+		chunkPool.Put(bp)
+	}()
 
 	// Hybrid Nonce: 4-byte prefix (position-bound) + 8-byte random suffix (version entropy)
 	prefix := DeriveChunkNoncePrefix(fileKey, chunkIndex)

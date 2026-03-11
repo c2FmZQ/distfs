@@ -110,9 +110,7 @@ func TestPathCache(t *testing.T) {
 
 	// 3. First Resolution (Sequential)
 	// Clear cache to force sequential resolution
-	c.pathMu.Lock()
-	c.pathCache = make(map[string]pathCacheEntry)
-	c.pathMu.Unlock()
+	c.clearPathCache()
 
 	atomic.StoreUint64(&getInodeCount, 0)
 	t.Log("Starting first resolution (sequential)...")

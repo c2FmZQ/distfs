@@ -1042,3 +1042,28 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** **Unit Test:** Provide varied ACL combinations (Users, Groups, Mask) to `checkReadPermission` and assert expected boolean outcomes.
     *   **Action:** **Integration Test:** Run a suite using native Linux `setfacl` and `getfacl` binaries inside the FUSE mount, verifying that access works correctly via standard shell users.
     *   **Action:** **Inheritance Test:** Create a nested directory structure and verify that a newly created file correctly inherits the `DefaultACL` and is readable by the designated group without manual intervention.
+
+---
+
+## Phase 52: Performance, Latency, and GC Optimization
+**Goal:** Drastically reduce CPU overhead, network latency, and Garbage Collection (GC) pressure across the Client, Metadata, and FUSE layers. **Constraint:** Zero regressions in correctness, thread-safety, or cryptographic security are permitted.
+
+*   **Step 52.1: Memory & GC Optimization (`sync.Pool`)**
+    *   **Action:** Implement `sync.Pool` in `pkg/crypto/chunk.go` and `pkg/client/client.go` to recycle 1MB byte slices used for chunk encryption and network downloads (`io.ReadAll`).
+    *   **Constraint:** Buffers MUST be explicitly zeroed or precisely sliced before reuse to prevent cross-file cryptographic data leakage.
+*   **Step 52.2: FSM Group Index (O(N) -> O(1))**
+    *   **Action:** Introduce a `user_groups` bucket in BoltDB (`pkg/metadata/fsm.go`) acting as a reverse index mapping `UserID -> []GroupID`. Refactor `GetUserGroupIDs` to use this O(1) lookup.
+    *   **Constraint:** Group creation, deletion, and membership updates must transactionally update this index to guarantee strict authorization consistency.
+*   **Step 52.3: O(1) PathCache Invalidation**
+    *   **Action:** Add a reverse map (`map[string][]string` mapping `inodeID -> []paths`) to the client's `pathCache`.
+    *   **Action:** Refactor `invalidatePathCacheByID` to perform an O(1) lookup instead of iterating over the entire cache.
+    *   **Constraint:** Mutex locking (`pathMu`) must remain strictly enforced to prevent data races.
+*   **Step 52.4: Signature Verification Caching (Math Offload)**
+    *   **Action:** Add a small, thread-safe LRU cache in `pkg/client/client.go` for ML-DSA signature verification.
+    *   **Constraint:** The cache key MUST securely incorporate the full `ManifestHash`, the `SignerID`, and the `UserSig` to prevent any possibility of cryptographic spoofing.
+*   **Step 52.5: FUSE Pre-fetching Thresholds**
+    *   **Action:** Modify the background pre-fetcher in `FileReader` (`pkg/client/client.go`) to implement a sequential read heuristic.
+    *   **Action:** Only trigger aggressive network pre-fetching if the last N reads were strictly sequential, saving bandwidth during random access.
+*   **Step 52.6: Testing & Regression Validation**
+    *   **Action:** Run the full `go test -race ./...` suite to prove no concurrency regressions were introduced by caching/pooling.
+    *   **Action:** Run system benchmarks (`/bin/benchmark.sh`) to empirically measure the latency and throughput improvements.

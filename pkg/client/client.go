@@ -906,6 +906,13 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 	})
 }
 
+var downloadBufPool = sync.Pool{
+	New: func() interface{} {
+		b := bytes.NewBuffer(make([]byte, 0, crypto.ChunkSize+4096))
+		return b
+	},
+}
+
 func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, token string) ([]byte, error) {
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no URLs provided for chunk %s", id)
@@ -976,7 +983,18 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				}
 
 				limit := int64(crypto.ChunkSize + 4096) // 1MB + overhead buffer
-				d, err := io.ReadAll(io.LimitReader(resp.Body, limit))
+
+				buf := downloadBufPool.Get().(*bytes.Buffer)
+				buf.Reset()
+				_, err = io.Copy(buf, io.LimitReader(resp.Body, limit))
+
+				var d []byte
+				if err == nil {
+					d = make([]byte, buf.Len())
+					copy(d, buf.Bytes())
+				}
+				downloadBufPool.Put(buf)
+
 				resCh <- result{data: d, err: err}
 			}(url)
 
@@ -1811,6 +1829,9 @@ type FileReader struct {
 	readAhead   map[int64]*readAheadResult
 	readAheadMu sync.Mutex
 
+	lastChunkIdx   int64
+	sequentialHits int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -1886,6 +1907,7 @@ func (c *Client) NewReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 		fileKey:         fileKey,
 		offset:          0,
 		currentChunkIdx: -1,
+		lastChunkIdx:    -1,
 		token:           token,
 		leaseNonce:      nonce,
 		readAhead:       make(map[int64]*readAheadResult),
@@ -1974,15 +1996,26 @@ func (r *FileReader) triggerPrefetch(idx int64) {
 func (r *FileReader) Read(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.read(p)
+	return r.readInternal(p, false, 0)
 }
 
-func (r *FileReader) read(p []byte) (int, error) {
-	if r.offset >= int64(r.inode.Size) {
+func (r *FileReader) ReadAt(p []byte, off int64) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.readInternal(p, true, off)
+}
+
+func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, error) {
+	currentOff := r.offset
+	if isReadAt {
+		currentOff = off
+	}
+
+	if currentOff >= int64(r.inode.Size) {
 		return 0, io.EOF
 	}
 
-	remaining := int64(r.inode.Size) - r.offset
+	remaining := int64(r.inode.Size) - currentOff
 	if int64(len(p)) > remaining {
 		p = p[:remaining]
 	}
@@ -1991,8 +2024,8 @@ func (r *FileReader) read(p []byte) (int, error) {
 	chunkSize := int64(crypto.ChunkSize)
 
 	for len(p) > 0 {
-		chunkIdx := r.offset / chunkSize
-		chunkOffset := r.offset % chunkSize
+		chunkIdx := currentOff / chunkSize
+		chunkOffset := currentOff % chunkSize
 
 		// Detect seek/random access and clear cache
 		if r.currentChunkIdx != -1 && chunkIdx != r.currentChunkIdx+1 && chunkIdx != r.currentChunkIdx {
@@ -2013,9 +2046,21 @@ func (r *FileReader) read(p []byte) (int, error) {
 			r.currentChunk = pt
 			r.currentChunkIdx = 0
 		} else {
-			// Trigger prefetch for next few chunks
-			for i := int64(1); i <= 3; i++ {
-				r.triggerPrefetch(chunkIdx + i)
+			// Phase 52.5: FUSE Pre-fetching Thresholds (Sequential Heuristic)
+			if chunkIdx == r.lastChunkIdx+1 || chunkIdx == r.lastChunkIdx {
+				if chunkIdx != r.lastChunkIdx {
+					r.sequentialHits++
+				}
+			} else {
+				r.sequentialHits = 0
+			}
+			r.lastChunkIdx = chunkIdx
+
+			// Only trigger aggressive network pre-fetching if the last N reads were strictly sequential
+			if r.sequentialHits >= 1 { // After reading 2 consecutive chunks
+				for i := int64(1); i <= 3; i++ {
+					r.triggerPrefetch(chunkIdx + i)
+				}
 			}
 
 			// Check Cache
@@ -2105,17 +2150,13 @@ func (r *FileReader) read(p []byte) (int, error) {
 
 		n := int(toCopy)
 		p = p[n:]
-		r.offset += int64(n)
+		currentOff += int64(n)
 		totalRead += n
+		if !isReadAt {
+			r.offset = currentOff
+		}
 	}
 	return totalRead, nil
-}
-
-func (r *FileReader) ReadAt(p []byte, off int64) (int, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.offset = off
-	return r.read(p)
 }
 
 func (r *FileReader) Stat() *metadata.Inode {

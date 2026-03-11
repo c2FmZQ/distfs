@@ -1773,88 +1773,68 @@ func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {
 
 // GetUserGroupIDs returns a slice of all GroupIDs the user is a member of (including recursive ownership).
 func (fsm *MetadataFSM) GetUserGroupIDs(userID string) ([]string, error) {
-	var groups []string
-	err := fsm.db.View(func(tx *bolt.Tx) error {
-		// Optimization: instead of scanning all groups, we should really have an index.
-		// Since groups are likely few compared to files, a full scan of the groups bucket is okay for now.
-		cursor := tx.Bucket([]byte("groups")).Cursor()
-		for k, v := cursor.First(); k != nil; k, v = cursor.Next() {
-			var g Group
-			if err := json.Unmarshal(v, &g); err != nil {
-				continue
-			}
-			if g.Members[userID] || g.OwnerID == userID {
-				groups = append(groups, string(k))
-				continue
-			}
-
-			// Recursive ownership check
-			visited := make(map[string]bool)
-			currID := g.OwnerID
-			for currID != "" && !visited[currID] {
-				visited[currID] = true
-				pPlain, _ := fsm.Get(tx, []byte("groups"), []byte(currID))
-				if pPlain == nil {
-					if currID == userID {
-						groups = append(groups, string(k))
-					}
-					break
-				}
-				var p Group
-				json.Unmarshal(pPlain, &p)
-				if p.Members[userID] || p.OwnerID == userID {
-					groups = append(groups, string(k))
-					break
-				}
-				currID = p.OwnerID
-			}
-		}
-		return nil
-	})
-	return groups, err
+	// Phase 52.2: FSM Group Index Optimization (O(N) -> O(1))
+	// Utilize the existing user_memberships and owner_groups indices.
+	entries, err := fsm.GetUserGroups(userID)
+	if err != nil {
+		return nil, err
+	}
+	groups := make([]string, len(entries))
+	for i, entry := range entries {
+		groups[i] = entry.ID
+	}
+	return groups, nil
 }
 
 func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
+	// Phase 52.2: O(1) Membership Check
 	var found bool
 	err := fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := fsm.Get(tx, []byte("groups"), []byte(groupID))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		var g Group
-		json.Unmarshal(plain, &g)
-		if g.Members[userID] || g.OwnerID == userID {
-			found = true
-			return nil
+		// Fast path 1: Direct Membership
+		mb := tx.Bucket([]byte("user_memberships"))
+		if mb != nil {
+			if sub := mb.Bucket([]byte(userID)); sub != nil {
+				if sub.Get([]byte(groupID)) != nil {
+					found = true
+					return nil
+				}
+			}
 		}
 
-		// Recursive check: if the owner is a group, are we in THAT group?
-		visited := make(map[string]bool)
-		currID := g.OwnerID
-		for currID != "" && !visited[currID] {
-			visited[currID] = true
-			pPlain, _ := fsm.Get(tx, []byte("groups"), []byte(currID))
-			if pPlain == nil {
-				// Not a group ID, must be a user ID (direct check already done or it doesn't match)
-				if currID == userID {
+		// Fast path 2: Direct Ownership
+		ob := tx.Bucket([]byte("owner_groups"))
+		if ob != nil {
+			if sub := ob.Bucket([]byte(userID)); sub != nil {
+				if sub.Get([]byte(groupID)) != nil {
 					found = true
+					return nil
 				}
-				return nil
 			}
-			var p Group
-			json.Unmarshal(pPlain, &p)
-			if p.Members[userID] || p.OwnerID == userID {
-				found = true
-				return nil
-			}
-			currID = p.OwnerID
 		}
+
+		// Fast path 3: Recursive Managers (Sub-groups)
+		// We still need to check if the user owns/manages a group that owns THIS group.
+		// Since GetUserGroups performs the full recursive resolution over the O(1) indices,
+		// we can leverage its logic. It's fast because it only processes index pointers, not JSON blobs.
 		return nil
 	})
-	return found, err
+
+	if found || err != nil {
+		return found, err
+	}
+
+	// Fallback to recursive index search if direct paths failed
+	groups, err := fsm.GetUserGroups(userID)
+	if err != nil {
+		return false, err
+	}
+	for _, g := range groups {
+		if g.ID == groupID {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 func (fsm *MetadataFSM) GetGroup(id string) (*Group, error) {
