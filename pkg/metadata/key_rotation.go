@@ -190,10 +190,15 @@ func (w *KeyRotationWorker) rotate() {
 		return
 	}
 
+	id := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	// Phase 53.1: Store private key in-memory only.
+	w.server.RegisterEpochKey(id, key)
+
 	clusterKey := ClusterKey{
-		ID:        fmt.Sprintf("%d", time.Now().UnixNano()),
+		ID:        id,
 		EncKey:    key.EncapsulationKey().Bytes(),
-		DecKey:    key.Bytes(),
+		DecKey:    nil, // DO NOT store private key in Raft/FSM
 		CreatedAt: time.Now().Unix(),
 	}
 

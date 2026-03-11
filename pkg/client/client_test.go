@@ -64,14 +64,14 @@ func waitLeader(t *testing.T, r *raft.Raft) {
 	}
 }
 
-func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, []byte) {
+func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, *mlkem.DecapsulationKey768, []byte) {
 	waitLeader(t, raftNode.Raft)
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
 	key := metadata.ClusterKey{
 		ID:        "key-1",
 		EncKey:    ek.Bytes(),
-		DecKey:    dk.Bytes(),
+		DecKey:    nil, // DO NOT store private key in FSM
 		CreatedAt: time.Now().Unix(),
 	}
 	keyBytes, _ := json.Marshal(key)
@@ -94,7 +94,7 @@ func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.Encapsu
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}
 
-	return dk.EncapsulationKey(), csk.Public()
+	return dk.EncapsulationKey(), dk, csk.Public()
 }
 
 func registerNode(t *testing.T, serverURL, secret string, node metadata.Node) {
@@ -132,10 +132,11 @@ func TestClientIntegration(t *testing.T) {
 	// Wait for leader
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -260,10 +261,11 @@ func TestReplication(t *testing.T) {
 		t.Fatal("Node did not become leader")
 	}
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -355,10 +357,11 @@ func TestDirectories(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -454,10 +457,11 @@ func TestReplicationRepair(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -570,10 +574,11 @@ func TestReadAhead(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -693,10 +698,11 @@ func TestGarbageCollection(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
@@ -792,10 +798,11 @@ func TestResolvePathComplex(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	metaServer.StopKeyRotation()
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()

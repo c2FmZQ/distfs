@@ -683,7 +683,8 @@ type AuthChallengeResponse struct {
 type AuthChallengeSolve struct {
 	UserID    string `json:"uid"`
 	Challenge []byte `json:"challenge"`
-	Signature []byte `json:"sig"` // User signature over Challenge
+	Signature []byte `json:"sig"`              // User signature over Challenge
+	EncKey    []byte `json:"enc_key,omitempty"` // Ephemeral ML-KEM-768 PK for session key establishment
 }
 
 // SessionToken is the internal structure of a session token.
@@ -701,7 +702,8 @@ type SignedSessionToken struct {
 
 // SessionResponse returns the encoded session token.
 type SessionResponse struct {
-	Token string `json:"token"` // Base64(SignedSessionToken)
+	Token string `json:"token"`            // Base64(SignedSessionToken)
+	KEMCT []byte `json:"kem_ct,omitempty"` // Ephemeral ML-KEM-768 CT for session key establishment
 }
 
 type LeaseInfo struct {

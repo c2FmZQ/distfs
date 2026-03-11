@@ -32,12 +32,13 @@ func TestManifestIntegrity(t *testing.T) {
 	}
 	raftNode.Raft.BootstrapCluster(cfg)
 	waitLeader(t, raftNode.Raft)
-	ek, _ := bootstrapCluster(t, raftNode)
+	ek, epochDK, _ := bootstrapCluster(t, raftNode)
 
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	raftSecret := "supersecret"
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, raftSecret, nil, 0, metadata.NewNodeVault(st), nodeDecKey, true, true)
+	server.RegisterEpochKey("key-1", epochDK)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 
@@ -221,11 +222,12 @@ func TestGroupIntegrity(t *testing.T) {
 	}
 	raftNode.Raft.BootstrapCluster(cfg)
 	waitLeader(t, raftNode.Raft)
-	ek, _ := bootstrapCluster(t, raftNode)
+	ek, epochDK, _ := bootstrapCluster(t, raftNode)
 
 	serverSignKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	server := metadata.NewServer(nodeID, raftNode.Raft, raftNode.FSM, "", serverSignKey, "testsecret", nil, 0, metadata.NewNodeVault(st), nodeDecKey, true, true)
+	server.RegisterEpochKey("key-1", epochDK)
 	ts := httptest.NewServer(server)
 	defer ts.Close()
 

@@ -39,7 +39,8 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	// Bootstrap cluster keys
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
-	key := metadata.ClusterKey{ID: "key-1", EncKey: ek.Bytes(), DecKey: dk.Bytes(), CreatedAt: time.Now().Unix()}
+	keyID := "key-1"
+	key := metadata.ClusterKey{ID: keyID, EncKey: ek.Bytes(), DecKey: nil, CreatedAt: time.Now().Unix()}
 	kb, _ := json.Marshal(key)
 	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRotateKey, Data: kb}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Raft apply RotateKey failed: %v", err)
@@ -55,6 +56,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey(keyID, dk)
 	ts := httptest.NewServer(metaServer)
 
 	// User

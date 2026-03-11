@@ -349,9 +349,13 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 		return
 	}
 
+	successCount := 1 // Local write succeeded
 	replicas := r.URL.Query().Get("replicas")
 	if replicas != "" {
 		targets := strings.Split(replicas, ",")
+		totalNodes := len(targets) + 1
+		requiredQuorum := totalNodes/2 + 1
+
 		token := r.Header.Get("Authorization")
 		sessionToken := r.Header.Get("Session-Token")
 
@@ -364,14 +368,20 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 
 		var errs []string
 		for i := 0; i < len(targets); i++ {
-			if err := <-errCh; err != nil {
+			if err := <-errCh; err == nil {
+				successCount++
+			} else {
 				errs = append(errs, err.Error())
 			}
 		}
 
-		if len(errs) > 0 {
-			http.Error(w, fmt.Sprintf("replication failed: %s", strings.Join(errs, "; ")), http.StatusBadGateway)
+		if successCount < requiredQuorum {
+			http.Error(w, fmt.Sprintf("quorum not reached (%d/%d): %s", successCount, requiredQuorum, strings.Join(errs, "; ")), http.StatusBadGateway)
 			return
+		}
+
+		if len(errs) > 0 {
+			logger.Debugf("DEBUG: Chunk %s reached quorum (%d/%d) but some replicas failed: %s", id, successCount, totalNodes, strings.Join(errs, "; "))
 		}
 	}
 

@@ -135,10 +135,12 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	// Bootstrap cluster key
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
+	keyID := "key-1"
+
 	key := ClusterKey{
-		ID:        "key-1",
+		ID:        keyID,
 		EncKey:    ek.Bytes(),
-		DecKey:    dk.Bytes(),
+		DecKey:    nil, // DO NOT store private key in FSM
 		CreatedAt: time.Now().Unix(),
 	}
 	keyBytes, _ := json.Marshal(key)
@@ -177,6 +179,8 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true, true)
 	ts := httptest.NewServer(server)
+
+	server.RegisterEpochKey(keyID, dk)
 
 	return node, ts, signKey, ek.Bytes(), server
 }

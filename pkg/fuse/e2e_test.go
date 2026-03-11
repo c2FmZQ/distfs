@@ -55,14 +55,14 @@ func waitLeaderLocal(t *testing.T, r *raft.Raft) {
 	}
 }
 
-func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, []byte) {
+func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.EncapsulationKey768, *mlkem.DecapsulationKey768, []byte) {
 	waitLeaderLocal(t, raftNode.Raft)
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
 	key := metadata.ClusterKey{
 		ID:        "key-1",
 		EncKey:    ek.Bytes(),
-		DecKey:    dk.Bytes(),
+		DecKey:    nil,
 		CreatedAt: time.Now().Unix(),
 	}
 	keyBytes, _ := json.Marshal(key)
@@ -85,7 +85,7 @@ func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.En
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}
 
-	return dk.EncapsulationKey(), csk.Public()
+	return dk.EncapsulationKey(), dk, csk.Public()
 }
 
 func registerNodeLocal(t *testing.T, serverURL, secret string, node metadata.Node) {
@@ -124,10 +124,11 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	})
 	waitLeaderLocal(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapClusterLocal(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapClusterLocal(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()

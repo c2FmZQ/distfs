@@ -444,6 +444,10 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 	})
 
 	if err != nil {
+		// Phase 53.3: Cleanup orphans if metadata update failed
+		if len(chunkEntries) > 0 {
+			go c.cleanupChunks(ctx, newID, chunkEntries)
+		}
 		return nil, nil, err
 	}
 

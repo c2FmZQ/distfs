@@ -184,13 +184,57 @@ func TestParallelReplicationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatalf("PUT request itself failed: %v", err)
 	}
-	if resp.StatusCode != http.StatusBadGateway {
-		t.Errorf("Expected 502, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusCreated {
+		t.Errorf("Expected 201 (Quorum reached), got %d", resp.StatusCode)
 	}
 	resp.Body.Close()
 
 	has0, _ := stores[0].HasChunk(chunkID)
 	if !has0 {
-		t.Error("Node 0 should have the chunk even if replication failed")
+		t.Error("Node 0 should have the chunk")
 	}
+	has1, _ := stores[1].HasChunk(chunkID)
+	if !has1 {
+		t.Error("Node 1 should have the chunk")
+	}
+}
+
+func TestParallelReplicationQuorumFailure(t *testing.T) {
+	servers := make([]*httptest.Server, 3)
+	stores := make([]*DiskStore, 3)
+
+	pub, sk := setupTestAuth(t)
+
+	for i := 0; i < 3; i++ {
+		tmpDir := t.TempDir()
+		st, _ := createTestStorage(t, tmpDir)
+		store, _ := NewDiskStore(st)
+		stores[i] = store
+		server := NewServer(store, pub, nil, NoopValidator{}, true, true)
+		ts := httptest.NewServer(server)
+		servers[i] = ts
+		defer ts.Close()
+	}
+
+	// CLOSE TWO NODES -> Only 1/3 remains. Quorum (2) not possible.
+	servers[1].Close()
+	servers[2].Close()
+
+	content := []byte("quorum failure test")
+	h := sha256.Sum256(content)
+	chunkID := hex.EncodeToString(h[:])
+
+	replicas := fmt.Sprintf("%s,%s", servers[1].URL, servers[2].URL)
+	url := fmt.Sprintf("%s/v1/data/%s?replicas=%s", servers[0].URL, chunkID, replicas)
+
+	req, _ := http.NewRequest("PUT", url, bytes.NewReader(content))
+	req.Header.Set("Authorization", signTestToken(t, sk, []string{chunkID}, "RW"))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("PUT request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Errorf("Expected 502 (Quorum failed), got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
 }

@@ -33,10 +33,11 @@ func TestAddEntryRegression(t *testing.T) {
 	})
 	waitLeader(t, metaNode.Raft)
 
-	serverEK, metaSignPK := bootstrapCluster(t, metaNode)
+	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()

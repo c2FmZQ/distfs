@@ -488,13 +488,20 @@ func (c *Client) Login(ctx context.Context) error {
 		return fmt.Errorf("invalid server signature on challenge")
 	}
 
-	// 3. Solve Challenge (Sign it)
+	// 3. Solve Challenge (Sign it) + Ephemeral Key for Forward Secrecy
 	sig := c.signKey.Sign(challengeRes.Challenge)
+
+	// Phase 53.1: Ephemeral PQC-KEM for Forward Secret Session Key
+	sessionDK, err := crypto.GenerateEncryptionKey()
+	if err != nil {
+		return fmt.Errorf("failed to generate ephemeral session key: %w", err)
+	}
 
 	solve := metadata.AuthChallengeSolve{
 		UserID:    c.userID,
 		Challenge: challengeRes.Challenge,
 		Signature: sig,
+		EncKey:    sessionDK.EncapsulationKey().Bytes(),
 	}
 	b, _ = json.Marshal(solve)
 
@@ -518,9 +525,18 @@ func (c *Client) Login(ctx context.Context) error {
 		return err
 	}
 
+	// Phase 53.1: Derive Shared Secret for session
+	var sharedSecret []byte
+	if len(res.KEMCT) > 0 {
+		sharedSecret, err = sessionDK.Decapsulate(res.KEMCT)
+		if err != nil {
+			return fmt.Errorf("failed to decapsulate session key: %w", err)
+		}
+	}
+
 	c.sessionMu.Lock()
 	c.sessionToken = res.Token
-	c.sessionKey = nil
+	c.sessionKey = sharedSecret
 	c.sessionExpiry = time.Now().Add(55 * time.Minute) // Buffer
 	c.sessionMu.Unlock()
 	return nil
@@ -905,6 +921,122 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 		}
 		return nil
 	})
+}
+
+// deleteChunk removes a chunk from its primary node.
+func (c *Client) deleteChunk(ctx context.Context, id string, nodes []metadata.Node, token string) error {
+	if len(nodes) == 0 {
+		return nil
+	}
+	primary := nodes[0]
+	url := fmt.Sprintf("%s/v1/data/%s", primary.Address, id)
+
+	return c.withRetry(ctx, func() error {
+		req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+		if err != nil {
+			return err
+		}
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		if sess := c.getSessionToken(); sess != "" {
+			req.Header.Set("Session-Token", sess)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+			return c.newAPIError(resp, resp.Body)
+		}
+		return nil
+	})
+}
+
+func (c *Client) cleanupChunks(ctx context.Context, inodeID string, chunks []metadata.ChunkEntry) {
+	if len(chunks) == 0 {
+		return
+	}
+	logger.Debugf("DEBUG CLIENT: Cleaning up %d orphaned chunks for inode %s", len(chunks), inodeID)
+
+	// We need a delete token
+	ids := make([]string, 0, len(chunks))
+	for _, ch := range chunks {
+		ids = append(ids, ch.ID)
+	}
+
+	token, err := c.issueToken(ctx, inodeID, ids, "D")
+	if err != nil {
+		logger.Debugf("DEBUG CLIENT: Failed to issue delete token for cleanup: %v", err)
+		return
+	}
+
+	// Resolve Node IDs to Addresses
+	activeNodes, err := c.GetNodes(ctx)
+	if err != nil {
+		return
+	}
+	nodeMap := make(map[string]metadata.Node)
+	for _, n := range activeNodes {
+		nodeMap[n.ID] = n
+	}
+
+	for _, ch := range chunks {
+		var targetNodes []metadata.Node
+		for _, nid := range ch.Nodes {
+			if n, ok := nodeMap[nid]; ok {
+				targetNodes = append(targetNodes, n)
+			}
+		}
+		if err := c.deleteChunk(ctx, ch.ID, targetNodes, token); err != nil {
+			logger.Debugf("DEBUG CLIENT: Failed to delete orphaned chunk %s: %v", ch.ID, err)
+		}
+	}
+}
+
+// GetNodes returns all storage nodes in the cluster.
+func (c *Client) GetNodes(ctx context.Context) ([]metadata.Node, error) {
+	var nodes []metadata.Node
+	err := c.withRetry(ctx, func() error {
+		if err := c.acquireControl(ctx); err != nil {
+			return err
+		}
+		defer c.releaseControl()
+
+		// This route requires X-Raft-Secret if not authenticated as admin,
+		// but since we are a user client, we use the public key discovery or similar.
+		// Actually, let's use the /v1/node GET route which might be public or internal.
+		req, err := http.NewRequestWithContext(ctx, "GET", c.serverURL+"/v1/node", nil)
+		if err != nil {
+			return err
+		}
+		// Try with session token first
+		if sess := c.getSessionToken(); sess != "" {
+			req.Header.Set("Session-Token", sess)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return c.newAPIError(resp, resp.Body)
+		}
+
+		var res struct {
+			Nodes []metadata.Node `json:"nodes"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+			return err
+		}
+		nodes = res.Nodes
+		return nil
+	})
+	return nodes, err
 }
 
 var downloadBufPool = sync.Pool{
@@ -1699,6 +1831,12 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 		c.keyMu.Unlock()
 		return nil
 	}
+
+	// Phase 53.3: Cleanup orphans if metadata update failed
+	if len(chunkEntries) > 0 {
+		go c.cleanupChunks(ctx, id, chunkEntries)
+	}
+
 	return fmt.Errorf("writeInodeContent UpdateInode failed for %s: %w", id, err)
 }
 
