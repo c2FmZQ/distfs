@@ -18,6 +18,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -33,6 +34,9 @@ type KeyRotationWorker struct {
 
 	// Progress tracking for background scanning
 	lastKeys map[string][]byte
+
+	rotating   bool
+	rotatingMu sync.Mutex
 }
 
 // NewKeyRotationWorker creates a new key rotation worker.
@@ -185,6 +189,20 @@ func (w *KeyRotationWorker) reencryptRecord(bucket, key []byte) {
 }
 
 func (w *KeyRotationWorker) rotate() {
+	w.rotatingMu.Lock()
+	if w.rotating {
+		w.rotatingMu.Unlock()
+		return
+	}
+	w.rotating = true
+	w.rotatingMu.Unlock()
+
+	defer func() {
+		w.rotatingMu.Lock()
+		w.rotating = false
+		w.rotatingMu.Unlock()
+	}()
+
 	key, err := crypto.GenerateEncryptionKey()
 	if err != nil {
 		return

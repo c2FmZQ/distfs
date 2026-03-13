@@ -37,7 +37,7 @@ import (
 )
 
 func TestSecurity_ClusterSignKey(t *testing.T) {
-	node, ts, serverSignKey, serverEKBytes, _ := metadata.SetupCluster(t)
+	node, ts, serverSignKey, _, _ := metadata.SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -51,7 +51,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 	}
 	metadata.CreateUser(t, node, u1)
 
-	token1 := metadata.LoginSessionForTest(t, ts, "u1", u1Sign)
+	token1, secret1 := metadata.LoginSessionForTestWithSecret(t, ts, "u1", u1Sign)
 
 	// Create Inode so token issuance succeeds (exists=true check)
 	inode := metadata.Inode{
@@ -77,7 +77,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 	}
 	payload, _ := json.Marshal(reqBody)
 	// Must seal POST requests to /v1/meta/token
-	body := metadata.SealTestRequest(t, "u1", u1Sign, serverEKBytes, payload)
+	body := metadata.SealTestRequestSymmetric(t, "u1", u1Sign, secret1, payload)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(body))
 	req.Header.Set("Session-Token", token1)
@@ -91,7 +91,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		t.Fatalf("Failed to get token: %d %s", resp.StatusCode, string(b))
 	}
 
-	opened := metadata.UnsealTestResponse(t, u1Dec, serverSignKey.Public(), resp)
+	opened := metadata.UnsealTestResponseWithSession(t, u1Dec, secret1, serverSignKey.Public(), resp)
 
 	var signedToken metadata.SignedAuthToken
 	if err := json.Unmarshal(opened, &signedToken); err != nil {

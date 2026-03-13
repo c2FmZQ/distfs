@@ -546,6 +546,7 @@ type contextKey string
 const (
 	userContextKey        contextKey = "user"
 	adminBypassContextKey contextKey = "admin-bypass"
+	sessionKeyContextKey  contextKey = "session-key"
 )
 
 func (s *Server) SetRaftAddress(addr string) {
@@ -1352,7 +1353,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, data)
+		sealed, err := s.sealResponse(r, ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1709,7 +1710,7 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 
 	// E2EE?
 	if r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+		sealed, err := s.sealResponse(r, user, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1765,7 +1766,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 
 	// E2EE?
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, data)
+		sealed, err := s.sealResponse(r, ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1824,7 +1825,7 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, data)
+		sealed, err := s.sealResponse(r, ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1900,7 +1901,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, data)
+		sealed, err := s.sealResponse(r, ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -1977,7 +1978,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, data)
+		sealed, err := s.sealResponse(r, ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -2187,7 +2188,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, data)
+		sealed, err := s.sealResponse(r, ctxUser, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -2431,7 +2432,20 @@ func (s *Server) flushBatchLocked() {
 	}
 }
 
-func (s *Server) sealResponse(user *User, payload []byte) ([]byte, error) {
+func (s *Server) sealResponse(r *http.Request, user *User, payload []byte) ([]byte, error) {
+	// Phase 53.1: Try symmetric sealing if session key is present in context (Forward Secrecy)
+	if r != nil {
+		if sessionKey, ok := r.Context().Value(sessionKeyContextKey).([]byte); ok && len(sessionKey) > 0 {
+			sealed, err := crypto.SealResponseSymmetric(sessionKey, s.signKey, payload)
+			if err == nil {
+				res := SealedResponse{
+					Sealed: sealed,
+				}
+				return json.Marshal(res)
+			}
+		}
+	}
+
 	uk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
 	if err != nil {
 		return nil, fmt.Errorf("failed to unmarshal user public key")
@@ -2523,7 +2537,7 @@ func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request
 
 	// E2EE?
 	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+		sealed, err := s.sealResponse(r, user, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -2582,7 +2596,7 @@ func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, i
 
 	// E2EE?
 	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(user, data)
+		sealed, err := s.sealResponse(r, user, data)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(http.StatusOK)
@@ -2715,7 +2729,7 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 	// E2EE?
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(ctxUser, b)
+		sealed, err := s.sealResponse(r, ctxUser, b)
 		if err == nil {
 			w.Header().Set("X-DistFS-Sealed", "true")
 			w.WriteHeader(status)
@@ -3515,6 +3529,8 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 					if err := s.checkReplay(user.ID, ts); err != nil {
 						return nil, err
 					}
+					// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
+					*r = *r.WithContext(context.WithValue(r.Context(), sessionKeyContextKey, entry.key))
 					return payload, nil
 				}
 				// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
@@ -3572,6 +3588,9 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	if err := s.checkReplay(user.ID, ts); err != nil {
 		return nil, err
 	}
+
+	// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
+	*r = *r.WithContext(context.WithValue(r.Context(), sessionKeyContextKey, sharedSecret))
 
 	return payload, nil
 }

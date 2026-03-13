@@ -16,6 +16,7 @@ package crypto
 
 import (
 	"crypto/mlkem"
+	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -209,6 +210,83 @@ func OpenResponse(clientSK *mlkem.DecapsulationKey768, serverPK []byte, sealed [
 	payload := inner[8+sigSize:]
 
 	// 4. Verify Signature
+	toVerify := make([]byte, 8+len(payload))
+	copy(toVerify[0:8], inner[0:8])
+	copy(toVerify[8:], payload)
+	if !VerifySignature(serverPK, toVerify, sig) {
+		return 0, nil, fmt.Errorf("invalid server signature")
+	}
+
+	return ts, payload, nil
+}
+
+// SealResponseSymmetric encrypts and signs a response using a pre-shared session key.
+func SealResponseSymmetric(sessionKey []byte, serverSK *IdentityKey, payload []byte) ([]byte, error) {
+	// 1. Prepare inner payload: [Timestamp][Signature][JSON]
+	ts := time.Now().UnixNano()
+	tsBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(tsBytes, uint64(ts))
+
+	// Data to sign: [Timestamp][JSON]
+	toSign := make([]byte, 8+len(payload))
+	copy(toSign[0:8], tsBytes)
+	copy(toSign[8:], payload)
+	sig := serverSK.Sign(toSign)
+
+	// Inner: [Timestamp][Signature][Payload]
+	sigSize := SignatureSize()
+	inner := make([]byte, 8+sigSize+len(payload))
+	copy(inner[0:8], tsBytes)
+	copy(inner[8:8+sigSize], sig)
+	copy(inner[8+sigSize:], payload)
+
+	// 2. Encrypt inner with session key (DEM)
+	demCT, err := EncryptDEM(sessionKey, inner)
+	if err != nil {
+		return nil, fmt.Errorf("dem encrypt failed: %w", err)
+	}
+
+	// Result: [Dummy KEM CT][DEM CT] to maintain wire format
+	kemSize := mlkem.CiphertextSize768
+	dummyKEM := make([]byte, kemSize)
+	// We use zeroed KEM to signal symmetric mode to some clients,
+	// or just random to match wire format.
+	// The server context will tell the client which to expect.
+	rand.Read(dummyKEM)
+
+	result := make([]byte, len(dummyKEM)+len(demCT))
+	copy(result[0:len(dummyKEM)], dummyKEM)
+	copy(result[len(dummyKEM):], demCT)
+
+	return result, nil
+}
+
+// OpenResponseSymmetric decrypts a response using a pre-shared session key.
+func OpenResponseSymmetric(sessionKey []byte, serverPK []byte, sealed []byte) (int64, []byte, error) {
+	kemSize := mlkem.CiphertextSize768
+	if len(sealed) < kemSize {
+		return 0, nil, fmt.Errorf("sealed response too short")
+	}
+
+	demCT := sealed[kemSize:]
+
+	// 1. Decrypt DEM
+	inner, err := DecryptDEM(sessionKey, demCT)
+	if err != nil {
+		return 0, nil, fmt.Errorf("dem decrypt failed: %w", err)
+	}
+
+	sigSize := SignatureSize()
+	if len(inner) < 8+sigSize {
+		return 0, nil, fmt.Errorf("decrypted response too short")
+	}
+
+	// 2. Parse Inner
+	ts := int64(binary.BigEndian.Uint64(inner[0:8]))
+	sig := inner[8 : 8+sigSize]
+	payload := inner[8+sigSize:]
+
+	// 3. Verify Signature
 	toVerify := make([]byte, 8+len(payload))
 	copy(toVerify[0:8], inner[0:8])
 	copy(toVerify[8:], payload)

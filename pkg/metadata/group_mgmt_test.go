@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"testing"
 	"time"
@@ -15,28 +14,31 @@ import (
 )
 
 func TestGroupManagementSecurity(t *testing.T) {
-	node, ts, _, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
 	// 1. Setup Users
 	// Alice (Victim/Owner)
+	uAliceDec, _ := crypto.GenerateEncryptionKey()
 	uAliceSign, _ := crypto.GenerateIdentityKey()
-	uAlice := User{ID: "alice", UID: 1001, SignKey: uAliceSign.Public()}
+	uAlice := User{ID: "alice", UID: 1001, SignKey: uAliceSign.Public(), EncKey: uAliceDec.EncapsulationKey().Bytes()}
 	CreateUser(t, node, uAlice)
 
 	// Bob (Helper/Member)
+	uBobDec, _ := crypto.GenerateEncryptionKey()
 	uBobSign, _ := crypto.GenerateIdentityKey()
-	uBob := User{ID: "bob", UID: 1002, SignKey: uBobSign.Public()}
+	uBob := User{ID: "bob", UID: 1002, SignKey: uBobSign.Public(), EncKey: uBobDec.EncapsulationKey().Bytes()}
 	CreateUser(t, node, uBob)
 
 	// Mallory (Attacker/Non-Member)
+	uMalloryDec, _ := crypto.GenerateEncryptionKey()
 	uMallorySign, _ := crypto.GenerateIdentityKey()
-	uMallory := User{ID: "mallory", UID: 1003, SignKey: uMallorySign.Public()}
+	uMallory := User{ID: "mallory", UID: 1003, SignKey: uMallorySign.Public(), EncKey: uMalloryDec.EncapsulationKey().Bytes()}
 	CreateUser(t, node, uMallory)
 
 	// 2. Alice creates Group A
-	tokenAlice := LoginSessionForTest(t, ts, "alice", uAliceSign)
+	tokenAlice, secretAlice := LoginSessionForTestWithSecret(t, ts, "alice", uAliceSign)
 	groupA := Group{
 		ID:       "group-a",
 		OwnerID:  "alice",
@@ -50,7 +52,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	objBytes, _ := json.Marshal(groupA)
 	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes}}
 	payload, _ := json.Marshal(batch)
-	body := sealTestRequest(t, "alice", uAliceSign, serverEK, payload)
+	body := SealTestRequestSymmetric(t, "alice", uAliceSign, secretAlice, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenAlice)
@@ -60,16 +62,16 @@ func TestGroupManagementSecurity(t *testing.T) {
 	}
 
 	// Read the group with the generated ID from the response
+	opened := UnsealTestResponseWithSession(t, uAliceDec, secretAlice, serverSignKey.Public(), resp)
 	var results []json.RawMessage
-	respBytes, _ := io.ReadAll(resp.Body)
-	json.Unmarshal(respBytes, &results)
+	json.Unmarshal(opened, &results)
 	var createdA Group
 	json.Unmarshal(results[0], &createdA)
 	resp.Body.Close()
 	groupID := createdA.ID
 
 	// 3. Mallory attempts to hijack Group A (Should fail)
-	tokenMallory := LoginSessionForTest(t, ts, "mallory", uMallorySign)
+	tokenMallory, secretMallory := LoginSessionForTestWithSecret(t, ts, "mallory", uMallorySign)
 	hijackA := createdA
 	hijackA.OwnerID = "mallory"
 	hijackA.SignGroupForTest("mallory", uMallorySign)
@@ -77,7 +79,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	objBytes, _ = json.Marshal(hijackA)
 	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
 	payload, _ = json.Marshal(batch)
-	body = sealTestRequest(t, "mallory", uMallorySign, serverEK, payload)
+	body = SealTestRequestSymmetric(t, "mallory", uMallorySign, secretMallory, payload)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenMallory)
@@ -96,7 +98,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	objBytes, _ = json.Marshal(selfManagedA)
 	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
 	payload, _ = json.Marshal(batch)
-	body = sealTestRequest(t, "alice", uAliceSign, serverEK, payload)
+	body = SealTestRequestSymmetric(t, "alice", uAliceSign, secretAlice, payload)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenAlice)
@@ -132,7 +134,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	}
 
 	// 5. Bob (Member) attempts to update self-managed Group A (Should succeed)
-	tokenBob := LoginSessionForTest(t, ts, "bob", uBobSign)
+	tokenBob, secretBob := LoginSessionForTestWithSecret(t, ts, "bob", uBobSign)
 
 	// Refresh gA
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/group/"+groupID, nil)
@@ -146,14 +148,14 @@ func TestGroupManagementSecurity(t *testing.T) {
 	if bobUpdate.Members == nil {
 		bobUpdate.Members = make(map[string]bool)
 	}
-	bobUpdate.Members["carol"] = true // Bob adds Carol
+	bobUpdate.Members["mallory"] = true // Bob adds mallory
 	bobUpdate.Version++
 	bobUpdate.SignGroupForTest("bob", uBobSign)
 
 	objBytes, _ = json.Marshal(bobUpdate)
 	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
 	payload, _ = json.Marshal(batch)
-	body = sealTestRequest(t, "bob", uBobSign, serverEK, payload)
+	body = SealTestRequestSymmetric(t, "bob", uBobSign, secretBob, payload)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenBob)
@@ -222,7 +224,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	objBytes, _ = json.Marshal(bobUpdateC)
 	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
 	payload, _ = json.Marshal(batch)
-	body = sealTestRequest(t, "bob", uBobSign, serverEK, payload)
+	body = SealTestRequest(t, "bob", uBobSign, serverEK, payload)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenBob)
@@ -239,7 +241,7 @@ func TestGroupManagementSecurity(t *testing.T) {
 	objBytes, _ = json.Marshal(malloryUpdateC)
 	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes}}
 	payload, _ = json.Marshal(batch)
-	body = sealTestRequest(t, "mallory", uMallorySign, serverEK, payload)
+	body = SealTestRequest(t, "mallory", uMallorySign, serverEK, payload)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", tokenMallory)

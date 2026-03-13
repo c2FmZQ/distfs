@@ -762,7 +762,24 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 		return nil, err
 	}
 
-	// 1. Open
+	// Phase 53.1: Try symmetric decryption if session key is available (Forward Secrecy)
+	c.sessionMu.RLock()
+	sessionKey := c.sessionKey
+	c.sessionMu.RUnlock()
+
+	if sessionKey != nil {
+		ts, payload, err := crypto.OpenResponseSymmetric(sessionKey, serverSignPK, sealed.Sealed)
+		if err == nil {
+			// Success! Check Staleness
+			now := time.Now().UnixNano()
+			if ts < now-int64(5*time.Minute) || ts > now+int64(5*time.Minute) {
+				return nil, fmt.Errorf("response timestamp out of range")
+			}
+			return io.NopCloser(bytes.NewReader(payload)), nil
+		}
+	}
+
+	// 1. Open (Full KEM Fallback)
 	ts, payload, err := crypto.OpenResponse(c.decKey, serverSignPK, sealed.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open response: %w", err)

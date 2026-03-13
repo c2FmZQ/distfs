@@ -17,7 +17,6 @@ package metadata
 import (
 	"bytes"
 	"crypto/hmac"
-	"crypto/mlkem"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -42,37 +41,6 @@ import (
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
-
-func unsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, serverSignPK []byte, resp *http.Response) []byte {
-	if resp.Header.Get("X-DistFS-Sealed") != "true" {
-		b, _ := io.ReadAll(resp.Body)
-		return b
-	}
-	var sealed SealedResponse
-	json.NewDecoder(resp.Body).Decode(&sealed)
-	_, payload, err := crypto.OpenResponse(userDecKey, serverSignPK, sealed.Sealed)
-	if err != nil {
-		t.Fatalf("OpenResponse failed: %v", err)
-	}
-	return payload
-}
-
-func sealTestRequest(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverPKBytes []byte, payload []byte) []byte {
-	serverPK, err := crypto.UnmarshalEncapsulationKey(serverPKBytes)
-	if err != nil {
-		t.Fatalf("failed to unmarshal server PK: %v", err)
-	}
-	sealed, err := crypto.SealRequest(serverPK, userSignKey, payload)
-	if err != nil {
-		t.Fatalf("SealRequest failed: %v", err)
-	}
-	sr := SealedRequest{
-		UserID: userID,
-		Sealed: sealed,
-	}
-	b, _ := json.Marshal(sr)
-	return b
-}
 
 func TestMetadataCluster(t *testing.T) {
 	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
@@ -105,7 +73,7 @@ func TestMetadataCluster(t *testing.T) {
 	inodeBytes, _ := json.Marshal(inode)
 	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
-	body := sealTestRequest(t, "u1", userSignKey, serverEK, payload)
+	body, secret := SealTestRequestWithSecret(t, "u1", userSignKey, serverEK, payload)
 
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
@@ -121,10 +89,10 @@ func TestMetadataCluster(t *testing.T) {
 	}
 
 	// Unseal response if needed (Create Inode returns the created Inode)
-	_ = UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	_ = UnsealTestResponseWithSession(t, userDecKey, secret, serverSignKey.Public(), resp)
 
 	// Test Get Inode
-	token = LoginSessionForTest(t, ts, "u1", userSignKey)
+	token, secretG := LoginSessionForTestWithSecret(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/"+inodeID, nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token)
@@ -136,7 +104,7 @@ func TestMetadataCluster(t *testing.T) {
 		t.Errorf("GET status %d", resp.StatusCode)
 	}
 
-	opened := UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	opened := UnsealTestResponseWithSession(t, userDecKey, secretG, serverSignKey.Public(), resp)
 	var got Inode
 	json.Unmarshal(opened, &got)
 	if got.ID != inodeID {
@@ -149,7 +117,7 @@ func TestMetadataCluster(t *testing.T) {
 	inode.SignInodeForTest("u1", userSignKey)
 	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: "u1"}}
 	payloadD, _ := json.Marshal(batchD)
-	bodyD := sealTestRequest(t, "u1", userSignKey, serverEK, payloadD)
+	bodyD, _ := SealTestRequestWithSecret(t, "u1", userSignKey, serverEK, payloadD)
 
 	token = LoginSessionForTest(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyD))
@@ -176,7 +144,7 @@ func TestMetadataCluster(t *testing.T) {
 }
 
 func TestSecurity_AccessControl(t *testing.T) {
-	node, ts, _, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -197,8 +165,8 @@ func TestSecurity_AccessControl(t *testing.T) {
 	i1Bytes, _ := json.Marshal(i1)
 	batch := []LogCommand{{Type: CmdCreateInode, Data: i1Bytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
-	body := SealTestRequest(t, "u1", u1Sign, serverEK, payload)
-	token1 := LoginSessionForTest(t, ts, "u1", u1Sign)
+	token1, secret1 := LoginSessionForTestWithSecret(t, ts, "u1", u1Sign)
+	body := SealTestRequestSymmetric(t, "u1", u1Sign, secret1, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token1)
@@ -206,6 +174,7 @@ func TestSecurity_AccessControl(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Failed to create inode: %d", resp.StatusCode)
 	}
+	_ = UnsealTestResponseWithSession(t, u1Dec, secret1, serverSignKey.Public(), resp)
 
 	// 3. User 2 attempts to GET User 1's inode (Should fail)
 	token2 := LoginSessionForTest(t, ts, "u2", u2Sign)
@@ -249,14 +218,16 @@ func TestSecurity_AccessControl(t *testing.T) {
 	i1d.SignInodeForTest("u1", u1Sign)
 	batchD := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(i1d), UserID: "u1"}}
 	payloadD, _ := json.Marshal(batchD)
-	bodyD := SealTestRequest(t, "u1", u1Sign, serverEK, payloadD)
+	token1d, secret1d := LoginSessionForTestWithSecret(t, ts, "u1", u1Sign)
+	bodyD := SealTestRequestSymmetric(t, "u1", u1Sign, secret1d, payloadD)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(bodyD))
 	req.Header.Set("X-DistFS-Sealed", "true")
-	req.Header.Set("Session-Token", token1)
+	req.Header.Set("Session-Token", token1d)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected 200 for authorized DELETE, got %d", resp.StatusCode)
 	}
+	_ = UnsealTestResponseWithSession(t, u1Dec, secret1d, serverSignKey.Public(), resp)
 }
 
 func TestFSM_EdgeCases(t *testing.T) {
@@ -283,7 +254,7 @@ func TestFSM_EdgeCases(t *testing.T) {
 }
 
 func TestIdentityRegistry(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -297,7 +268,7 @@ func TestIdentityRegistry(t *testing.T) {
 	}
 	CreateUser(t, node, user)
 
-	token := LoginSessionForTest(t, ts, "u1", userSignKey)
+	token, secret := LoginSessionForTestWithSecret(t, ts, "u1", userSignKey)
 
 	// Create Group
 	group := Group{
@@ -312,7 +283,7 @@ func TestIdentityRegistry(t *testing.T) {
 	objBytes, _ := json.Marshal(group)
 	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
-	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
+	body := SealTestRequestSymmetric(t, "u1", userSignKey, secret, payload)
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -325,7 +296,7 @@ func TestIdentityRegistry(t *testing.T) {
 		t.Errorf("Group Create failed: %d", resp.StatusCode)
 	}
 
-	_ = UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	_ = UnsealTestResponseWithSession(t, userDecKey, secret, serverSignKey.Public(), resp)
 
 	// Register Node
 	n := Node{ID: "node-data-1", Status: NodeStatusActive}
@@ -363,7 +334,7 @@ func TestRegisterUserEndpoint(t *testing.T) {
 }
 
 func TestKeySync(t *testing.T) {
-	node, ts, _, serverEK, srv := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -416,8 +387,8 @@ func TestKeySync(t *testing.T) {
 	// 4. POST (Store) with Session + Sealing
 	blob := KeySyncBlob{KDF: "argon2id", Salt: []byte("salt"), Ciphertext: []byte("data")}
 	payload, _ := json.Marshal(blob)
-	body := SealTestRequest(t, userID, u1Sign, serverEK, payload)
-	sessionToken := LoginSessionForTest(t, ts, userID, u1Sign)
+	sessionToken, secret := LoginSessionForTestWithSecret(t, ts, userID, u1Sign)
+	body := SealTestRequestSymmetric(t, userID, u1Sign, secret, payload)
 
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/user/keysync", bytes.NewReader(body))
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -552,7 +523,7 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, _, _ := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -564,7 +535,6 @@ func TestChunkPagination(t *testing.T) {
 		EncKey:  userDecKey.EncapsulationKey().Bytes(),
 	}
 	CreateUser(t, node, user)
-	token := LoginSessionForTest(t, ts, "u1", userSignKey)
 
 	// Create Inode with many chunks
 	chunkCount := ChunkPageSize + 50 // 1050
@@ -589,13 +559,14 @@ func TestChunkPagination(t *testing.T) {
 	inodeBytes, _ := json.Marshal(inode)
 	batch := []LogCommand{{Type: CmdCreateInode, Data: inodeBytes, UserID: "u1"}}
 	payload, _ := json.Marshal(batch)
-	body := SealTestRequest(t, "u1", userSignKey, serverEK, payload)
+	tokenP, secretP := LoginSessionForTestWithSecret(t, ts, "u1", userSignKey)
+	body := SealTestRequestSymmetric(t, "u1", userSignKey, secretP, payload)
 
 	// POST /v1/meta/batch
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DistFS-Sealed", "true")
-	req.Header.Set("Session-Token", token)
+	req.Header.Set("Session-Token", tokenP)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST failed: %v", err)
@@ -604,13 +575,13 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("POST status %d", resp.StatusCode)
 	}
 
-	_ = UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	_ = UnsealTestResponseWithSession(t, userDecKey, secretP, serverSignKey.Public(), resp)
 
 	// Verify via API (Transparent Reconstruction)
-	token = LoginSessionForTest(t, ts, "u1", userSignKey)
+	tokenP2, secretP2 := LoginSessionForTestWithSecret(t, ts, "u1", userSignKey)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/inode/"+inodeID, nil)
 	req.Header.Set("X-DistFS-Sealed", "true")
-	req.Header.Set("Session-Token", token)
+	req.Header.Set("Session-Token", tokenP2)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET failed: %v", err)
@@ -619,7 +590,7 @@ func TestChunkPagination(t *testing.T) {
 		t.Errorf("GET status %d", resp.StatusCode)
 	}
 
-	opened := UnsealTestResponse(t, userDecKey, serverSignKey.Public(), resp)
+	opened := UnsealTestResponseWithSession(t, userDecKey, secretP2, serverSignKey.Public(), resp)
 	var got Inode
 	if err := json.Unmarshal(opened, &got); err != nil {
 		t.Fatalf("Decode failed: %v", err)

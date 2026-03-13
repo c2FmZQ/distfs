@@ -4,7 +4,9 @@ package metadata
 import (
 	"bytes"
 	"crypto/mlkem"
+	"crypto/rand"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,12 +24,24 @@ import (
 )
 
 func UnsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, serverSignPK []byte, resp *http.Response) []byte {
+	return UnsealTestResponseWithSession(t, userDecKey, nil, serverSignPK, resp)
+}
+
+func UnsealTestResponseWithSession(t *testing.T, userDecKey *mlkem.DecapsulationKey768, sessionKey []byte, serverSignPK []byte, resp *http.Response) []byte {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
 		b, _ := io.ReadAll(resp.Body)
 		return b
 	}
 	var sealed SealedResponse
 	json.NewDecoder(resp.Body).Decode(&sealed)
+
+	if len(sessionKey) > 0 {
+		_, payload, err := crypto.OpenResponseSymmetric(sessionKey, serverSignPK, sealed.Sealed)
+		if err == nil {
+			return payload
+		}
+	}
+
 	_, payload, err := crypto.OpenResponse(userDecKey, serverSignPK, sealed.Sealed)
 	if err != nil {
 		t.Fatalf("OpenResponse failed: %v", err)
@@ -36,20 +50,42 @@ func UnsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, ser
 }
 
 func SealTestRequest(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverPKBytes []byte, payload []byte) []byte {
+	b, _ := SealTestRequestWithSecret(t, userID, userSignKey, serverPKBytes, payload)
+	return b
+}
+
+func SealTestRequestWithSecret(t *testing.T, userID string, userSignKey *crypto.IdentityKey, serverPKBytes []byte, payload []byte) ([]byte, []byte) {
 	serverPK, err := crypto.UnmarshalEncapsulationKey(serverPKBytes)
 	if err != nil {
 		t.Fatalf("failed to unmarshal server PK: %v", err)
 	}
-	sealed, err := crypto.SealRequest(serverPK, userSignKey, payload)
-	if err != nil {
-		t.Fatalf("SealRequest failed: %v", err)
-	}
+	// Use crypto.SealRequest but it doesn't return the secret.
+	// We'll reimplement it slightly to get the secret.
+	ts := time.Now().UnixNano()
+	tsBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(tsBytes, uint64(ts))
+	toSign := make([]byte, 8+len(payload))
+	copy(toSign[0:8], tsBytes)
+	copy(toSign[8:], payload)
+	sig := userSignKey.Sign(toSign)
+	sigSize := crypto.SignatureSize()
+	inner := make([]byte, 8+sigSize+len(payload))
+	copy(inner[0:8], tsBytes)
+	copy(inner[8:8+sigSize], sig)
+	copy(inner[8+sigSize:], payload)
+
+	sharedSecret, kemCT := crypto.Encapsulate(serverPK)
+	demCT, _ := crypto.EncryptDEM(sharedSecret, inner)
+	sealed := make([]byte, len(kemCT)+len(demCT))
+	copy(sealed[0:len(kemCT)], kemCT)
+	copy(sealed[len(kemCT):], demCT)
+
 	sr := SealedRequest{
 		UserID: userID,
 		Sealed: sealed,
 	}
 	b, _ := json.Marshal(sr)
-	return b
+	return b, sharedSecret
 }
 
 type NoopValidator struct{}
@@ -187,6 +223,11 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 }
 
 func LoginSessionForTest(t *testing.T, ts *httptest.Server, userID string, userSignKey *crypto.IdentityKey) string {
+	token, _ := LoginSessionForTestWithSecret(t, ts, userID, userSignKey)
+	return token
+}
+
+func LoginSessionForTestWithSecret(t *testing.T, ts *httptest.Server, userID string, userSignKey *crypto.IdentityKey) (string, []byte) {
 	// 1. Get Challenge
 	reqData := AuthChallengeRequest{UserID: userID}
 	b, _ := json.Marshal(reqData)
@@ -202,12 +243,17 @@ func LoginSessionForTest(t *testing.T, ts *httptest.Server, userID string, userS
 	var challengeRes AuthChallengeResponse
 	json.NewDecoder(resp.Body).Decode(&challengeRes)
 
-	// 2. Solve Challenge
+	// 2. Solve Challenge + Ephemeral Key for Forward Secrecy
 	sig := userSignKey.Sign(challengeRes.Challenge)
+
+	// Phase 53.1: Ephemeral PQC-KEM for Forward Secret Session Key
+	sessionDK, _ := crypto.GenerateEncryptionKey()
+
 	solve := AuthChallengeSolve{
 		UserID:    userID,
 		Challenge: challengeRes.Challenge,
 		Signature: sig,
+		EncKey:    sessionDK.EncapsulationKey().Bytes(),
 	}
 	b, _ = json.Marshal(solve)
 	resp, err = http.Post(ts.URL+"/v1/login", "application/json", bytes.NewReader(b))
@@ -221,7 +267,55 @@ func LoginSessionForTest(t *testing.T, ts *httptest.Server, userID string, userS
 
 	var sessionRes SessionResponse
 	json.NewDecoder(resp.Body).Decode(&sessionRes)
-	return sessionRes.Token
+
+	// Phase 53.1: Derive Shared Secret for session
+	var sharedSecret []byte
+	if len(sessionRes.KEMCT) > 0 {
+		sharedSecret, err = sessionDK.Decapsulate(sessionRes.KEMCT)
+		if err != nil {
+			t.Fatalf("failed to decapsulate session key: %v", err)
+		}
+	}
+
+	return sessionRes.Token, sharedSecret
+}
+
+func SealTestRequestSymmetric(t *testing.T, userID string, userSignKey *crypto.IdentityKey, sessionKey []byte, payload []byte) []byte {
+	// Reimplement logic from client.go sealBody symmetric path
+	ts := time.Now().UnixNano()
+	tsBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(tsBytes, uint64(ts))
+
+	toSign := make([]byte, 8+len(payload))
+	copy(toSign[0:8], tsBytes)
+	copy(toSign[8:], payload)
+	sig := userSignKey.Sign(toSign)
+
+	sigSize := crypto.SignatureSize()
+	inner := make([]byte, 8+sigSize+len(payload))
+	copy(inner[0:8], tsBytes)
+	copy(inner[8:8+sigSize], sig)
+	copy(inner[8+sigSize:], payload)
+
+	demCT, err := crypto.EncryptDEM(sessionKey, inner)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	kemSize := mlkem.CiphertextSize768
+	dummyKEM := make([]byte, kemSize)
+	rand.Read(dummyKEM)
+
+	sealed := make([]byte, len(dummyKEM)+len(demCT))
+	copy(sealed[0:len(dummyKEM)], dummyKEM)
+	copy(sealed[len(dummyKEM):], demCT)
+
+	sr := SealedRequest{
+		UserID: userID,
+		Sealed: sealed,
+	}
+	b, _ := json.Marshal(sr)
+	return b
 }
 
 func WaitLeader(t *testing.T, r *raft.Raft) {

@@ -372,13 +372,7 @@ func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
 		var errs []string
 		for i := 0; i < len(targets); i++ {
 			if successCount >= requiredQuorum {
-				// Quorum met! The remaining results will be handled by a reaper goroutine
-				// to avoid leaking the errCh.
-				go func(remaining int) {
-					for j := 0; j < remaining; j++ {
-						<-errCh
-					}
-				}(len(targets) - i)
+				// Quorum met! The remaining sends are buffered and will complete in background.
 				break
 			}
 
