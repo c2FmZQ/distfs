@@ -19,6 +19,9 @@ This document is the authoritative technical specification for the DistFS protoc
 ### 1.3 The "Sealing" Protocol (L7 E2EE)
 Provides end-to-end encryption for sensitive Metadata API requests.
 
+#### 1.3.1 Standard Sealing (Asymmetric)
+Used for initial login and requests where no session is established.
+
 **Inner Payload Format (Binary):**
 `[Timestamp (8b BigEndian uint64)][Signature (2420b ML-DSA-65)][Plaintext JSON]`
 - **Signature:** Calculated over `[Timestamp][Plaintext JSON]`.
@@ -28,10 +31,19 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 - **KEM_CT:** Encapsulates a 32-byte Shared Secret for the recipient's ML-KEM-768 public key.
 - **AES_GCM_CT:** The Inner Payload encrypted using the Shared Secret.
 
+#### 1.3.2 Symmetric Sealing (Forward Secret)
+Used for requests within an established session. Provides improved performance and forward secrecy.
+
+**Encrypted Wrapper (Binary):**
+`[KEM_CT (1088b zeroed)][NONCE (12b)][AES_GCM_CT + TAG]`
+- **KEM_CT:** MUST be zero-filled to signal symmetric mode.
+- **AES_GCM_CT:** The Inner Payload encrypted using the ephemeral **Session Key** derived during `Login`.
+
 **HTTP Request/Response Wrappers:**
 - **Request:** `{"uid": "user_id", "sealed": "base64_enc_wrapper"}`
 - **Response:** `{"sealed": "base64_enc_wrapper"}`
 - **Header:** `X-DistFS-Sealed: true` MUST be set for all sealed requests.
+- **Header:** `Session-Token` MUST be provided for symmetric mode.
 
 ---
 
@@ -53,7 +65,7 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 | :--- | :--- | :--- | :--- |
 | `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. |
 | `POST` | `/v1/auth/challenge` | None | Request a login challenge for a User ID. |
-| `POST` | `/v1/login` | Challenge | Exchange a signed challenge for a Session Token. |
+| `POST` | `/v1/login` | Challenge | Exchange a signed challenge and ephemeral KEM PK for a Session Token and KEM CT. |
 | `GET` | `/v1/user/keysync` | Bearer JWT | Retrieve encrypted configuration backup. |
 | `POST` | `/v1/user/keysync` | Session + E2EE | Store encrypted configuration backup. |
 | `GET` | `/v1/user/{id}` | Session | Fetch a user's public profile (ID, UID, Keys). |
@@ -81,9 +93,14 @@ Provides end-to-end encryption for sensitive Metadata API requests.
 | Method | Path | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/data/{id}` | Signed Token | Download encrypted chunk. |
-| `PUT` | `/v1/data/{id}` | Signed Token | Upload encrypted chunk. |
+| `PUT` | `/v1/data/{id}` | Signed Token | Upload encrypted chunk. Optional Query: `replicas=csv_node_addresses`. |
 | `DELETE` | `/v1/data/{id}` | Signed Token | Permanently remove chunk. |
 | `POST` | `/v1/data/{id}/replicate` | Signed Token | Trigger P2P replication to target nodes. |
+
+**Consistency Guarantees:**
+- **Metadata:** Linearizable (Raft).
+- **Data (Phase 53):** Sub-Quorum Persistent ($R=3, W=2$). A `PUT` returns 201 Created once the local write and at least one remote replica succeed. Remaining replication completes in the background.
+- **Write-Through:** Metadata updates MUST only be submitted AFTER the Data sub-quorum is reached.
 
 ---
 
@@ -177,7 +194,7 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 8. `[]byte("type:")` + `BigEndian(uint32(type))` + `[]byte("|")`
 9. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
 10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID)` + `[]byte("|")`
-11. `[]byte("manifest:")` + `CSV(chunk_id(node1,node2,...))` + `[]byte("|")`
+11. `[]byte("manifest:")` + `CSV(chunk_id)` + `[]byte("|")`  // Nodes are EXCLUDED (Phase 53.6)
 12. `[]byte("pages:")` + `SortedCSV(chunk_page_ids)` + `[]byte("|")`
 13. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
 
