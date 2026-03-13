@@ -1,0 +1,26 @@
+{
+  "name": "distfs",
+  "version": "1.0.0",
+  "description": "DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system. It is designed as a research platform to explore the boundaries of zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.",
+  "main": "index.js",
+  "scripts": {
+    "build:ts": "tsc",
+    "watch:ts": "tsc -w",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/c2FmZQ/distfs.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/c2FmZQ/distfs/issues"
+  },
+  "homepage": "https://github.com/c2FmZQ/distfs#readme",
+  "devDependencies": {
+    "typescript": "^5.9.3"
+  }
+}

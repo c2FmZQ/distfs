@@ -1129,3 +1129,32 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 60.5: Testing Strategy & Validation**
     *   **Action:** **Unit Testing:** Ensure all cryptographic and client tests pass under the WASM execution environment (`GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/misc/wasm/go_js_wasm_exec" ./pkg/...`).
     *   **Action:** **E2E Browser Testing:** Implement Playwright or Puppeteer tests to mount the `distfs.wasm` binary in a headless browser, authenticate against a local test cluster, and perform an E2E upload/download cycle, asserting memory stability.
+
+---
+
+## Phase 61: Full-Featured Web UI & Media Streaming
+**Goal:** Build a production-grade, interactive web-based file manager using lightweight TypeScript, supporting native media viewing, thumbnail generation, and securely bounded local caching.
+
+*   **Step 61.1: TypeScript Toolchain Setup**
+    *   **Action:** Initialize `package.json` in the root and install `typescript` as a development dependency.
+    *   **Action:** Configure `tsconfig.json` for strict typing, outputting ES6 modules to a `web/js/` build directory.
+*   **Step 61.2: WASM Cryptographic Onboarding Bridge**
+    *   **Action:** Extend `cmd/distfs-wasm/main.go` to expose the full `distfs init` flow to JavaScript (OIDC login, PQC key generation, `KeySyncBlob` extraction/decryption).
+    *   **Action:** Build a TypeScript login UI that prompts for the user's passphrase to unlock their downloaded configuration.
+*   **Step 61.3: The File Manager UI (Vanilla TS)**
+    *   **Action:** Build a split-pane interface (Directory Tree & Content View) using semantic HTML and CSS Grid/Flexbox.
+    *   **Action:** Implement context menus for core CRUD operations (Mkdir, Rm, Mv).
+    *   **Action:** Implement drag-and-drop chunked file uploads interacting with the WASM encryption pipeline.
+*   **Step 61.4: Service Worker Media & Seek Support**
+    *   **Action:** Enhance `sw.js` to handle `/distfs-media/{id}` requests, allowing `<img src>` and `<video src>` tags to render decrypted content securely.
+    *   **Action:** Implement HTTP `Range` header parsing in the Service Worker and WASM bridge to support seeking within large video/audio files without decrypting the entire file.
+*   **Step 61.5: Bounded Encrypted Caching (IndexedDB)**
+    *   **Action:** Implement a local caching layer using IndexedDB to store raw, **encrypted** 1MB ciphertext chunks. Plaintext must never touch the disk.
+    *   **Action:** Implement an LRU (Least Recently Used) eviction policy to limit the total cache size.
+    *   **Action:** Add a "Settings" modal in the UI allowing the user to configure the maximum cache size (e.g., 500MB, 2GB).
+*   **Step 61.6: Thumbnail Generation & Storage**
+    *   **Action:** Implement client-side thumbnail generation (using HTML5 `<canvas>`) when an image is successfully decrypted and rendered.
+    *   **Action:** Store the generated thumbnails as hidden, encrypted files directly within the DistFS filesystem (e.g., in a `.thumbnails` hidden directory) so they are synchronized across devices, falling back to the local IndexedDB cache for performance.
+*   **Step 61.7: Sharing & ACL UI**
+    *   **Action:** Build modal dialogs to interact with the DistFS Dark Registry.
+    *   **Action:** Implement UI to add specific users or groups to a file's Lockbox (POSIX ACLs), triggering the underlying WASM re-encryption and signature flows.
