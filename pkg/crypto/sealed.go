@@ -16,7 +16,6 @@ package crypto
 
 import (
 	"crypto/mlkem"
-	"crypto/rand"
 	"encoding/binary"
 	"fmt"
 	"time"
@@ -252,7 +251,7 @@ func SealResponseSymmetric(sessionKey []byte, serverSK *IdentityKey, payload []b
 	// We use zeroed KEM to signal symmetric mode to some clients,
 	// or just random to match wire format.
 	// The server context will tell the client which to expect.
-	rand.Read(dummyKEM)
+	// rand.Read(dummyKEM) -> Use zeros for efficiency and determinism.
 
 	result := make([]byte, len(dummyKEM)+len(demCT))
 	copy(result[0:len(dummyKEM)], dummyKEM)

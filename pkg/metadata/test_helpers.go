@@ -4,7 +4,6 @@ package metadata
 import (
 	"bytes"
 	"crypto/mlkem"
-	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -304,7 +303,7 @@ func SealTestRequestSymmetric(t *testing.T, userID string, userSignKey *crypto.I
 
 	kemSize := mlkem.CiphertextSize768
 	dummyKEM := make([]byte, kemSize)
-	rand.Read(dummyKEM)
+	// rand.Read(dummyKEM) -> Use zeros for consistency
 
 	sealed := make([]byte, len(dummyKEM)+len(demCT))
 	copy(sealed[0:len(dummyKEM)], dummyKEM)

@@ -3493,6 +3493,18 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 	json.NewEncoder(w).Encode(resp)
 }
 
+func (s *Server) parseSessionToken(tokenStr string) (*SessionToken, error) {
+	b, err := base64.StdEncoding.DecodeString(tokenStr)
+	if err != nil {
+		return nil, err
+	}
+	var st SignedSessionToken
+	if err := json.Unmarshal(b, &st); err != nil {
+		return nil, err
+	}
+	return &st.Token, nil
+}
+
 func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *User) ([]byte, error) {
 	// Limit reading to 10MB to prevent DoS
 	limitBody := http.MaxBytesReader(w, r.Body, 10*1024*1024)
@@ -3509,17 +3521,9 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	sessionToken := r.Header.Get("Session-Token")
 	if sessionToken != "" {
 		// Phase 53.1: Session keys are cached by Nonce, not full token string
-		sessionNonce := ""
-		if b, err := base64.StdEncoding.DecodeString(sessionToken); err == nil {
-			var st SignedSessionToken
-			if err := json.Unmarshal(b, &st); err == nil {
-				sessionNonce = st.Token.Nonce
-			}
-		}
-
-		if sessionNonce != "" {
+		if st, err := s.parseSessionToken(sessionToken); err == nil {
 			s.sessionKeyMu.RLock()
-			entry, ok := s.sessionKeyCache[sessionNonce]
+			entry, ok := s.sessionKeyCache[st.Nonce]
 			s.sessionKeyMu.RUnlock()
 
 			if ok {
@@ -3567,18 +3571,11 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	// Phase 53.1: Update session key cache if we have a session token.
 	// This ensures that subsequent requests can use the symmetric path with the new shared secret.
 	if sessionToken != "" {
-		sessionNonce := ""
-		if b, err := base64.StdEncoding.DecodeString(sessionToken); err == nil {
-			var st SignedSessionToken
-			if err := json.Unmarshal(b, &st); err == nil {
-				sessionNonce = st.Token.Nonce
-			}
-		}
-		if sessionNonce != "" {
+		if st, err := s.parseSessionToken(sessionToken); err == nil {
 			s.sessionKeyMu.Lock()
-			s.sessionKeyCache[sessionNonce] = sessionKeyEntry{
+			s.sessionKeyCache[st.Nonce] = sessionKeyEntry{
 				key:    sharedSecret,
-				expiry: time.Now().Add(1 * time.Hour).Unix(), // Standard session length
+				expiry: st.Expiry,
 			}
 			s.sessionKeyMu.Unlock()
 		}
