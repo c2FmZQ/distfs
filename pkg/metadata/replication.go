@@ -252,7 +252,8 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
 	if err != nil {
 		return err
 	}

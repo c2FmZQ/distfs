@@ -767,22 +767,23 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 	sessionKey := c.sessionKey
 	c.sessionMu.RUnlock()
 
+	var ts int64
+	var payload []byte
+	var opened bool
+
 	if sessionKey != nil {
-		ts, payload, err := crypto.OpenResponseSymmetric(sessionKey, serverSignPK, sealed.Sealed)
+		ts, payload, err = crypto.OpenResponseSymmetric(sessionKey, serverSignPK, sealed.Sealed)
 		if err == nil {
-			// Success! Check Staleness
-			now := time.Now().UnixNano()
-			if ts < now-int64(5*time.Minute) || ts > now+int64(5*time.Minute) {
-				return nil, fmt.Errorf("response timestamp out of range")
-			}
-			return io.NopCloser(bytes.NewReader(payload)), nil
+			opened = true
 		}
 	}
 
-	// 1. Open (Full KEM Fallback)
-	ts, payload, err := crypto.OpenResponse(c.decKey, serverSignPK, sealed.Sealed)
-	if err != nil {
-		return nil, fmt.Errorf("failed to open response: %w", err)
+	if !opened {
+		// 1. Open (Full KEM Fallback)
+		ts, payload, err = crypto.OpenResponse(c.decKey, serverSignPK, sealed.Sealed)
+		if err != nil {
+			return nil, fmt.Errorf("failed to open response: %w", err)
+		}
 	}
 
 	// 2. Replay/Staleness Protection
@@ -978,20 +979,24 @@ func (c *Client) cleanupChunks(ctx context.Context, inodeID string, chunks []met
 	}
 	logger.Debugf("DEBUG CLIENT: Cleaning up %d orphaned chunks for inode %s", len(chunks), inodeID)
 
+	// Use a detached context for cleanup to ensure it runs even if the original request was canceled.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
 	// We need a delete token
 	ids := make([]string, 0, len(chunks))
 	for _, ch := range chunks {
 		ids = append(ids, ch.ID)
 	}
 
-	token, err := c.issueToken(ctx, inodeID, ids, "D")
+	token, err := c.issueToken(cleanupCtx, inodeID, ids, "D")
 	if err != nil {
 		logger.Debugf("DEBUG CLIENT: Failed to issue delete token for cleanup: %v", err)
 		return
 	}
 
 	// Resolve Node IDs to Addresses
-	activeNodes, err := c.GetNodes(ctx)
+	activeNodes, err := c.GetNodes(cleanupCtx)
 	if err != nil {
 		return
 	}
@@ -1007,7 +1012,7 @@ func (c *Client) cleanupChunks(ctx context.Context, inodeID string, chunks []met
 				targetNodes = append(targetNodes, n)
 			}
 		}
-		if err := c.deleteChunk(ctx, ch.ID, targetNodes, token); err != nil {
+		if err := c.deleteChunk(cleanupCtx, ch.ID, targetNodes, token); err != nil {
 			logger.Debugf("DEBUG CLIENT: Failed to delete orphaned chunk %s: %v", ch.ID, err)
 		}
 	}

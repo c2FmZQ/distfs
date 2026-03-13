@@ -1187,6 +1187,18 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 				expiry: st.Expiry,
 			}
 			s.sessionKeyMu.Unlock()
+
+			// Prune epochPrivateKeys
+			active, err := s.fsm.GetActiveKey()
+			if err == nil {
+				s.epochPrivateKeysMu.Lock()
+				for id := range s.epochPrivateKeys {
+					if id != active.ID {
+						delete(s.epochPrivateKeys, id)
+					}
+				}
+				s.epochPrivateKeysMu.Unlock()
+			}
 		}
 	}
 
@@ -3527,17 +3539,22 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 			s.sessionKeyMu.RUnlock()
 
 			if ok {
-				ts, payload, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
-				if err == nil {
-					// Success with cached key
-					if err := s.checkReplay(user.ID, ts); err != nil {
-						return nil, err
+				if entry.expiry < time.Now().Unix() {
+					s.sessionKeyMu.RUnlock()
+					// Treat as cache miss, fall back to KEM
+				} else {
+					ts, payload, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
+					if err == nil {
+						// Success with cached key
+						if err := s.checkReplay(user.ID, ts); err != nil {
+							return nil, err
+						}
+						// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
+						*r = *r.WithContext(context.WithValue(r.Context(), sessionKeyContextKey, entry.key))
+						return payload, nil
 					}
-					// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
-					*r = *r.WithContext(context.WithValue(r.Context(), sessionKeyContextKey, entry.key))
-					return payload, nil
+					// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
 				}
-				// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
 			}
 		}
 	}
@@ -3578,6 +3595,18 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 				expiry: st.Expiry,
 			}
 			s.sessionKeyMu.Unlock()
+
+			// Prune epochPrivateKeys
+			active, err := s.fsm.GetActiveKey()
+			if err == nil {
+				s.epochPrivateKeysMu.Lock()
+				for id := range s.epochPrivateKeys {
+					if id != active.ID {
+						delete(s.epochPrivateKeys, id)
+					}
+				}
+				s.epochPrivateKeysMu.Unlock()
+			}
 		}
 	}
 
@@ -3653,6 +3682,18 @@ func (s *Server) sessionCleanupWorker() {
 				}
 
 				s.sessionKeyMu.Unlock()
+
+				// Prune epochPrivateKeys
+				active, err := s.fsm.GetActiveKey()
+				if err == nil {
+					s.epochPrivateKeysMu.Lock()
+					for id := range s.epochPrivateKeys {
+						if id != active.ID {
+							delete(s.epochPrivateKeys, id)
+						}
+					}
+					s.epochPrivateKeysMu.Unlock()
+				}
 
 			}
 
