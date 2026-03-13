@@ -99,7 +99,7 @@ Used for requests within an established session. Provides improved performance a
 
 **Consistency Guarantees:**
 - **Metadata:** Linearizable (Raft).
-- **Data (Phase 53):** Sub-Quorum Persistent ($R=3, W=2$). A `PUT` returns 201 Created once the local write and at least one remote replica succeed. Remaining replication completes in the background.
+- **Data:** Sub-Quorum Persistent ($R=3, W=2$). A `PUT` returns 201 Created once the local write and at least one remote replica succeed. Remaining replication completes in the background.
 - **Write-Through:** Metadata updates MUST only be submitted AFTER the Data sub-quorum is reached.
 
 ---
@@ -194,7 +194,7 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 8. `[]byte("type:")` + `BigEndian(uint32(type))` + `[]byte("|")`
 9. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
 10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID)` + `[]byte("|")`
-11. `[]byte("manifest:")` + `CSV(chunk_id)` + `[]byte("|")`  // Nodes are EXCLUDED (Phase 53.6)
+11. `[]byte("manifest:")` + `CSV(chunk_id)` + `[]byte("|")`  // Nodes are EXCLUDED from user-signed content hash.
 12. `[]byte("pages:")` + `SortedCSV(chunk_page_ids)` + `[]byte("|")`
 13. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
 
