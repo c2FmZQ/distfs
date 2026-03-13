@@ -60,9 +60,10 @@ func TestAddEntryRegression(t *testing.T) {
 
 	// Register data node
 	node := metadata.Node{
-		ID:      "data1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
+		ID:            "data1",
+		Address:       tsData.URL,
+		Status:        metadata.NodeStatusActive,
+		LastHeartbeat: time.Now().Unix(),
 	}
 	nodeBytes, _ := json.Marshal(node)
 	cmdBytes, _ := json.Marshal(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nodeBytes})

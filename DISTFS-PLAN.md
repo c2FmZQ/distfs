@@ -1070,20 +1070,38 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 53: Protocol Hardening & Strong Data Consistency [DONE]
+## Phase 53: Protocol Hardening & Strong Data Consistency [COMPLETED]
 **Goal:** Address fundamental architectural gaps identified during the research audit, specifically focusing on cryptographic forward secrecy and the metadata-data consistency mismatch.
 
-*   **Step 53.1: Ephemeral PQC-KEM Session Sealing (Forward Secrecy) [DONE]**
-    *   **Action:** Refactor the "Sealing" layer in `pkg/client/client.go` and `pkg/metadata/server.go`.
-    *   **Action:** Instead of encrypting requests directly for the long-lived Epoch Key, implement a PQC-KEM exchange (ML-KEM-768) per session or per-request to derive an ephemeral symmetric key.
-    *   **Action:** Ensure the server never stores historical ephemeral keys, guaranteeing that a future compromise cannot decrypt past metadata traffic.
-*   **Step 53.2: Synchronous Write-Through Verification (Consistency Gap) [DONE]**
-    *   **Action:** Modify the chunk upload pipeline in `pkg/client/client.go` (`Put`, `SaveDataFile`).
-    *   **Action:** Enforce a "Quorum-Persisted" acknowledgment from the Data Node pool *before* submitting the final Inode manifest update to the Raft Metadata Leader.
-    *   **Action:** Ensure that any reader who resolves the new metadata version is guaranteed to find the corresponding 1MB data chunks already replicated.
-*   **Step 53.3: Failure Recovery & Atomicity [DONE]**
-    *   **Action:** Implement a client-side cleanup for orphaned chunks if the Raft metadata commit fails after data nodes have already persisted them.
-    *   **Action:** Add integration tests to simulate network partitions during the "Consistency Gap" window and verify system stability.
-*   **Step 53.4: Testing & Validation [DONE]**
-    *   **Action:** **Forward Secrecy Test:** Verify that compromising a node's Epoch Key at time T+1 does not allow decryption of metadata payloads captured at time T.
-    *   **Action:** **Consistency Test:** Perform rapid write-read cycles across distributed nodes and verify that 404 errors on chunks are mathematically impossible under the new write-through protocol.
+*   **Step 53.1: Ephemeral PQC-KEM Session Sealing (Forward Secrecy)**
+    *   **Action:** [Done] Refactor the "Sealing" layer in `pkg/client/client.go` and `pkg/metadata/server.go`.
+    *   **Action:** [Done] Instead of encrypting requests directly for the long-lived Epoch Key, implement a PQC-KEM exchange (ML-KEM-768) per session or per-request to derive an ephemeral symmetric key.
+    *   **Action:** [Done] Ensure the server never stores historical ephemeral keys, guaranteeing that a future compromise cannot decrypt past metadata traffic.
+*   **Step 53.2: Synchronous Write-Through Verification (Consistency Gap)**
+    *   **Action:** [Done] Modify the chunk upload pipeline in `pkg/client/client.go` (`Put`, `SaveDataFile`).
+    *   **Action:** [Done] Enforce a "Quorum-Persisted" acknowledgment from the Data Node pool *before* submitting the final Inode manifest update to the Raft Metadata Leader.
+    *   **Action:** [Done] Ensure that any reader who resolves the new metadata version is guaranteed to find the corresponding 1MB data chunks already replicated.
+*   **Step 53.3: Failure Recovery & Atomicity**
+    *   **Action:** [Done] Implement a client-side cleanup for orphaned chunks if the Raft metadata commit fails after data nodes have already persisted them.
+    *   **Action:** [Done] Add integration tests to simulate network partitions during the "Consistency Gap" window and verify system stability.
+*   **Step 53.4: Testing & Validation**
+    *   **Action:** [Done] **Forward Secrecy Test:** Verify that compromising a node's Epoch Key at time T+1 does not allow decryption of metadata payloads captured at time T.
+    *   **Action:** [Done] **Consistency Test:** Perform rapid write-read cycles across distributed nodes and verify that 404 errors on chunks are mathematically impossible under the new write-through protocol.
+*   **Step 53.5: Scalable Sub-Quorum Persistence**
+    *   **Action:** [Done] Refactor `handleAllocateNodes` in `pkg/metadata/server.go` to return a fixed replication factor (default $R=3$) regardless of cluster size.
+    *   **Action:** [Done] Refactor `handlePut` in `pkg/data/api.go` to enforce a quorum relative to the assigned replication set ($W = \lfloor R/2 \rfloor + 1$), preventing $N/2+1$ scaling bottlenecks in large clusters.
+    *   **Action:** [Done] Ensure the `replicas` query parameter in the Data API correctly communicates the intended sub-quorum boundary.
+    *   **Action:** [Done] **Scalability Test:** Simulate a 15-node cluster and verify that write latency remains constant compared to a 3-node cluster.
+*   **Step 53.6: Decouple Content Integrity from Placement Metadata**
+    *   **Action:** [Done] Refactor `ManifestHash` in `pkg/metadata/types.go` to exclude `NodeIDs` from the `ChunkManifest` hash. The user should only sign the `ChunkIDs` (Content Integrity).
+    *   **Action:** [Done] Implement a server-side signature (Cluster Signature) for the placement metadata (mapping of `ChunkID` to `NodeIDs`).
+    *   **Action:** [Done] Update `VerifyInode` in `pkg/client/client.go` to verify both the User Signature (Content) and the Cluster Signature (Placement).
+*   **Step 53.7: Implement Over-Replication Handling**
+    *   **Action:** [Done] Update `ReplicationMonitor` in `pkg/metadata/replication.go` to detect chunks with more than the target replication factor ($R=3$).
+    *   **Action:** [Done] Implement logic to select "excess" replicas and issue `DELETE` requests to data nodes.
+    *   **Action:** [Done] Update Inode metadata via Raft to remove the deleted replicas from the manifest.
+*   **Step 53.8: Comprehensive Replication & Integrity Integration Tests**
+    *   **Action:** [Done] Create a new test suite `pkg/client/replication_e2e_test.go`.
+    *   **Action:** [Done] **Under-Replication Test:** Write a file, kill a data node, force a replication scan, and verify that the file remains readable and its integrity signature remains valid after repair.
+    *   **Action:** [Done] **Over-Replication Test:** Write a file, manually add extra replicas, force a scan, and verify they are pruned.
+    *   **Action:** [Done] **Integrity Attack Test:** Verify that if the server attempts to change a `ChunkID` (content swap), the client correctly rejects it, even if the placement metadata is "correctly" signed by the cluster.

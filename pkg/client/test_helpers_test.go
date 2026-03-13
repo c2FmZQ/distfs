@@ -79,7 +79,7 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	dataTS := httptest.NewServer(dataServer)
 
 	// Register real data node
-	nodeInfo := metadata.Node{ID: "n1", Address: dataTS.URL, Status: metadata.NodeStatusActive}
+	nodeInfo := metadata.Node{ID: "n1", Address: dataTS.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
 	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second).Error(); err != nil {
 		t.Fatalf("Raft apply RegisterNode failed: %v", err)

@@ -316,6 +316,7 @@ func main() {
 						Status:         metadata.NodeStatusActive,
 						PublicKey:      raftKey.Public(),
 						SignKey:        signKey.Public(),
+						LastHeartbeat:  time.Now().Unix(),
 					}
 					nodeBytes, _ := json.Marshal(node)
 					cmd := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nodeBytes}

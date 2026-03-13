@@ -217,11 +217,11 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		forwardTransport: &http.Transport{
 			TLSClientConfig: clientTLSConfig,
 		},
-		leaderURLCache: make(map[raft.ServerAddress]string),
-		stopCh:         make(chan struct{}),
-		batchQueue:     make([]*LogCommand, 0),
-		batchResps:     make([]chan interface{}, 0),
-		batchApplyCh:   make(chan batchRequest, 1000),
+		leaderURLCache:   make(map[raft.ServerAddress]string),
+		stopCh:           make(chan struct{}),
+		batchQueue:       make([]*LogCommand, 0),
+		batchResps:       make([]chan interface{}, 0),
+		batchApplyCh:     make(chan batchRequest, 1000),
 		vault:            vault,
 		decKey:           decKey,
 		epochPrivateKeys: make(map[string]*mlkem.DecapsulationKey768),
@@ -1784,7 +1784,8 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 		return s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
-				if n.Status == NodeStatusActive && n.Address != "" {
+				age := time.Since(time.Unix(n.LastHeartbeat, 0))
+				if n.Status == NodeStatusActive && n.Address != "" && age < 5*time.Minute {
 					nodes = append(nodes, n)
 				}
 			}
@@ -1801,10 +1802,14 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Use crypto/rand for shuffling
+	// Phase 53.5: Fixed Replication Factor R=3 for scalability.
+	// We shuffle all active nodes and pick up to 3.
 	for i := len(nodes) - 1; i > 0; i-- {
 		b := make([]byte, 8)
-		rand.Read(b)
+		if _, err := io.ReadFull(rand.Reader, b); err != nil {
+			s.writeError(w, r, ErrCodeInternal, "entropy failure", http.StatusInternalServerError)
+			return
+		}
 		j := int(binary.LittleEndian.Uint64(b) % uint64(i+1))
 		nodes[i], nodes[j] = nodes[j], nodes[i]
 	}
@@ -2069,7 +2074,16 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 }
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
-	s.ApplyRaftCommand(w, r, CmdRegisterNode, 1024*1024, http.StatusCreated)
+	var node Node
+	if err := json.NewDecoder(r.Body).Decode(&node); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "invalid node data", http.StatusBadRequest)
+		return
+	}
+	if node.LastHeartbeat == 0 {
+		node.LastHeartbeat = time.Now().Unix()
+	}
+	data, _ := json.Marshal(node)
+	s.ApplyRaftCommandWithHook(w, r, CmdRegisterNode, data, http.StatusCreated, nil)
 }
 
 func (s *Server) handleAllocateGID(w http.ResponseWriter, r *http.Request) {
@@ -3348,6 +3362,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	node.Address = info.APIURL
 	node.ClusterAddress = req.Address
 	node.RaftAddress = info.RaftAddress
+	node.LastHeartbeat = time.Now().Unix()
 	data, _ := json.Marshal(node)
 	s.ApplyRaftCommandWithHook(w, r, CmdRegisterNode, data, http.StatusOK, func(resp interface{}) interface{} {
 		return map[string]string{"status": "ok"}

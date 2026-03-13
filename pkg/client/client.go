@@ -3474,6 +3474,7 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch signer %s: %w", signerID, err)
 	}
+	logger.Debugf("DEBUG CLIENT: VerifyInode %s (v%d): hash=%x sig=%x pk=%x", inode.ID, inode.Version, hash, inode.UserSig, user.SignKey)
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
 		return fmt.Errorf("invalid manifest signature by %s", signerID)
 	}

@@ -241,7 +241,7 @@ func TestClient_AdminMethods(t *testing.T) {
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
 
 	// Register a node
-	nodeInfo := metadata.Node{ID: "n1", Address: "http://127.0.0.1:8080", Status: metadata.NodeStatusActive}
+	nodeInfo := metadata.Node{ID: "n1", Address: "http://127.0.0.1:8080", Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
 	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
 
@@ -551,7 +551,7 @@ func TestClient_UploadExtraError(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	err := c.uploadChunk(ctx, "c1", []byte("data"), []metadata.Node{{Address: ts.URL}}, "token")
+	err := c.uploadChunk(ctx, "c1", []byte("data"), []metadata.Node{{Address: ts.URL, LastHeartbeat: time.Now().Unix()}}, "token")
 	if err == nil {
 		t.Error("uploadChunk should fail when node returns error")
 	}
@@ -1012,8 +1012,16 @@ func TestClient_SyncFile_More(t *testing.T) {
 
 	// 2. Growing file (Chunked)
 	large := make([]byte, crypto.ChunkSize+100)
-	c.CreateFile(ctx, "/large", bytes.NewReader(large), int64(len(large)))
-	inodeL, _, _ := c.ResolvePath(ctx, "/large")
+	if err := c.CreateFile(ctx, "/large", bytes.NewReader(large), int64(len(large))); err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
+	}
+	inodeL, _, err := c.ResolvePath(ctx, "/large")
+	if err != nil {
+		t.Fatalf("ResolvePath failed: %v", err)
+	}
+	if inodeL == nil {
+		t.Fatal("ResolvePath returned nil inode")
+	}
 
 	grown := make([]byte, 2*crypto.ChunkSize+100)
 	_, err = c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
@@ -1075,9 +1083,10 @@ func TestClient_SyncFile(t *testing.T) {
 
 	// Register Data Node
 	nodeInfo := metadata.Node{
-		ID:      "data1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
+		ID:            "data1",
+		Address:       tsData.URL,
+		Status:        metadata.NodeStatusActive,
+		LastHeartbeat: time.Now().Unix(),
 	}
 	registerNode(t, ts.URL, "testsecret", nodeInfo)
 
@@ -1127,7 +1136,7 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
-	nodeInfo := metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive}
+	nodeInfo := metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	registerNode(t, ts.URL, "testsecret", nodeInfo)
 
 	// 1. UploadChunkData
@@ -1180,7 +1189,7 @@ func TestClient_OpenBlobWrite(t *testing.T) {
 	tsData := httptest.NewServer(dataServer)
 	defer tsData.Close()
 
-	registerNode(t, ts.URL, "testsecret", metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive})
+	registerNode(t, ts.URL, "testsecret", metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()})
 
 	// Open for writing
 	path := "/bigblob"

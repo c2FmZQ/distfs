@@ -31,11 +31,11 @@ func TestWriteConsistency_SynchronousReplication(t *testing.T) {
 		ds, _ := data.NewDiskStore(st)
 		srv := data.NewServer(ds, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
 		ts := httptest.NewServer(srv)
-		
-		nodeInfo := metadata.Node{ID: id, Address: ts.URL, Status: metadata.NodeStatusActive}
+
+		nodeInfo := metadata.Node{ID: id, Address: ts.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 		nb, _ := json.Marshal(nodeInfo)
 		metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
-		
+
 		return ts, ds
 	}
 
@@ -88,11 +88,11 @@ func TestWriteConsistency_QuorumSuccess(t *testing.T) {
 		ds, _ := data.NewDiskStore(st)
 		srv := data.NewServer(ds, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
 		ts := httptest.NewServer(srv)
-		
-		nodeInfo := metadata.Node{ID: id, Address: ts.URL, Status: metadata.NodeStatusActive}
+
+		nodeInfo := metadata.Node{ID: id, Address: ts.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 		nb, _ := json.Marshal(nodeInfo)
 		metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
-		
+
 		return ts, ds
 	}
 
@@ -105,8 +105,8 @@ func TestWriteConsistency_QuorumSuccess(t *testing.T) {
 	ts3.Close()
 
 	// 2. Write a file
-	content := bytes.Repeat([]byte("quorum test"), 1000) 
-	
+	content := bytes.Repeat([]byte("quorum test"), 1000)
+
 	var err error
 	for i := 0; i < 5; i++ {
 		err = c.CreateFile(ctx, "/quorum-file", bytes.NewReader(content), int64(len(content)))
@@ -138,7 +138,7 @@ func TestWriteConsistency_QuorumFailure(t *testing.T) {
 	defer ts1.Close()
 
 	register := func(id, addr string) {
-		nodeInfo := metadata.Node{ID: id, Address: addr, Status: metadata.NodeStatusActive}
+		nodeInfo := metadata.Node{ID: id, Address: addr, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 		nb, _ := json.Marshal(nodeInfo)
 		metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
 	}
@@ -148,8 +148,8 @@ func TestWriteConsistency_QuorumFailure(t *testing.T) {
 	register("n3", "http://127.0.0.1:2") // DOWN
 
 	// 2. Write a file
-	content := bytes.Repeat([]byte("fail test"), 1000) 
-	
+	content := bytes.Repeat([]byte("fail test"), 1000)
+
 	err := c.CreateFile(ctx, "/fail-file", bytes.NewReader(content), int64(len(content)))
 	if err == nil {
 		t.Errorf("Expected WriteFile to fail because quorum (2/3) not reached")
@@ -174,7 +174,7 @@ func TestFailureRecovery_CleanupOrphans(t *testing.T) {
 	ts1 := httptest.NewServer(srv1)
 	defer ts1.Close()
 
-	nodeInfo := metadata.Node{ID: "n1", Address: ts1.URL, Status: metadata.NodeStatusActive}
+	nodeInfo := metadata.Node{ID: "n1", Address: ts1.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
 	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
 

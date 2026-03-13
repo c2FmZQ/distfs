@@ -98,6 +98,9 @@ func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.Encapsu
 }
 
 func registerNode(t *testing.T, serverURL, secret string, node metadata.Node) {
+	if node.LastHeartbeat == 0 {
+		node.LastHeartbeat = time.Now().Unix()
+	}
 	body, _ := json.Marshal(node)
 	req, _ := http.NewRequest("POST", serverURL+"/v1/node", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")

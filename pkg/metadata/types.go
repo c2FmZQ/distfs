@@ -600,15 +600,7 @@ func (i *Inode) ManifestHash() []byte {
 	// Write ChunkManifest
 	h.Write([]byte("manifest:"))
 	for _, entry := range i.ChunkManifest {
-		h.Write([]byte(entry.ID + "("))
-		// Include nodes in hash
-		for j, nodeID := range entry.Nodes {
-			if j > 0 {
-				h.Write([]byte(","))
-			}
-			h.Write([]byte(nodeID))
-		}
-		h.Write([]byte("),"))
+		h.Write([]byte(entry.ID + ","))
 	}
 	h.Write([]byte("|"))
 
@@ -683,7 +675,7 @@ type AuthChallengeResponse struct {
 type AuthChallengeSolve struct {
 	UserID    string `json:"uid"`
 	Challenge []byte `json:"challenge"`
-	Signature []byte `json:"sig"`              // User signature over Challenge
+	Signature []byte `json:"sig"`               // User signature over Challenge
 	EncKey    []byte `json:"enc_key,omitempty"` // Ephemeral ML-KEM-768 PK for session key establishment
 }
 

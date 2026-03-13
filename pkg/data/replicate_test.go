@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 )
 
 func TestReplicateChain(t *testing.T) {
@@ -51,7 +52,14 @@ func TestReplicateChain(t *testing.T) {
 
 	// Verify on all nodes
 	for i := 0; i < 3; i++ {
-		has, _ := stores[i].HasChunk(chunkID)
+		var has bool
+		for retry := 0; retry < 10; retry++ {
+			has, _ = stores[i].HasChunk(chunkID)
+			if has {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 		if !has {
 			t.Errorf("Node %d missing chunk", i)
 		} else {
@@ -145,7 +153,14 @@ func TestParallelReplication(t *testing.T) {
 	resp.Body.Close()
 
 	for i := 0; i < 4; i++ {
-		has, _ := stores[i].HasChunk(chunkID)
+		var has bool
+		for retry := 0; retry < 10; retry++ {
+			has, _ = stores[i].HasChunk(chunkID)
+			if has {
+				break
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
 		if !has {
 			t.Errorf("Node %d missing chunk", i)
 		}

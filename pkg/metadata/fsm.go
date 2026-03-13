@@ -52,30 +52,31 @@ var (
 type CommandType uint8
 
 const (
-	CmdCreateInode       CommandType = 1
-	CmdUpdateInode       CommandType = 2
-	CmdDeleteInode       CommandType = 3
-	CmdRegisterNode      CommandType = 4
-	CmdCreateUser        CommandType = 5
-	CmdCreateGroup       CommandType = 6
-	CmdUpdateGroup       CommandType = 7
-	CmdAddChunkReplica   CommandType = 8
-	CmdGCRemove          CommandType = 9
-	CmdSetUserQuota      CommandType = 10
-	CmdRotateKey         CommandType = 11
-	CmdInitWorld         CommandType = 12
-	CmdStoreKeySync      CommandType = 13
-	CmdBatch             CommandType = 14
-	CmdAcquireLeases     CommandType = 15
-	CmdReleaseLeases     CommandType = 16
-	CmdPromoteAdmin      CommandType = 17
-	CmdStoreMetrics      CommandType = 18
-	CmdSetGroupQuota     CommandType = 19
-	CmdSetClusterSignKey CommandType = 20
-	CmdRemoveNode        CommandType = 21
-	CmdRotateFSMKey      CommandType = 22
-	CmdReencryptValue    CommandType = 23
-	CmdAdminSetUserLock  CommandType = 24
+	CmdCreateInode        CommandType = 1
+	CmdUpdateInode        CommandType = 2
+	CmdDeleteInode        CommandType = 3
+	CmdRegisterNode       CommandType = 4
+	CmdCreateUser         CommandType = 5
+	CmdCreateGroup        CommandType = 6
+	CmdUpdateGroup        CommandType = 7
+	CmdAddChunkReplica    CommandType = 8
+	CmdGCRemove           CommandType = 9
+	CmdSetUserQuota       CommandType = 10
+	CmdRotateKey          CommandType = 11
+	CmdInitWorld          CommandType = 12
+	CmdStoreKeySync       CommandType = 13
+	CmdBatch              CommandType = 14
+	CmdAcquireLeases      CommandType = 15
+	CmdReleaseLeases      CommandType = 16
+	CmdPromoteAdmin       CommandType = 17
+	CmdStoreMetrics       CommandType = 18
+	CmdSetGroupQuota      CommandType = 19
+	CmdSetClusterSignKey  CommandType = 20
+	CmdRemoveNode         CommandType = 21
+	CmdRotateFSMKey       CommandType = 22
+	CmdReencryptValue     CommandType = 23
+	CmdAdminSetUserLock   CommandType = 24
+	CmdRemoveChunkReplica CommandType = 25
 )
 
 type LogCommand struct {
@@ -599,6 +600,8 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 		return fsm.executeUpdateGroup(tx, cmd.Data, cmd.UserID)
 	case CmdAddChunkReplica:
 		return fsm.executeAddChunkReplica(tx, cmd.Data)
+	case CmdRemoveChunkReplica:
+		return fsm.executeRemoveChunkReplica(tx, cmd.Data)
 	case CmdGCRemove:
 		return fsm.executeGCRemove(tx, cmd.Data)
 	case CmdSetUserQuota:
@@ -769,7 +772,10 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	var update Inode
 	json.Unmarshal(data, &update)
 
+	logger.Debugf("FSM executeUpdateInode: ID=%s v%d signer=%s", update.ID, update.Version, userID)
+
 	if err := fsm.verifyInodeSignature(tx, &update, userID); err != nil {
+		logger.Debugf("FSM executeUpdateInode: signature verify failed for %s: %v", update.ID, err)
 		return err
 	}
 
@@ -787,7 +793,10 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	var inode Inode
 	json.Unmarshal(plain, &inode)
 
+	logger.Debugf("FSM executeUpdateInode: %s currentVersion=%d targetVersion=%d", update.ID, inode.Version, update.Version)
+
 	if update.Version != inode.Version+1 {
+		logger.Debugf("FSM executeUpdateInode: version conflict for %s: current=%d target=%d", update.ID, inode.Version, update.Version)
 		return ErrConflict
 	}
 
@@ -1178,6 +1187,38 @@ func (fsm *MetadataFSM) executeAddChunkReplica(tx *bolt.Tx, data []byte) interfa
 					inode.ChunkManifest[i].Nodes = append(inode.ChunkManifest[i].Nodes, nid)
 				}
 			}
+			break
+		}
+	}
+	return fsm.saveInodeWithPages(tx, &inode)
+}
+
+func (fsm *MetadataFSM) executeRemoveChunkReplica(tx *bolt.Tx, data []byte) interface{} {
+	var req AddReplicaRequest
+	json.Unmarshal(data, &req)
+	plain, _ := fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
+	if plain == nil {
+		return ErrNotFound
+	}
+	var inode Inode
+	json.Unmarshal(plain, &inode)
+	fsm.LoadInodeWithPages(tx, &inode)
+	for i, chunk := range inode.ChunkManifest {
+		if chunk.ID == req.ChunkID {
+			var newNodes []string
+			for _, eid := range chunk.Nodes {
+				remove := false
+				for _, nid := range req.NodeIDs {
+					if eid == nid {
+						remove = true
+						break
+					}
+				}
+				if !remove {
+					newNodes = append(newNodes, eid)
+				}
+			}
+			inode.ChunkManifest[i].Nodes = newNodes
 			break
 		}
 	}

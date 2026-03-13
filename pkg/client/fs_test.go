@@ -20,6 +20,7 @@ import (
 	"io/fs"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
@@ -71,9 +72,10 @@ func TestDistFS_ReadDir(t *testing.T) {
 
 	// Register Data Node
 	node := metadata.Node{
-		ID:      "data1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
+		ID:            "data1",
+		Address:       tsData.URL,
+		Status:        metadata.NodeStatusActive,
+		LastHeartbeat: time.Now().Unix(),
 	}
 	registerNode(t, tsMeta.URL, "testsecret", node)
 

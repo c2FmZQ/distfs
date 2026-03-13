@@ -23,10 +23,12 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	n1 := Node{ID: "n1", Address: "http://127.0.0.1:1111", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	n2 := Node{ID: "n2", Address: "http://127.0.0.1:2222", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	n3 := Node{ID: "n3", Address: "http://127.0.0.1:3333", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	n4 := Node{ID: "n4", Address: "http://127.0.0.1:4444", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal(), 5*time.Second)
 	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
+	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal(), 5*time.Second)
 
 	sk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
@@ -103,6 +105,72 @@ func TestReplication_Scan_Concurrent(t *testing.T) {
 	// We can't set private scanning field, so we just call it twice
 	go rm.Scan()
 	rm.Scan()
+}
+
+func TestReplicationMonitor_Prune(t *testing.T) {
+	node, ts, _, _, s := SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+
+	// 1. Setup Nodes
+	n1 := Node{ID: "n1", Address: "http://127.0.0.1:1111", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	n2 := Node{ID: "n2", Address: "http://127.0.0.1:2222", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	n3 := Node{ID: "n3", Address: "http://127.0.0.1:3333", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	n4 := Node{ID: "n4", Address: "http://127.0.0.1:4444", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+
+	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
+	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal(), 5*time.Second)
+	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
+	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal(), 5*time.Second)
+
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+
+	// 2. Setup Inode with over-replication (4 nodes, target is 3)
+	inode := Inode{
+		ID:      "over-replicated-inode",
+		Type:    FileType,
+		OwnerID: "u1",
+		ChunkManifest: []ChunkEntry{
+			{ID: "c1", Nodes: []string{"n1", "n2", "n3", "n4"}},
+		},
+	}
+	inode.SignInodeForTest("u1", sk)
+	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode), UserID: "u1"}.Marshal(), 5*time.Second)
+
+	// 3. Mock Data Nodes for pruning
+	n4Mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "DELETE" && r.URL.Path == "/v1/data/c1" {
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer n4Mock.Close()
+	n4.Address = n4Mock.URL
+	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal(), 5*time.Second)
+
+	time.Sleep(100 * time.Millisecond)
+
+	// 4. Manually trigger Scan
+	s.replMonitor.Scan()
+
+	time.Sleep(500 * time.Millisecond) // Wait for background pruning
+
+	// 5. Verify Inode updated in FSM (should have exactly 3 nodes)
+	err := node.FSM.db.View(func(tx *bolt.Tx) error {
+		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("over-replicated-inode"))
+		if err != nil {
+			return err
+		}
+		var i Inode
+		json.Unmarshal(plain, &i)
+		if len(i.ChunkManifest[0].Nodes) != 3 {
+			return fmt.Errorf("nodes not pruned: %v", i.ChunkManifest[0].Nodes)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Error(err)
+	}
 }
 
 func mustMarshal(v interface{}) []byte {

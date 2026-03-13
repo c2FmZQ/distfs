@@ -44,7 +44,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// Register a Node
-	nodeInfo := Node{ID: "n1", Address: "http://n1:8080", Status: NodeStatusActive}
+	nodeInfo := Node{ID: "n1", Address: "http://n1:8080", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
 	server.ApplyRaftCommandInternal(CmdRegisterNode, nb, "")
 

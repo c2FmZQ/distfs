@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -74,6 +75,7 @@ func (rm *ReplicationMonitor) loop() {
 
 // Scan performs a full scan of all inodes to detect under-replicated chunks.
 func (rm *ReplicationMonitor) Scan() {
+	logger.Debugf("REPL: Starting manual scan (Leader=%v)", rm.server.raft.State() == raft.Leader)
 	if rm.server.raft.State() != raft.Leader {
 		return
 	}
@@ -87,9 +89,14 @@ func (rm *ReplicationMonitor) Scan() {
 			if err := json.Unmarshal(v, &n); err != nil {
 				return nil // Skip corrupt
 			}
-			if n.Status == NodeStatusActive && time.Since(time.Unix(n.LastHeartbeat, 0)) < 5*time.Minute {
+			age := time.Since(time.Unix(n.LastHeartbeat, 0))
+			logger.Debugf("REPL Scan: checking node %s status=%s age=%v", n.ID, n.Status, age)
+			if n.Status == NodeStatusActive && age < 5*time.Minute {
 				activeNodes[n.ID] = n
 				activeNodeIDs = append(activeNodeIDs, n.ID)
+				logger.Debugf("REPL Scan: node %s is ACTIVE", n.ID)
+			} else {
+				logger.Debugf("REPL Scan: node %s is NOT active (status=%s, age=%v)", n.ID, n.Status, age)
 			}
 			return nil
 		})
@@ -102,6 +109,8 @@ func (rm *ReplicationMonitor) Scan() {
 	if len(activeNodeIDs) < 2 {
 		return
 	}
+
+	logger.Debugf("REPL: activeNodes=%v", activeNodeIDs)
 
 	// 2. Scan Inodes
 	err = rm.server.fsm.db.View(func(tx *bolt.Tx) error {
@@ -131,30 +140,45 @@ func (rm *ReplicationMonitor) Scan() {
 	}
 }
 
+const TargetReplication = 3
+
 func (rm *ReplicationMonitor) checkReplication(inode *Inode, activeNodes map[string]Node, activeNodeIDs []string) {
 	for _, chunk := range inode.ChunkManifest {
 		validReplicas := 0
 		var sourceNode Node
 		foundSource := false
 		existingHolders := make(map[string]bool)
+		var healthyNodeIDs []string
+		var deadNodeIDs []string
 
 		for _, nodeID := range chunk.Nodes {
 			existingHolders[nodeID] = true
 			if n, ok := activeNodes[nodeID]; ok {
 				validReplicas++
+				healthyNodeIDs = append(healthyNodeIDs, nodeID)
 				if !foundSource {
 					sourceNode = n
 					foundSource = true
 				}
+			} else {
+				deadNodeIDs = append(deadNodeIDs, nodeID)
 			}
 		}
 
-		if validReplicas < 3 && foundSource {
-			// Need repair
-			needed := 3 - validReplicas
+		// Calculate actual target for this cluster size
+		target := TargetReplication
+		if len(activeNodeIDs) < target {
+			target = len(activeNodeIDs)
+		}
+
+		logger.Debugf("REPL: Inode %s Chunk %s: valid=%d healthy=%v dead=%v target=%d sourceFound=%v", inode.ID, chunk.ID, validReplicas, healthyNodeIDs, deadNodeIDs, target, foundSource)
+
+		// 1. Repair if under-replicated
+		if validReplicas < target && foundSource {
+			// ... (rest of repair logic)
+			needed := target - validReplicas
 			var targets []string
 
-			// Find candidates efficiently
 			startIndex := rand.Intn(len(activeNodeIDs))
 			for i := 0; i < len(activeNodeIDs); i++ {
 				idx := (startIndex + i) % len(activeNodeIDs)
@@ -169,7 +193,6 @@ func (rm *ReplicationMonitor) checkReplication(inode *Inode, activeNodes map[str
 			}
 
 			if len(targets) > 0 {
-				// Launch repair in background with semaphore
 				select {
 				case rm.sem <- struct{}{}:
 					go func(inodeID, chunkID string, src Node, tgts []string) {
@@ -177,8 +200,27 @@ func (rm *ReplicationMonitor) checkReplication(inode *Inode, activeNodes map[str
 						rm.executeRepair(inodeID, chunkID, src, tgts, activeNodes)
 					}(inode.ID, chunk.ID, sourceNode, targets)
 				default:
-					// Semaphore full, skip this repair cycle
 				}
+			}
+		}
+
+		// 2. Prune if over-replicated OR contains dead nodes
+		var toRemove []string
+		if validReplicas > TargetReplication {
+			toRemove = append(toRemove, healthyNodeIDs[TargetReplication:]...)
+		}
+		if len(deadNodeIDs) > 0 {
+			toRemove = append(toRemove, deadNodeIDs...)
+		}
+
+		if len(toRemove) > 0 {
+			select {
+			case rm.sem <- struct{}{}:
+				go func(inodeID, chunkID string, remIDs []string) {
+					defer func() { <-rm.sem }()
+					rm.executePrune(inodeID, chunkID, remIDs, activeNodes)
+				}(inode.ID, chunk.ID, toRemove)
+			default:
 			}
 		}
 	}
@@ -222,6 +264,7 @@ func (rm *ReplicationMonitor) triggerRepair(chunkID string, source Node, targetI
 }
 
 func (rm *ReplicationMonitor) executeRepair(inodeID, chunkID string, source Node, targetIDs []string, nodes map[string]Node) {
+	logger.Debugf("REPL: Repairing chunk %s for inode %s: source=%s targets=%v", chunkID, inodeID, source.ID, targetIDs)
 	// 1. Trigger
 	if err := rm.triggerRepair(chunkID, source, targetIDs, nodes); err != nil {
 		log.Printf("Repair failed for chunk %s: %v", chunkID, err)
@@ -242,5 +285,61 @@ func (rm *ReplicationMonitor) executeRepair(inodeID, chunkID string, source Node
 	f := rm.server.raft.Apply(b, 5*time.Second)
 	if err := f.Error(); err != nil {
 		log.Printf("Failed to apply AddReplica: %v", err)
+	} else {
+		logger.Debugf("REPL: Successfully applied AddReplica for chunk %s", chunkID)
 	}
+}
+
+func (rm *ReplicationMonitor) executePrune(inodeID, chunkID string, targetIDs []string, nodes map[string]Node) {
+	// 1. Trigger deletion from data nodes (best effort)
+	token, err := rm.server.generateSelfToken([]string{chunkID}, "D")
+	if err == nil {
+		for _, nid := range targetIDs {
+			if n, ok := nodes[nid]; ok {
+				if err := rm.deleteFromNode(n.Address, chunkID, token); err != nil {
+					log.Printf("Prune: failed to delete chunk %s from active node %s: %v", chunkID, nid, err)
+				}
+			}
+		}
+	} else {
+		log.Printf("Prune: failed to generate token for deletion: %v", err)
+	}
+
+	// 2. Update Metadata (Atomic Remove) - ALWAYS do this for all targetIDs
+	req := AddReplicaRequest{
+		InodeID: inodeID,
+		ChunkID: chunkID,
+		NodeIDs: targetIDs,
+	}
+	body, _ := json.Marshal(req)
+
+	cmd := LogCommand{Type: CmdRemoveChunkReplica, Data: body}
+	b, _ := json.Marshal(cmd)
+
+	f := rm.server.raft.Apply(b, 5*time.Second)
+	if err := f.Error(); err != nil {
+		log.Printf("Failed to apply RemoveReplica: %v", err)
+	} else {
+		logger.Debugf("REPL: Successfully applied RemoveReplica for chunk %s (nodes=%v)", chunkID, targetIDs)
+	}
+}
+
+func (rm *ReplicationMonitor) deleteFromNode(address, chunkID, token string) error {
+	req, err := http.NewRequest("DELETE", fmt.Sprintf("%s/v1/data/%s", address, chunkID), nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("status %d", resp.StatusCode)
+	}
+	return nil
 }
