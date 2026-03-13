@@ -26,6 +26,9 @@ CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
 CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
 CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
 
+echo "Building WASM module..."
+GOOS=js GOARCH=wasm go build -o web/distfs.wasm ./cmd/distfs-wasm
+
 # 2. Run Unit Tests
 if [ $SKIP_UNIT -eq 0 ]; then
     echo "## Unit Tests" >> $REPORT
@@ -43,6 +46,22 @@ if [ $SKIP_UNIT -eq 0 ]; then
     fi
     grep "ok" "$LOG_DIR/unit-tests.log" >> $REPORT || true
     grep "FAIL" "$LOG_DIR/unit-tests.log" >> $REPORT || true
+
+    echo "Running WASM Unit Tests..."
+    WASM_EXEC="$(go env GOROOT)/misc/wasm/go_js_wasm_exec"
+    if [ -f "$WASM_EXEC" ]; then
+        if ! GOOS=js GOARCH=wasm go test -exec="$WASM_EXEC" ./pkg/client ./pkg/crypto > "$LOG_DIR/wasm-unit-tests.log" 2>&1; then
+            cat "$LOG_DIR/wasm-unit-tests.log" >> $REPORT
+            echo '```' >> $REPORT
+            echo "WASM Unit Tests Failed"
+            exit 1
+        fi
+        grep "ok" "$LOG_DIR/wasm-unit-tests.log" | sed 's/^/WASM: /' >> $REPORT || true
+        grep "FAIL" "$LOG_DIR/wasm-unit-tests.log" | sed 's/^/WASM: /' >> $REPORT || true
+    else
+        echo "WASM Execution environment not found. Skipping WASM unit tests. (Build succeeded)" >> $REPORT
+    fi
+
     echo '```' >> $REPORT
     echo "" >> $REPORT
 else

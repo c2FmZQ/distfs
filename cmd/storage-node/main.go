@@ -480,7 +480,19 @@ func main() {
 	log.Printf("Storage Node %s starting Public API on %s, Cluster API on %s", *nodeID, *apiAddr, *clusterAddr)
 
 	// Start Public Server
-	publicSrv := &http.Server{Addr: *apiAddr, Handler: publicMux}
+	corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Session-Token, X-DistFS-Sealed, X-DistFS-Admin-Bypass")
+		w.Header().Set("Access-Control-Expose-Headers", "X-DistFS-Sealed")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		publicMux.ServeHTTP(w, r)
+	})
+
+	publicSrv := &http.Server{Addr: *apiAddr, Handler: corsHandler}
 	go func() {
 		var err error
 		if *tlsCert != "" && *tlsKey != "" {

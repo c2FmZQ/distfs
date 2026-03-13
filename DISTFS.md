@@ -378,6 +378,12 @@ To provide high-fidelity POSIX compatibility, DistFS implements the following sp
 **Out of Scope: `CopyFileRange`**
 Server-side copying is currently not supported because DistFS maintains Zero-Knowledge privacy. Since every file is encrypted with a unique symmetric key, copying data between files would require the server to decrypt and re-encrypt the content (or reuse keys, which weakens the security model), violating the core security mandate. All copies must be performed client-side.
 
+### 6.5 WebAssembly (WASM) & Browser Integration
+DistFS supports compiling the core client (`pkg/client`) to **WebAssembly**, enabling a Zero-Knowledge "file manager" UI directly within the browser sandbox.
+*   **Browser as the Trusted Boundary:** All PQC math, metadata parsing, and AES-256-GCM encryption/decryption happen inside the client's browser. The server never receives plaintext or unsealed RPCs from the web client.
+*   **Service Worker Streaming:** To support multi-gigabyte file downloads without exhausting browser RAM (Out-Of-Memory errors), the web client utilizes a **Service Worker**. When a user requests a file, the Service Worker intercepts a synthetic request and responds with a `ReadableStream`. A dedicated WASM Web Worker fetches, verifies, and decrypts 1MB chunks just-in-time, passing them to the Service Worker via *Transferable Objects*, which streams them directly to the user's local disk.
+*   **CORS & Fallback Transports:** The storage nodes expose configurable CORS headers, and the WASM client uses standard `fetch` API fallbacks (bypassing custom TCP/TLS transports) to operate within browser networking constraints.
+
 ## 7. Cluster Architecture & Operations
 
 ### 7.1 Network Topology & Ports

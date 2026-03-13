@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package client
 
@@ -12,7 +14,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"syscall"
 	"testing"
 	"time"
 
@@ -595,10 +596,10 @@ func TestClient_MiscMethods(t *testing.T) {
 		t.Errorf("Expected u1, got %s", c.UserID())
 	}
 
-	// 3. ToPOSIX
+	// 3. ToFS
 	apiErr := &APIError{StatusCode: http.StatusNotFound}
-	if apiErr.ToPOSIX() != syscall.ENOENT {
-		t.Errorf("Expected ENOENT, got %v", apiErr.ToPOSIX())
+	if apiErr.ToFS() != fs.ErrNotExist {
+		t.Errorf("Expected fs.ErrNotExist, got %v", apiErr.ToFS())
 	}
 
 	// 4. GetServerKey (Pre-configured)

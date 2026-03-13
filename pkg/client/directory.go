@@ -20,13 +20,13 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -586,7 +586,7 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 		}
 		childID, ok := oldParent.Children[encOldName]
 		if !ok {
-			return syscall.ENOENT
+			return fs.ErrNotExist
 		}
 
 		child, err := c.getInode(ctx, childID)
@@ -852,7 +852,7 @@ func (c *Client) Link(ctx context.Context, targetPath, linkPath string) error {
 	}
 
 	if target.Type == metadata.DirType {
-		return syscall.EISDIR
+		return errors.New("is a directory")
 	}
 
 	dir, name := filepath.Split(strings.TrimRight(linkPath, "/"))

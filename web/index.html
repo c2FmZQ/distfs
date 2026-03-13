@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>DistFS Web Client</title>
+</head>
+<body>
+    <h1>DistFS Zero-Knowledge File Manager</h1>
+    <div id="status">Loading WASM...</div>
+
+    <script>
+        if ('serviceWorker' in navigator) {
+            navigator.serviceWorker.register('sw.js').then(() => {
+                console.log('Service Worker Registered');
+            });
+        }
+
+        const worker = new Worker('worker.js');
+        worker.onmessage = (event) => {
+            const status = document.getElementById('status');
+            if (event.data.type === 'ready') {
+                status.innerText = 'WASM Ready. Awaiting authentication.';
+            } else if (event.data.type === 'list-success') {
+                status.innerText = JSON.stringify(event.data.entries, null, 2);
+            }
+        };
+
+        // Listen for download requests from the Service Worker
+        navigator.serviceWorker.addEventListener('message', (event) => {
+            if (event.data.type === 'start-download') {
+                // Forward the MessagePort to the WASM worker so it can stream chunks
+                // directly to the Service Worker, bypassing this main UI thread entirely.
+                worker.postMessage({ 
+                    type: 'download-stream', 
+                    id: event.data.id 
+                }, [event.ports[0]]);
+            }
+        });
+    </script>
+</body>
+</html>

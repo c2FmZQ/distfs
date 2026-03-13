@@ -1105,3 +1105,27 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** [Done] **Under-Replication Test:** Write a file, kill a data node, force a replication scan, and verify that the file remains readable and its integrity signature remains valid after repair.
     *   **Action:** [Done] **Over-Replication Test:** Write a file, manually add extra replicas, force a scan, and verify they are pruned.
     *   **Action:** [Done] **Integrity Attack Test:** Verify that if the server attempts to change a `ChunkID` (content swap), the client correctly rejects it, even if the placement metadata is "correctly" signed by the cluster.
+
+---
+
+## Phase 60: WebAssembly (WASM) & Browser Client Integration
+**Goal:** Prove the "Zero-Knowledge" architecture by compiling `pkg/client` to WebAssembly and running it within a browser's secure sandbox. Implement memory-efficient streaming via Service Workers.
+
+*   **Step 60.1: OS & Network Decoupling (`pkg/client`)**
+    *   **Action:** Refactor `APIError.ToPOSIX()` to use `io/fs` standard errors (`fs.ErrNotExist`, `fs.ErrPermission`) instead of `syscall` constants.
+    *   **Action:** Isolate `ech.NewTransport()` behind `//go:build !wasm` tags. Provide a fallback that uses `http.DefaultTransport` (which maps to `fetch` in WASM) using `//go:build wasm`.
+*   **Step 60.2: Server CORS Support (`cmd/storage-node` & `pkg/metadata`)**
+    *   **Action:** Implement CORS middleware on the Metadata and Data APIs.
+    *   **Action:** Ensure `OPTIONS` preflight requests succeed and custom headers (`X-DistFS-Sealed`, `Session-Token`, `Authorization`) are explicitly allowed and exposed.
+*   **Step 60.3: WASM JS/Go Bridge (`pkg/wasm`)**
+    *   **Action:** Create a new entry point (`cmd/distfs-wasm/main.go`) to compile to `distfs.wasm`.
+    *   **Action:** Use `syscall/js` to expose core client functions to JavaScript (e.g., `login`, `listDirectory`, `mkdir`).
+    *   **Action:** Implement background execution to ensure PQC math (ML-KEM/ML-DSA) does not block the browser's main UI thread.
+*   **Step 60.4: Service Worker Streaming Engine (Frontend)**
+    *   **Action:** Implement a JavaScript Service Worker to intercept synthetic `/distfs-download/{id}` requests.
+    *   **Action:** Construct a `ReadableStream` within the Service Worker that uses `MessageChannel` to request data from the WASM Web Worker.
+    *   **Action:** Implement the WASM side to fetch encrypted 1MB chunks, decrypt them, and yield them via *Transferable Objects* (`ArrayBuffer`) to the Service Worker.
+    *   **Action:** Ensure the browser can stream the decrypted data directly to the user's hard drive without causing an Out-Of-Memory (OOM) crash for large files.
+*   **Step 60.5: Testing Strategy & Validation**
+    *   **Action:** **Unit Testing:** Ensure all cryptographic and client tests pass under the WASM execution environment (`GOOS=js GOARCH=wasm go test -exec="$(go env GOROOT)/misc/wasm/go_js_wasm_exec" ./pkg/...`).
+    *   **Action:** **E2E Browser Testing:** Implement Playwright or Puppeteer tests to mount the `distfs.wasm` binary in a headless browser, authenticate against a local test cluster, and perform an E2E upload/download cycle, asserting memory stability.

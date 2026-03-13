@@ -1,4 +1,4 @@
-//go:build !debug
+//go:build !wasm && !debug
 
 package metadata
 

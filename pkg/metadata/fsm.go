@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
@@ -22,7 +24,6 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -36,101 +37,6 @@ import (
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
-
-var (
-	ErrExists                  = errors.New("already exists")
-	ErrNotFound                = errors.New("not found")
-	ErrConflict                = errors.New("version conflict")
-	ErrStopIteration           = errors.New("iteration stopped")
-	ErrAtomicRollback          = errors.New("atomic transaction failure")
-	ErrLeaseRequired           = errors.New("lease required")
-	ErrStructuralInconsistency = errors.New("structural inconsistency detected")
-	ErrQuotaExceeded           = errors.New("quota exceeded")
-	ErrQuotaDisabled           = errors.New("group quota is disabled")
-)
-
-type CommandType uint8
-
-const (
-	CmdCreateInode        CommandType = 1
-	CmdUpdateInode        CommandType = 2
-	CmdDeleteInode        CommandType = 3
-	CmdRegisterNode       CommandType = 4
-	CmdCreateUser         CommandType = 5
-	CmdCreateGroup        CommandType = 6
-	CmdUpdateGroup        CommandType = 7
-	CmdAddChunkReplica    CommandType = 8
-	CmdGCRemove           CommandType = 9
-	CmdSetUserQuota       CommandType = 10
-	CmdRotateKey          CommandType = 11
-	CmdInitWorld          CommandType = 12
-	CmdStoreKeySync       CommandType = 13
-	CmdBatch              CommandType = 14
-	CmdAcquireLeases      CommandType = 15
-	CmdReleaseLeases      CommandType = 16
-	CmdPromoteAdmin       CommandType = 17
-	CmdStoreMetrics       CommandType = 18
-	CmdSetGroupQuota      CommandType = 19
-	CmdSetClusterSignKey  CommandType = 20
-	CmdRemoveNode         CommandType = 21
-	CmdRotateFSMKey       CommandType = 22
-	CmdReencryptValue     CommandType = 23
-	CmdAdminSetUserLock   CommandType = 24
-	CmdRemoveChunkReplica CommandType = 25
-)
-
-type LogCommand struct {
-	Type          CommandType       `json:"type"`
-	Data          json.RawMessage   `json:"data"`
-	UserID        string            `json:"uid,omitempty"`
-	SessionNonce  string            `json:"sid,omitempty"`
-	LeaseBindings map[string]string `json:"lease_bindings,omitempty"` // nameHMAC -> pathID
-	Atomic        bool              `json:"atomic,omitempty"`         // Roll back entire transaction on any sub-command error
-}
-
-func (c LogCommand) Marshal() []byte {
-	b, _ := json.Marshal(c)
-	return b
-}
-
-type ReencryptRequest struct {
-	Bucket []byte `json:"bucket"`
-	Key    []byte `json:"key"`
-}
-
-type LeaseRequest struct {
-	InodeIDs     []string  `json:"inode_ids"`
-	SessionID    string    `json:"session_id"`
-	Nonce        string    `json:"nonce,omitempty"`
-	Duration     int64     `json:"duration"`
-	UserID       string    `json:"user_id,omitempty"`
-	Type         LeaseType `json:"type,omitempty"`
-	Placeholders []Inode   `json:"placeholders,omitempty"`
-}
-
-type RotateKeyRequest struct {
-	Gen uint32 `json:"gen"`
-	Key []byte `json:"key"`
-}
-
-type RotateFSMKeyRequest struct {
-	Gen    uint32 `json:"gen"`
-	NewKey []byte `json:"new_key"`
-}
-
-type ClusterKey struct {
-	ID        string `json:"id"`
-	CreatedAt int64  `json:"created_at"`
-	Key       []byte `json:"key"`
-	EncKey    []byte `json:"enc_key,omitempty"`
-	DecKey    []byte `json:"dec_key,omitempty"`
-}
-
-type AddReplicaRequest struct {
-	InodeID string   `json:"inode_id"`
-	ChunkID string   `json:"chunk_id"`
-	NodeIDs []string `json:"node_ids"`
-}
 
 type MetadataSnapshot struct {
 	db      *bolt.DB

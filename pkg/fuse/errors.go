@@ -4,6 +4,7 @@ package fuse
 import (
 	"context"
 	"errors"
+	"net/http"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 
@@ -21,7 +22,18 @@ func mapError(err error) error {
 	// 1. Check for specific APIError mapping
 	var apiErr *client.APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.ToPOSIX()
+		switch apiErr.StatusCode {
+		case http.StatusNotFound:
+			return syscall.ENOENT
+		case http.StatusUnauthorized, http.StatusForbidden:
+			return syscall.EACCES
+		case http.StatusServiceUnavailable, http.StatusTooManyRequests:
+			return syscall.EAGAIN
+		case http.StatusConflict:
+			return syscall.EEXIST
+		default:
+			return syscall.EIO
+		}
 	}
 	// 2. Handle specific Sentinel errors
 	if errors.Is(err, metadata.ErrNotFound) {

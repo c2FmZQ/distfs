@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"iter"
 	"log"
 	mrand "math/rand"
@@ -37,13 +38,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
-	"github.com/c2FmZQ/ech"
 )
 
 type contextKey string
@@ -284,20 +283,7 @@ type Client struct {
 
 // NewClient creates a new DistFS client.
 func NewClient(serverAddr string) *Client {
-	var transport http.RoundTripper
-
-	if strings.HasPrefix(serverAddr, "http://") {
-		t := http.DefaultTransport.(*http.Transport).Clone()
-		t.ForceAttemptHTTP2 = true
-		t.MaxIdleConns = 100
-		t.MaxIdleConnsPerHost = 100
-		transport = t
-	} else {
-		echTransport := ech.NewTransport()
-		echTransport.HTTPTransport.MaxIdleConns = 100
-		echTransport.HTTPTransport.MaxIdleConnsPerHost = 100
-		transport = echTransport
-	}
+	transport := getDefaultTransport(serverAddr)
 
 	return &Client{
 		serverURL: serverAddr,
@@ -389,16 +375,7 @@ func (c *Client) WithDisableDoH(disable bool) *Client {
 	c2 := *c
 	clonedClient := *c.httpClient
 	c2.httpClient = &clonedClient
-
-	if transport, ok := c2.httpClient.Transport.(*ech.Transport); ok {
-		t2 := *transport
-		if disable {
-			t2.Resolver = ech.InsecureGoResolver()
-		} else {
-			t2.Resolver = ech.DefaultResolver
-		}
-		c2.httpClient.Transport = &t2
-	}
+	c2.httpClient.Transport = applyDisableDoH(c2.httpClient.Transport, disable)
 	return &c2
 }
 
@@ -1218,18 +1195,16 @@ func (c *Client) newAPIError(resp *http.Response, body io.Reader) *APIError {
 	return ae
 }
 
-func (e *APIError) ToPOSIX() error {
+func (e *APIError) ToFS() error {
 	switch e.StatusCode {
 	case http.StatusNotFound:
-		return syscall.ENOENT
+		return fs.ErrNotExist
 	case http.StatusUnauthorized, http.StatusForbidden:
-		return syscall.EACCES
-	case http.StatusServiceUnavailable, http.StatusTooManyRequests:
-		return syscall.EAGAIN
+		return fs.ErrPermission
 	case http.StatusConflict:
-		return syscall.EEXIST
+		return fs.ErrExist
 	default:
-		return syscall.EIO
+		return e
 	}
 }
 
@@ -4666,11 +4641,15 @@ func (c *Client) isRetryable(err error) bool {
 		return c.isRetryable(urlErr.Err)
 	}
 
-	// 2. Check for specific syscall errors
-	if errors.Is(err, syscall.ECONNREFUSED) ||
-		errors.Is(err, syscall.ECONNRESET) ||
-		errors.Is(err, syscall.ECONNABORTED) ||
-		errors.Is(err, syscall.ETIMEDOUT) ||
+	// 2. Check for specific network errors
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") ||
+		strings.Contains(msg, "connection aborted") ||
+		strings.Contains(msg, "timeout") ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) {
 		return true
