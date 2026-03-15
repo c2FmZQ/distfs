@@ -187,7 +187,11 @@ class DistFSApp {
         this.currentPath = path;
         document.getElementById('breadcrumb')!.innerText = path;
         const fileList = document.getElementById('file-list')!;
-        fileList.innerHTML = '<div>Loading...</div>';
+        
+        fileList.innerHTML = '';
+        const loadingDiv = document.createElement('div');
+        loadingDiv.textContent = 'Loading...';
+        fileList.appendChild(loadingDiv);
 
         try {
             const entries = await this.client.listDirectory(path);
@@ -196,7 +200,17 @@ class DistFSApp {
             if (path !== '/') {
                 const upDir = document.createElement('div');
                 upDir.className = 'file-item';
-                upDir.innerHTML = `<div class="file-icon">📁</div><div class="file-name">..</div>`;
+                
+                const upIcon = document.createElement('div');
+                upIcon.className = 'file-icon';
+                upIcon.textContent = '📁';
+                upDir.appendChild(upIcon);
+                
+                const upName = document.createElement('div');
+                upName.className = 'file-name';
+                upName.textContent = '..';
+                upDir.appendChild(upName);
+                
                 upDir.onclick = () => {
                     const parent = path.substring(0, path.lastIndexOf('/')) || '/';
                     this.loadDirectory(parent);
@@ -210,19 +224,50 @@ class DistFSApp {
                 
                 const isImage = entry.name.match(/\.(jpg|jpeg|png|gif|webp)$/i);
                 
-                let iconContent = entry.isDir ? '📁' : '📄';
+                const iconDiv = document.createElement('div');
+                iconDiv.className = 'file-icon';
+                iconDiv.style.height = '100px';
+                iconDiv.style.display = 'flex';
+                iconDiv.style.alignItems = 'center';
+                iconDiv.style.justifyContent = 'center';
+
                 if (!entry.isDir && isImage) {
-                    // For images, we use our Service Worker media stream to render the thumbnail.
-                    // The SW intercepts /distfs-media/ requests and decrypts on the fly.
-                    iconContent = `<img src="/distfs-media/${entry.name}" style="max-width: 100%; max-height: 100px; object-fit: contain;" alt="${entry.name}">`;
+                    const img = document.createElement('img');
+                    img.src = `/distfs-media/${entry.name}`;
+                    img.style.maxWidth = '100%';
+                    img.style.maxHeight = '100px';
+                    img.style.objectFit = 'contain';
+                    img.alt = entry.name;
+                    iconDiv.appendChild(img);
+                } else {
+                    iconDiv.textContent = entry.isDir ? '📁' : '📄';
                 }
 
-                const sizeStr = entry.isDir ? '' : `<br><small>${(entry.size / 1024).toFixed(1)} KB</small>`;
-                el.innerHTML = `
-                    <div class="file-icon" style="height: 100px; display: flex; align-items: center; justify-content: center;">${iconContent}</div>
-                    <div class="file-name">${entry.name}${sizeStr}</div>
-                    <button class="share-btn" style="margin-top: 5px; font-size: 0.8em; padding: 2px 5px;" onclick="event.stopPropagation(); window.openShareModal('${entry.name}')">Share</button>
-                `;
+                const nameDiv = document.createElement('div');
+                nameDiv.className = 'file-name';
+                nameDiv.textContent = entry.name;
+                
+                if (!entry.isDir) {
+                    const sizeSpan = document.createElement('small');
+                    sizeSpan.textContent = `${(entry.size / 1024).toFixed(1)} KB`;
+                    nameDiv.appendChild(document.createElement('br'));
+                    nameDiv.appendChild(sizeSpan);
+                }
+
+                const shareBtn = document.createElement('button');
+                shareBtn.className = 'share-btn';
+                shareBtn.style.marginTop = '5px';
+                shareBtn.style.fontSize = '0.8em';
+                shareBtn.style.padding = '2px 5px';
+                shareBtn.textContent = 'Share';
+                shareBtn.onclick = (event) => {
+                    event.stopPropagation();
+                    (window as any).openShareModal(entry.name);
+                };
+
+                el.appendChild(iconDiv);
+                el.appendChild(nameDiv);
+                el.appendChild(shareBtn);
                 
                 el.onclick = () => {
                     if (entry.isDir) {
@@ -238,7 +283,11 @@ class DistFSApp {
                 fileList.appendChild(el);
             }
         } catch (e: any) {
-            fileList.innerHTML = `<div style="color:red">Error: ${e.message}</div>`;
+            fileList.innerHTML = '';
+            const errorDiv = document.createElement('div');
+            errorDiv.style.color = 'red';
+            errorDiv.textContent = `Error: ${e.message}`;
+            fileList.appendChild(errorDiv);
         }
     }
 

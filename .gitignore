@@ -9,4 +9,6 @@
 /node*/
 /DISTFS-REPORT.md
 /logs/
+/web/js/
+/web/wasm_exec.js
 /web/distfs.wasm

@@ -88,8 +88,6 @@ docker compose down -v --remove-orphans > /dev/null 2>&1
 # 4. Run E2E Tests & Benchmarks
 echo "Starting E2E and FUSE tests (15m timeout)..."
 # Capture all output
-export HOST_UID=$(id -u)
-export HOST_GID=$(id -g)
 if ! timeout 15m docker compose up --build --exit-code-from e2e-runner > "$LOG_DIR/all-logs.log" 2>&1; then
     E2E_FAILED=1
 fi
