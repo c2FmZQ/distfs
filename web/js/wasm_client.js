@@ -2,12 +2,15 @@
 export class WasmClient {
     worker;
     pendingRequests;
+    onReady;
     constructor(workerUrl) {
         this.worker = new Worker(workerUrl);
         this.pendingRequests = new Map();
         this.worker.onmessage = (event) => {
             if (event.data.type === 'ready') {
                 console.log("WASM Worker is ready.");
+                if (this.onReady)
+                    this.onReady();
                 return;
             }
             const { id, type, result, error } = event.data;
@@ -35,6 +38,9 @@ export class WasmClient {
     }
     async generateKeys() {
         return this.invoke('generateKeys');
+    }
+    async fetchServerKey(serverURL) {
+        return this.invoke('fetchServerKey', { serverURL });
     }
     async registerUser(serverURL, jwt, signKeyPubHex, encKeyHex) {
         return this.invoke('registerUser', { serverURL, jwt, signKeyPubHex, encKeyHex });

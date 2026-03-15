@@ -398,6 +398,11 @@ func (c *Client) UserID() string {
 	return c.userID
 }
 
+// HTTPClient returns the underlying HTTP client, useful for raw requests in WASM bridge.
+func (c *Client) HTTPClient() *http.Client {
+	return c.httpClient
+}
+
 func (c *Client) SignKey() *crypto.IdentityKey {
 	return c.signKey
 }

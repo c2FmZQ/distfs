@@ -1158,3 +1158,23 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 61.7: Sharing & ACL UI**
     *   **Action:** Build modal dialogs to interact with the DistFS Dark Registry.
     *   **Action:** Implement UI to add specific users or groups to a file's Lockbox (POSIX ACLs), triggering the underlying WASM re-encryption and signature flows.
+
+---
+
+## Phase 62: Web UI End-to-End Testing (Playwright & Docker Compose)
+
+**Goal:** Establish an automated End-to-End testing pipeline for the Web UI using Playwright. This pipeline must run fully containerized within the existing `docker-compose.yml` infrastructure, matching the rigor of the native `e2e-runner`.
+
+*   **Step 62.1: Local Test Server & Asset Hosting**
+    *   **Action:** Build a lightweight Go file server (`cmd/web-test-server/main.go`) that serves the `web/` directory over HTTP.
+    *   **Action:** Add this test server as a new service in `docker-compose.yml`, running on port `8091`.
+*   **Step 62.2: Playwright Toolchain Setup**
+    *   **Action:** Add `playwright` and `@playwright/test` to the `devDependencies` in `package.json`.
+    *   **Action:** Create a `playwright.config.ts` configured for headless Chromium execution, pointing to the test server (`http://web-test-server:8091`) and relying on the existing `storage-node-1` (`http://storage-node-1:8080`) for the DistFS API.
+*   **Step 62.3: Core E2E Test Suite (`web/tests/e2e.spec.ts`)**
+    *   **Action:** Write an authentication test: Playwright will call `http://test-auth:8080/mint` to generate a real JWT. It will then interact with the `prompt()` dialogs to inject this JWT and a test passphrase, asserting that the UI transitions from the "auth-overlay" to the main file manager view and successfully registers the user with the `storage-node`.
+    *   **Action:** Write a directory listing test: Use the DistFS CLI (`distfs`) inside the test container to seed a directory structure, then assert that the Web UI correctly renders the directories and files.
+*   **Step 62.4: Docker Compose Integration**
+    *   **Action:** Update the `Dockerfile` to include the Node.js runtime and Playwright browser dependencies. (Note: Alpine Linux does not officially support Playwright browsers out-of-the-box. We must transition the `e2e-runner` or create a new `playwright-runner` based on `mcr.microsoft.com/playwright:v1.X.X-jammy`).
+    *   **Action:** Add a `web-e2e-runner` service to `docker-compose.yml` that runs `npx playwright test` and depends on the storage nodes and the web test server.
+    *   **Action:** Update `scripts/run-tests.sh` to capture the exit code of the `web-e2e-runner` and append its logs to the final test report.

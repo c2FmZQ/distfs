@@ -21,6 +21,8 @@
   },
   "homepage": "https://github.com/c2FmZQ/distfs#readme",
   "devDependencies": {
+    "@playwright/test": "^1.58.2",
+    "playwright": "^1.58.2",
     "typescript": "^5.9.3"
   }
 }

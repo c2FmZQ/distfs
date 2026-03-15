@@ -25,9 +25,16 @@ CGO_ENABLED=0 go build -o bin/distfs-fuse ./cmd/distfs-fuse
 CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
 CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
 CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
+CGO_ENABLED=0 go build -o bin/web-test-server ./cmd/web-test-server
 
 echo "Building WASM module..."
 GOOS=js GOARCH=wasm go build -o web/distfs.wasm ./cmd/distfs-wasm
+rm -f web/wasm_exec.js
+if [ -f "$(go env GOROOT)/lib/wasm/wasm_exec.js" ]; then
+    cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
+else
+    cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" web/
+fi
 
 # 2. Run Unit Tests
 if [ $SKIP_UNIT -eq 0 ]; then
@@ -48,7 +55,10 @@ if [ $SKIP_UNIT -eq 0 ]; then
     grep "FAIL" "$LOG_DIR/unit-tests.log" >> $REPORT || true
 
     echo "Running WASM Unit Tests..."
-    WASM_EXEC="$(go env GOROOT)/misc/wasm/go_js_wasm_exec"
+    WASM_EXEC="$(go env GOROOT)/lib/wasm/go_js_wasm_exec"
+    if [ ! -f "$WASM_EXEC" ]; then
+        WASM_EXEC="$(go env GOROOT)/misc/wasm/go_js_wasm_exec"
+    fi
     if [ -f "$WASM_EXEC" ]; then
         if ! GOOS=js GOARCH=wasm go test -exec="$WASM_EXEC" ./pkg/client ./pkg/crypto > "$LOG_DIR/wasm-unit-tests.log" 2>&1; then
             cat "$LOG_DIR/wasm-unit-tests.log" >> $REPORT
@@ -78,6 +88,8 @@ docker compose down -v --remove-orphans > /dev/null 2>&1
 # 4. Run E2E Tests & Benchmarks
 echo "Starting E2E and FUSE tests (15m timeout)..."
 # Capture all output
+export HOST_UID=$(id -u)
+export HOST_GID=$(id -g)
 if ! timeout 15m docker compose up --build --exit-code-from e2e-runner > "$LOG_DIR/all-logs.log" 2>&1; then
     E2E_FAILED=1
 fi

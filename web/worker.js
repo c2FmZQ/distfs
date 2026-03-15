@@ -36,6 +36,9 @@ onmessage = async (event) => {
             case 'generateKeys':
                 result = await self.DistFS.generateKeys();
                 break;
+            case 'fetchServerKey':
+                result = await self.DistFS.fetchServerKey(event.data.serverURL);
+                break;
             case 'registerUser':
                 result = await self.DistFS.registerUser(
                     event.data.serverURL,

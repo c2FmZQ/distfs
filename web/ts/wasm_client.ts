@@ -16,6 +16,7 @@ export interface WasmResponse {
 export class WasmClient {
     private worker: Worker;
     private pendingRequests: Map<string, { resolve: (val: any) => void, reject: (err: any) => void }>;
+    public onReady?: () => void;
 
     constructor(workerUrl: string) {
         this.worker = new Worker(workerUrl);
@@ -24,6 +25,7 @@ export class WasmClient {
         this.worker.onmessage = (event: MessageEvent<WasmResponse>) => {
             if (event.data.type === 'ready') {
                 console.log("WASM Worker is ready.");
+                if (this.onReady) this.onReady();
                 return;
             }
 
@@ -53,6 +55,10 @@ export class WasmClient {
 
     async generateKeys(): Promise<{decKey: string, encKey: string, signKey: string, signPubKey: string}> {
         return this.invoke('generateKeys');
+    }
+
+    async fetchServerKey(serverURL: string): Promise<string> {
+        return this.invoke('fetchServerKey', { serverURL });
     }
 
     async registerUser(serverURL: string, jwt: string, signKeyPubHex: string, encKeyHex: string): Promise<string> {

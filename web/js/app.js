@@ -1,10 +1,16 @@
 import { WasmClient } from './wasm_client.js';
 class DistFSApp {
     client;
-    serverURL = 'http://localhost:8080';
+    serverURL = localStorage.getItem('distfs_server_url') || 'http://localhost:8080';
     currentPath = '/';
     constructor() {
         this.client = new WasmClient('worker.js');
+        this.client.onReady = () => {
+            const statusEl = document.getElementById('status');
+            if (statusEl) {
+                statusEl.innerText = 'WASM Ready. Awaiting authentication.';
+            }
+        };
         this.initUI();
         this.setupServiceWorkerBridge();
     }
@@ -102,18 +108,21 @@ class DistFSApp {
                 statusEl.innerText = 'Registration complete, but keys were not backed up.';
                 return;
             }
+            statusEl.innerText = 'Fetching server key...';
+            const serverKeyHex = await this.client.fetchServerKey(this.serverURL);
             const config = {
                 user_id: userID,
                 enc_key: keys.decKey,
                 sign_key: keys.signKey,
-                server_key: ""
+                server_key: serverKeyHex
             };
             statusEl.innerText = 'Encrypting configuration...';
             const encryptedBlob = await this.client.encryptConfig(JSON.stringify(config), passphrase);
+            statusEl.innerText = 'Initializing client...';
+            await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, config.server_key);
             statusEl.innerText = 'Pushing to cloud backup...';
             await this.client.pushKeySync(encryptedBlob);
             statusEl.innerText = `Account created and backed up! User ID: ${userID}`;
-            await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, config.server_key);
             this.onLoginSuccess(userID);
         }
         catch (e) {

@@ -1,8 +1,15 @@
 # Copyright 2026 TTBT Enterprises LLC
-FROM alpine:latest
+FROM mcr.microsoft.com/playwright:v1.58.2-jammy
+
+# Disable interactive prompts during apt-get
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Install fuse3 and acl for the fuse-tester container
-RUN apk add --no-cache fuse3 tzdata jq curl acl
+RUN apt-get update && apt-get install -y tzdata fuse3 jq curl acl wget && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /distfs
+COPY package.json package-lock.json playwright.config.ts ./
+RUN npm ci && npx playwright install --with-deps chromium
 
 COPY bin/storage-node /bin/storage-node
 COPY bin/distfs /bin/distfs
@@ -10,6 +17,8 @@ COPY bin/distfs-fuse /bin/distfs-fuse
 COPY bin/test-auth /bin/test-auth
 COPY bin/distfs-bench /bin/distfs-bench
 COPY bin/distfs-fuse-load /bin/distfs-fuse-load
+COPY bin/web-test-server /bin/web-test-server
+COPY web /distfs/web
 COPY scripts/test-e2e.sh /bin/test-e2e.sh
 COPY scripts/test-fuse.sh /bin/test-fuse.sh
 COPY scripts/test-ha.sh /bin/test-ha.sh
