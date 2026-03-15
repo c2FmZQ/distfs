@@ -1033,10 +1033,11 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	unlock := fs.Bool("unlock", false, "Unlock the user account after verification")
 	quota := fs.String("quota", "", "Set user quota (format: bytes,inodes e.g. 1000000,5000)")
 	home := fs.Bool("home", false, "Provision a home directory in /users/<username>")
+	assumeYes := fs.Bool("yes", false, "Assume 'yes' for the verification prompt")
 	fs.Parse(args)
 
 	if fs.NArg() < 2 {
-		log.Fatal("usage: registry-add [--unlock] [--quota <bytes,inodes>] [--home] <username> <email>")
+		log.Fatal("usage: registry-add [--unlock] [--quota <bytes,inodes>] [--home] [--yes] <username> <email>")
 	}
 	username := fs.Arg(0)
 	email := fs.Arg(1)
@@ -1071,12 +1072,16 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	fmt.Printf("Please contact this user out-of-band (e.g., via phone or Signal).\n")
 	fmt.Printf("Ask them to verify their security code matches: %s\n", codeStr)
 	fmt.Printf("-----------------------------------------\n")
-	fmt.Printf("Does the code match? [y/N]: ")
 
-	var response string
-	fmt.Scanln(&response)
-	if strings.ToLower(strings.TrimSpace(response)) != "y" {
-		log.Fatal("Verification aborted.")
+	if !*assumeYes {
+		fmt.Printf("Does the code match? [y/N]: ")
+		var response string
+		fmt.Scanln(&response)
+		if strings.ToLower(strings.TrimSpace(response)) != "y" {
+			log.Fatal("Verification aborted.")
+		}
+	} else {
+		fmt.Println("Verification auto-confirmed via --yes flag.")
 	}
 
 	// 3. Attestation & Registry Update

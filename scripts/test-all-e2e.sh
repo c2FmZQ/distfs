@@ -84,7 +84,7 @@ provision_user() {
     U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
     
     # Provision directory and unlock via Global Admin
-    echo "y" | distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --unlock --home "$name" "$email"
+    distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$email"
     
     # Add to users group to allow traversal
     distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
@@ -108,7 +108,7 @@ BENCH_OUT=$(distfs -disable-doh -use-pinentry=false -config "/tmp/bench-dir/conf
 BENCH_ID=$(echo "$BENCH_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 # Provision, unlock, and assign to admin group
-echo "y" | distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --unlock bench-user bench-user@example.com
+distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user bench-user@example.com
 distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
 
 # Promote and add to Administrators group
@@ -142,6 +142,7 @@ run_test "OOB Identity & Registry" "/bin/test-registry.sh" || FAILED=1
 echo "--- WEB UI TESTS ---" | tee -a $REPORT_FILE
 echo "Running Playwright E2E..." | tee -a $REPORT_FILE
 # Navigate to workspace and run playwright
+export CAPTURE_SCREENSHOTS="${CAPTURE_SCREENSHOTS:-}"
 cd /distfs && npx playwright test >> $REPORT_FILE 2>&1 || FAILED=1
 
 echo "" | tee -a $REPORT_FILE

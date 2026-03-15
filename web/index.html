@@ -87,11 +87,57 @@
         </div>
     </div>
 
+    <!-- Device Flow Modal -->
+    <div id="device-flow-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); z-index: 300; justify-content:center; align-items:center; color: white; text-align: center;">
+        <div style="background:#222; padding:30px; border-radius:12px; max-width:400px; width: 90%;">
+            <h2>Authorize Access</h2>
+            <p>Please open the following URL in a new tab:</p>
+            <p><a id="device-flow-link" href="#" target="_blank" style="color: #007bff; word-break: break-all;"></a></p>
+            <p>And enter this code if prompted:</p>
+            <h1 id="device-flow-code" style="letter-spacing: 5px; background: #333; padding: 10px; border-radius: 4px;"></h1>
+            <p id="device-flow-status">Waiting for verification...</p>
+            <button id="btn-cancel-device-flow" style="margin-top: 20px; background: #444; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer;">Cancel</button>
+        </div>
+    </div>
+
     <script>
+        console.log('SW: isSecureContext =', window.isSecureContext);
         if ('serviceWorker' in navigator) {
-            navigator.serviceWorker.register('sw.js').then(() => {
-                console.log('Service Worker Registered');
+            console.log('SW: Registering...');
+            navigator.serviceWorker.register('sw.js').then(reg => {
+                console.log('SW: Registered, scope:', reg.scope);
+                
+                if (reg.installing) console.log('SW: Installing...');
+                if (reg.waiting) console.log('SW: Waiting...');
+                if (reg.active) console.log('SW: Active');
+
+                if (!navigator.serviceWorker.controller) {
+                    console.log('SW: No controller, waiting for activation...');
+                    reg.addEventListener('updatefound', () => {
+                        const newWorker = reg.installing;
+                        console.log('SW: New worker installing...');
+                        newWorker.addEventListener('statechange', () => {
+                            console.log('SW: State change:', newWorker.state);
+                            if (newWorker.state === 'activated') {
+                                console.log('SW: Activated! Reloading...');
+                                window.location.reload();
+                            }
+                        });
+                    });
+                    
+                    // Fallback: if already active but no controller, claim it
+                    if (reg.active) {
+                        console.log('SW: Already active but no controller. Reloading in 1s...');
+                        setTimeout(() => window.location.reload(), 1000);
+                    }
+                } else {
+                    console.log('SW: Page is controlled by:', navigator.serviceWorker.controller.scriptURL);
+                }
+            }).catch(err => {
+                console.error('SW: Registration failed:', err);
             });
+        } else {
+            console.warn('SW: Not supported in this browser');
         }
     </script>
     <script type="module" src="js/app.js"></script>

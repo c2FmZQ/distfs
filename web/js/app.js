@@ -1,7 +1,7 @@
 import { WasmClient } from './wasm_client.js';
 class DistFSApp {
     client;
-    serverURL = localStorage.getItem('distfs_server_url') || 'http://localhost:8080';
+    serverURL = localStorage.getItem('distfs_server_url') || window.location.origin;
     currentPath = '/';
     constructor() {
         this.client = new WasmClient('worker.js');
@@ -46,6 +46,10 @@ class DistFSApp {
         if (btnLogin) {
             btnLogin.addEventListener('click', () => this.handleLogin());
         }
+        document.getElementById('btn-cancel-device-flow')?.addEventListener('click', () => {
+            // Reload page to abort everything for simplicity
+            window.location.reload();
+        });
         document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
             document.getElementById('share-modal').style.display = 'none';
         });
@@ -67,6 +71,36 @@ class DistFSApp {
             }
         });
         this.setupDragAndDrop();
+    }
+    async getAuthConfig() {
+        const res = await fetch(`${this.serverURL}/v1/auth/config`);
+        if (!res.ok) {
+            throw new Error("Auth config unavailable");
+        }
+        return await res.json();
+    }
+    async performDeviceFlow() {
+        const config = await this.getAuthConfig();
+        const authInfo = await this.client.startDeviceAuth(config.device_authorization_endpoint, config.token_endpoint);
+        const modal = document.getElementById('device-flow-modal');
+        const link = document.getElementById('device-flow-link');
+        const code = document.getElementById('device-flow-code');
+        const status = document.getElementById('device-flow-status');
+        const verificationURL = authInfo.verificationURIComplete || authInfo.verificationURI;
+        link.href = verificationURL;
+        link.innerText = verificationURL;
+        code.innerText = authInfo.userCode;
+        status.innerText = "Waiting for you to authorize...";
+        modal.style.display = 'flex';
+        try {
+            const token = await this.client.pollForToken(config.device_authorization_endpoint, config.token_endpoint, authInfo.deviceCode, authInfo.userCode, authInfo.verificationURI, authInfo.interval);
+            modal.style.display = 'none';
+            return token;
+        }
+        catch (e) {
+            modal.style.display = 'none';
+            throw e;
+        }
     }
     setupDragAndDrop() {
         const mainView = document.getElementById('main-view');
@@ -95,14 +129,10 @@ class DistFSApp {
         statusEl.innerText = 'Generating Post-Quantum Keys...';
         try {
             const keys = await this.client.generateKeys();
-            console.log("Keys generated locally.");
-            const mockJWT = prompt("Enter an OIDC JWT to register:");
-            if (!mockJWT) {
-                statusEl.innerText = 'Registration cancelled.';
-                return;
-            }
+            statusEl.innerText = 'Please authorize in the popup modal...';
+            const jwt = await this.performDeviceFlow();
             statusEl.innerText = 'Registering with cluster...';
-            const userID = await this.client.registerUser(this.serverURL, mockJWT, keys.signPubKey, keys.encKey);
+            const userID = await this.client.registerUser(this.serverURL, jwt, keys.signPubKey, keys.encKey);
             const passphrase = prompt("Registration successful! Enter a passphrase to backup your keys to the cloud:");
             if (!passphrase) {
                 statusEl.innerText = 'Registration complete, but keys were not backed up.';
@@ -123,7 +153,7 @@ class DistFSApp {
             statusEl.innerText = 'Pushing to cloud backup...';
             await this.client.pushKeySync(encryptedBlob);
             statusEl.innerText = `Account created and backed up! User ID: ${userID}`;
-            this.onLoginSuccess(userID);
+            await this.onLoginSuccess(userID);
         }
         catch (e) {
             statusEl.innerText = `Error: ${e.message}`;
@@ -132,11 +162,10 @@ class DistFSApp {
     async handleLogin() {
         const statusEl = document.getElementById('status');
         try {
-            const mockJWT = prompt("Enter your OIDC JWT to login:");
-            if (!mockJWT)
-                return;
+            statusEl.innerText = 'Please authorize in the popup modal...';
+            const jwt = await this.performDeviceFlow();
             statusEl.innerText = 'Fetching cloud backup...';
-            const blobStr = await this.client.pullKeySync(this.serverURL, mockJWT);
+            const blobStr = await this.client.pullKeySync(this.serverURL, jwt);
             const passphrase = prompt("Enter your passphrase to decrypt your keys:");
             if (!passphrase)
                 return;
@@ -145,16 +174,17 @@ class DistFSApp {
             const config = JSON.parse(configStr);
             statusEl.innerText = 'Initializing client...';
             await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, config.server_key);
-            this.onLoginSuccess(config.user_id);
+            await this.onLoginSuccess(config.user_id);
+            statusEl.innerText = `Logged in successfully as ${config.user_id}`;
         }
         catch (e) {
             statusEl.innerText = `Login Error: ${e.message}`;
         }
     }
-    onLoginSuccess(userID) {
+    async onLoginSuccess(userID) {
         document.getElementById('auth-overlay').style.display = 'none';
         document.getElementById('user-info').innerText = `User: ${userID.substring(0, 8)}...`;
-        this.loadDirectory('/');
+        await this.loadDirectory('/');
     }
     async loadDirectory(path) {
         this.currentPath = path;
@@ -195,8 +225,9 @@ class DistFSApp {
                 iconDiv.style.alignItems = 'center';
                 iconDiv.style.justifyContent = 'center';
                 if (!entry.isDir && isImage) {
+                    const fullPath = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
                     const img = document.createElement('img');
-                    img.src = `/distfs-media/${entry.name}`;
+                    img.src = `/distfs-media${fullPath}`;
                     img.style.maxWidth = '100%';
                     img.style.maxHeight = '100px';
                     img.style.objectFit = 'contain';
@@ -234,8 +265,9 @@ class DistFSApp {
                         this.loadDirectory(newPath);
                     }
                     else {
+                        const fullPath = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
                         const dlLink = document.createElement('a');
-                        dlLink.href = `/distfs-download/${entry.name}`;
+                        dlLink.href = `/distfs-download${fullPath}`;
                         dlLink.download = entry.name;
                         dlLink.click();
                     }

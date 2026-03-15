@@ -37,13 +37,14 @@ import (
 )
 
 var (
-	configPath  = flag.String("config", config.DefaultPath(), "Path to config file")
-	usePinentry = flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
-	useTPM      = flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
-	adminFlag   = flag.Bool("admin", false, "Enable admin bypass mode")
-	disableDoH  = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
-	rootID      = flag.String("root", "", "Specify target root directory ID")
-	registryDir = flag.String("registry", "/registry", "Directory to use for identity verification")
+	configPath    = flag.String("config", config.DefaultPath(), "Path to config file")
+	usePinentry   = flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
+	useTPM        = flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
+	adminFlag     = flag.Bool("admin", false, "Enable admin bypass mode")
+	disableDoH    = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
+	allowInsecure = flag.Bool("allow-insecure", false, "Allow insecure TLS connections (skip verification)")
+	rootID        = flag.String("root", "", "Specify target root directory ID")
+	registryDir   = flag.String("registry", "/registry", "Directory to use for identity verification")
 )
 
 func setupTPMHasher() {
@@ -246,6 +247,7 @@ func cmdInit(ctx context.Context, args []string) {
 		ShowQR:        *qrCode,
 		Browser:       *browser,
 		DisableDoH:    *disableDoH,
+		AllowInsecure: *allowInsecure,
 	}
 
 	if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
@@ -279,6 +281,7 @@ func loadClient() *client.Client {
 		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
 		WithAdmin(*adminFlag).
 		WithDisableDoH(*disableDoH).
+		WithAllowInsecure(*allowInsecure).
 		WithRegistry(*registryDir)
 
 	if *rootID != "" {

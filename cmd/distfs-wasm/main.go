@@ -10,15 +10,77 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path/filepath"
 	"syscall/js"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"golang.org/x/oauth2"
 )
 
 var c *client.Client
+
+func startDeviceAuth(args []js.Value) (interface{}, error) {
+	authEndpoint := args[0].String()
+	tokenEndpoint := args[1].String()
+	
+	oauthConfig := &oauth2.Config{
+		ClientID: "distfs",
+		Endpoint: oauth2.Endpoint{
+			DeviceAuthURL: authEndpoint,
+			TokenURL:      tokenEndpoint,
+		},
+		Scopes: []string{"openid", "email"},
+	}
+
+	resp, err := oauthConfig.DeviceAuth(context.Background())
+	if err != nil {
+		return nil, err
+	}
+
+	return map[string]interface{}{
+		"verificationURI":         resp.VerificationURI,
+		"verificationURIComplete": resp.VerificationURIComplete,
+		"userCode":                resp.UserCode,
+		"deviceCode":              resp.DeviceCode,
+		"interval":                resp.Interval,
+	}, nil
+}
+
+func pollForToken(args []js.Value) (interface{}, error) {
+	authEndpoint := args[0].String()
+	tokenEndpoint := args[1].String()
+	deviceCode := args[2].String()
+	userCode := args[3].String()
+	verificationURI := args[4].String()
+	interval := args[5].Int()
+
+	oauthConfig := &oauth2.Config{
+		ClientID: "distfs",
+		Endpoint: oauth2.Endpoint{
+			DeviceAuthURL: authEndpoint,
+			TokenURL:      tokenEndpoint,
+		},
+		Scopes: []string{"openid", "email"},
+	}
+
+	// Reconstruct the response object for polling
+	resp := &oauth2.DeviceAuthResponse{
+		DeviceCode:      deviceCode,
+		UserCode:        userCode,
+		VerificationURI: verificationURI,
+		Interval:        int64(interval),
+	}
+
+	token, err := oauthConfig.DeviceAccessToken(context.Background(), resp)
+	if err != nil {
+		return nil, err
+	}
+
+	return token.AccessToken, nil
+}
 
 // asyncFunc wraps a Go function that returns (interface{}, error) into a JavaScript Promise.
 // This ensures that heavy cryptographic operations execute in the background Goroutine
@@ -260,17 +322,69 @@ func listDirectory(args []js.Value) (interface{}, error) {
 	return res, nil
 }
 
+func statFile(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	info, err := c.Stat(context.Background(), path)
+	if err != nil {
+		return nil, err
+	}
+
+	mimeType := "application/octet-stream"
+	ext := filepath.Ext(path)
+	switch ext {
+	case ".png":
+		mimeType = "image/png"
+	case ".jpg", ".jpeg":
+		mimeType = "image/jpeg"
+	case ".gif":
+		mimeType = "image/gif"
+	case ".webp":
+		mimeType = "image/webp"
+	}
+
+	return map[string]interface{}{
+		"size":     info.Size(),
+		"mimeType": mimeType,
+	}, nil
+}
+
+func readFileChunk(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	offset := int64(args[1].Int())
+	length := int(args[2].Int())
+
+	f, err := c.Open(context.Background(), path, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	buf := make([]byte, length)
+	n, err := f.ReadAt(buf, offset)
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+
+	uint8Array := js.Global().Get("Uint8Array").New(n)
+	js.CopyBytesToJS(uint8Array, buf[:n])
+	return uint8Array, nil
+}
+
 func main() {
 	js.Global().Set("DistFS", map[string]interface{}{
-		"init":          asyncFunc(initClient),
-		"listDirectory": asyncFunc(listDirectory),
-		"generateKeys":  asyncFunc(generateKeys),
-		"fetchServerKey": asyncFunc(fetchServerKey),
-		"encryptConfig": asyncFunc(encryptConfig),
-		"decryptConfig": asyncFunc(decryptConfig),
-		"pushKeySync":   asyncFunc(pushKeySync),
-		"pullKeySync":   asyncFunc(pullKeySync),
-		"registerUser":  asyncFunc(registerUser),
+		"init":            asyncFunc(initClient),
+		"listDirectory":   asyncFunc(listDirectory),
+		"statFile":        asyncFunc(statFile),
+		"readFileChunk":   asyncFunc(readFileChunk),
+		"generateKeys":    asyncFunc(generateKeys),
+		"fetchServerKey":  asyncFunc(fetchServerKey),
+		"encryptConfig":   asyncFunc(encryptConfig),
+		"decryptConfig":   asyncFunc(decryptConfig),
+		"pushKeySync":     asyncFunc(pushKeySync),
+		"pullKeySync":     asyncFunc(pullKeySync),
+		"registerUser":    asyncFunc(registerUser),
+		"startDeviceAuth": asyncFunc(startDeviceAuth),
+		"pollForToken":    asyncFunc(pollForToken),
 	})
 
 	// Block indefinitely to keep the WASM instance alive

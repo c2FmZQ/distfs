@@ -59,12 +59,24 @@ onmessage = async (event) => {
             case 'pullKeySync':
                 result = await self.DistFS.pullKeySync(event.data.serverURL, event.data.token);
                 break;
+            case 'startDeviceAuth':
+                result = await self.DistFS.startDeviceAuth(event.data.authEndpoint, event.data.tokenEndpoint);
+                break;
+            case 'pollForToken':
+                result = await self.DistFS.pollForToken(
+                    event.data.authEndpoint,
+                    event.data.tokenEndpoint,
+                    event.data.deviceCode,
+                    event.data.userCode,
+                    event.data.verificationURI,
+                    event.data.interval
+                );
+                break;
             case 'media-stream':
                 const mediaPort = event.ports[0];
                 try {
-                    // Ask WASM for the file size and mime type.
-                    // (Assuming we add statFile to WASM later, for now we mock the response to prove the pipeline)
-                    const meta = await self.DistFS.statFile(event.data.id); 
+                    const id = event.data.id;
+                    const meta = await self.DistFS.statFile(id); 
                     mediaPort.postMessage({ 
                         type: 'media-metadata', 
                         size: meta.size,
@@ -73,28 +85,50 @@ onmessage = async (event) => {
 
                     mediaPort.onmessage = async (msg) => {
                         if (msg.data.type === 'stream-range') {
-                            // In a real implementation, we fetch chunks covering [start, end]
-                            // and push them via mediaPort.postMessage({ type: 'chunk', data: ... })
-                            // For this simulation, we signal done immediately.
+                            let offset = msg.data.start;
+                            const end = msg.data.end;
+                            const chunkSize = 1024 * 1024; // 1MB chunks
+
+                            while (offset <= end) {
+                                const length = Math.min(chunkSize, end - offset + 1);
+                                const chunk = await self.DistFS.readFileChunk(id, offset, length);
+                                mediaPort.postMessage({ type: 'chunk', data: chunk }, [chunk.buffer]);
+                                offset += length;
+                            }
                             mediaPort.postMessage({ type: 'done' });
-                        } else if (msg.data.type === 'pull') {
-                            // Send next chunk if needed
                         }
                     };
                 } catch(err) {
                      mediaPort.postMessage({ type: 'error', error: err.toString() });
                 }
-                return; // Handled via MessageChannel
+                return;
             case 'download-stream':
                 const port = event.ports[0];
-                port.onmessage = async (msg) => {
-                    if (msg.data.type === 'pull') {
-                        // TODO: Implement actual chunk fetching from WASM in a later step
-                        port.postMessage({ type: 'done' });
-                    }
-                };
-                port.postMessage({ type: 'pull' });
-                return; // Early return, streaming handled via MessageChannel
+                try {
+                    const id = event.data.id;
+                    const meta = await self.DistFS.statFile(id);
+                    let offset = 0;
+                    const size = meta.size;
+                    const chunkSize = 1024 * 1024;
+
+                    port.onmessage = async (msg) => {
+                        if (msg.data.type === 'pull') {
+                            if (offset < size) {
+                                const length = Math.min(chunkSize, size - offset);
+                                const chunk = await self.DistFS.readFileChunk(id, offset, length);
+                                port.postMessage({ type: 'chunk', data: chunk }, [chunk.buffer]);
+                                offset += length;
+                            } else {
+                                port.postMessage({ type: 'done' });
+                            }
+                        }
+                    };
+                    // Initial pull trigger
+                    port.postMessage({ type: 'pull' });
+                } catch(err) {
+                    port.postMessage({ type: 'error', error: err.toString() });
+                }
+                return;
             default:
                 throw new Error(`Unknown action type: ${type}`);
         }

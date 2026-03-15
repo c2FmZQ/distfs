@@ -196,6 +196,9 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	}()
 	discoveryTransport := createTransport(discoveryTLSConfig)
 
+	retryClient.HTTPClient.Transport = discoveryTransport
+	remote = jwks.NewRemote(retryClient, nil)
+
 	s := &Server{
 		nodeID:     nodeID,
 		raft:       r,
@@ -347,7 +350,7 @@ func (s *Server) loadClusterSignKey() {
 func (s *Server) discoverOIDC(discoveryURL string) {
 	ticker := time.NewTicker(time.Hour)
 	defer ticker.Stop()
-	client := &http.Client{Timeout: 10 * time.Second}
+	client := s.discoveryHTTPClient
 
 	for {
 		resp, err := client.Get(discoveryURL)

@@ -57,6 +57,12 @@ export class WasmClient {
     async pullKeySync(serverURL, token) {
         return this.invoke('pullKeySync', { serverURL, token });
     }
+    async startDeviceAuth(authEndpoint, tokenEndpoint) {
+        return this.invoke('startDeviceAuth', { authEndpoint, tokenEndpoint });
+    }
+    async pollForToken(authEndpoint, tokenEndpoint, deviceCode, userCode, verificationURI, interval) {
+        return this.invoke('pollForToken', { authEndpoint, tokenEndpoint, deviceCode, userCode, verificationURI, interval });
+    }
     async init(serverURL, userID, decKey, signKey, serverKey) {
         return this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
     }

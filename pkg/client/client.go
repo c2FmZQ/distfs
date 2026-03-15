@@ -379,6 +379,15 @@ func (c *Client) WithDisableDoH(disable bool) *Client {
 	return &c2
 }
 
+// WithAllowInsecure configures whether to allow insecure TLS connections (skip verification).
+func (c *Client) WithAllowInsecure(allow bool) *Client {
+	c2 := *c
+	clonedClient := *c.httpClient
+	c2.httpClient = &clonedClient
+	c2.httpClient.Transport = applyAllowInsecure(c2.httpClient.Transport, allow)
+	return &c2
+}
+
 // WithLeaseExpiredCallback returns a new client with the specified lease expiration callback.
 func (c *Client) WithLeaseExpiredCallback(fn func(id string, err error)) *Client {
 	c2 := *c

@@ -1,0 +1,15 @@
+# TLSPROXY Configuration for DistFS Web E2E Tests
+httpAddr: ":80"
+tlsAddr: ":443"
+
+backends:
+  - serverNames: ["web-test-server"]
+    mode: http
+    addresses: ["web-assets:8091"]
+    pathOverrides:
+      - paths: ["/v1/"]
+        mode: http
+        addresses: ["storage-node-1:8080"]
+      - paths: ["/auth/"]
+        mode: http
+        addresses: ["test-auth:8080"]

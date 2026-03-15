@@ -8,8 +8,9 @@ ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y tzdata fuse3 jq curl acl wget && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /distfs
-COPY package.json package-lock.json playwright.config.ts ./
-RUN npm ci && npx playwright install --with-deps chromium
+COPY package.json package-lock.json playwright.config.ts tsconfig.json ./
+COPY web/ts ./web/ts
+RUN npm ci && npx tsc && npx playwright install --with-deps chromium
 
 COPY bin/storage-node /bin/storage-node
 COPY bin/distfs /bin/distfs

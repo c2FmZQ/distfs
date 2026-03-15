@@ -8,8 +8,9 @@ export default defineConfig({
   workers: process.env.CI ? 1 : undefined,
   reporter: 'list',
   use: {
-    baseURL: 'http://web-test-server:8091',
+    baseURL: 'https://web-test-server',
     trace: 'on-first-retry',
+    ignoreHTTPSErrors: true,
   },
   projects: [
     {
@@ -17,7 +18,10 @@ export default defineConfig({
       use: { 
         ...devices['Desktop Chrome'],
         launchOptions: {
-          args: ['--unsafely-treat-insecure-origin-as-secure=http://web-test-server:8091']
+          args: [
+            '--ignore-certificate-errors',
+            '--disable-web-security'
+          ]
         }
       },
     },

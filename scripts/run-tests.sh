@@ -10,6 +10,9 @@ for arg in "$@"; do
     if [ "$arg" == "--skip-unit" ] || [ "$arg" == "--fast" ]; then
         SKIP_UNIT=1
     fi
+    if [ "$arg" == "--screenshots" ]; then
+        export CAPTURE_SCREENSHOTS="true"
+    fi
 done
 
 echo "# DistFS Test & Performance Report" > $REPORT
@@ -35,6 +38,8 @@ if [ -f "$(go env GOROOT)/lib/wasm/wasm_exec.js" ]; then
 else
     cp "$(go env GOROOT)/misc/wasm/wasm_exec.js" web/
 fi
+
+mkdir -p web/js
 
 # 2. Run Unit Tests
 if [ $SKIP_UNIT -eq 0 ]; then

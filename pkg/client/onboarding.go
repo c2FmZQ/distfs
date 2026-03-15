@@ -42,6 +42,7 @@ type OnboardingOptions struct {
 	ShowQR        bool
 	Browser       string
 	DisableDoH    bool
+	AllowInsecure bool
 }
 
 // GetOIDCToken retrieves an OIDC token using the device flow or returns the provided JWT.
@@ -56,7 +57,9 @@ func GetOIDCToken(ctx context.Context, opts OnboardingOptions) (string, error) {
 
 	if authEndpoint == "" || tokenEndpoint == "" {
 		// Discovery from server
-		httpClient := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH).httpClient
+		httpClient := NewClient(opts.ServerURL).
+			WithDisableDoH(opts.DisableDoH).
+			WithAllowInsecure(opts.AllowInsecure).httpClient
 		req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/auth/config", nil)
 		if err != nil {
 			return "", fmt.Errorf("failed to create auth config request: %w", err)
@@ -106,7 +109,9 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		return err
 	}
 
-	httpClient := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH).httpClient
+	httpClient := NewClient(opts.ServerURL).
+		WithDisableDoH(opts.DisableDoH).
+		WithAllowInsecure(opts.AllowInsecure).httpClient
 
 	// Fetch Server Key
 	req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/meta/key", nil)

@@ -3,6 +3,7 @@
 package client
 
 import (
+	"crypto/tls"
 	"net/http"
 	"strings"
 
@@ -31,6 +32,30 @@ func applyDisableDoH(transport http.RoundTripper, disable bool) http.RoundTrippe
 		} else {
 			t2.Resolver = ech.DefaultResolver
 		}
+		return &t2
+	}
+	return transport
+}
+
+func applyAllowInsecure(transport http.RoundTripper, allow bool) http.RoundTripper {
+	// Handle standard transport (http:// cases or cloned defaults)
+	if t, ok := transport.(*http.Transport); ok {
+		t2 := t.Clone()
+		if t2.TLSClientConfig == nil {
+			t2.TLSClientConfig = &tls.Config{}
+		}
+		t2.TLSClientConfig.InsecureSkipVerify = allow
+		return t2
+	}
+	// Handle ECH transport
+	if t, ok := transport.(*ech.Transport); ok {
+		t2 := *t
+		if t2.TLSConfig != nil {
+			t2.TLSConfig = t2.TLSConfig.Clone()
+		} else {
+			t2.TLSConfig = &tls.Config{}
+		}
+		t2.TLSConfig.InsecureSkipVerify = allow
 		return &t2
 	}
 	return transport

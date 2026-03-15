@@ -1178,3 +1178,24 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update the `Dockerfile` to include the Node.js runtime and Playwright browser dependencies. (Note: Alpine Linux does not officially support Playwright browsers out-of-the-box. We must transition the `e2e-runner` or create a new `playwright-runner` based on `mcr.microsoft.com/playwright:v1.X.X-jammy`).
     *   **Action:** Add a `web-e2e-runner` service to `docker-compose.yml` that runs `npx playwright test` and depends on the storage nodes and the web test server.
     *   **Action:** Update `scripts/run-tests.sh` to capture the exit code of the `web-e2e-runner` and append its logs to the final test report.
+
+---
+
+## Phase 63: Comprehensive Web UI Testing & Documentation Generation
+
+**Goal:** Expand the Playwright E2E test suite to exercise all primary UI code paths (navigation, KeySync login, media rendering, and sharing) and implement an automated screenshot generation mechanism for documentation.
+
+*   **Step 63.1: Configurable Screenshot Capture**
+    *   **Action:** Update `playwright.config.ts` and `web/tests/e2e.spec.ts` to accept an environment variable (e.g., `CAPTURE_SCREENSHOTS=true`).
+    *   **Action:** Add a `--screenshots` flag to `scripts/run-tests.sh` that passes this environment variable into the Playwright Docker execution and mounts a local `docs/assets/` directory to extract the images.
+*   **Step 63.2: Expand Test Coverage: KeySync Login**
+    *   **Action:** Create a new Playwright test block that executes `distfs init` and `distfs push-keysync` via `child_process` to seed a valid cloud backup.
+    *   **Action:** Automate the "Login (Existing Account)" UI flow, asserting that the Web UI correctly fetches, decrypts, and initializes the client from the seeded KeySync blob.
+*   **Step 63.3: Expand Test Coverage: File Navigation & Media**
+    *   **Action:** Update the existing test to seed a complex directory structure (nested folders) and a test image using the CLI before driving the UI.
+    *   **Action:** Automate clicking through the directory tree, asserting the breadcrumb and file grid update correctly.
+    *   **Action:** Assert that the test image successfully renders as a thumbnail in the UI (verifying the Service Worker interception loop).
+*   **Step 63.4: Expand Test Coverage: UI Interaction & Error Handling**
+    *   **Action:** Automate opening the "Share" modal, populating the inputs, and submitting.
+    *   **Action:** Implement a test that uses Playwright's `page.route` to mock an API failure and verify the UI's error boundary logic catches and displays the error gracefully.
+    *   **Action:** Insert `page.screenshot()` calls at the successful completion of each major visual state (Login, Dashboard, Navigation, Share Modal), gated by the `CAPTURE_SCREENSHOTS` environment variable.

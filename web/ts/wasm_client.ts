@@ -81,6 +81,28 @@ export class WasmClient {
         return this.invoke('pullKeySync', { serverURL, token });
     }
 
+    /**
+     * postMessage sends a raw message to the underlying WASM worker.
+     * Use this for streaming operations that bypass the standard Promise-based invoke bridge.
+     */
+    postMessage(message: any, transfer?: Transferable[]): void {
+        this.worker.postMessage(message, transfer || []);
+    }
+
+    async startDeviceAuth(authEndpoint: string, tokenEndpoint: string): Promise<{
+        verificationURI: string,
+        verificationURIComplete: string,
+        userCode: string,
+        deviceCode: string,
+        interval: number
+    }> {
+        return this.invoke('startDeviceAuth', { authEndpoint, tokenEndpoint });
+    }
+
+    async pollForToken(authEndpoint: string, tokenEndpoint: string, deviceCode: string, userCode: string, verificationURI: string, interval: number): Promise<string> {
+        return this.invoke('pollForToken', { authEndpoint, tokenEndpoint, deviceCode, userCode, verificationURI, interval });
+    }
+
     async init(serverURL: string, userID: string, decKey: string, signKey: string, serverKey: string): Promise<boolean> {
         return this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
     }
