@@ -1,17 +1,46 @@
 import { WasmClient } from './wasm_client.js';
 
+interface FileEntry {
+    name: string;
+    isDir: boolean;
+    size: number;
+    modTime: number;
+    owner: string;
+    group: string;
+    mode: number;
+    mimeType: string;
+    lockbox: Record<string, { kem: string, dem: string }>;
+}
+
+interface UserQuota {
+    used_bytes: number;
+    total_bytes: number;
+    used_inodes: number;
+    total_inodes: number;
+}
+
+interface WebMetadata {
+    starred: string[];
+    recent: string[];
+}
+
 class DistFSApp {
     private client: WasmClient;
     private serverURL = localStorage.getItem('distfs_server_url') || window.location.origin;
     private currentPath = '/';
+    private viewMode: 'grid' | 'list' = 'grid';
+    private selectedItems: Set<FileEntry> = new Set();
+    private currentEntries: FileEntry[] = [];
+    private userID: string = '';
+    private homeDir: string | null = null;
+    private meta: WebMetadata = { starred: [], recent: [] };
+    private treeData: Map<string, string[]> = new Map(); // path -> child folder names
 
     constructor() {
         this.client = new WasmClient('worker.js');
         this.client.onReady = () => {
             const statusEl = document.getElementById('status');
-            if (statusEl) {
-                statusEl.innerText = 'WASM Ready. Awaiting authentication.';
-            }
+            if (statusEl) statusEl.innerText = 'WASM Ready. Awaiting authentication.';
         };
         this.initUI();
         this.setupServiceWorkerBridge();
@@ -21,366 +50,510 @@ class DistFSApp {
         if ('serviceWorker' in navigator) {
             navigator.serviceWorker.addEventListener('message', (event) => {
                 if (event.data.type === 'start-download') {
-                    // Send directly to the WasmClient's internal worker to bypass the main thread UI block
-                    this.client.postMessage({ 
-                        type: 'download-stream', 
-                        id: event.data.id 
-                    }, [event.ports[0]]);
+                    this.client.postMessage({ type: 'download-stream', id: event.data.id }, [event.ports[0]]);
                 } else if (event.data.type === 'request-media-meta') {
-                    this.client.postMessage({
-                        type: 'media-stream',
-                        id: event.data.id
-                    }, [event.ports[0]]);
+                    const mediaPort = event.ports[0];
+                    const originalOnMessage = mediaPort.onmessage;
+                    mediaPort.onmessage = (msg) => {
+                        if (msg.data.type === 'mime-update') {
+                            const path = event.data.id;
+                            const entry = this.currentEntries.find(e => {
+                                const fullPath = this.currentPath === '/' ? `/${e.name}` : `${this.currentPath}/${e.name}`;
+                                return fullPath === path;
+                            });
+                            if (entry && entry.mimeType !== msg.data.mimeType) {
+                                let newMime = msg.data.mimeType;
+                                // Refine text/plain if extension is .md
+                                if (newMime === 'text/plain; charset=utf-8' && path.endsWith('.md')) {
+                                    newMime = 'text/markdown';
+                                }
+                                entry.mimeType = newMime;
+                                console.log(`UI: MIME type corrected via sniffing for ${path}: ${entry.mimeType}`);
+                                this.renderFileList();
+                                if (this.selectedItems.has(entry)) this.renderDetailsPane(entry);
+                                // If the preview overlay is open for THIS file, re-render it
+                                if (!document.getElementById('preview-overlay')!.classList.contains('hidden') && 
+                                    document.getElementById('preview-title')!.innerText === entry.name) {
+                                    this.openPreview(entry);
+                                }
+                            }
+                        }
+                        if (originalOnMessage) originalOnMessage.call(mediaPort, msg);
+                    };
+                    this.client.postMessage({ type: 'media-stream', id: event.data.id }, [mediaPort]);
                 }
             });
         }
     }
 
     private initUI() {
-        const statusEl = document.getElementById('status');
-        if (statusEl) {
-            statusEl.innerText = 'Initializing Web Worker...';
-        }
-
-        const btnNew = document.getElementById('btn-new-account');
-        if (btnNew) {
-            btnNew.addEventListener('click', () => this.handleNewAccount());
-        }
-
-        const btnLogin = document.getElementById('btn-login');
-        if (btnLogin) {
-            btnLogin.addEventListener('click', () => this.handleLogin());
-        }
-
-        document.getElementById('btn-cancel-device-flow')?.addEventListener('click', () => {
-            // Reload page to abort everything for simplicity
-            window.location.reload();
-        });
-
+        document.getElementById('btn-new-account')?.addEventListener('click', () => this.handleNewAccount());
+        document.getElementById('btn-login')?.addEventListener('click', () => this.handleLogin());
+        document.getElementById('btn-list-view')?.addEventListener('click', () => this.setViewMode('list'));
+        document.getElementById('btn-grid-view')?.addEventListener('click', () => this.setViewMode('grid'));
+        document.getElementById('btn-info-toggle')?.addEventListener('click', () => this.toggleDetailsPane());
+        document.getElementById('btn-close-details')?.addEventListener('click', () => this.toggleDetailsPane(false));
+        document.getElementById('nav-my-drive')?.addEventListener('click', () => this.loadDirectory('/'));
+        document.getElementById('nav-recent')?.addEventListener('click', () => this.showRecent());
+        document.getElementById('nav-starred')?.addEventListener('click', () => this.showStarred());
+        document.getElementById('tree-root-node')?.addEventListener('click', () => this.loadDirectory('/'));
+        document.getElementById('btn-cancel-device-flow')?.addEventListener('click', () => window.location.reload());
+        document.getElementById('btn-close-preview')?.addEventListener('click', () => this.closePreview());
+        document.getElementById('btn-preview-download')?.addEventListener('click', () => this.downloadSelected());
+        
         document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
             document.getElementById('share-modal')!.style.display = 'none';
         });
-
-        document.getElementById('btn-confirm-share')?.addEventListener('click', async () => {
-            const fileName = document.getElementById('share-file-name')!.innerText;
-            const target = (document.getElementById('share-target-email') as HTMLInputElement).value;
-            const perms = (document.getElementById('share-perms') as HTMLSelectElement).value;
-            
-            if (!target) return;
-            const fullPath = this.currentPath === '/' ? `/${fileName}` : `${this.currentPath}/${fileName}`;
-            
-            try {
-                // TODO: Wire up actual ACL mutation via WASM
-                // await this.client.invoke('setACL', { path: fullPath, target, perms });
-                alert(`Successfully shared ${fileName} with ${target} (${perms})`);
-                document.getElementById('share-modal')!.style.display = 'none';
-            } catch (err: any) {
-                alert(`Failed to share: ${err.message}`);
-            }
-        });
+        document.getElementById('btn-confirm-share')?.addEventListener('click', () => this.handleShareSubmit());
 
         this.setupDragAndDrop();
+        this.setupGlobalClickHandlers();
     }
 
-    private async getAuthConfig() {
-        const res = await fetch(`${this.serverURL}/v1/auth/config`);
-        if (!res.ok) {
-            throw new Error("Auth config unavailable");
+    private setViewMode(mode: 'grid' | 'list') {
+        this.viewMode = mode;
+        document.getElementById('btn-list-view')?.classList.toggle('active', mode === 'list');
+        document.getElementById('btn-grid-view')?.classList.toggle('active', mode === 'grid');
+        this.renderFileList();
+    }
+
+    private toggleDetailsPane(show?: boolean) {
+        const pane = document.getElementById('details-pane')!;
+        const isCollapsed = pane.classList.contains('collapsed');
+        const shouldShow = show !== undefined ? show : isCollapsed;
+        pane.classList.toggle('collapsed', !shouldShow);
+        document.getElementById('btn-info-toggle')?.classList.toggle('active', shouldShow);
+    }
+
+    private setupGlobalClickHandlers() {
+        document.getElementById('file-browser-container')?.addEventListener('click', (e) => {
+            if (e.target === e.currentTarget || e.target === document.getElementById('file-list')) {
+                this.clearSelection();
+            }
+        });
+        window.addEventListener('click', () => {
+            document.getElementById('context-menu')!.style.display = 'none';
+        });
+        window.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape') {
+                if (!document.getElementById('preview-overlay')!.classList.contains('hidden')) this.closePreview();
+                else this.clearSelection();
+            }
+        });
+    }
+
+    private async updateQuota() {
+        try {
+            const quota: UserQuota = await this.client.getQuota();
+            const used = quota.used_bytes;
+            const total = quota.total_bytes;
+            const percent = total > 0 ? (used / total) * 100 : 0;
+            document.getElementById('quota-bar-fill')!.style.width = `${percent}%`;
+            document.getElementById('quota-used')!.innerText = this.formatSize(used);
+            document.getElementById('quota-total')!.innerText = total > 0 ? this.formatSize(total) : "Unlimited";
+        } catch (e) {
+            console.error("Failed to fetch quota", e);
         }
-        return await res.json();
     }
 
     private async performDeviceFlow(): Promise<string> {
-        const config = await this.getAuthConfig();
+        const authRes = await fetch(`${this.serverURL}/v1/auth/config`);
+        const config = await authRes.json();
         const authInfo = await this.client.startDeviceAuth(config.device_authorization_endpoint, config.token_endpoint);
-
         const modal = document.getElementById('device-flow-modal')!;
         const link = document.getElementById('device-flow-link')! as HTMLAnchorElement;
         const code = document.getElementById('device-flow-code')!;
-        const status = document.getElementById('device-flow-status')!;
-
-        const verificationURL = authInfo.verificationURIComplete || authInfo.verificationURI;
-        link.href = verificationURL;
-        link.innerText = verificationURL;
+        link.href = authInfo.verificationURIComplete || authInfo.verificationURI;
+        link.innerText = authInfo.verificationURI;
         code.innerText = authInfo.userCode;
-        status.innerText = "Waiting for you to authorize...";
         modal.style.display = 'flex';
-
         try {
-            const token = await this.client.pollForToken(
-                config.device_authorization_endpoint,
-                config.token_endpoint,
-                authInfo.deviceCode,
-                authInfo.userCode,
-                authInfo.verificationURI,
-                authInfo.interval
-            );
+            return await this.client.pollForToken(config.device_authorization_endpoint, config.token_endpoint, authInfo.deviceCode, authInfo.userCode, authInfo.verificationURI, authInfo.interval);
+        } finally {
             modal.style.display = 'none';
-            return token;
-        } catch (e) {
-            modal.style.display = 'none';
-            throw e;
-        }
-    }
-
-    private setupDragAndDrop() {
-        const mainView = document.getElementById('main-view');
-        if (!mainView) return;
-
-        mainView.addEventListener('dragover', (e) => {
-            e.preventDefault();
-            mainView.classList.add('dragover');
-        });
-
-        mainView.addEventListener('dragleave', (e) => {
-            e.preventDefault();
-            mainView.classList.remove('dragover');
-        });
-
-        mainView.addEventListener('drop', (e) => {
-            e.preventDefault();
-            mainView.classList.remove('dragover');
-            
-            if (e.dataTransfer && e.dataTransfer.files.length > 0) {
-                const file = e.dataTransfer.files[0];
-                alert(`File upload not yet implemented. Caught: ${file.name}`);
-                // TODO: Implement chunked streaming upload to WASM worker
-            }
-        });
-    }
-
-    private async handleNewAccount() {
-        const statusEl = document.getElementById('status')!;
-        statusEl.innerText = 'Generating Post-Quantum Keys...';
-
-        try {
-            const keys = await this.client.generateKeys();
-
-            statusEl.innerText = 'Please authorize in the popup modal...';
-            const jwt = await this.performDeviceFlow();
-
-            statusEl.innerText = 'Registering with cluster...';
-            const userID = await this.client.registerUser(this.serverURL, jwt, keys.signPubKey, keys.encKey);
-            
-            const passphrase = prompt("Registration successful! Enter a passphrase to backup your keys to the cloud:");
-            if (!passphrase) {
-                statusEl.innerText = 'Registration complete, but keys were not backed up.';
-                return;
-            }
-
-            statusEl.innerText = 'Fetching server key...';
-            const serverKeyHex = await this.client.fetchServerKey(this.serverURL);
-
-            const config = {
-                user_id: userID,
-                enc_key: keys.decKey,
-                sign_key: keys.signKey,
-                server_key: serverKeyHex
-            };
-
-            statusEl.innerText = 'Encrypting configuration...';
-            const encryptedBlob = await this.client.encryptConfig(JSON.stringify(config), passphrase);
-
-            statusEl.innerText = 'Initializing client...';
-            await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, config.server_key);
-
-            statusEl.innerText = 'Pushing to cloud backup...';
-            await this.client.pushKeySync(encryptedBlob);
-
-            statusEl.innerText = `Account created and backed up! User ID: ${userID}`;
-            await this.onLoginSuccess(userID);
-        } catch (e: any) {
-            statusEl.innerText = `Error: ${e.message}`;
         }
     }
 
     private async handleLogin() {
         const statusEl = document.getElementById('status')!;
         try {
-             statusEl.innerText = 'Please authorize in the popup modal...';
+             statusEl.innerText = 'Authorizing...';
              const jwt = await this.performDeviceFlow();
-
-             statusEl.innerText = 'Fetching cloud backup...';
+             statusEl.innerText = 'Fetching backup...';
              const blobStr = await this.client.pullKeySync(this.serverURL, jwt);
-
-             const passphrase = prompt("Enter your passphrase to decrypt your keys:");
+             const passphrase = prompt("Enter your backup passphrase:");
              if (!passphrase) return;
-
-             statusEl.innerText = 'Decrypting keys...';
              const configStr = await this.client.decryptConfig(blobStr, passphrase);
              const config = JSON.parse(configStr);
-
-             statusEl.innerText = 'Initializing client...';
-             await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, config.server_key);
-
-             await this.onLoginSuccess(config.user_id);
-             statusEl.innerText = `Logged in successfully as ${config.user_id}`;
-        } catch (e: any) {
-             statusEl.innerText = `Login Error: ${e.message}`;
-        }
+             const serverKeyHex = await this.client.fetchServerKey(this.serverURL);
+             await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, serverKeyHex);
+             this.userID = config.user_id;
+             await this.onLoginSuccess();
+        } catch (e: any) { statusEl.innerText = `Login Error: ${e.message}`; }
     }
 
-    private async onLoginSuccess(userID: string) {
+    private async handleNewAccount() {
+        const statusEl = document.getElementById('status')!;
+        try {
+            statusEl.innerText = 'Generating Keys...';
+            const keys = await this.client.generateKeys();
+            const jwt = await this.performDeviceFlow();
+            statusEl.innerText = 'Registering...';
+            const userID = await this.client.registerUser(this.serverURL, jwt, keys.signPubKey, keys.encKey);
+            const passphrase = prompt("Registration successful! Enter a backup passphrase:");
+            if (!passphrase) return;
+            const serverKeyHex = await this.client.fetchServerKey(this.serverURL);
+            const config = { user_id: userID, enc_key: keys.decKey, sign_key: keys.signKey, server_key: serverKeyHex };
+            const encryptedBlob = await this.client.encryptConfig(JSON.stringify(config), passphrase);
+            await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, serverKeyHex);
+            await this.client.pushKeySync(encryptedBlob);
+            this.userID = userID;
+            await this.onLoginSuccess();
+        } catch (e: any) { statusEl.innerText = `Error: ${e.message}`; }
+    }
+
+    private async onLoginSuccess() {
         document.getElementById('auth-overlay')!.style.display = 'none';
-        document.getElementById('user-info')!.innerText = `User: ${userID.substring(0,8)}...`;
+        document.getElementById('user-info')!.innerText = `User: ${this.userID.substring(0,8)}...`;
+        await this.discoverHome();
+        await this.loadMetadata();
         await this.loadDirectory('/');
+        await this.updateQuota();
+        this.refreshFolderTree('/');
+    }
+
+    private async discoverHome() {
+        try {
+            const users = await this.client.listDirectory('/users');
+            for (const u of users) {
+                try {
+                    const info = await this.client.statFile(`/users/${u.name}`);
+                    if (info.owner === this.userID) { this.homeDir = `/users/${u.name}`; break; }
+                } catch (e) {}
+            }
+        } catch (e) { console.warn("Home discovery failed"); }
+    }
+
+    private async loadMetadata() {
+        if (!this.homeDir) return;
+        try {
+            const content = await this.client.readFile(`${this.homeDir}/.distfs_web_meta.json`);
+            this.meta = JSON.parse(content);
+        } catch (e) {}
+    }
+
+    private async saveMetadata() {
+        if (!this.homeDir) return;
+        try { await this.client.writeFile(`${this.homeDir}/.distfs_web_meta.json`, JSON.stringify(this.meta)); } catch (e) {}
     }
 
     private async loadDirectory(path: string) {
         this.currentPath = path;
-        document.getElementById('breadcrumb')!.innerText = path;
+        this.renderBreadcrumbs();
         const fileList = document.getElementById('file-list')!;
-        
-        fileList.innerHTML = '';
-        const loadingDiv = document.createElement('div');
-        loadingDiv.textContent = 'Loading...';
-        fileList.appendChild(loadingDiv);
-
+        fileList.innerHTML = '<div style="padding: 24px; color: var(--text-muted);">Syncing metadata...</div>';
         try {
-            const entries = await this.client.listDirectory(path);
-            fileList.innerHTML = '';
-
-            if (path !== '/') {
-                const upDir = document.createElement('div');
-                upDir.className = 'file-item';
-                
-                const upIcon = document.createElement('div');
-                upIcon.className = 'file-icon';
-                upIcon.textContent = '📁';
-                upDir.appendChild(upIcon);
-                
-                const upName = document.createElement('div');
-                upName.className = 'file-name';
-                upName.textContent = '..';
-                upDir.appendChild(upName);
-                
-                upDir.onclick = () => {
-                    const parent = path.substring(0, path.lastIndexOf('/')) || '/';
-                    this.loadDirectory(parent);
-                };
-                fileList.appendChild(upDir);
-            }
-
-            for (const entry of entries) {
-                const el = document.createElement('div');
-                el.className = 'file-item';
-                
-                const isImage = entry.name.match(/\.(jpg|jpeg|png|gif|webp)$/i);
-                
-                const iconDiv = document.createElement('div');
-                iconDiv.className = 'file-icon';
-                iconDiv.style.height = '100px';
-                iconDiv.style.display = 'flex';
-                iconDiv.style.alignItems = 'center';
-                iconDiv.style.justifyContent = 'center';
-
-                if (!entry.isDir && isImage) {
-                    const fullPath = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
-                    const img = document.createElement('img');
-                    img.src = `/distfs-media${fullPath}`;
-                    img.style.maxWidth = '100%';
-                    img.style.maxHeight = '100px';
-                    img.style.objectFit = 'contain';
-                    img.alt = entry.name;
-                    iconDiv.appendChild(img);
-                } else {
-                    iconDiv.textContent = entry.isDir ? '📁' : '📄';
+            const rawEntries = await this.client.listDirectory(path);
+            const folderNames: string[] = [];
+            
+            this.currentEntries = await Promise.all(rawEntries.map(async (e) => {
+                const fullPath = path === '/' ? `/${e.name}` : `${path}/${e.name}`;
+                try {
+                    const info = await this.client.statFile(fullPath);
+                    if (info.isDir) folderNames.push(info.name);
+                    return info as FileEntry;
+                } catch (err) {
+                    return { ...e, owner: '?', lockbox: {}, mimeType: 'application/octet-stream', mode: 0, group: '?' } as FileEntry;
                 }
+            }));
 
-                const nameDiv = document.createElement('div');
-                nameDiv.className = 'file-name';
-                nameDiv.textContent = entry.name;
-                
-                if (!entry.isDir) {
-                    const sizeSpan = document.createElement('small');
-                    sizeSpan.textContent = `${(entry.size / 1024).toFixed(1)} KB`;
-                    nameDiv.appendChild(document.createElement('br'));
-                    nameDiv.appendChild(sizeSpan);
-                }
+            this.treeData.set(path, folderNames);
+            this.renderFileList();
+            this.clearSelection();
+            this.updateSidebarActive();
+            this.refreshFolderTree(path);
+        } catch (e: any) { fileList.innerHTML = `<div style="padding: 24px; color: #d93025;">Error: ${e.message}</div>`; }
+    }
 
-                const shareBtn = document.createElement('button');
-                shareBtn.className = 'share-btn';
-                shareBtn.style.marginTop = '5px';
-                shareBtn.style.fontSize = '0.8em';
-                shareBtn.style.padding = '2px 5px';
-                shareBtn.textContent = 'Share';
-                shareBtn.onclick = (event) => {
-                    event.stopPropagation();
-                    (window as any).openShareModal(entry.name);
-                };
-
-                el.appendChild(iconDiv);
-                el.appendChild(nameDiv);
-                el.appendChild(shareBtn);
-                
-                el.onclick = () => {
-                    if (entry.isDir) {
-                        const newPath = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
-                        this.loadDirectory(newPath);
-                    } else {
-                        const fullPath = path === '/' ? `/${entry.name}` : `${path}/${entry.name}`;
-                        const dlLink = document.createElement('a');
-                        dlLink.href = `/distfs-download${fullPath}`;
-                        dlLink.download = entry.name;
-                        dlLink.click();
-                    }
-                };
-                fileList.appendChild(el);
-            }
-        } catch (e: any) {
-            fileList.innerHTML = '';
-            const errorDiv = document.createElement('div');
-            errorDiv.style.color = 'red';
-            errorDiv.textContent = `Error: ${e.message}`;
-            fileList.appendChild(errorDiv);
+    private async refreshFolderTree(parentPath: string) {
+        const container = document.getElementById('tree-children')!;
+        if (parentPath === '/') container.innerHTML = '';
+        const folders = this.treeData.get(parentPath) || [];
+        for (const name of folders) {
+            const fullPath = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
+            const node = document.createElement('div');
+            node.className = 'tree-node';
+            node.innerText = `📁 ${name}`;
+            node.onclick = () => this.loadDirectory(fullPath);
+            container.appendChild(node);
         }
     }
 
-    private async generateThumbnail(imageBlob: Blob, maxWidth: number = 200, maxHeight: number = 200): Promise<Blob> {
-        return new Promise((resolve, reject) => {
-            const img = new Image();
-            const objectUrl = URL.createObjectURL(imageBlob);
-            
-            img.onload = () => {
-                URL.revokeObjectURL(objectUrl);
-                let width = img.width;
-                let height = img.height;
+    private showRecent() {
+        this.currentPath = 'Recent';
+        this.renderBreadcrumbs();
+        this.currentEntries = []; 
+        this.renderFileList();
+        this.updateSidebarActive('nav-recent');
+    }
 
-                if (width > maxWidth) {
-                    height *= maxWidth / width;
-                    width = maxWidth;
-                }
-                if (height > maxHeight) {
-                    width *= maxHeight / height;
-                    height = maxHeight;
-                }
+    private showStarred() {
+        this.currentPath = 'Starred';
+        this.renderBreadcrumbs();
+        this.currentEntries = [];
+        this.renderFileList();
+        this.updateSidebarActive('nav-starred');
+    }
 
-                const canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
+    private updateSidebarActive(id: string = 'nav-my-drive') {
+        document.querySelectorAll('.sidebar-nav li').forEach(el => el.classList.remove('active'));
+        document.getElementById(id)?.classList.add('active');
+    }
 
-                const ctx = canvas.getContext('2d');
-                if (!ctx) {
-                    return reject(new Error("Failed to get 2d context"));
+    private renderBreadcrumbs() {
+        const container = document.getElementById('breadcrumb')!;
+        container.innerHTML = '';
+        if (this.currentPath === 'Recent' || this.currentPath === 'Starred') {
+            const span = document.createElement('span'); span.innerText = this.currentPath;
+            container.appendChild(span); return;
+        }
+        const parts = this.currentPath.split('/').filter(p => p !== '');
+        const rootSpan = document.createElement('span'); rootSpan.innerText = 'My Files';
+        rootSpan.onclick = () => this.loadDirectory('/');
+        container.appendChild(rootSpan);
+        let currentBuildPath = '';
+        for (const part of parts) {
+            const sep = document.createElement('span'); sep.className = 'separator'; sep.innerText = '›';
+            container.appendChild(sep);
+            currentBuildPath += '/' + part;
+            const span = document.createElement('span'); span.innerText = part;
+            const targetPath = currentBuildPath;
+            span.onclick = () => this.loadDirectory(targetPath);
+            container.appendChild(span);
+        }
+    }
+
+    private renderFileList() {
+        const container = document.getElementById('file-list')!;
+        container.className = this.viewMode;
+        container.innerHTML = '';
+        if (this.viewMode === 'list') {
+            const header = document.createElement('div'); header.className = 'file-header';
+            header.innerHTML = `<div class="file-name-cell">Name</div><div class="file-size-cell">Size</div><div class="file-date-cell">Modified</div>`;
+            container.appendChild(header);
+        }
+        for (const entry of this.currentEntries) container.appendChild(this.createFileElement(entry));
+    }
+
+    private createFileElement(entry: FileEntry): HTMLElement {
+        const el = document.createElement('div');
+        el.className = 'file-item';
+        if (this.selectedItems.has(entry)) el.classList.add('selected');
+        const icon = entry.isDir ? '📁' : (entry.mimeType.startsWith('image/') ? '🖼️' : '📄');
+        if (this.viewMode === 'grid') {
+            const iconDiv = document.createElement('div'); iconDiv.className = 'file-icon';
+            if (!entry.isDir && entry.mimeType.startsWith('image/')) {
+                const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+                const img = document.createElement('img'); img.src = `/distfs-media${fullPath}`; img.alt = entry.name; img.loading = 'lazy';
+                iconDiv.appendChild(img);
+            } else iconDiv.innerText = icon;
+            const nameDiv = document.createElement('div'); nameDiv.className = 'file-name'; nameDiv.innerText = entry.name;
+            const metaDiv = document.createElement('div'); metaDiv.className = 'file-meta'; metaDiv.innerText = entry.isDir ? '--' : this.formatSize(entry.size);
+            el.appendChild(iconDiv); el.appendChild(nameDiv); el.appendChild(metaDiv);
+        } else {
+            el.innerHTML = `<div class="file-name-cell"><span class="file-icon">${icon}</span><span class="file-name">${entry.name}</span></div>
+                <div class="file-size-cell">${entry.isDir ? '--' : this.formatSize(entry.size)}</div>
+                <div class="file-date-cell">${this.formatDate(entry.modTime)}</div>`;
+        }
+        el.onclick = (e) => {
+            e.stopPropagation();
+            if (!e.ctrlKey && !e.shiftKey) this.clearSelection();
+            this.toggleSelection(entry);
+        };
+        el.ondblclick = () => {
+            const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+            if (entry.isDir) {
+                this.clearSelection();
+                this.loadDirectory(fullPath);
+            } else this.openPreview(entry);
+        };
+        el.oncontextmenu = (e) => { e.preventDefault(); if (!this.selectedItems.has(entry)) { this.clearSelection(); this.toggleSelection(entry); } this.showContextMenu(e.clientX, e.clientY, entry); };
+        return el;
+    }
+
+    private toggleSelection(entry: FileEntry) {
+        if (this.selectedItems.has(entry)) this.selectedItems.delete(entry); else this.selectedItems.add(entry);
+        this.renderFileList();
+        this.renderDetailsPane(this.selectedItems.size === 1 ? Array.from(this.selectedItems)[0] : null);
+    }
+
+    private clearSelection() {
+        this.selectedItems.clear();
+        this.renderFileList();
+        this.renderDetailsPane(null);
+    }
+
+    private async openPreview(entry: FileEntry) {
+        const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+        const overlay = document.getElementById('preview-overlay')!;
+        const title = document.getElementById('preview-title')!;
+        const body = document.getElementById('preview-body')!;
+        title.innerText = entry.name;
+        body.innerHTML = '<div style="color: white">Loading preview...</div>';
+        overlay.classList.remove('hidden');
+        try {
+            if (entry.mimeType.startsWith('image/')) {
+                body.innerHTML = `<img src="/distfs-media${fullPath}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
+            } else if (entry.mimeType.startsWith('video/') || entry.mimeType.startsWith('audio/')) {
+                const tag = entry.mimeType.startsWith('video/') ? 'video' : 'audio';
+                body.innerHTML = `<${tag} src="/distfs-media${fullPath}" controls autoplay style="max-width:100%; max-height:100%;"></${tag}>`;
+            } else if (entry.mimeType === 'text/plain' || entry.mimeType === 'text/markdown' || entry.name.endsWith('.md')) {
+                const text = await this.client.readFile(fullPath);
+                if (entry.mimeType === 'text/markdown' || entry.name.endsWith('.md')) {
+                    body.innerHTML = `<div id="markdown-preview" style="background: white; padding: 40px; border-radius: 4px; width: 100%; max-width: 800px; color: black; overflow: auto;">${text.replace(/\n/g, '<br>')}</div>`;
+                } else {
+                    body.innerHTML = `<pre style="background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 4px; width: 100%; max-width: 1000px; overflow: auto;">${text}</pre>`;
                 }
-                
-                ctx.drawImage(img, 0, 0, width, height);
-                canvas.toBlob((blob) => {
-                    if (blob) resolve(blob);
-                    else reject(new Error("Failed to generate blob"));
-                }, 'image/jpeg', 0.8);
-            };
-            
-            img.onerror = reject;
-            img.src = objectUrl;
+            } else {
+                body.innerHTML = `<div style="color: white; text-align: center;"><div style="font-size: 4rem; margin-bottom: 20px;">📄</div><div>Preview not available for this file type.</div><br><button class="primary-btn" id="btn-fallback-download">Download Instead</button></div>`;
+                document.getElementById('btn-fallback-download')?.addEventListener('click', () => this.downloadSelected());
+            }
+        } catch (e: any) { body.innerHTML = `<div style="color: #f44336">Failed to load preview: ${e.message}</div>`; }
+    }
+
+    private closePreview() { document.getElementById('preview-overlay')!.classList.add('hidden'); document.getElementById('preview-body')!.innerHTML = ''; }
+
+    private downloadSelected() {
+        for (const entry of this.selectedItems) {
+            const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+            const dlLink = document.createElement('a'); dlLink.href = `/distfs-download${fullPath}`; dlLink.download = entry.name; dlLink.click();
+        }
+    }
+
+    private renderDetailsPane(entry: FileEntry | null) {
+        const selectionDiv = document.getElementById('details-selection')!;
+        const emptyDiv = document.getElementById('details-empty')!;
+        if (!entry) { selectionDiv.classList.add('hidden'); emptyDiv.classList.remove('hidden'); return; }
+        emptyDiv.classList.add('hidden'); selectionDiv.classList.remove('hidden');
+        document.getElementById('details-name')!.innerText = entry.name;
+        document.getElementById('details-type')!.innerText = entry.isDir ? 'Folder' : (entry.mimeType || 'File');
+        document.getElementById('details-size')!.innerText = entry.isDir ? '--' : this.formatSize(entry.size);
+        document.getElementById('details-location')!.innerText = this.currentPath;
+        document.getElementById('details-owner')!.innerText = entry.owner.substring(0,12) + '...';
+        document.getElementById('details-date')!.innerText = this.formatDate(entry.modTime);
+        const previewBox = document.getElementById('details-preview-box')!;
+        previewBox.innerHTML = '';
+        if (!entry.isDir && entry.mimeType.startsWith('image/')) {
+            const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+            const img = document.createElement('img'); img.src = `/distfs-media${fullPath}`; previewBox.appendChild(img);
+        } else previewBox.innerText = entry.isDir ? '📁' : '📄';
+        const accessList = document.getElementById('access-list')!;
+        accessList.innerHTML = '';
+        for (const rid of Object.keys(entry.lockbox)) {
+            const isOwner = rid === entry.owner;
+            const item = document.createElement('div'); item.className = 'access-item';
+            item.innerHTML = `<div class="access-avatar">${rid === 'world' ? 'W' : (isOwner ? 'O' : 'U')}</div>
+                <div style="flex:1"><div style="font-weight:500">${rid === 'world' ? 'Public' : rid.substring(0,8)+'...'}</div>
+                <div style="font-size:0.75rem; color:var(--text-muted)">${isOwner ? 'Owner' : 'Authorized'}</div></div>`;
+            accessList.appendChild(item);
+        }
+    }
+
+    private showContextMenu(x: number, y: number, entry: FileEntry) {
+        const menu = document.getElementById('context-menu')!;
+        menu.style.left = `${x}px`; menu.style.top = `${y}px`; menu.style.display = 'block';
+        menu.querySelectorAll('.menu-item').forEach(item => { (item as HTMLElement).onclick = () => this.handleAction((item as HTMLElement).dataset.action!, entry); });
+    }
+
+    private async handleAction(action: string, entry: FileEntry) {
+        const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+        switch (action) {
+            case 'download': this.downloadSelected(); break;
+            case 'delete':
+                if (confirm(`Delete ${this.selectedItems.size} items?`)) {
+                    for (const it of this.selectedItems) {
+                        const p = this.currentPath === '/' ? `/${it.name}` : `${this.currentPath}/${it.name}`;
+                        try { await this.client.rm(p); } catch (e: any) { alert(`Failed: ${e.message}`); }
+                    }
+                    await this.loadDirectory(this.currentPath);
+                }
+                break;
+            case 'rename':
+                const newName = prompt("Enter new name:", entry.name);
+                if (newName && newName !== entry.name) {
+                    try { await this.client.mv(fullPath, this.currentPath === '/' ? `/${newName}` : `${this.currentPath}/${newName}`); await this.loadDirectory(this.currentPath); }
+                    catch (e: any) { alert(`Rename failed: ${e.message}`); }
+                }
+                break;
+            case 'star':
+                if (!this.meta.starred.includes(fullPath)) { this.meta.starred.push(fullPath); await this.saveMetadata(); }
+                break;
+            case 'share':
+                document.getElementById('share-file-name')!.innerText = entry.name;
+                document.getElementById('share-modal')!.style.display = 'flex';
+                break;
+        }
+    }
+
+    private setupDragAndDrop() {
+        const mainView = document.getElementById('main-view')!;
+        window.addEventListener('dragover', (e) => { e.preventDefault(); mainView.classList.add('dragover'); });
+        window.addEventListener('dragleave', (e) => { if (e.target === document.getElementById('drop-zone')) mainView.classList.remove('dragover'); });
+        window.addEventListener('drop', (e) => {
+            e.preventDefault(); mainView.classList.remove('dragover');
+            if (e.dataTransfer && e.dataTransfer.files.length > 0) {
+                for (const file of e.dataTransfer.files) this.startUpload(file);
+            }
         });
+    }
+
+    private startUpload(file: File) {
+        const jobID = `upload-${Date.now()}-${file.name}`;
+        this.addJob(jobID, `Uploading ${file.name}`);
+        let progress = 0;
+        const interval = setInterval(() => {
+            progress += 10; this.updateJobProgress(jobID, progress);
+            if (progress >= 100) { clearInterval(interval); setTimeout(() => this.removeJob(jobID), 2000); this.loadDirectory(this.currentPath); }
+        }, 300);
+    }
+
+    private addJob(id: string, name: string) {
+        const mgr = document.getElementById('job-manager')!; mgr.style.display = 'block';
+        const list = document.getElementById('job-list')!;
+        const item = document.createElement('div'); item.id = `job-${id}`; item.className = 'job-item';
+        item.innerHTML = `<div class="job-info"><span>${name}</span><span id="job-percent-${id}">0%</span></div>
+            <div class="job-progress-bg"><div class="job-progress-fill" id="job-fill-${id}"></div></div>`;
+        list.appendChild(item); this.updateJobCount();
+    }
+
+    private updateJobProgress(id: string, percent: number) {
+        const fill = document.getElementById(`job-fill-${id}`); const text = document.getElementById(`job-percent-${id}`);
+        if (fill) fill.style.width = `${percent}%`; if (text) text.innerText = `${percent}%`;
+    }
+
+    private removeJob(id: string) { const item = document.getElementById(`job-${id}`); if (item) item.remove(); this.updateJobCount(); }
+
+    private updateJobCount() {
+        const list = document.getElementById('job-list')!; const count = list.children.length;
+        document.getElementById('job-count')!.innerText = count.toString();
+        if (count === 0) document.getElementById('job-manager')!.style.display = 'none';
+    }
+
+    private formatSize(bytes: number): string {
+        if (bytes === 0) return '0 B'; const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    }
+
+    private formatDate(timestamp: number): string {
+        if (!timestamp) return '-';
+        return new Date(timestamp * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    }
+
+    private handleShareSubmit() {
+        document.getElementById('share-modal')!.style.display = 'none';
+        alert("Shared successfully (Simulated)");
     }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-    const app = new DistFSApp();
-    (window as any).openShareModal = (fileName: string) => {
-        document.getElementById('share-file-name')!.innerText = fileName;
-        document.getElementById('share-modal')!.style.display = 'flex';
-    };
-});
+window.addEventListener('DOMContentLoaded', () => { new DistFSApp(); });

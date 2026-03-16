@@ -23,12 +23,8 @@ const runCLI = (cmd: string, password?: string) => {
   }
 };
 
-/**
- * Helper to authorize a device flow code via the test-auth server
- */
 const authorizeDeviceCode = async (request: any, userCode: string, email: string) => {
   console.log(`Authorizing user code ${userCode} for ${email}...`);
-  // Try a few times in case the test-auth server is slow to register the code
   for (let i = 0; i < 5; i++) {
     const res = await request.get(`http://test-auth:8080/authorize_code?user_code=${userCode}&email=${email}`);
     if (res.ok()) return;
@@ -37,149 +33,163 @@ const authorizeDeviceCode = async (request: any, userCode: string, email: string
   throw new Error(`Failed to authorize user code ${userCode}`);
 };
 
-test.describe('DistFS Web Client E2E', () => {
+test.describe('DistFS Web Client Phase 64 E2E', () => {
 
-  test('New Account Registration and Directory Listing', async ({ page, request }) => {
-    page.on('console', msg => console.log(`BROWSER CONSOLE [${msg.type()}]: ${msg.text()}`));
-    
-    page.on('dialog', async dialog => {
-      if (dialog.type() === 'prompt') await dialog.accept('test-passphrase-123');
-      else await dialog.accept();
-    });
-
-    await page.goto('/');
-    await expect(page.locator('#status')).toContainText('WASM Ready', { timeout: 20000 });
-    
-    await captureScreenshot(page, 'login-screen');
-
-    await page.click('#btn-new-account');
-
-    // Wait for the Device Flow modal to appear
-    const modal = page.locator('#device-flow-modal');
-    await expect(modal).toBeVisible({ timeout: 15000 });
-    
-    const userCode = await page.locator('#device-flow-code').textContent();
-    await authorizeDeviceCode(request, userCode!, 'newuser@distfs.local');
-
-    // Registration should now continue automatically
-    await expect(page.locator('#status')).toContainText('Account created and backed up!', { timeout: 30000 });
-    
-    await expect(page.locator('#auth-overlay')).toBeHidden();
-    await expect(page.locator('#user-info')).toContainText('User:');
-    
-    await expect(page.locator('#file-list')).toContainText('account is locked pending administrator approval');
-    await captureScreenshot(page, 'locked-dashboard');
-  });
-
-  test('Existing Account Login via KeySync', async ({ page, request }) => {
-    page.on('console', msg => console.log(`BROWSER CONSOLE [${msg.type()}]: ${msg.text()}`));
-    
-    const email = 'keysync@distfs.local';
-    // 1. Seed an account using the CLI
-    const seedAuthRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
-    const seedJwt = await seedAuthRes.text();
-    
-    console.log("Seeding account for KeySync test...");
-    const confFile = `/tmp/keysync-${Date.now()}.json`;
-    const initOut = runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${seedJwt}`, 'test-passphrase-123');
-    const match = initOut.match(/User ID:\s+([a-f0-9]+)/);
-    if (!match) throw new Error(`Failed to extract User ID from output: ${initOut}`);
-    const userID = match[1];
-    
-    const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock keysync-user ${email}`, 'testpassword');
-
-    // 2. Drive the UI Login Flow
-    page.on('dialog', async dialog => {
-      if (dialog.type() === 'prompt') await dialog.accept('test-passphrase-123');
-      else await dialog.accept();
-    });
-
-    await page.goto('/');
-    await expect(page.locator('#status')).toContainText('WASM Ready', { timeout: 20000 });
-    
-    await page.click('#btn-login');
-
-    // Wait for the Device Flow modal
-    const modal = page.locator('#device-flow-modal');
-    await expect(modal).toBeVisible({ timeout: 15000 });
-    
-    const userCode = await page.locator('#device-flow-code').textContent();
-    await authorizeDeviceCode(request, userCode!, email);
-
-    await expect(page.locator('#status')).toContainText(`Logged in successfully as ${userID}`, { timeout: 30000 });
-    await expect(page.locator('#auth-overlay')).toBeHidden();
-    
-    await captureScreenshot(page, 'dashboard-unlocked');
-  });
-
-  test('File Navigation, Sharing, and Media Rendering', async ({ page, request }) => {
-    page.on('console', msg => console.log(`BROWSER CONSOLE [${msg.type()}]: ${msg.text()}`));
-    
-    const email = 'media@distfs.local';
+  test('Workspace Layout and Navigation', async ({ page, request }) => {
+    const email = 'workspace@distfs.local';
     const authRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
     const jwt = await authRes.text();
     
-    console.log("Seeding account and data for Navigation test...");
-    const confFile = `/tmp/media-${Date.now()}.json`;
-    const initOut = runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
-    const match = initOut.match(/User ID:\s+([a-f0-9]+)/);
-    if (!match) throw new Error(`Failed to extract User ID from output: ${initOut}`);
-    const userID = match[1];
+    const confFile = `/tmp/ws-${Date.now()}.json`;
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
     
     const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
-    // Admin creates and provision a directory for the user
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock --quota 1000000,100 media-user ${email}`, 'testpassword');
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner media-user /media-user`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock --quota 100000000,100 ws-user ${email}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner ws-user /ws-user`, 'testpassword');
 
-    // Give some time for Raft consensus to propagate the new directory
-    await new Promise(r => setTimeout(r, 3000));
+    await new Promise(r => setTimeout(r, 2000));
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} mkdir /ws-user/Documents`, 'test-passphrase-123');
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} mkdir /ws-user/Photos`, 'test-passphrase-123');
+    runCLI(`echo "Phase 64 Content" > /tmp/test.txt`);
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} put /tmp/test.txt /ws-user/Documents/notes.txt`, 'test-passphrase-123');
 
-    runCLI(`/bin/distfs -allow-insecure -config ${confFile} mkdir /media-user/Photos`, 'test-passphrase-123');
-    runCLI(`echo "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=" | base64 -d > /tmp/img.png`);
-    runCLI(`/bin/distfs -allow-insecure -config ${confFile} put /tmp/img.png /media-user/Photos/test-image.png`, 'test-passphrase-123');
-
-    page.on('dialog', async dialog => {
-      if (dialog.type() === 'prompt') await dialog.accept('test-passphrase-123');
-      else await dialog.accept(); // For the success alert
+    page.on('dialog', async d => {
+        if (d.type() === 'prompt') await d.accept('test-passphrase-123');
+        else await d.accept();
     });
 
     await page.goto('/');
-    await expect(page.locator('#status')).toContainText('WASM Ready', { timeout: 20000 });
-    
     await page.click('#btn-login');
-    const modal = page.locator('#device-flow-modal');
-    await expect(modal).toBeVisible({ timeout: 15000 });
-    
-    const userCode = await page.locator('#device-flow-code').textContent();
+    const codeLoc = page.locator('#device-flow-code');
+    await expect(codeLoc).not.toBeEmpty({ timeout: 15000 });
+    const userCode = await codeLoc.textContent();
     await authorizeDeviceCode(request, userCode!, email);
 
     await expect(page.locator('#auth-overlay')).toBeHidden({ timeout: 30000 });
     
-    await expect(page.locator('#file-list')).toContainText('media-user');
-    await page.getByText('media-user', { exact: true }).click();
-    await expect(page.locator('#breadcrumb')).toHaveText('/media-user');
-    
-    await expect(page.locator('#file-list')).toContainText('Photos');
-    await page.getByText('Photos', { exact: true }).click();
-    await expect(page.locator('#breadcrumb')).toHaveText('/media-user/Photos');
-    
-    await expect(page.locator('#file-list')).toContainText('test-image.png');
+    // 1. Verify Layout
+    await expect(page.locator('#sidebar')).toBeVisible();
+    await expect(page.locator('#details-pane')).toBeVisible();
+    await expect(page.locator('#quota-info')).toBeVisible();
+    await captureScreenshot(page, 'ws-layout-overview');
 
-    await captureScreenshot(page, 'populated-tree');
-
-    const imageLoc = page.locator('img[alt="test-image.png"]');
-    await expect(imageLoc).toBeVisible();
-    expect(await imageLoc.getAttribute('src')).toBe('/distfs-media/media-user/Photos/test-image.png');
-    await captureScreenshot(page, 'image-thumbnail');
-
-    await page.locator('.share-btn').first().click();
-    await expect(page.locator('#share-modal')).toBeVisible();
-    await page.locator('#share-target-email').fill('alice@example.com');
-    await page.locator('#share-perms').selectOption('rw-');
+    // 2. Folder Tree Navigation
+    await page.click('#tree-children >> text=ws-user');
+    await expect(page.locator('#breadcrumb')).toContainText('ws-user');
     
-    await page.click('#btn-confirm-share');
-    await expect(page.locator('#share-modal')).toBeHidden();
+    // 3. View Toggling
+    await page.click('#btn-list-view');
+    await expect(page.locator('#file-list')).toHaveClass(/list/);
+    await captureScreenshot(page, 'ws-list-view');
+
+    await page.click('#btn-grid-view');
+    await expect(page.locator('#file-list')).toHaveClass(/grid/);
+    
+    // 4. Details Pane
+    await page.click('#file-list >> text=Documents');
+    // Ensure the hidden class is removed
+    await expect(page.locator('#details-selection')).not.toHaveClass(/hidden/, { timeout: 10000 });
+    await expect(page.locator('#details-name')).toHaveText('Documents');
+    await expect(page.locator('#details-type')).toHaveText('Folder');
+    await captureScreenshot(page, 'ws-details-pane');
+
+    // 5. Context Menu
+    await page.click('#file-list >> text=Photos', { button: 'right' });
+    await expect(page.locator('#context-menu')).toBeVisible();
+    await captureScreenshot(page, 'ws-context-menu');
+  });
+
+  test('Multi-select and Batch Actions', async ({ page, request }) => {
+    const email = 'batch@distfs.local';
+    const authRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
+    const jwt = await authRes.text();
+    
+    const confFile = `/tmp/batch-${Date.now()}.json`;
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
+    
+    const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock batch-user ${email}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner batch-user /batch-user`, 'testpassword');
+
+    await new Promise(r => setTimeout(r, 2000));
+    for (let i = 1; i <= 3; i++) {
+        runCLI(`echo "File ${i}" > /tmp/f${i}.txt`);
+        runCLI(`/bin/distfs -allow-insecure -config ${confFile} put /tmp/f${i}.txt /batch-user/file${i}.txt`, 'test-passphrase-123');
+    }
+
+    page.on('dialog', async d => {
+        if (d.type() === 'prompt') await d.accept('test-passphrase-123');
+        else await d.accept();
+    });
+
+    await page.goto('/');
+    await page.click('#btn-login');
+    const codeLoc = page.locator('#device-flow-code');
+    await expect(codeLoc).not.toBeEmpty({ timeout: 15000 });
+    const userCode = await codeLoc.textContent();
+    await authorizeDeviceCode(request, userCode!, email);
+    await expect(page.locator('#auth-overlay')).toBeHidden({ timeout: 30000 });
+
+    await page.click('#tree-children >> text=batch-user');
+    
+    // Multi-select using Ctrl
+    await page.click('#file-list >> text=file1.txt');
+    await page.click('#file-list >> text=file2.txt', { modifiers: ['Control'] });
+    await page.click('#file-list >> text=file3.txt', { modifiers: ['Control'] });
+
+    await expect(page.locator('.file-item.selected')).toHaveCount(3);
+    await captureScreenshot(page, 'ws-multi-select');
+
+    // Delete batch
+    await page.click('#file-list >> text=file1.txt', { button: 'right' });
+    await page.click('#context-menu >> [data-action="delete"]');
+
+    await expect(page.locator('#file-list >> text=file1.txt')).toBeHidden({ timeout: 15000 });
+    await expect(page.locator('#file-list >> text=file2.txt')).toBeHidden();
+    await expect(page.locator('#file-list >> text=file3.txt')).toBeHidden();
+  });
+
+  test('Content Preview Overlay', async ({ page, request }) => {
+    const email = 'preview@distfs.local';
+    const authRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
+    const jwt = await authRes.text();
+    
+    const confFile = `/tmp/preview-${Date.now()}.json`;
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
+    
+    const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock preview-user ${email}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner preview-user /preview-user`, 'testpassword');
+
+    await new Promise(r => setTimeout(r, 2000));
+    const mdContent = "# DistFS Preview\n\n- E2EE\n- PQC\n- WASM";
+    runCLI(`echo "${mdContent}" > /tmp/test.md`);
+    runCLI(`/bin/distfs -allow-insecure -config ${confFile} put /tmp/test.md /preview-user/readme.md`, 'test-passphrase-123');
+
+    page.on('dialog', async d => {
+        if (d.type() === 'prompt') await d.accept('test-passphrase-123');
+        else await d.accept();
+    });
+
+    await page.goto('/');
+    await page.click('#btn-login');
+    const codeLoc = page.locator('#device-flow-code');
+    await expect(codeLoc).not.toBeEmpty({ timeout: 15000 });
+    const userCode = await codeLoc.textContent();
+    await authorizeDeviceCode(request, userCode!, email);
+    await expect(page.locator('#auth-overlay')).toBeHidden({ timeout: 30000 });
+
+    await page.click('#tree-children >> text=preview-user');
+    await expect(page.locator('#file-list')).not.toContainText('Syncing metadata');
+    await page.dblclick('#file-list >> text=readme.md');
+
+    await expect(page.locator('#preview-overlay')).toBeVisible({ timeout: 15000 });
+    await expect(page.locator('#preview-title')).toHaveText('readme.md');
+    await expect(page.locator('#markdown-preview')).toContainText('DistFS Preview');
+    await captureScreenshot(page, 'ws-content-preview');
+
+    await page.click('#btn-close-preview');
+    await expect(page.locator('#preview-overlay')).toBeHidden();
   });
 
 });

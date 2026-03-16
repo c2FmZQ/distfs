@@ -3,143 +3,303 @@
 <head>
     <title>DistFS Web Client</title>
     <style>
-        body { font-family: sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; background-color: #f5f5f5;}
-        header { background: #333; color: white; padding: 10px 20px; display: flex; justify-content: space-between; align-items: center; }
-        .controls button { padding: 8px 16px; margin-left: 10px; cursor: pointer; }
+        :root {
+            --primary-bg: #ffffff;
+            --secondary-bg: #f8f9fa;
+            --border-color: #dee2e6;
+            --sidebar-width: 260px;
+            --details-width: 360px;
+            --accent-color: #1a73e8;
+            --text-main: #3c4043;
+            --text-muted: #5f6368;
+        }
+
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; color: var(--text-main); background-color: var(--secondary-bg); }
         
+        header { background: var(--primary-bg); color: var(--text-main); padding: 12px 24px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-color); box-shadow: 0 1px 2px rgba(60,64,67,0.1); z-index: 50; }
+        header h2 { margin: 0; font-size: 1.25rem; font-weight: 500; display: flex; align-items: center; }
+        header h2 img { margin-right: 12px; }
+
         #app-container { display: flex; flex: 1; overflow: hidden; }
         
-        #sidebar { width: 250px; background: #fff; border-right: 1px solid #ccc; overflow-y: auto; padding: 10px; }
-        #sidebar ul { list-style-type: none; padding-left: 20px; }
-        #sidebar li { cursor: pointer; padding: 4px 0; }
-        #sidebar li:hover { background-color: #eee; }
-        
-        #main-view { flex: 1; display: flex; flex-direction: column; background: #fff; overflow-y: auto; position: relative;}
-        #breadcrumb { padding: 10px 20px; border-bottom: 1px solid #ccc; background: #fafafa; font-weight: bold;}
-        
-        #file-list { flex: 1; padding: 20px; display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 20px; align-content: start;}
-        .file-item { border: 1px solid #ddd; padding: 15px; text-align: center; border-radius: 6px; cursor: pointer; background: #fafafa; transition: box-shadow 0.2s;}
-        .file-item:hover { box-shadow: 0 4px 8px rgba(0,0,0,0.1); background: #fff;}
-        .file-icon { font-size: 2em; margin-bottom: 10px; }
-        .file-name { word-break: break-all; font-size: 0.9em; }
+        /* Sidebar */
+        #sidebar { width: var(--sidebar-width); background: var(--primary-bg); border-right: 1px solid var(--border-color); display: flex; flex-direction: column; padding: 16px 0; }
+        .sidebar-section { margin-bottom: 24px; }
+        .sidebar-label { padding: 0 24px; font-size: 0.75rem; font-weight: 700; text-transform: uppercase; color: var(--text-muted); margin-bottom: 8px; letter-spacing: 0.5px; }
+        .sidebar-nav { list-style: none; padding: 0; margin: 0; }
+        .sidebar-nav li { padding: 8px 24px; cursor: pointer; display: flex; align-items: center; font-size: 0.9rem; transition: background 0.2s; }
+        .sidebar-nav li:hover { background-color: #f1f3f4; }
+        .sidebar-nav li.active { background-color: #e8f0fe; color: var(--accent-color); font-weight: 500; border-radius: 0 20px 20px 0; margin-right: 12px; }
+        .sidebar-nav li span.icon { margin-right: 12px; font-size: 1.2rem; }
 
-        /* Drag & Drop Overlay */
-        #drop-zone { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5); color: white; display: none; justify-content: center; align-items: center; font-size: 2em; z-index: 10; }
+        #tree-container { flex: 1; overflow-y: auto; padding: 0 12px; font-size: 0.85rem; }
+        .tree-node { padding: 4px 8px; cursor: pointer; border-radius: 4px; display: flex; align-items: center; white-space: nowrap; }
+        .tree-node:hover { background: #f1f3f4; }
+        .tree-node.selected { background: #e8f0fe; color: var(--accent-color); }
+        .tree-children { margin-left: 16px; border-left: 1px solid var(--border-color); }
+
+        #quota-info { padding: 16px 24px; border-top: 1px solid var(--border-color); }
+        .quota-bar-bg { height: 4px; background: #e8eaed; border-radius: 2px; margin: 8px 0; overflow: hidden; }
+        #quota-bar-fill { height: 100%; background: var(--accent-color); width: 0%; transition: width 0.3s; }
+        .quota-text { font-size: 0.75rem; color: var(--text-muted); }
+
+        /* Main Content */
+        #main-view { flex: 1; display: flex; flex-direction: column; background: var(--primary-bg); position: relative; }
+        
+        #toolbar { padding: 8px 24px; border-bottom: 1px solid var(--border-color); display: flex; align-items: center; background: var(--primary-bg); }
+        #breadcrumb { flex: 1; font-size: 1.1rem; color: var(--text-muted); display: flex; align-items: center; }
+        #breadcrumb span { cursor: pointer; padding: 4px 8px; border-radius: 4px; }
+        #breadcrumb span:hover { background: #f1f3f4; color: var(--text-main); }
+        #breadcrumb .separator { padding: 0 4px; color: var(--border-color); cursor: default; }
+
+        #view-controls { display: flex; gap: 8px; }
+        .icon-btn { background: none; border: none; padding: 8px; cursor: pointer; border-radius: 50%; color: var(--text-muted); transition: background 0.2s; display: flex; align-items: center; justify-content: center; }
+        .icon-btn:hover { background: #f1f3f4; color: var(--text-main); }
+        .icon-btn.active { color: var(--accent-color); background: #e8f0fe; }
+
+        #file-browser-container { flex: 1; overflow-y: auto; position: relative; }
+        
+        /* Grid View */
+        #file-list.grid { padding: 24px; display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 20px; }
+        .grid .file-item { border: 1px solid var(--border-color); padding: 16px; text-align: center; border-radius: 8px; cursor: pointer; background: var(--primary-bg); transition: all 0.2s; position: relative; }
+        .grid .file-item:hover { box-shadow: 0 1px 3px 1px rgba(60,64,67,0.15); border-color: transparent; }
+        .grid .file-item.selected { background: #e8f0fe; border-color: var(--accent-color); }
+        .grid .file-icon { font-size: 3rem; margin-bottom: 12px; }
+        .grid .file-name { font-size: 0.85rem; font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .grid .file-meta { font-size: 0.75rem; color: var(--text-muted); margin-top: 4px; }
+
+        /* List View */
+        #file-list.list { display: flex; flex-direction: column; }
+        .list .file-header { display: flex; padding: 12px 24px; border-bottom: 1px solid var(--border-color); font-size: 0.75rem; font-weight: 700; color: var(--text-muted); text-transform: uppercase; }
+        .list .file-item { display: flex; padding: 8px 24px; border-bottom: 1px solid var(--border-color); cursor: pointer; align-items: center; font-size: 0.9rem; }
+        .list .file-item:hover { background: #f8f9fa; }
+        .list .file-item.selected { background: #e8f0fe; }
+        .list .file-name-cell { flex: 3; display: flex; align-items: center; overflow: hidden; }
+        .list .file-icon { font-size: 1.25rem; margin-right: 16px; width: 24px; text-align: center; }
+        .list .file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .list .file-size-cell { flex: 1; color: var(--text-muted); text-align: right; }
+        .list .file-date-cell { flex: 1.5; color: var(--text-muted); text-align: right; }
+
+        /* Details Pane */
+        #details-pane { width: var(--details-width); background: var(--primary-bg); border-left: 1px solid var(--border-color); display: flex; flex-direction: column; overflow-y: auto; transition: transform 0.3s; }
+        #details-pane.collapsed { transform: translateX(100%); width: 0; border-left: none; }
+        .details-header { padding: 20px 24px; border-bottom: 1px solid var(--border-color); display: flex; justify-content: space-between; align-items: center; }
+        .details-content { padding: 24px; }
+        .details-preview { width: 100%; height: 160px; background: #f1f3f4; border-radius: 8px; margin-bottom: 20px; display: flex; align-items: center; justify-content: center; font-size: 4rem; overflow: hidden; }
+        .details-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+        .details-title { font-size: 1.1rem; font-weight: 500; margin-bottom: 16px; word-break: break-all; }
+        .details-table { width: 100%; font-size: 0.85rem; border-collapse: collapse; }
+        .details-table td { padding: 8px 0; border-bottom: 1px solid #f1f3f4; }
+        .details-table td:first-child { color: var(--text-muted); width: 40%; }
+        
+        #access-list { margin-top: 24px; }
+        .access-item { display: flex; align-items: center; padding: 8px 0; font-size: 0.85rem; }
+        .access-avatar { width: 24px; height: 24px; border-radius: 50%; background: #e8eaed; margin-right: 12px; display: flex; align-items: center; justify-content: center; font-size: 0.7rem; font-weight: 700; color: var(--text-muted); }
+
+        /* Job Manager Toast */
+        #job-manager { position: fixed; bottom: 24px; right: 24px; width: 360px; background: var(--primary-bg); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,0.2); z-index: 1000; overflow: hidden; display: none; }
+        .job-header { background: #323336; color: white; padding: 12px 16px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; }
+        .job-list { max-height: 300px; overflow-y: auto; background: var(--primary-bg); }
+        .job-item { padding: 12px 16px; border-bottom: 1px solid var(--border-color); display: flex; flex-direction: column; }
+        .job-info { display: flex; justify-content: space-between; font-size: 0.85rem; margin-bottom: 8px; }
+        .job-progress-bg { height: 4px; background: #e8eaed; border-radius: 2px; }
+        .job-progress-fill { height: 100%; background: var(--accent-color); width: 0%; transition: width 0.2s; }
+
+        /* Context Menu */
+        #context-menu { position: fixed; background: white; border: 1px solid var(--border-color); box-shadow: 0 2px 10px rgba(0,0,0,0.1); border-radius: 4px; padding: 4px 0; z-index: 1000; display: none; min-width: 160px; }
+        .menu-item { padding: 8px 16px; cursor: pointer; font-size: 0.9rem; display: flex; align-items: center; }
+        .menu-item:hover { background: #f1f3f4; }
+        .menu-item span.icon { margin-right: 12px; width: 16px; }
+
+        /* Drop Zone */
+        #drop-zone { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background: rgba(26, 115, 232, 0.1); border: 2px dashed var(--accent-color); border-radius: 8px; margin: 12px; display: none; flex-direction: column; justify-content: center; align-items: center; z-index: 100; pointer-events: none; }
         #main-view.dragover #drop-zone { display: flex; }
 
         /* Auth Overlay */
-        #auth-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: white; z-index: 100; display: flex; flex-direction: column; align-items: center; justify-content: center; }
-        #status { margin-top: 20px; padding: 15px; font-family: monospace; color: #555;}
+        #auth-overlay { position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: white; z-index: 2000; display: flex; flex-direction: column; align-items: center; justify-content: center; }
+        #status { margin-top: 24px; font-family: 'Roboto Mono', monospace; color: var(--text-muted); font-size: 0.9rem; }
+        .auth-card { background: white; padding: 48px; border-radius: 8px; border: 1px solid var(--border-color); box-shadow: 0 1px 3px rgba(0,0,0,0.1); text-align: center; max-width: 400px; width: 90%; }
+        .auth-card h1 { margin-bottom: 32px; font-weight: 400; color: var(--text-main); }
+        .auth-buttons { display: flex; flex-direction: column; gap: 12px; }
+        .primary-btn { background: var(--accent-color); color: white; border: none; padding: 10px 24px; border-radius: 4px; font-weight: 500; cursor: pointer; transition: background 0.2s; }
+        .primary-btn:hover { background: #185abc; }
+        .secondary-btn { background: white; color: var(--accent-color); border: 1px solid var(--border-color); padding: 10px 24px; border-radius: 4px; font-weight: 500; cursor: pointer; transition: background 0.2s; }
+        .secondary-btn:hover { background: #f8f9fa; }
+
+        /* Helper Utilities */
+        .hidden { display: none !important; }
     </style>
 </head>
 <body>
     <div id="auth-overlay">
-        <h1>DistFS Zero-Knowledge File Manager</h1>
-        <div class="controls">
-            <button id="btn-login">Login (Existing Account)</button>
-            <button id="btn-new-account">Create New Account</button>
+        <div class="auth-card">
+            <img src="distfs-256x256.png" width="64" height="64" style="margin-bottom: 16px;">
+            <h1>DistFS</h1>
+            <p style="color: var(--text-muted); margin-bottom: 32px;">Secure, Zero-Knowledge Workspace</p>
+            <div class="auth-buttons">
+                <button id="btn-login" class="primary-btn">Sign In</button>
+                <button id="btn-new-account" class="secondary-btn">Create Account</button>
+            </div>
+            <div id="status">WASM Runtime Initializing...</div>
         </div>
-        <div id="status">Loading WASM Environment...</div>
     </div>
 
     <header>
-        <h2>DistFS</h2>
-        <div id="user-info">Not logged in</div>
+        <h2><img src="distfs-256x256.png" width="32" height="32"> DistFS Workspace</h2>
+        <div id="user-info" style="font-size: 0.9rem; color: var(--text-muted);">Not authenticated</div>
     </header>
 
     <div id="app-container">
         <div id="sidebar">
-            <div style="font-weight:bold; margin-bottom:10px;">Directory Tree</div>
-            <ul id="tree-root">
-                <li data-path="/">/ (Root)</li>
-            </ul>
+            <div class="sidebar-section">
+                <ul class="sidebar-nav">
+                    <li id="nav-my-drive" class="active"><span class="icon">📁</span> My Files</li>
+                    <li id="nav-recent"><span class="icon">🕒</span> Recent</li>
+                    <li id="nav-starred"><span class="icon">⭐</span> Starred</li>
+                    <li id="nav-trash"><span class="icon">🗑️</span> Trash</li>
+                </ul>
+            </div>
+            
+            <div class="sidebar-label">Folders</div>
+            <div id="tree-container">
+                <div id="tree-root-node" class="tree-node selected" data-path="/">/ (Root)</div>
+                <div id="tree-children" class="tree-children"></div>
+            </div>
+
+            <div id="quota-info">
+                <div class="quota-text">Storage</div>
+                <div class="quota-bar-bg"><div id="quota-bar-fill"></div></div>
+                <div class="quota-text"><span id="quota-used">0 B</span> of <span id="quota-total">0 B</span> used</div>
+            </div>
         </div>
         
         <div id="main-view">
-            <div id="breadcrumb">/</div>
-            <div id="file-list">
-                <!-- File items populated dynamically -->
+            <div id="toolbar">
+                <div id="breadcrumb">/</div>
+                <div id="view-controls">
+                    <button id="btn-list-view" class="icon-btn" title="List view">☰</button>
+                    <button id="btn-grid-view" class="icon-btn active" title="Grid view">▦</button>
+                    <button id="btn-info-toggle" class="icon-btn" title="View details">ⓘ</button>
+                </div>
             </div>
-            <div id="drop-zone">Drop files here to upload securely</div>
+
+            <div id="file-browser-container">
+                <div id="file-list" class="grid">
+                    <!-- Dynamic Items -->
+                </div>
+                <div id="drop-zone">
+                    <span style="font-size: 3rem; margin-bottom: 16px;">📁</span>
+                    <span>Drop files to upload securely to this folder</span>
+                </div>
+            </div>
+        </div>
+
+        <div id="details-pane">
+            <div class="details-header">
+                <span style="font-weight: 500;">Details</span>
+                <button id="btn-close-details" class="icon-btn">✕</button>
+            </div>
+            <div id="details-empty" class="details-content" style="text-align: center; color: var(--text-muted); margin-top: 48px;">
+                <div style="font-size: 3rem; margin-bottom: 16px;">📄</div>
+                <p>Select a file or folder to view its properties</p>
+            </div>
+            <div id="details-selection" class="details-content hidden">
+                <div class="details-preview" id="details-preview-box">📄</div>
+                <div class="details-title" id="details-name">filename.txt</div>
+                
+                <table class="details-table">
+                    <tr><td>Type</td><td id="details-type">-</td></tr>
+                    <tr><td>Size</td><td id="details-size">-</td></tr>
+                    <tr><td>Location</td><td id="details-location">-</td></tr>
+                    <tr><td>Owner</td><td id="details-owner">-</td></tr>
+                    <tr><td>Modified</td><td id="details-date">-</td></tr>
+                </table>
+
+                <div id="access-list-container">
+                    <div class="sidebar-label" style="padding: 0; margin-top: 24px;">Who has access</div>
+                    <div id="access-list">
+                        <!-- User items -->
+                    </div>
+                    <button id="btn-manage-access" class="secondary-btn" style="width: 100%; margin-top: 16px; font-size: 0.85rem;">Manage Access</button>
+                </div>
+            </div>
         </div>
     </div>
 
-    <!-- Sharing Modal -->
-    <div id="share-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index: 200; justify-content:center; align-items:center;">
-        <div style="background:white; padding:20px; border-radius:8px; min-width:300px;">
-            <h3>Share File</h3>
-            <p id="share-file-name"></p>
-            <div style="margin-bottom:15px;">
-                <label>User/Group Email:</label><br>
-                <input type="text" id="share-target-email" style="width:100%; padding:5px; margin-top:5px;" placeholder="alice@example.com">
+    <!-- Job Manager Toast -->
+    <div id="job-manager">
+        <div class="job-header" id="job-header">
+            <span>Transfers</span>
+            <span id="job-count">0</span>
+        </div>
+        <div id="job-list" class="job-list">
+            <!-- Dynamic Job Items -->
+        </div>
+    </div>
+
+    <!-- Context Menu -->
+    <div id="context-menu">
+        <div class="menu-item" data-action="download"><span class="icon">⬇</span> Download</div>
+        <div class="menu-item" data-action="share"><span class="icon">👤</span> Share</div>
+        <div class="menu-item" data-action="star"><span class="icon">⭐</span> Star</div>
+        <div style="height: 1px; background: var(--border-color); margin: 4px 0;"></div>
+        <div class="menu-item" data-action="rename"><span class="icon">✎</span> Rename</div>
+        <div class="menu-item" data-action="move"><span class="icon">➡</span> Move to</div>
+        <div class="menu-item" data-action="delete" style="color: #d93025;"><span class="icon">🗑</span> Delete</div>
+    </div>
+
+    <!-- Sharing Modal (Re-using existing but styled) -->
+    <div id="share-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.5); z-index: 3000; justify-content:center; align-items:center;">
+        <div style="background:white; padding:32px; border-radius:8px; min-width:400px; box-shadow: 0 12px 48px rgba(0,0,0,0.3);">
+            <h3 style="margin-top: 0;">Share "<span id="share-file-name"></span>"</h3>
+            <div style="margin-bottom:20px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Add people and groups</label>
+                <input type="text" id="share-target-email" style="width:100%; padding:12px; border: 1px solid var(--border-color); border-radius: 4px; margin-top:8px; box-sizing: border-box;" placeholder="Enter email address">
             </div>
-            <div style="margin-bottom:15px;">
-                <label>Permissions:</label><br>
-                <select id="share-perms" style="width:100%; padding:5px; margin-top:5px;">
-                    <option value="r--">Read-Only</option>
-                    <option value="rw-">Read-Write</option>
+            <div style="margin-bottom:24px;">
+                <label style="font-size: 0.85rem; font-weight: 600; color: var(--text-muted);">Permissions</label>
+                <select id="share-perms" style="width:100%; padding:10px; border: 1px solid var(--border-color); border-radius: 4px; margin-top:8px;">
+                    <option value="r--">Viewer (Read-only)</option>
+                    <option value="rw-">Editor (Read-Write)</option>
                 </select>
             </div>
-            <div style="display:flex; justify-content:flex-end;">
-                <button id="btn-cancel-share" style="background:#ccc; border:none;">Cancel</button>
-                <button id="btn-confirm-share" style="background:#007bff; color:white; border:none;">Apply</button>
+            <div style="display:flex; justify-content:flex-end; gap: 12px;">
+                <button id="btn-cancel-share" class="secondary-btn">Cancel</button>
+                <button id="btn-confirm-share" class="primary-btn">Share</button>
             </div>
         </div>
     </div>
 
-    <!-- Device Flow Modal -->
-    <div id="device-flow-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); z-index: 300; justify-content:center; align-items:center; color: white; text-align: center;">
-        <div style="background:#222; padding:30px; border-radius:12px; max-width:400px; width: 90%;">
-            <h2>Authorize Access</h2>
-            <p>Please open the following URL in a new tab:</p>
-            <p><a id="device-flow-link" href="#" target="_blank" style="color: #007bff; word-break: break-all;"></a></p>
-            <p>And enter this code if prompted:</p>
-            <h1 id="device-flow-code" style="letter-spacing: 5px; background: #333; padding: 10px; border-radius: 4px;"></h1>
-            <p id="device-flow-status">Waiting for verification...</p>
-            <button id="btn-cancel-device-flow" style="margin-top: 20px; background: #444; color: white; border: none; padding: 10px 20px; border-radius: 4px; cursor: pointer;">Cancel</button>
+    <!-- Device Flow Modal (Re-using existing but styled) -->
+    <div id="device-flow-modal" style="display:none; position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.8); z-index: 4000; justify-content:center; align-items:center; color: white; text-align: center;">
+        <div style="background:#202124; padding:48px; border-radius:8px; max-width:440px; width: 90%; box-shadow: 0 24px 64px rgba(0,0,0,0.5);">
+            <h2 style="font-weight: 400; margin-top: 0;">Device Authentication</h2>
+            <p style="color: #9aa0a6; margin-bottom: 32px;">A verification code is required to authorize this browser.</p>
+            <div style="background: #303134; padding: 24px; border-radius: 8px; margin-bottom: 32px;">
+                <div style="font-size: 0.85rem; color: #9aa0a6; margin-bottom: 8px;">USER CODE</div>
+                <div id="device-flow-code" style="font-size: 2.5rem; letter-spacing: 4px; font-family: 'Roboto Mono', monospace; color: #8ab4f8;"></div>
+            </div>
+            <p style="margin-bottom: 12px;">1. Go to: <a id="device-flow-link" href="#" target="_blank" style="color: #8ab4f8; text-decoration: none;"></a></p>
+            <p style="margin-bottom: 32px;">2. Enter the code shown above.</p>
+            <div id="device-flow-status" style="font-size: 0.9rem; color: #9aa0a6; margin-bottom: 24px;">Waiting for your confirmation...</div>
+            <button id="btn-cancel-device-flow" class="secondary-btn" style="border-color: #5f6368; color: #9aa0a6;">Cancel</button>
         </div>
     </div>
 
-    <script>
-        console.log('SW: isSecureContext =', window.isSecureContext);
-        if ('serviceWorker' in navigator) {
-            console.log('SW: Registering...');
-            navigator.serviceWorker.register('sw.js').then(reg => {
-                console.log('SW: Registered, scope:', reg.scope);
-                
-                if (reg.installing) console.log('SW: Installing...');
-                if (reg.waiting) console.log('SW: Waiting...');
-                if (reg.active) console.log('SW: Active');
+    <!-- Preview Overlay -->
+    <div id="preview-overlay" class="hidden" style="position:fixed; top:0; left:0; right:0; bottom:0; background:rgba(0,0,0,0.9); z-index: 5000; display: flex; flex-direction: column;">
+        <div style="padding: 16px 24px; display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #3c4043;">
+            <div id="preview-title" style="color: white; font-size: 1.1rem;">filename.txt</div>
+            <div style="display: flex; gap: 12px;">
+                <button id="btn-preview-download" class="secondary-btn" style="background: transparent; color: white; border-color: #5f6368;">Download</button>
+                <button id="btn-close-preview" class="icon-btn" style="color: white;">✕</button>
+            </div>
+        </div>
+        <div id="preview-body" style="flex: 1; overflow: auto; display: flex; align-items: center; justify-content: center; padding: 48px;">
+            <!-- Dynamic Content (Img, Video, Text, Markdown) -->
+        </div>
+    </div>
 
-                if (!navigator.serviceWorker.controller) {
-                    console.log('SW: No controller, waiting for activation...');
-                    reg.addEventListener('updatefound', () => {
-                        const newWorker = reg.installing;
-                        console.log('SW: New worker installing...');
-                        newWorker.addEventListener('statechange', () => {
-                            console.log('SW: State change:', newWorker.state);
-                            if (newWorker.state === 'activated') {
-                                console.log('SW: Activated! Reloading...');
-                                window.location.reload();
-                            }
-                        });
-                    });
-                    
-                    // Fallback: if already active but no controller, claim it
-                    if (reg.active) {
-                        console.log('SW: Already active but no controller. Reloading in 1s...');
-                        setTimeout(() => window.location.reload(), 1000);
-                    }
-                } else {
-                    console.log('SW: Page is controlled by:', navigator.serviceWorker.controller.scriptURL);
-                }
-            }).catch(err => {
-                console.error('SW: Registration failed:', err);
-            });
-        } else {
-            console.warn('SW: Not supported in this browser');
-        }
-    </script>
     <script type="module" src="js/app.js"></script>
 </body>
 </html>

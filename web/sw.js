@@ -84,64 +84,66 @@ async function handleMediaStream(request, id, clientId) {
             if (event.data.type === 'media-metadata') {
                 console.log(`SW: Received metadata for ${id}: size=${event.data.size}`);
                 const fileSize = event.data.size;
-                const mimeType = event.data.mimeType || 'application/octet-stream';
+                let mimeType = event.data.mimeType || 'application/octet-stream';
                 
-                if (rangeHeader) {
-                    const parts = rangeHeader.replace(/bytes=/, "").split("-");
-                    const start = parseInt(parts[0], 10);
-                    const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-                    const chunksize = (end - start) + 1;
+                const { readable, writable } = new TransformStream();
+                const writer = writable.getWriter();
+                let responseSent = false;
 
-                    const { readable, writable } = new TransformStream();
-                    const writer = writable.getWriter();
-                    
-                    channel.port1.onmessage = async (chunkEvent) => {
-                        if (chunkEvent.data.type === 'chunk') {
-                            await writer.write(chunkEvent.data.data);
-                            channel.port1.postMessage({ type: 'pull' });
-                        } else if (chunkEvent.data.type === 'done') {
-                            await writer.close();
-                            channel.port1.close();
-                        }
-                    };
+                const sendResponse = () => {
+                    if (responseSent) return;
+                    responseSent = true;
 
-                    resolve(new Response(readable, {
-                        status: 206,
-                        headers: {
-                            'Content-Range': `bytes ${start}-${end}/${fileSize}`,
-                            'Accept-Ranges': 'bytes',
-                            'Content-Length': chunksize.toString(),
-                            'Content-Type': mimeType,
-                        }
-                    }));
-                    
-                    channel.port1.postMessage({ type: 'stream-range', start, end });
-                    
-                } else {
-                    const { readable, writable } = new TransformStream();
-                    const writer = writable.getWriter();
-                    
-                    channel.port1.onmessage = async (chunkEvent) => {
-                        if (chunkEvent.data.type === 'chunk') {
-                            await writer.write(chunkEvent.data.data);
-                            channel.port1.postMessage({ type: 'pull' });
-                        } else if (chunkEvent.data.type === 'done') {
-                            await writer.close();
-                            channel.port1.close();
-                        }
-                    };
+                    if (rangeHeader) {
+                        const parts = rangeHeader.replace(/bytes=/, "").split("-");
+                        const start = parseInt(parts[0], 10);
+                        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+                        const chunksize = (end - start) + 1;
 
-                    resolve(new Response(readable, {
-                        status: 200,
-                        headers: {
-                            'Content-Length': fileSize.toString(),
-                            'Content-Type': mimeType,
-                            'Accept-Ranges': 'bytes'
-                        }
-                    }));
-                    
-                    channel.port1.postMessage({ type: 'stream-range', start: 0, end: fileSize - 1 });
-                }
+                        resolve(new Response(readable, {
+                            status: 206,
+                            headers: {
+                                'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+                                'Accept-Ranges': 'bytes',
+                                'Content-Length': chunksize.toString(),
+                                'Content-Type': mimeType,
+                            }
+                        }));
+                    } else {
+                        resolve(new Response(readable, {
+                            status: 200,
+                            headers: {
+                                'Content-Length': fileSize.toString(),
+                                'Content-Type': mimeType,
+                                'Accept-Ranges': 'bytes'
+                            }
+                        }));
+                    }
+                };
+
+                // Fallback timeout for sniffing
+                const sniffTimeout = setTimeout(sendResponse, 2000);
+
+                channel.port1.onmessage = async (chunkEvent) => {
+                    if (chunkEvent.data.type === 'chunk') {
+                        await writer.write(chunkEvent.data.data);
+                        sendResponse(); // Ensure response is sent on first chunk
+                        channel.port1.postMessage({ type: 'pull' });
+                    } else if (chunkEvent.data.type === 'mime-update') {
+                        console.log(`SW: Sniffed MIME update for ${id}: ${chunkEvent.data.mimeType}`);
+                        mimeType = chunkEvent.data.mimeType;
+                        clearTimeout(sniffTimeout);
+                        sendResponse();
+                    } else if (chunkEvent.data.type === 'done') {
+                        await writer.close();
+                        channel.port1.close();
+                    }
+                };
+
+                const start = rangeHeader ? parseInt(rangeHeader.replace(/bytes=/, "").split("-")[0], 10) : 0;
+                const end = rangeHeader && rangeHeader.split("-")[1] ? parseInt(rangeHeader.split("-")[1], 10) : fileSize - 1;
+                channel.port1.postMessage({ type: 'stream-range', start, end });
+
             } else if (event.data.type === 'error') {
                 console.error(`SW: Error from client: ${event.data.error}`);
                 resolve(new Response(event.data.error, { status: 500 }));

@@ -1199,3 +1199,80 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Automate opening the "Share" modal, populating the inputs, and submitting.
     *   **Action:** Implement a test that uses Playwright's `page.route` to mock an API failure and verify the UI's error boundary logic catches and displays the error gracefully.
     *   **Action:** Insert `page.screenshot()` calls at the successful completion of each major visual state (Login, Dashboard, Navigation, Share Modal), gated by the `CAPTURE_SCREENSHOTS` environment variable.
+
+---
+
+## Phase 64: High-Fidelity Web UI & Advanced Workspace Management
+
+**Goal:** Transform the experimental file manager into a professional workspace by implementing a modern sidebar-based layout, full namespace mutation support (Move/Rename/Delete), visual quota tracking, and an advanced background upload/download manager.
+
+*   **Step 64.1: Modern Workspace Layout & Sidebar**
+    *   **Action:** Implement a responsive three-pane layout: a persistent left sidebar for global navigation, a central file browser, and a collapsible right-hand "Details" pane.
+    *   **Action:** Sidebar Features: Add a recursive "Folder Tree" view, visual "Storage Quota" progress bar (calling `v1/user/quota`), and "Recent/Starred" filters.
+    *   **Action:** Navigation Logic: Implement "Starred" files by storing a JSON manifest in the user's home directory (e.g., `~/.distfs/web_meta.json`).
+    *   **Testing Strategy:** 
+        *   **Layout Verification:** Use Playwright to assert visibility and dimensions of the three panes at different viewport sizes (Mobile/Tablet/Desktop).
+        *   **Tree Navigation:** Verify that clicking a folder in the sidebar correctly updates the central browser and breadcrumbs.
+        *   **Metadata Persistence:** Star a file, reload the page, and assert that the file remains in the "Starred" view (verifying home-directory manifest round-trip).
+*   **Step 64.2: Visual View Modes & Content Previews**
+    *   **Action:** View Toggle: Implement a smooth transition between a metadata-rich "List View" and a visual "Grid View" with large thumbnails.
+    *   **Action:** Content Previews: Add a "Preview Overlay" that renders text files, Markdown (via a library like `marked`), and high-resolution images/videos using the Service Worker streaming engine.
+    *   **Testing Strategy:**
+        *   **State Consistency:** Assert that the file selection and current directory are preserved when toggling between Grid and List views.
+        *   **Streaming Preview:** Open a Markdown preview and assert that the Service Worker correctly intercepts the request and that `marked` renders the expected HTML.
+        *   **Large Media Seek:** Verify that a video preview can seek to a specific timestamp (asserting `Range` header support in the SW).
+*   **Step 64.3: Full Namespace Mutations (CRUD)**
+    *   **Action:** Implement "Rename" and "Delete" triggers in the UI, calling the corresponding WASM bindings for `mv` and `rm`.
+    *   **Action:** Drag-and-Drop Organization: Enable dragging file icons onto folder nodes in the sidebar or grid to trigger internal move (`mv`) operations.
+    *   **Action:** Batch Operations: Implement multi-select (Shift/Ctrl) to allow bulk deletion or movement of files in a single Raft transaction.
+    *   **Testing Strategy:**
+        *   **Mutation Atomic Verification:** Perform a "Rename" in the UI and then use the `distfs` CLI to verify the Inode name has updated on the server.
+        *   **Drag-and-Drop Simulation:** Use Playwright's `dragTo` API to move a file into a sidebar folder and assert its disappearance from the current view and appearance in the target.
+        *   **Multi-Select CRUD:** Select multiple files, click "Delete," and assert that multiple `rm` calls (or a batch call) are dispatched to WASM.
+*   **Step 64.4: Advanced Sharing & Lockbox Inspection**
+    *   **Action:** Lockbox Inspector: In the right-hand details pane, show a list of all users and groups that have explicit cryptographic access to the selected file, parsed from the Inode's Lockbox.
+    *   **Action:** Permissions Editor: Implement a clean UI to add/remove access, mapping directly to `chmod` and ACL mutation logic in WASM.
+    *   **Testing Strategy:**
+        *   **Provenance Verification:** Assert that the "Who has access" list accurately reflects the cryptographic keys found in the Lockbox (using `stat` raw data).
+        *   **ACL Lifecycle:** Add a new user to a file's ACL via the UI, then log in as that user in a separate Playwright browser context to verify they can now decrypt the file.
+*   **Step 64.5: Background Job Manager & Progress UI**
+    *   **Action:** Job Queue Overlay: Implement a "toast" notification in the bottom-right (Google Drive style) that tracks all active WASM worker operations.
+    *   **Action:** Real-time Feedback: Show individual progress bars for chunked uploads/downloads, current throughput (MB/s), and success/failure status.
+    *   **Testing Strategy:**
+        *   **Concurrency Stress:** Trigger 10 simultaneous 5MB uploads and assert that the Job Manager correctly displays 10 individual progress bars.
+        *   **Error Recovery:** Use `page.route` to fail an intermediate chunk upload and verify the UI shows a "Retry" or "Failed" state for that specific job.
+*   **Step 64.6: Contextual Interaction & Search**
+    *   **Action:** Context Menus: Implement a custom right-click menu providing fast access to "Download," "Get Shareable Link," "Move," and "Rename."
+    *   **Action:** Global Search: Add a search bar that performs client-side filtering of the cached directory tree or executes deep traversal for larger namespaces.
+    *   **Testing Strategy:**
+        *   **Context Menu Trigger:** Right-click a file and assert that the custom menu appears at the cursor position with the correct action items.
+        *   **Search Accuracy:** Type a partial filename and assert that the file grid is filtered in real-time to show only matching items.
+
+---
+
+## Phase 65: Security Provenance & Technical Debt Consolidation
+
+**Goal:** Strengthen the cryptographic foundations of the system by implementing mandatory signature verification for directory entries and registry records, while refactoring memory-intensive operations to support large-scale namespaces.
+
+*   **Step 65.1: Directory Entry Signature Verification**
+    *   **Action:** Implement `VerifyEntrySignature` in `pkg/client/client.go`. Every entry returned in a directory listing must be cryptographically verified using the `VerifierID`'s public key.
+    *   **Testing Strategy:** Manually inject a forged entry into a BoltDB snapshot and assert that the client rejects the entire directory listing with a `DISTFS_STRUCTURAL_INCONSISTENCY` error.
+*   **Step 65.2: Admin Registry Signing**
+    *   **Action:** Update `cmd/distfs/admin.go` to sign out-of-band registry entries with the administrator's **ML-DSA** private key.
+    *   **Action:** Update the client-side registry verification logic to require a valid admin signature for all trusted identities.
+    *   **Testing Strategy:** Assert that the `registry-add` command now produces a signed payload and that the client correctly rejects identities with invalid or missing admin signatures.
+*   **Step 65.3: Web UI Sharing Integration**
+    *   **Action:** Implement the WASM bridge for `setACL` and wire it to the "Share" modal in the Web UI.
+    *   **Action:** Replace the simulated sharing logic in `app.ts` with real cryptographic mutations of the file's Lockbox.
+    *   **Testing Strategy:** Perform a share operation in the UI and verify the updated Lockbox state using the `distfs stat` CLI.
+*   **Step 65.4: Large Namespace Memory Refactoring**
+    *   **Action:** Refactor `pkg/client/client.go` to use a streaming iterator or chunked buffering for directory listings instead of loading the full entry set into memory.
+    *   **Action:** Implement pagination or "Load More" logic in the Web UI to handle directories with >1000 items.
+    *   **Testing Strategy:** Generate a test directory with 10,000 files and verify that the client can list it without exceeding a 128MB memory ceiling.
+*   **Step 65.5: Robust Symlink & Lstat Support**
+    *   **Action:** Update `ResolvePath` in `pkg/client/directory.go` to include a `followFinal` flag.
+    *   **Action:** Implement proper `Lstat` handling in the FUSE layer to correctly report symlink metadata instead of the target's metadata.
+    *   **Testing Strategy:** Create a symlink in a FUSE mount and verify that `ls -l` correctly identifies it as a link (`l` bit) and shows the correct link target.
+
+
+

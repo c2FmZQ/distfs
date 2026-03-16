@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"path/filepath"
 	"syscall/js"
@@ -83,8 +84,6 @@ func pollForToken(args []js.Value) (interface{}, error) {
 }
 
 // asyncFunc wraps a Go function that returns (interface{}, error) into a JavaScript Promise.
-// This ensures that heavy cryptographic operations execute in the background Goroutine
-// without blocking the main JavaScript thread (or Web Worker thread).
 func asyncFunc(fn func(args []js.Value) (interface{}, error)) js.Func {
 	return js.FuncOf(func(this js.Value, args []js.Value) interface{} {
 		handler := js.FuncOf(func(this js.Value, promiseArgs []js.Value) interface{} {
@@ -187,7 +186,6 @@ func pullKeySync(args []js.Value) (interface{}, error) {
 	serverURL := args[0].String()
 	token := args[1].String()
 	
-	// Create a temporary unauthenticated client just to pull the blob
 	tempClient := client.NewClient(serverURL).WithDisableDoH(true)
 	
 	blob, err := tempClient.PullKeySync(context.Background(), token)
@@ -249,7 +247,6 @@ func registerUser(args []js.Value) (interface{}, error) {
 	}
 	body, _ := json.Marshal(payload)
 
-	// We use the underlying HTTP client from a dummy client to handle native fetch logic
 	tempClient := client.NewClient(serverURL).WithDisableDoH(true)
 	
 	req, err := http.NewRequestWithContext(context.Background(), "POST", serverURL+"/v1/user/register", bytes.NewReader(body))
@@ -299,7 +296,7 @@ func initClient(args []js.Value) (interface{}, error) {
 		WithIdentity(userID, decKey).
 		WithSignKey(signKey).
 		WithServerKey(serverKey).
-		WithDisableDoH(true) // Always disable DoH in the browser, rely on native fetch
+		WithDisableDoH(true)
 
 	return true, nil
 }
@@ -314,9 +311,10 @@ func listDirectory(args []js.Value) (interface{}, error) {
 	res := make([]interface{}, 0, len(entries))
 	for _, e := range entries {
 		res = append(res, map[string]interface{}{
-			"name":  e.Name(),
-			"isDir": e.IsDir(),
-			"size":  e.Size(),
+			"name":    e.Name(),
+			"isDir":   e.IsDir(),
+			"size":    e.Size(),
+			"modTime": e.ModTime().Unix(),
 		})
 	}
 	return res, nil
@@ -329,22 +327,31 @@ func statFile(args []js.Value) (interface{}, error) {
 		return nil, err
 	}
 
-	mimeType := "application/octet-stream"
-	ext := filepath.Ext(path)
-	switch ext {
-	case ".png":
-		mimeType = "image/png"
-	case ".jpg", ".jpeg":
-		mimeType = "image/jpeg"
-	case ".gif":
-		mimeType = "image/gif"
-	case ".webp":
-		mimeType = "image/webp"
+	inode := info.Sys().(*metadata.Inode)
+
+	mimeType := mime.TypeByExtension(filepath.Ext(path))
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+
+	lockbox := make(map[string]interface{})
+	for k, v := range inode.Lockbox {
+		lockbox[k] = map[string]interface{}{
+			"kem": hex.EncodeToString(v.KEMCiphertext),
+			"dem": hex.EncodeToString(v.DEMCiphertext),
+		}
 	}
 
 	return map[string]interface{}{
+		"name":     info.Name(),
 		"size":     info.Size(),
+		"isDir":    info.IsDir(),
+		"modTime":  info.ModTime().Unix(),
+		"owner":    inode.OwnerID,
+		"group":    inode.GroupID,
+		"mode":     inode.Mode,
 		"mimeType": mimeType,
+		"lockbox":  lockbox,
 	}, nil
 }
 
@@ -367,7 +374,89 @@ func readFileChunk(args []js.Value) (interface{}, error) {
 
 	uint8Array := js.Global().Get("Uint8Array").New(n)
 	js.CopyBytesToJS(uint8Array, buf[:n])
-	return uint8Array, nil
+
+	res := map[string]interface{}{
+		"chunk": uint8Array,
+	}
+	// Sniff content type if reading from the beginning
+	if offset == 0 && n > 0 {
+		res["detectedMimeType"] = http.DetectContentType(buf[:n])
+	}
+
+	return res, nil
+}
+
+func getQuota(args []js.Value) (interface{}, error) {
+	if c == nil {
+		return nil, fmt.Errorf("client not initialized")
+	}
+	user, err := c.GetUser(context.Background(), c.UserID())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]interface{}{
+		"used_bytes":  user.Usage.TotalBytes,
+		"total_bytes": user.Quota.MaxBytes,
+		"used_inodes": user.Usage.InodeCount,
+		"total_inodes": user.Quota.MaxInodes,
+	}, nil
+}
+
+func readFile(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	f, err := c.Open(context.Background(), path, 0, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	// Cap reading at 10MB for UI text previews
+	limitReader := io.LimitReader(f, 10*1024*1024)
+	data, err := io.ReadAll(limitReader)
+	if err != nil {
+		return nil, err
+	}
+	return string(data), nil
+}
+
+func writeFile(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	content := args[1].String()
+	
+	// Open or create file
+	err := c.CreateFile(context.Background(), path, bytes.NewReader([]byte(content)), int64(len(content)))
+	if err != nil {
+		return nil, err
+	}
+	return true, nil
+}
+
+func mkdir(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	err := c.Mkdir(context.Background(), path, 0755)
+	if err != nil {
+		return nil, err
+	}
+	return true, nil
+}
+
+func mv(args []js.Value) (interface{}, error) {
+	oldPath := args[0].String()
+	newPath := args[1].String()
+	err := c.Rename(context.Background(), oldPath, newPath)
+	if err != nil {
+		return nil, err
+	}
+	return true, nil
+}
+
+func rm(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	err := c.Remove(context.Background(), path)
+	if err != nil {
+		return nil, err
+	}
+	return true, nil
 }
 
 func main() {
@@ -376,6 +465,12 @@ func main() {
 		"listDirectory":   asyncFunc(listDirectory),
 		"statFile":        asyncFunc(statFile),
 		"readFileChunk":   asyncFunc(readFileChunk),
+		"readFile":        asyncFunc(readFile),
+		"writeFile":       asyncFunc(writeFile),
+		"mkdir":           asyncFunc(mkdir),
+		"mv":              asyncFunc(mv),
+		"rm":              asyncFunc(rm),
+		"getQuota":        asyncFunc(getQuota),
 		"generateKeys":    asyncFunc(generateKeys),
 		"fetchServerKey":  asyncFunc(fetchServerKey),
 		"encryptConfig":   asyncFunc(encryptConfig),
@@ -387,6 +482,5 @@ func main() {
 		"pollForToken":    asyncFunc(pollForToken),
 	})
 
-	// Block indefinitely to keep the WASM instance alive
 	<-make(chan struct{})
 }

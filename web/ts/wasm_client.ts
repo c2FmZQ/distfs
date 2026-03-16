@@ -1,113 +1,109 @@
-// This file defines the TypeScript interfaces for communicating with the WASM Web Worker.
-
-export interface WasmRequest {
-    type: string;
-    id: string; // Unique ID for request/response matching
-    [key: string]: any;
-}
-
-export interface WasmResponse {
-    type: string;
-    id: string;
-    result?: any;
-    error?: string;
-}
-
 export class WasmClient {
     private worker: Worker;
-    private pendingRequests: Map<string, { resolve: (val: any) => void, reject: (err: any) => void }>;
+    private ready: boolean = false;
     public onReady?: () => void;
 
-    constructor(workerUrl: string) {
-        this.worker = new Worker(workerUrl);
-        this.pendingRequests = new Map();
-
-        this.worker.onmessage = (event: MessageEvent<WasmResponse>) => {
-            if (event.data.type === 'ready') {
-                console.log("WASM Worker is ready.");
+    constructor(workerScript: string) {
+        this.worker = new Worker(workerScript);
+        this.worker.onmessage = (e) => {
+            if (e.data.type === 'ready') {
+                this.ready = true;
                 if (this.onReady) this.onReady();
-                return;
-            }
-
-            const { id, type, result, error } = event.data;
-            const promise = this.pendingRequests.get(id);
-            
-            if (promise) {
-                this.pendingRequests.delete(id);
-                if (type === 'error' || error) {
-                    promise.reject(new Error(error || "Unknown WASM error"));
-                } else {
-                    promise.resolve(result);
-                }
-            } else if (type === 'start-download') {
-               // Ignore here, this is handled by Service Worker
             }
         };
     }
 
-    private invoke(type: string, payload: any = {}): Promise<any> {
+    async invoke(action: string, args: any): Promise<any> {
         return new Promise((resolve, reject) => {
             const id = Math.random().toString(36).substring(7);
-            this.pendingRequests.set(id, { resolve, reject });
-            this.worker.postMessage({ type, id, ...payload });
+            const handler = (e: MessageEvent) => {
+                if (e.data.id === id) {
+                    this.worker.removeEventListener('message', handler);
+                    if (e.data.type === 'success') {
+                        resolve(e.data.result);
+                    } else {
+                        reject(new Error(e.data.error));
+                    }
+                }
+            };
+            this.worker.addEventListener('message', handler);
+            this.worker.postMessage({ type: 'invoke', action, args, id });
         });
     }
 
-    async generateKeys(): Promise<{decKey: string, encKey: string, signKey: string, signPubKey: string}> {
-        return this.invoke('generateKeys');
+    async init(serverURL: string, userID: string, decKey: string, signKey: string, serverKey: string): Promise<void> {
+        await this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
+    }
+
+    async listDirectory(path: string): Promise<any[]> {
+        return this.invoke('listDirectory', { path });
+    }
+
+    async statFile(path: string): Promise<any> {
+        return this.invoke('statFile', { path });
+    }
+
+    async readFile(path: string): Promise<string> {
+        return this.invoke('readFile', { path });
+    }
+
+    async writeFile(path: string, content: string): Promise<void> {
+        return this.invoke('writeFile', { path, content });
+    }
+
+    async mkdir(path: string): Promise<void> {
+        return this.invoke('mkdir', { path });
+    }
+
+    async mv(oldPath: string, newPath: string): Promise<void> {
+        return this.invoke('mv', { oldPath, newPath });
+    }
+
+    async rm(path: string): Promise<void> {
+        return this.invoke('rm', { path });
+    }
+
+    async getQuota(): Promise<any> {
+        return this.invoke('getQuota', {});
+    }
+
+    async generateKeys(): Promise<any> {
+        return this.invoke('generateKeys', {});
+    }
+
+    async registerUser(serverURL: string, jwt: string, signPubKey: string, encKey: string): Promise<string> {
+        return this.invoke('registerUser', { serverURL, jwt, signPubKey, encKey });
     }
 
     async fetchServerKey(serverURL: string): Promise<string> {
         return this.invoke('fetchServerKey', { serverURL });
     }
 
-    async registerUser(serverURL: string, jwt: string, signKeyPubHex: string, encKeyHex: string): Promise<string> {
-        return this.invoke('registerUser', { serverURL, jwt, signKeyPubHex, encKeyHex });
+    async encryptConfig(config: string, passphrase: string): Promise<string> {
+        return this.invoke('encryptConfig', { config, passphrase });
     }
 
-    async encryptConfig(configStr: string, passphrase: string): Promise<string> {
-        return this.invoke('encryptConfig', { configStr, passphrase });
+    async decryptConfig(blob: string, passphrase: string): Promise<string> {
+        return this.invoke('decryptConfig', { blob, passphrase });
     }
 
-    async decryptConfig(blobStr: string, passphrase: string): Promise<string> {
-        return this.invoke('decryptConfig', { blobStr, passphrase });
-    }
-
-    async pushKeySync(blobStr: string): Promise<boolean> {
-        return this.invoke('pushKeySync', { blobStr });
+    async pushKeySync(blob: string): Promise<void> {
+        return this.invoke('pushKeySync', { blob });
     }
 
     async pullKeySync(serverURL: string, token: string): Promise<string> {
         return this.invoke('pullKeySync', { serverURL, token });
     }
 
-    /**
-     * postMessage sends a raw message to the underlying WASM worker.
-     * Use this for streaming operations that bypass the standard Promise-based invoke bridge.
-     */
     postMessage(message: any, transfer?: Transferable[]): void {
         this.worker.postMessage(message, transfer || []);
     }
 
-    async startDeviceAuth(authEndpoint: string, tokenEndpoint: string): Promise<{
-        verificationURI: string,
-        verificationURIComplete: string,
-        userCode: string,
-        deviceCode: string,
-        interval: number
-    }> {
+    async startDeviceAuth(authEndpoint: string, tokenEndpoint: string): Promise<any> {
         return this.invoke('startDeviceAuth', { authEndpoint, tokenEndpoint });
     }
 
     async pollForToken(authEndpoint: string, tokenEndpoint: string, deviceCode: string, userCode: string, verificationURI: string, interval: number): Promise<string> {
         return this.invoke('pollForToken', { authEndpoint, tokenEndpoint, deviceCode, userCode, verificationURI, interval });
-    }
-
-    async init(serverURL: string, userID: string, decKey: string, signKey: string, serverKey: string): Promise<boolean> {
-        return this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
-    }
-
-    async listDirectory(path: string): Promise<any[]> {
-        return this.invoke('listDirectory', { path });
     }
 }
