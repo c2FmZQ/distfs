@@ -52,7 +52,11 @@ func (g *GCWorker) Start() {
 
 // Stop stops the background GC process.
 func (g *GCWorker) Stop() {
-	close(g.stopCh)
+	select {
+	case <-g.stopCh:
+	default:
+		close(g.stopCh)
+	}
 	g.wg.Wait()
 }
 

@@ -231,6 +231,39 @@ type DirectoryEntry struct {
 	Signature  []byte `json:"sig"` // Signature by Verifier over all other fields
 }
 
+// Hash returns a deterministic cryptographic commitment of the directory entry.
+func (e *DirectoryEntry) Hash() []byte {
+	h := crypto.NewHash()
+	h.Write([]byte(e.Username))
+	h.Write([]byte("|"))
+	h.Write([]byte(e.FullName))
+	h.Write([]byte("|"))
+	h.Write([]byte(e.Email))
+	h.Write([]byte("|"))
+	h.Write([]byte(e.UserID))
+	h.Write([]byte("|"))
+	h.Write(e.EncKey)
+	h.Write([]byte("|"))
+	h.Write(e.SignKey)
+	h.Write([]byte("|"))
+	h.Write([]byte(e.HomeDir))
+	h.Write([]byte("|"))
+	h.Write([]byte(e.VerifierID))
+	h.Write([]byte("|"))
+	var tsBuf [8]byte
+	binary.LittleEndian.PutUint64(tsBuf[:], uint64(e.Timestamp))
+	h.Write(tsBuf[:])
+	return h.Sum(nil)
+}
+
+// VerifySignature verifies that the entry was signed by the claimed verifier.
+func (e *DirectoryEntry) VerifySignature(verifierPubKey []byte) bool {
+	if len(e.Signature) == 0 {
+		return false
+	}
+	return crypto.VerifySignature(verifierPubKey, e.Hash(), e.Signature)
+}
+
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
@@ -279,6 +312,13 @@ type Client struct {
 	onLeaseExpired func(id string, err error)
 
 	registryDir string
+}
+
+// GetRootID returns the ID of the root directory.
+func (c *Client) GetRootID() string {
+	c.rootMu.RLock()
+	defer c.rootMu.RUnlock()
+	return c.rootID
 }
 
 // NewClient creates a new DistFS client.
@@ -1650,59 +1690,85 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	data, err := json.Marshal(ids)
-	if err != nil {
-		return nil, err
+
+	var allInodes []*metadata.Inode
+	const chunkSize = 1000
+
+	for i := 0; i < len(ids); i += chunkSize {
+		end := i + chunkSize
+		if end > len(ids) {
+			end = len(ids)
+		}
+		chunkIDs := ids[i:end]
+
+		data, err := json.Marshal(chunkIDs)
+		if err != nil {
+			return nil, err
+		}
+
+		var chunkInodes []*metadata.Inode
+		err = c.withRetry(ctx, func() error {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
+
+			req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inodes", nil)
+			if err != nil {
+				return err
+			}
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
+			if err := c.sealBody(ctx, req, data); err != nil {
+				return err
+			}
+
+			resp, err := c.httpClient.Do(req)
+			if err != nil {
+				return err
+			}
+			body, err := c.unsealResponse(ctx, resp)
+			if err != nil {
+				return err
+			}
+			defer body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return c.newAPIError(resp, body)
+			}
+			return json.NewDecoder(body).Decode(&chunkInodes)
+		})
+
+		if err != nil {
+			return nil, err
+		}
+
+		// Phase 31: Verification
+		for _, inode := range chunkInodes {
+			if err := c.VerifyInode(ctx, inode); err != nil {
+				return nil, fmt.Errorf("structural inconsistency: inode %s verification failed: %w", inode.ID, err)
+			}
+
+			// Decrypt FileKey if available so ClientBlob (Name) can be read
+			if inode.Lockbox != nil {
+				if fileKey, err := inode.Lockbox.GetFileKey(c.userID, c.decKey); err == nil {
+					inode.SetFileKey(fileKey)
+					c.keyMu.Lock()
+					c.keyCache[inode.ID] = fileMetadata{
+						key:     fileKey,
+						groupID: inode.GroupID,
+						inlined: inode.GetInlineData() != nil,
+					}
+					c.keyMu.Unlock()
+				}
+			}
+
+			allInodes = append(allInodes, inode)
+		}
 	}
 
-	var inodes []*metadata.Inode
-	err = c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/meta/inodes", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-		return json.NewDecoder(body).Decode(&inodes)
-	})
-
-	if err != nil {
-		return nil, err
-	}
-
-	// Phase 31: Verification
-	var valid []*metadata.Inode
-	for _, inode := range inodes {
-		if err := c.VerifyInode(ctx, inode); err != nil {
-			logger.Debugf("DEBUG CLIENT: getInodes skipping inode %s due to verification failure: %v", inode.ID, err)
-			continue
-		}
-		valid = append(valid, inode)
-	}
-	return valid, nil
+	return allInodes, nil
 }
 
 func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte, iType metadata.InodeType, fileKey []byte, r io.Reader, size int64, name string, encryptedName []byte, mode uint32, groupID string, parentID string, nameHMAC string, uid, gid uint32, accessACL *metadata.POSIXAccess) error {
@@ -4449,6 +4515,12 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		if attr.MTime != nil {
 			i.SetMTime(*attr.MTime)
 		}
+		if attr.AccessACL != nil {
+			i.AccessACL = attr.AccessACL
+		}
+		if attr.DefaultACL != nil {
+			i.DefaultACL = attr.DefaultACL
+		}
 
 		// Update Lockbox (using pre-fetched keys)
 		if ownerPK != nil {
@@ -4475,6 +4547,33 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 				delete(i.Lockbox, i.GroupID)
 			}
 		}
+
+		// 2.3 ACL Access Expansion
+		if i.AccessACL != nil {
+			for uid, bits := range i.AccessACL.Users {
+				if (bits & 4) != 0 {
+					user, err := c.GetUser(ctx, uid)
+					if err == nil {
+						upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+						if err == nil {
+							i.Lockbox.AddRecipient(uid, upk, key)
+						}
+					}
+				}
+			}
+			for gid, bits := range i.AccessACL.Groups {
+				if (bits & 4) != 0 {
+					group, err := c.GetGroup(ctx, gid)
+					if err == nil {
+						gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+						if err == nil {
+							i.Lockbox.AddRecipient(gid, gpk, key)
+						}
+					}
+				}
+			}
+		}
+
 		return nil
 	})
 
@@ -5165,10 +5264,17 @@ func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string
 		return "", nil, fmt.Errorf("failed to read registry entry for %s: %w", identifier, err)
 	}
 
-	// TODO: Phase 49 - Verify the entry signature using the VerifierID's public key
-	// This requires pulling the Verifier's key from the server (or recursively from the registry).
-	// For this initial implementation, we trust the registry file if we could read it
-	// (meaning we have read access to the registry group).
+	// Verify the entry signature using the VerifierID's public key.
+	verifier, err := c.GetUser(ctx, entry.VerifierID)
+	if err != nil {
+		return "", nil, fmt.Errorf("failed to fetch verifier %s for registry entry: %w", entry.VerifierID, err)
+	}
+	if !verifier.IsAdmin {
+		return "", nil, fmt.Errorf("verifier %s is not an administrator", entry.VerifierID)
+	}
+	if !entry.VerifySignature(verifier.SignKey) {
+		return "", nil, fmt.Errorf("invalid registry signature for %s by %s", identifier, entry.VerifierID)
+	}
 
 	return entry.UserID, &entry, nil
 }

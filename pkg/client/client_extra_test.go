@@ -628,7 +628,7 @@ func TestClient_MiscMethods(t *testing.T) {
 	rc.Close()
 
 	// 7. GetInodes
-	_, err = c.GetInodes(ctx, []string{"root"})
+	_, err = c.GetInodes(ctx, []string{c.GetRootID()})
 	if err != nil {
 		t.Errorf("GetInodes failed: %v", err)
 	}

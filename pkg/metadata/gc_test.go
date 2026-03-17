@@ -13,6 +13,7 @@ import (
 
 func TestGCWorker_RunGC(t *testing.T) {
 	node, ts, _, _, s := SetupCluster(t)
+	defer s.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

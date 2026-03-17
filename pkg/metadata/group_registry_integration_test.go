@@ -9,7 +9,8 @@ import (
 )
 
 func TestGroupMemberRegistry(t *testing.T) {
-	node, ts, _, serverEK, _ := metadata.SetupCluster(t)
+	node, ts, _, serverEK, srv := metadata.SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

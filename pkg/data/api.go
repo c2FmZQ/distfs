@@ -123,6 +123,16 @@ func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM, valida
 // ServeHTTP handles incoming HTTP requests for chunks.
 // Supported methods: PUT (upload), GET (download), DELETE (remove), POST (replicate).
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Enable CORS for Web UI (WASM worker)
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, PUT, POST, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Session-Token")
+
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if !strings.HasPrefix(r.URL.Path, "/v1/data/") {
 		http.NotFound(w, r)
 		return

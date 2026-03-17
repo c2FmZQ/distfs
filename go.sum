@@ -26,8 +26,8 @@ github.com/beorn7/perks v1.0.0/go.mod h1:KWe93zE9D1o94FZ5RNwFwVgaQK1VOXiVxmqh+Ce
 github.com/beorn7/perks v1.0.1/go.mod h1:G2ZrVWU2WbWT9wwq4/hrbKbnv/1ERSJQ0ibhJ6rlkpw=
 github.com/boltdb/bolt v1.3.1 h1:JQmyP4ZBrce+ZQu0dY660FMfatumYDLun9hBCUVIkF4=
 github.com/boltdb/bolt v1.3.1/go.mod h1:clJnj/oiGkjum5o1McbSZDSLxVThjynRyGBgiAx27Ps=
-github.com/c2FmZQ/ech v0.4.0 h1:KbRAzFK6S2tBy03PQBWx72SyoxreN+VEg9kEZk9pPag=
-github.com/c2FmZQ/ech v0.4.0/go.mod h1:efG3ukNhMom+/MxsJnClR6awhxaEpxr5C9ruAeKj92k=
+github.com/c2FmZQ/ech v0.4.1 h1:AdG3wKS5SsvOSGBxhmwt5eyHSUipx33DhpXTW3Xs4MY=
+github.com/c2FmZQ/ech v0.4.1/go.mod h1:efG3ukNhMom+/MxsJnClR6awhxaEpxr5C9ruAeKj92k=
 github.com/c2FmZQ/storage v0.3.2 h1:/Qy/uoZTEw1XxrkHK4MAiQliwpZ02Y5w/whym8Q4+qQ=
 github.com/c2FmZQ/storage v0.3.2/go.mod h1:kgLL2yKcpWW62FmdoWwETSAWKpF95dBfhD6N7zfE1PE=
 github.com/c2FmZQ/tlsproxy/jwks v0.0.0-20260210222347-c2dddf848fef h1:1cZ8BSuLb9Lz/KQCJh+SmXIE04t1jirIG/MPH1izdjM=

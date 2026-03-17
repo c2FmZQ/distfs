@@ -113,6 +113,11 @@ func (c *Client) GetPathID(ctx context.Context, path string) (string, error) {
 
 // ResolvePath resolves a human-readable path to an Inode and its decrypted FileKey.
 func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
+	return c.ResolvePathExtended(ctx, path, true)
+}
+
+// ResolvePathExtended resolves a path with optional symlink following for the final component.
+func (c *Client) ResolvePathExtended(ctx context.Context, path string, followFinal bool) (*metadata.Inode, []byte, error) {
 	path = "/" + strings.Trim(path, "/")
 
 	var lastErr error
@@ -121,7 +126,7 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 			c.clearPathCache()
 		}
 
-		inode, key, err := c.resolvePathInternal(ctx, path)
+		inode, key, err := c.resolvePathInternal(ctx, path, followFinal)
 		if err == nil {
 			return inode, key, nil
 		}
@@ -134,7 +139,7 @@ func (c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode,
 	return nil, nil, lastErr
 }
 
-func (c *Client) resolvePathInternal(ctx context.Context, path string) (*metadata.Inode, []byte, error) {
+func (c *Client) resolvePathInternal(ctx context.Context, path string, followFinal bool) (*metadata.Inode, []byte, error) {
 	if path == "/" {
 		// Fast path for root
 		inode, err := c.getInode(ctx, c.rootID)
@@ -180,9 +185,21 @@ func (c *Client) resolvePathInternal(ctx context.Context, path string) (*metadat
 			if valid {
 				remainingPath := strings.Join(parts[i:], "/")
 				if remainingPath == "" {
+					// We reached the final component. If it's a symlink and followFinal is true, follow it.
+					if inode.Type == metadata.SymlinkType && followFinal {
+						return c.resolveSymlink(ctx, inode, entry.key, prefix, 0, followFinal)
+					}
 					return inode, entry.key, nil
 				}
-				return c.resolveSequential(ctx, inode, entry.key, remainingPath, prefix)
+				// If cached prefix is a symlink, we MUST follow it before proceeding.
+				if inode.Type == metadata.SymlinkType {
+					newInode, newKey, err := c.resolveSymlink(ctx, inode, entry.key, prefix, 0, true)
+					if err != nil {
+						return nil, nil, err
+					}
+					return c.resolveSequential(ctx, newInode, newKey, remainingPath, prefix, 0, followFinal)
+				}
+				return c.resolveSequential(ctx, inode, entry.key, remainingPath, prefix, 0, followFinal)
 			}
 			c.invalidatePathCache(prefix)
 		}
@@ -205,15 +222,18 @@ func (c *Client) resolvePathInternal(ctx context.Context, path string) (*metadat
 	// Populate cache for root
 	c.putPathCache("/", pathCacheEntry{inodeID: c.rootID, key: rootKey, inode: rootInode})
 
-	return c.resolveSequential(ctx, rootInode, rootKey, strings.TrimPrefix(path, "/"), "")
+	return c.resolveSequential(ctx, rootInode, rootKey, strings.TrimPrefix(path, "/"), "", 0, followFinal)
 }
 
-func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.Inode, currentKey []byte, remainingPath string, prefix string) (*metadata.Inode, []byte, error) {
+func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.Inode, currentKey []byte, remainingPath string, prefix string, symlinkCount int, followFinal bool) (*metadata.Inode, []byte, error) {
+	const maxSymlinks = 40
 	parts := strings.Split(remainingPath, "/")
-	for _, part := range parts {
+	for i, part := range parts {
 		if part == "" {
 			continue
 		}
+		isFinal := i == len(parts)-1
+
 		if currentInode.Type != metadata.DirType {
 			return nil, nil, fmt.Errorf("path component %s is not a directory", prefix)
 		}
@@ -250,11 +270,62 @@ func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.I
 			inode:   childInode,
 		})
 
+		if childInode.Type == metadata.SymlinkType {
+			if !isFinal || followFinal {
+				if symlinkCount >= maxSymlinks {
+					return nil, nil, fmt.Errorf("too many symbolic links")
+				}
+				currentInode, currentKey, err = c.resolveSymlink(ctx, childInode, childKey, prefix, symlinkCount+1, followFinal)
+				if err != nil {
+					return nil, nil, err
+				}
+				continue
+			}
+		}
+
 		currentInode = childInode
 		currentKey = childKey
 	}
 
 	return currentInode, currentKey, nil
+}
+
+func (c *Client) resolveSymlink(ctx context.Context, inode *metadata.Inode, key []byte, prefix string, symlinkCount int, followFinal bool) (*metadata.Inode, []byte, error) {
+	target := inode.GetSymlinkTarget()
+	if target == "" {
+		return nil, nil, fmt.Errorf("symlink %s has no target", prefix)
+	}
+
+	if !filepath.IsAbs(target) {
+		dir := filepath.Dir(prefix)
+		target = filepath.Join(dir, target)
+	}
+
+	// SEC: Sanitize target path to prevent escaping DistFS root
+	target = "/" + strings.TrimLeft(filepath.Clean(target), "/")
+
+	return c.resolvePathInternalRecursive(ctx, target, followFinal, symlinkCount)
+}
+
+func (c *Client) resolvePathInternalRecursive(ctx context.Context, path string, followFinal bool, symlinkCount int) (*metadata.Inode, []byte, error) {
+	path = "/" + strings.Trim(path, "/")
+	if path == "/" {
+		// Root handled normally
+		return c.resolvePathInternal(ctx, "/", followFinal)
+	}
+
+	// For simplicity, we restart resolution from root for symlinks
+	// but we could optimize by resolving relative paths.
+	rootInode, err := c.getInode(ctx, c.rootID)
+	if err != nil {
+		return nil, nil, err
+	}
+	rootKey, err := c.UnlockInode(ctx, rootInode)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	return c.resolveSequential(ctx, rootInode, rootKey, strings.TrimPrefix(path, "/"), "", symlinkCount, followFinal)
 }
 
 // AddEntry creates a new directory entry.
@@ -799,7 +870,7 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 // Stat returns file info for the given path.
 // Stat returns metadata information for the file or directory at the given path.
 func (c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error) {
-	inode, _, err := c.ResolvePath(ctx, path)
+	inode, _, err := c.ResolvePathExtended(ctx, path, true)
 	if err != nil {
 		return nil, err
 	}
@@ -813,9 +884,15 @@ func (c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error) {
 // Lstat returns file info for the given path, without following the final symlink.
 // Lstat returns metadata information for the path, without following symbolic links.
 func (c *Client) Lstat(ctx context.Context, path string) (*DistFileInfo, error) {
-	// Our ResolvePath currently follows all symlinks.
-	// TODO: Support Lstat properly by adding a 'followFinal' flag to ResolvePath.
-	return c.Stat(ctx, path)
+	inode, _, err := c.ResolvePathExtended(ctx, path, false)
+	if err != nil {
+		return nil, err
+	}
+	_, fileName := filepath.Split(path)
+	if fileName == "" && path == "/" {
+		fileName = "/"
+	}
+	return &DistFileInfo{inode: inode, name: fileName}, nil
 }
 
 // ReadDir returns a list of directory entries for the given path.

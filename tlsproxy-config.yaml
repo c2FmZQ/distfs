@@ -13,3 +13,15 @@ backends:
       - paths: ["/auth/"]
         mode: http
         addresses: ["test-auth:8080"]
+
+  - serverNames: ["storage-node-1.web-test-server"]
+    mode: http
+    addresses: ["storage-node-1:8080"]
+
+  - serverNames: ["storage-node-2.web-test-server"]
+    mode: http
+    addresses: ["storage-node-2:8080"]
+
+  - serverNames: ["storage-node-3.web-test-server"]
+    mode: http
+    addresses: ["storage-node-3:8080"]

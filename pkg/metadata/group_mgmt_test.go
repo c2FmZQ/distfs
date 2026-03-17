@@ -14,7 +14,8 @@ import (
 )
 
 func TestGroupManagementSecurity(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, serverEK, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -252,7 +253,8 @@ func TestGroupManagementSecurity(t *testing.T) {
 }
 
 func TestGroupQuotaEnforcement(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -329,7 +331,8 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 }
 
 func TestGroupQuotaFallback(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -400,7 +403,8 @@ func marshalInode(t *testing.T, i Inode) []byte {
 }
 
 func TestGroupQuotaBypassReproduction(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -448,7 +452,8 @@ func TestGroupQuotaBypassReproduction(t *testing.T) {
 }
 
 func TestSetQuotaOnDisabledGroup(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

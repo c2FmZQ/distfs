@@ -150,7 +150,7 @@ func (d *DistFS) ReadLink(name string) (string, error) {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
 	}
 	fullPath := path.Join(d.basePath, name)
-	inode, _, err := d.client.ResolvePath(d.ctx, fullPath)
+	inode, _, err := d.client.ResolvePathExtended(d.ctx, fullPath, false)
 	if err != nil {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
 	}
@@ -331,6 +331,87 @@ func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEn
 		return nil, err
 	}
 	return c.readDirExtended(ctx, inode, key)
+}
+
+// ReadDirPaginated returns a paginated list of directory entries and the total count.
+func (c *Client) ReadDirPaginated(ctx context.Context, path string, offset, limit int) ([]*DistDirEntry, int, error) {
+	inode, key, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		return nil, 0, err
+	}
+	return c.readDirPaginated(ctx, inode, key, offset, limit)
+}
+
+func (c *Client) readDirPaginated(ctx context.Context, inode *metadata.Inode, key []byte, offset, limit int) ([]*DistDirEntry, int, error) {
+	if inode.Type != metadata.DirType {
+		return nil, 0, fmt.Errorf("not a directory")
+	}
+
+	total := len(inode.Children)
+	if total == 0 {
+		return nil, 0, nil
+	}
+
+	// Extract and sort keys for stable pagination
+	keys := make([]string, 0, total)
+	for k := range inode.Children {
+		keys = append(keys, k)
+	}
+	// Sort by encrypted name hash for stable deterministic order
+	// Real alphabetical sort requires decrypting all names, which is too slow for large dirs.
+	// Optimization: If directory is massive, we should cache this sorted list or use a server-side iterator.
+	sort.Strings(keys)
+
+	end := offset + limit
+	if limit < 0 || end > total {
+		end = total
+	}
+
+	if offset >= total {
+		return nil, total, nil
+	}
+
+	ids := make([]string, 0, end-offset)
+	for _, k := range keys[offset:end] {
+		ids = append(ids, inode.Children[k])
+	}
+
+	inodes, err := c.getInodes(ctx, ids)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var entries []*DistDirEntry
+	for _, childInode := range inodes {
+		childName := childInode.GetName()
+		if childName == "" {
+			childName = "unnamed-" + childInode.ID[:8]
+		}
+
+		c.keyMu.RLock()
+		meta, ok := c.keyCache[childInode.ID]
+		c.keyMu.RUnlock()
+
+		var childKey []byte
+		if ok {
+			childKey = meta.key
+		} else {
+			childKey = childInode.GetFileKey()
+		}
+
+		entries = append(entries, &DistDirEntry{
+			inode: childInode,
+			name:  childName,
+			key:   childKey,
+		})
+	}
+
+	// Sort the returned page alphabetically by decrypted name for better UX on small pages
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].name < entries[j].name
+	})
+
+	return entries, total, nil
 }
 
 func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key []byte) ([]*DistDirEntry, error) {

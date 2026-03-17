@@ -19,6 +19,7 @@ import (
 
 func TestFSMKeyRotation(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -88,6 +89,7 @@ func TestFSMKeyRotation(t *testing.T) {
 
 func TestFSMKeyRingSync(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)

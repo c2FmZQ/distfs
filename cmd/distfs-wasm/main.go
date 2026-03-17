@@ -303,7 +303,27 @@ func initClient(args []js.Value) (interface{}, error) {
 
 func listDirectory(args []js.Value) (interface{}, error) {
 	path := args[0].String()
-	entries, err := c.ReadDir(context.Background(), path)
+	
+	offset := 0
+	limit := -1
+	if len(args) > 1 && !args[1].IsUndefined() {
+		offset = args[1].Int()
+	}
+	if len(args) > 2 && !args[2].IsUndefined() {
+		limit = args[2].Int()
+	}
+
+	var entries []*client.DistDirEntry
+	var total int
+	var err error
+
+	if limit > 0 {
+		entries, total, err = c.ReadDirPaginated(context.Background(), path, offset, limit)
+	} else {
+		entries, err = c.ReadDir(context.Background(), path)
+		total = len(entries)
+	}
+
 	if err != nil {
 		return nil, err
 	}
@@ -317,7 +337,11 @@ func listDirectory(args []js.Value) (interface{}, error) {
 			"modTime": e.ModTime().Unix(),
 		})
 	}
-	return res, nil
+	
+	return map[string]interface{}{
+		"entries": res,
+		"total":   total,
+	}, nil
 }
 
 func statFile(args []js.Value) (interface{}, error) {
@@ -342,23 +366,55 @@ func statFile(args []js.Value) (interface{}, error) {
 		}
 	}
 
+	var accessACL map[string]interface{}
+	if inode.AccessACL != nil {
+		users := make(map[string]interface{})
+		for k, v := range inode.AccessACL.Users {
+			users[k] = v
+		}
+		groups := make(map[string]interface{})
+		for k, v := range inode.AccessACL.Groups {
+			groups[k] = v
+		}
+		accessACL = map[string]interface{}{"Users": users, "Groups": groups}
+	}
+
+	var defaultACL map[string]interface{}
+	if inode.DefaultACL != nil {
+		users := make(map[string]interface{})
+		for k, v := range inode.DefaultACL.Users {
+			users[k] = v
+		}
+		groups := make(map[string]interface{})
+		for k, v := range inode.DefaultACL.Groups {
+			groups[k] = v
+		}
+		defaultACL = map[string]interface{}{"Users": users, "Groups": groups}
+	}
+
 	return map[string]interface{}{
-		"name":     info.Name(),
-		"size":     info.Size(),
-		"isDir":    info.IsDir(),
-		"modTime":  info.ModTime().Unix(),
-		"owner":    inode.OwnerID,
-		"group":    inode.GroupID,
-		"mode":     inode.Mode,
-		"mimeType": mimeType,
-		"lockbox":  lockbox,
+		"name":       info.Name(),
+		"size":       info.Size(),
+		"isDir":      info.IsDir(),
+		"modTime":    info.ModTime().Unix(),
+		"owner":      inode.OwnerID,
+		"group":      inode.GroupID,
+		"mode":       inode.Mode,
+		"mimeType":   mimeType,
+		"lockbox":    lockbox,
+		"accessACL":  accessACL,
+		"defaultACL": defaultACL,
 	}, nil
 }
 
 func readFileChunk(args []js.Value) (interface{}, error) {
 	path := args[0].String()
 	offset := int64(args[1].Int())
-	length := int(args[2].Int())
+	length := args[2].Int()
+
+	if length < 0 || length > 10*1024*1024 {
+		return nil, fmt.Errorf("invalid chunk length: %d", length)
+	}
 
 	f, err := c.Open(context.Background(), path, 0, 0)
 	if err != nil {
@@ -459,6 +515,33 @@ func rm(args []js.Value) (interface{}, error) {
 	return true, nil
 }
 
+func setACL(args []js.Value) (interface{}, error) {
+	path := args[0].String()
+	aclJSON := args[1].String()
+
+	var acl metadata.POSIXAccess
+	if err := json.Unmarshal([]byte(aclJSON), &acl); err != nil {
+		return nil, fmt.Errorf("invalid ACL JSON: %w", err)
+	}
+
+	err := c.SetAttr(context.Background(), path, metadata.SetAttrRequest{
+		AccessACL: &acl,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return true, nil
+}
+
+func lookupUser(args []js.Value) (interface{}, error) {
+	email := args[0].String()
+	userID, _, err := c.ResolveUsername(context.Background(), email)
+	if err != nil {
+		return nil, err
+	}
+	return userID, nil
+}
+
 func main() {
 	js.Global().Set("DistFS", map[string]interface{}{
 		"init":            asyncFunc(initClient),
@@ -470,6 +553,8 @@ func main() {
 		"mkdir":           asyncFunc(mkdir),
 		"mv":              asyncFunc(mv),
 		"rm":              asyncFunc(rm),
+		"setACL":          asyncFunc(setACL),
+		"lookupUser":      asyncFunc(lookupUser),
 		"getQuota":        asyncFunc(getQuota),
 		"generateKeys":    asyncFunc(generateKeys),
 		"fetchServerKey":  asyncFunc(fetchServerKey),

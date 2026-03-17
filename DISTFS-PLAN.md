@@ -1250,26 +1250,26 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 
 ---
 
-## Phase 65: Security Provenance & Technical Debt Consolidation
+## Phase 65: Security Provenance & Technical Debt Consolidation [DONE]
 
 **Goal:** Strengthen the cryptographic foundations of the system by implementing mandatory signature verification for directory entries and registry records, while refactoring memory-intensive operations to support large-scale namespaces.
 
-*   **Step 65.1: Directory Entry Signature Verification**
+*   **Step 65.1: Directory Entry Signature Verification [DONE]**
     *   **Action:** Implement `VerifyEntrySignature` in `pkg/client/client.go`. Every entry returned in a directory listing must be cryptographically verified using the `VerifierID`'s public key.
     *   **Testing Strategy:** Manually inject a forged entry into a BoltDB snapshot and assert that the client rejects the entire directory listing with a `DISTFS_STRUCTURAL_INCONSISTENCY` error.
-*   **Step 65.2: Admin Registry Signing**
+*   **Step 65.2: Admin Registry Signing [DONE]**
     *   **Action:** Update `cmd/distfs/admin.go` to sign out-of-band registry entries with the administrator's **ML-DSA** private key.
     *   **Action:** Update the client-side registry verification logic to require a valid admin signature for all trusted identities.
     *   **Testing Strategy:** Assert that the `registry-add` command now produces a signed payload and that the client correctly rejects identities with invalid or missing admin signatures.
-*   **Step 65.3: Web UI Sharing Integration**
+*   **Step 65.3: Web UI Sharing Integration [DONE]**
     *   **Action:** Implement the WASM bridge for `setACL` and wire it to the "Share" modal in the Web UI.
     *   **Action:** Replace the simulated sharing logic in `app.ts` with real cryptographic mutations of the file's Lockbox.
     *   **Testing Strategy:** Perform a share operation in the UI and verify the updated Lockbox state using the `distfs stat` CLI.
-*   **Step 65.4: Large Namespace Memory Refactoring**
+*   **Step 65.4: Large Namespace Memory Refactoring [DONE]**
     *   **Action:** Refactor `pkg/client/client.go` to use a streaming iterator or chunked buffering for directory listings instead of loading the full entry set into memory.
     *   **Action:** Implement pagination or "Load More" logic in the Web UI to handle directories with >1000 items.
     *   **Testing Strategy:** Generate a test directory with 10,000 files and verify that the client can list it without exceeding a 128MB memory ceiling.
-*   **Step 65.5: Robust Symlink & Lstat Support**
+*   **Step 65.5: Robust Symlink & Lstat Support [DONE]**
     *   **Action:** Update `ResolvePath` in `pkg/client/directory.go` to include a `followFinal` flag.
     *   **Action:** Implement proper `Lstat` handling in the FUSE layer to correctly report symlink metadata instead of the target's metadata.
     *   **Testing Strategy:** Create a symlink in a FUSE mount and verify that `ls -l` correctly identifies it as a link (`l` bit) and shows the correct link target.

@@ -56,7 +56,11 @@ func (rm *ReplicationMonitor) Start() {
 
 // Stop stops the background monitor.
 func (rm *ReplicationMonitor) Stop() {
-	close(rm.stopCh)
+	select {
+	case <-rm.stopCh:
+	default:
+		close(rm.stopCh)
+	}
 	rm.wg.Wait()
 }
 

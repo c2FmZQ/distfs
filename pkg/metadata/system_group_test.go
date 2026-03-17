@@ -12,7 +12,8 @@ import (
 )
 
 func TestSystemGroups(t *testing.T) {
-	node, ts, _, _, _ := metadata.SetupCluster(t)
+	node, ts, _, _, srv := metadata.SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

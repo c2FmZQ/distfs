@@ -32,11 +32,11 @@ export class WasmClient {
     }
 
     async init(serverURL: string, userID: string, decKey: string, signKey: string, serverKey: string): Promise<void> {
-        await this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
+        return this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
     }
 
-    async listDirectory(path: string): Promise<any[]> {
-        return this.invoke('listDirectory', { path });
+    async listDirectory(path: string, offset?: number, limit?: number): Promise<{entries: any[], total: number}> {
+        return this.invoke('listDirectory', { path, offset, limit });
     }
 
     async statFile(path: string): Promise<any> {
@@ -61,6 +61,14 @@ export class WasmClient {
 
     async rm(path: string): Promise<void> {
         return this.invoke('rm', { path });
+    }
+
+    async setACL(path: string, aclJSON: string): Promise<void> {
+        return this.invoke('setACL', { path, aclJSON });
+    }
+
+    async lookupUser(email: string): Promise<string> {
+        return this.invoke('lookupUser', { email });
     }
 
     async getQuota(): Promise<any> {

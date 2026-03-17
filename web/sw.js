@@ -122,7 +122,12 @@ async function handleMediaStream(request, id, clientId) {
                 };
 
                 // Fallback timeout for sniffing
-                const sniffTimeout = setTimeout(sendResponse, 2000);
+                const sniffTimeout = setTimeout(() => {
+                    if (!responseSent) {
+                        console.warn(`SW: Sniffing timed out for ${id}, falling back to ${mimeType}`);
+                        sendResponse();
+                    }
+                }, 2000);
 
                 channel.port1.onmessage = async (chunkEvent) => {
                     if (chunkEvent.data.type === 'chunk') {

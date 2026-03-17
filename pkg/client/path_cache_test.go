@@ -47,7 +47,7 @@ func TestPathCache(t *testing.T) {
 	// Create a custom handler to count Inode GET requests
 	var getInodeCount uint64
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	metaServer.RegisterEpochKey("key-1", serverDK)
 	metaServer.StopKeyRotation()
 

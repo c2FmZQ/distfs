@@ -824,6 +824,12 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	if update.Links != nil || fields["links"] != nil {
 		inode.Links = update.Links
 	}
+	if fields["access_acl"] != nil {
+		inode.AccessACL = update.AccessACL
+	}
+	if fields["default_acl"] != nil {
+		inode.DefaultACL = update.DefaultACL
+	}
 	if !inode.Unlinked {
 		inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	}

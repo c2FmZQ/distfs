@@ -24,6 +24,7 @@ import (
 
 func TestServer_MiscHandlers(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -216,6 +217,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 
 func TestServer_AdminHandlers(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -290,6 +292,7 @@ func TestServer_AdminHandlers(t *testing.T) {
 
 func TestServer_ClusterAdminHandlers(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -338,6 +341,7 @@ func TestServer_OIDCDiscovery(t *testing.T) {
 	defer tsOIDC.Close()
 
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -355,13 +359,15 @@ func TestServer_OIDCDiscovery(t *testing.T) {
 }
 
 func TestServer_RegisterUser_Idempotency(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 }
 
 func TestServer_IssueToken_Permissions(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -412,6 +418,7 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 
 func TestServer_UnsealExtraErrors(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -440,7 +447,8 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 }
 
 func TestServer_LoginExtraErrors(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -485,6 +493,7 @@ func TestServer_LoginExtraErrors(t *testing.T) {
 
 func TestServer_AuthChallenge_LazyGC(t *testing.T) {
 	_, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer ts.Close()
 
 	// 1. Manually add expired challenge
@@ -524,7 +533,7 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true, true)
+	server2 := NewServer("node2", node2.Raft, node2.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true)
 
 	// node2 has no leader
 	req, _ := http.NewRequest("GET", "/v1/meta/batch/root", nil)
@@ -540,6 +549,7 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 
 func TestServer_LifecycleAndConfig(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -555,7 +565,8 @@ func TestServer_LifecycleAndConfig(t *testing.T) {
 }
 
 func TestServer_BatchErrors(t *testing.T) {
-	node, ts, _, ek, _ := SetupCluster(t)
+	node, ts, _, ek, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -581,6 +592,7 @@ func TestServer_BatchErrors(t *testing.T) {
 
 func TestServer_ApplyBatch_Errors(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -597,7 +609,8 @@ func TestServer_ApplyBatch_Errors(t *testing.T) {
 }
 
 func TestServer_GetInodes_EdgeCases(t *testing.T) {
-	node, ts, _, ek, _ := SetupCluster(t)
+	node, ts, _, ek, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -622,6 +635,7 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 
 func TestServer_Batch_Forbidden(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -658,7 +672,8 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 }
 
 func TestServer_GetKeySync_Errors(t *testing.T) {
-	_, ts, _, _, _ := SetupCluster(t)
+	_, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer ts.Close()
 
 	// 1. Missing bearer
@@ -677,7 +692,8 @@ func TestServer_GetKeySync_Errors(t *testing.T) {
 }
 
 func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
-	node, ts, _, ek, _ := SetupCluster(t)
+	node, ts, _, ek, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -715,6 +731,7 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	// Discovery expects mTLS (resp.TLS != nil)
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -755,6 +772,7 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 
 func TestServer_MiscHandlers_More(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -867,7 +885,8 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 }
 
 func TestServer_DebugHandlers_Extra(t *testing.T) {
-	_, ts, _, _, _ := SetupCluster(t)
+	_, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer ts.Close()
 
 	// 1. Missing secret
@@ -886,7 +905,8 @@ func TestServer_DebugHandlers_Extra(t *testing.T) {
 }
 
 func TestServer_handleBatch_More(t *testing.T) {
-	node, ts, _, ek, _ := SetupCluster(t)
+	node, ts, _, ek, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -935,6 +955,7 @@ func TestServer_handleBatch_More(t *testing.T) {
 
 func TestServer_Permissions_Thorough(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -989,6 +1010,7 @@ func ptr[T any](v T) *T {
 
 func TestServer_SetAttr(t *testing.T) {
 	node, ts, _, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -1080,6 +1102,7 @@ func TestServer_SetAttr(t *testing.T) {
 
 func TestServer_HealthAndStatus(t *testing.T) {
 	node, ts, usk, ek, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 	WaitLeader(t, node.Raft)
@@ -1111,6 +1134,7 @@ func TestServer_HealthAndStatus(t *testing.T) {
 func TestServer_Forwarding(t *testing.T) {
 	// Node 1 (Leader)
 	n1, ts1, _, _, s1 := SetupCluster(t)
+	defer s1.Shutdown()
 	defer n1.Shutdown()
 	defer ts1.Close()
 
@@ -1158,7 +1182,7 @@ func TestServer_Forwarding(t *testing.T) {
 	s1.ApplyRaftCommandInternal(CmdRegisterNode, n1b, "")
 
 	nodeDecKey2, _ := crypto.GenerateEncryptionKey()
-	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2, true, true)
+	s2 := NewServer(nodeID2, n2.Raft, n2.FSM, "", signKey2, "testsecret", nil, 0, NewNodeVault(st2), nodeDecKey2, true)
 	ts2 := httptest.NewServer(s2)
 	defer ts2.Close()
 

@@ -90,6 +90,10 @@ func main() {
 	flag.Usage = usage
 	flag.Parse()
 
+	if os.Getenv("DISTFS_ALLOW_INSECURE") == "true" {
+		*allowInsecure = true
+	}
+
 	if *useTPM {
 		setupTPMHasher()
 	}
@@ -261,7 +265,9 @@ func loadClient() *client.Client {
 		log.Fatal(err)
 	}
 
-	c := client.NewClient(conf.ServerURL)
+	c := client.NewClient(conf.ServerURL).
+		WithAllowInsecure(*allowInsecure).
+		WithDisableDoH(*disableDoH)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)

@@ -348,7 +348,7 @@ func main() {
 	}
 
 	// 4. Initialize Servers
-	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey, *disableDoH, *allowInsecure)
+	metaServer := metadata.NewServer(*nodeID, rn.Raft, rn.FSM, *oidcURL, signKey, *raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey, *disableDoH)
 	metaServer.SetRaftAddress(*raftAdvertise)
 	metaServer.SetAPIURL(*apiURL)
 	metaServer.SetTLSPublicKey(raftKey.Public())

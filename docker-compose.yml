@@ -3,50 +3,66 @@ services:
     container_name: test-auth
     build: .
     entrypoint: ["/bin/test-auth", "-addr", ":8080", "-baseURL", "https://web-test-server/auth"]
+    volumes:
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
+    depends_on:
+      web-assets:
+        condition: service_healthy
 
   storage-node-1:
     container_name: storage-node-1
     build: .
-    command: ["-id", "node-1", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-1:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-1:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-1:8080", "-bootstrap", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh", "-allow-insecure"]
+    command: ["-id", "node-1", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-1:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-1:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "https://storage-node-1.web-test-server", "-bootstrap", "-oidc-discovery-url", "https://web-test-server/auth/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000001
     volumes:
       - node1-data:/data
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
     depends_on:
-      - test-auth
+      web-assets:
+        condition: service_healthy
+      test-auth:
+        condition: service_started
 
   storage-node-2:
     container_name: storage-node-2
     build: .
-    command: ["-id", "node-2", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-2:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-2:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-2:8080", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh", "-allow-insecure"]
+    command: ["-id", "node-2", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-2:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-2:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "https://storage-node-2.web-test-server", "-oidc-discovery-url", "https://web-test-server/auth/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000002
     volumes:
       - node2-data:/data
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
     depends_on:
-      - test-auth
+      web-assets:
+        condition: service_healthy
+      test-auth:
+        condition: service_started
 
   storage-node-3:
     container_name: storage-node-3
     build: .
-    command: ["-id", "node-3", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-3:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-3:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "http://storage-node-3:8080", "-oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh", "-allow-insecure"]
+    command: ["-id", "node-3", "-raft-bind", "0.0.0.0:5000", "-raft-advertise", "storage-node-3:5000", "-cluster-addr", "0.0.0.0:9090", "-cluster-advertise", "https://storage-node-3:9090", "-api-addr", "0.0.0.0:8080", "-api-url", "https://storage-node-3.web-test-server", "-oidc-discovery-url", "https://web-test-server/auth/.well-known/openid-configuration", "-raft-secret", "supersecret", "-disable-doh"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000003
     volumes:
       - node3-data:/data
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
     depends_on:
-      - test-auth
+      web-assets:
+        condition: service_healthy
+      test-auth:
+        condition: service_started
 
   e2e-runner:
     container_name: e2e-runner
     build: .
     entrypoint: ["/bin/test-all-e2e.sh"]
     depends_on:
-      - storage-node-1
-      - storage-node-2
-      - storage-node-3
-      - test-auth
-      - web-test-server
+      storage-node-1:
+        condition: service_started
+      web-assets:
+        condition: service_healthy
     cap_add:
       - SYS_ADMIN
     devices:
@@ -63,11 +79,21 @@ services:
       - client-config:/root/.distfs
       - node1-data:/data
       - ./docs/assets:/distfs/docs/assets
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
 
   web-assets:
     container_name: web-assets
     build: .
-    entrypoint: ["/bin/web-test-server", "-addr", ":8091", "-dir", "/distfs/web"]
+    entrypoint: ["/bin/sh", "-c", "until [ -f /ca-certs/ca-state.json ]; do sleep 1; done; exec /bin/web-test-server -addr :8091 -dir /distfs/web"]
+    healthcheck:
+      test: ["CMD", "test", "-f", "/ca-certs/ca-state.json"]
+      interval: 1s
+      timeout: 5s
+      retries: 30
+    volumes:
+      - tlsproxy-root-ca:/ca-certs:ro
+    depends_on:
+      - web-test-server
 
   web-test-server:
     container_name: web-test-server
@@ -76,18 +102,25 @@ services:
     command: ["--config", "/config.yaml", "--use-ephemeral-certificate-manager"]
     environment:
       - HOME=/tmp
-    depends_on:
-      - storage-node-1
-      - web-assets
+      - CERTMANAGER_STATE_FILE=/ca-state/ca-state.json
     volumes:
       - ./tlsproxy-config.yaml:/config.yaml
+      - tlsproxy-root-ca:/ca-state
     networks:
       default:
         aliases:
           - web-test-server
+          - storage-node-1.web-test-server
+          - storage-node-2.web-test-server
+          - storage-node-3.web-test-server
+
+networks:
+  default:
+    internal: true
 
 volumes:
   node1-data:
   node2-data:
   node3-data:
   client-config:
+  tlsproxy-root-ca:

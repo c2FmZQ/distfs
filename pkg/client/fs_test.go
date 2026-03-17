@@ -18,6 +18,8 @@ package client
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http/httptest"
@@ -48,7 +50,7 @@ func TestDistFS_ReadDir(t *testing.T) {
 	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true, true)
+	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
 	metaServer.RegisterEpochKey("key-1", serverDK)
 	tsMeta := httptest.NewServer(metaServer)
 	defer tsMeta.Close()
@@ -153,6 +155,105 @@ func TestDistFS_ReadDir(t *testing.T) {
 	if err != io.EOF {
 		if len(pEntries3) != 0 {
 			t.Errorf("Expected EOF or empty, got %d entries, err %v", len(pEntries3), err)
+		}
+	}
+}
+
+func TestReadDirPaginated(t *testing.T) {
+	node, ts, serverSignKey, serverEK, srv := metadata.SetupCluster(t)
+	defer node.Shutdown()
+	defer ts.Close()
+	defer srv.Shutdown()
+
+	dk, _ := crypto.GenerateEncryptionKey()
+	userSignKey, _ := crypto.GenerateIdentityKey()
+	userID := "test-user"
+
+	metadata.CreateUser(t, node, metadata.User{
+		ID:      userID,
+		UID:     1000,
+		SignKey: userSignKey.Public(),
+		EncKey:  dk.EncapsulationKey().Bytes(),
+	})
+	token := metadata.LoginSessionForTest(t, ts, userID, userSignKey)
+
+	svKey, _ := crypto.UnmarshalEncapsulationKey(serverEK)
+	c := NewClient(ts.URL).
+		WithIdentity(userID, dk).
+		WithSignKey(userSignKey).
+		WithServerKey(svKey)
+	c.sessionToken = token
+	c.serverSignPK = serverSignKey.Public()
+
+	ctx := context.Background()
+	c.EnsureRoot(ctx)
+
+	dirPath := "/paginated_dir"
+	c.Mkdir(ctx, dirPath, 0755)
+
+	// Create 250 empty files inline
+	for i := 0; i < 250; i++ {
+		fileName := fmt.Sprintf("file_%04d.txt", i)
+		filePath := dirPath + "/" + fileName
+		err := c.CreateFile(ctx, filePath, bytes.NewReader(nil), 0)
+		if err != nil {
+			t.Fatalf("CreateFile %d failed: %v", i, err)
+		}
+	}
+
+	page1, total, err := c.ReadDirPaginated(ctx, dirPath, 0, 100)
+	if err != nil {
+		t.Fatalf("ReadDirPaginated page 1 failed: %v", err)
+	}
+	if total != 250 {
+		t.Fatalf("Expected total 250, got %d", total)
+	}
+	if len(page1) != 100 {
+		t.Fatalf("Expected page 1 len 100, got %d", len(page1))
+	}
+
+	page2, total2, err := c.ReadDirPaginated(ctx, dirPath, 100, 100)
+	if err != nil {
+		t.Fatalf("ReadDirPaginated page 2 failed: %v", err)
+	}
+	if total2 != 250 {
+		t.Fatalf("Expected total 250, got %d", total2)
+	}
+	if len(page2) != 100 {
+		t.Fatalf("Expected page 2 len 100, got %d", len(page2))
+	}
+
+	page3, total3, err := c.ReadDirPaginated(ctx, dirPath, 200, 100)
+	if err != nil {
+		t.Fatalf("ReadDirPaginated page 3 failed: %v", err)
+	}
+	if total3 != 250 {
+		t.Fatalf("Expected total 250, got %d", total3)
+	}
+	if len(page3) != 50 {
+		t.Fatalf("Expected page 3 len 50, got %d", len(page3))
+	}
+
+	// Verify all files are present across pages
+	allSeen := make(map[string]bool)
+	for _, e := range page1 {
+		allSeen[e.Name()] = true
+	}
+	for _, e := range page2 {
+		allSeen[e.Name()] = true
+	}
+	for _, e := range page3 {
+		allSeen[e.Name()] = true
+	}
+
+	if len(allSeen) != 250 {
+		t.Errorf("Expected 250 unique files across pages, got %d", len(allSeen))
+	}
+
+	for i := 0; i < 250; i++ {
+		name := fmt.Sprintf("file_%04d.txt", i)
+		if !allSeen[name] {
+			t.Errorf("Missing file %s in paginated results", name)
 		}
 	}
 }

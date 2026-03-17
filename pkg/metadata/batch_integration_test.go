@@ -31,6 +31,7 @@ import (
 
 func TestRequestBatching(t *testing.T) {
 	node, _, _, _, server := metadata.SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 
 	// Wait for leader
@@ -80,6 +81,7 @@ func TestRequestBatching(t *testing.T) {
 
 func TestSessionKeyMemoization(t *testing.T) {
 	node, _, _, _, server := metadata.SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	metadata.WaitLeader(t, node.Raft)
 
@@ -123,6 +125,7 @@ func TestSessionKeyMemoization(t *testing.T) {
 
 func TestBatchAtomicity(t *testing.T) {
 	node, _, _, _, server := metadata.SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	metadata.WaitLeader(t, node.Raft)
 

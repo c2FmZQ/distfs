@@ -31,10 +31,10 @@ export class WasmClient {
         });
     }
     async init(serverURL, userID, decKey, signKey, serverKey) {
-        await this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
+        return this.invoke('init', { serverURL, userID, decKey, signKey, serverKey });
     }
-    async listDirectory(path) {
-        return this.invoke('listDirectory', { path });
+    async listDirectory(path, offset, limit) {
+        return this.invoke('listDirectory', { path, offset, limit });
     }
     async statFile(path) {
         return this.invoke('statFile', { path });
@@ -53,6 +53,12 @@ export class WasmClient {
     }
     async rm(path) {
         return this.invoke('rm', { path });
+    }
+    async setACL(path, aclJSON) {
+        return this.invoke('setACL', { path, aclJSON });
+    }
+    async lookupUser(email) {
+        return this.invoke('lookupUser', { email });
     }
     async getQuota() {
         return this.invoke('getQuota', {});

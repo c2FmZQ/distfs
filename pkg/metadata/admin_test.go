@@ -16,7 +16,8 @@ import (
 )
 
 func TestAdminCUI(t *testing.T) {
-	node, ts, _, _, _ := metadata.SetupCluster(t)
+	node, ts, _, _, srv := metadata.SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -111,7 +112,8 @@ func TestAdminCUI(t *testing.T) {
 }
 
 func TestAdminAPI(t *testing.T) {
-	node, ts, _, _, _ := metadata.SetupCluster(t)
+	node, ts, _, _, srv := metadata.SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -178,7 +180,8 @@ func TestAdminAPI(t *testing.T) {
 }
 
 func TestAdminMkdirOwner(t *testing.T) {
-	node, ts, _, _, _ := metadata.SetupCluster(t)
+	node, ts, _, _, srv := metadata.SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -246,6 +249,7 @@ func TestAdminMkdirOwner(t *testing.T) {
 
 func TestOwnerImmutability(t *testing.T) {
 	node, ts, _, _, server := metadata.SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -278,6 +282,7 @@ func TestOwnerImmutability(t *testing.T) {
 
 func TestFSM_GroupAuthorization(t *testing.T) {
 	node, ts, _, _, server := metadata.SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -344,6 +349,7 @@ func isFSMError(res interface{}) bool {
 
 func TestFSM_AdminCreation(t *testing.T) {
 	node, ts, _, _, server := metadata.SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

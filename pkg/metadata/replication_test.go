@@ -16,6 +16,7 @@ import (
 
 func TestReplicationMonitor_Scan(t *testing.T) {
 	node, ts, _, _, s := SetupCluster(t)
+	defer s.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -98,6 +99,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 
 func TestReplication_Scan_Concurrent(t *testing.T) {
 	node, _, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	WaitLeader(t, node.Raft)
 
@@ -109,6 +111,7 @@ func TestReplication_Scan_Concurrent(t *testing.T) {
 
 func TestReplicationMonitor_Prune(t *testing.T) {
 	node, ts, _, _, s := SetupCluster(t)
+	defer s.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -180,6 +183,7 @@ func mustMarshal(v interface{}) []byte {
 
 func TestReplication_Misc(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -192,6 +196,7 @@ func TestReplication_Misc(t *testing.T) {
 
 func TestGC_Misc(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -204,6 +209,7 @@ func TestGC_Misc(t *testing.T) {
 
 func TestReplication_Scan_Types(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -227,6 +233,7 @@ func TestReplication_Scan_Types(t *testing.T) {
 
 func TestReplication_Repair_Fail(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -239,6 +246,7 @@ func TestReplication_Repair_Fail(t *testing.T) {
 
 func TestReplication_Repair_RaftFail(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	// Don't defer shutdown yet
 
 	source := Node{ID: "n1", Address: ts.URL} // Valid URL but Raft will be gone
@@ -254,6 +262,7 @@ func TestReplication_Repair_RaftFail(t *testing.T) {
 
 func TestGC_DeleteFail(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -269,6 +278,7 @@ func TestGC_DeleteFail(t *testing.T) {
 
 func TestKeyRotation_Misc(t *testing.T) {
 	node, ts, _, _, server := SetupCluster(t)
+	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

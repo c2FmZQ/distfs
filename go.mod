@@ -4,7 +4,7 @@ go 1.26.0
 
 require (
 	bazil.org/fuse v0.0.0-20230120002735-62a210ff1fd5
-	github.com/c2FmZQ/ech v0.4.0
+	github.com/c2FmZQ/ech v0.4.1
 	github.com/c2FmZQ/storage v0.3.2
 	github.com/c2FmZQ/tlsproxy/jwks v0.0.0-20260210222347-c2dddf848fef
 	github.com/c2FmZQ/tpm v0.5.0

@@ -43,7 +43,8 @@ import (
 )
 
 func TestMetadataCluster(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, serverEK, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -144,7 +145,8 @@ func TestMetadataCluster(t *testing.T) {
 }
 
 func TestSecurity_AccessControl(t *testing.T) {
-	node, ts, serverSignKey, serverEK, _ := SetupCluster(t)
+	node, ts, serverSignKey, serverEK, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -231,7 +233,8 @@ func TestSecurity_AccessControl(t *testing.T) {
 }
 
 func TestFSM_EdgeCases(t *testing.T) {
-	node, _, _, _, _ := SetupCluster(t)
+	node, _, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 
 	// Unknown Command (using string for type instead of number to avoid unmarshal error if it's strict, or just use a known unused number)
@@ -254,7 +257,8 @@ func TestFSM_EdgeCases(t *testing.T) {
 }
 
 func TestIdentityRegistry(t *testing.T) {
-	node, ts, serverSignKey, _, _ := SetupCluster(t)
+	node, ts, serverSignKey, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -314,7 +318,8 @@ func TestIdentityRegistry(t *testing.T) {
 }
 
 func TestRegisterUserEndpoint(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	_ = node
 	defer ts.Close()
 
@@ -335,6 +340,7 @@ func TestRegisterUserEndpoint(t *testing.T) {
 
 func TestKeySync(t *testing.T) {
 	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -523,7 +529,8 @@ func (m *MockSink) ID() string                  { return "mock" }
 func (m *MockSink) Cancel() error               { return nil }
 
 func TestChunkPagination(t *testing.T) {
-	node, ts, serverSignKey, _, _ := SetupCluster(t)
+	node, ts, serverSignKey, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -635,7 +642,8 @@ func TestChunkPagination(t *testing.T) {
 }
 
 func TestAccounting(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
@@ -728,7 +736,8 @@ func TestAccounting(t *testing.T) {
 }
 
 func TestQuotaEnforcement(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	_ = node
 	defer node.Shutdown()
 	defer ts.Close()
@@ -817,7 +826,8 @@ func TestQuotaEnforcement(t *testing.T) {
 }
 
 func TestSecurity_IDOR_User(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 
@@ -905,7 +915,8 @@ func TestSecurity_IDOR_User(t *testing.T) {
 }
 
 func TestNodeRevocation(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

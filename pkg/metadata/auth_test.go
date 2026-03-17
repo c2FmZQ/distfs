@@ -12,9 +12,10 @@ import (
 )
 
 func TestChallengeResponseAuth(t *testing.T) {
-	node, ts, _, _, _ := SetupCluster(t)
+	node, ts, _, _, srv := SetupCluster(t)
 	defer node.Shutdown()
 	defer ts.Close()
+	defer srv.Shutdown()
 
 	// 1. Create a user in FSM
 	userDK, _ := crypto.GenerateEncryptionKey()
@@ -91,6 +92,7 @@ func TestChallengeResponseAuth(t *testing.T) {
 
 func TestMutualRaftAuth(t *testing.T) {
 	node, ts, _, _, srv := SetupCluster(t)
+	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 

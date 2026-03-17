@@ -27,13 +27,15 @@ onmessage = async (event) => {
             let result;
             switch(action) {
                 case 'init': result = await fn(args.serverURL, args.userID, args.decKey, args.signKey, args.serverKey); break;
-                case 'listDirectory': result = await fn(args.path); break;
+                case 'listDirectory': result = await fn(args.path, args.offset, args.limit); break;
                 case 'statFile': result = await fn(args.path); break;
                 case 'readFile': result = await fn(args.path); break;
                 case 'writeFile': result = await fn(args.path, args.content); break;
                 case 'mkdir': result = await fn(args.path); break;
                 case 'mv': result = await fn(args.oldPath, args.newPath); break;
                 case 'rm': result = await fn(args.path); break;
+                case 'setACL': result = await fn(args.path, args.aclJSON); break;
+                case 'lookupUser': result = await fn(args.email); break;
                 case 'getQuota': result = await fn(); break;
                 case 'generateKeys': result = await fn(); break;
                 case 'fetchServerKey': result = await fn(args.serverURL); break;

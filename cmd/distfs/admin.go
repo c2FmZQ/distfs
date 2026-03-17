@@ -1096,13 +1096,15 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	}
 
 	entry := client.DirectoryEntry{
-		Username: username,
-		Email:    email,
-		UserID:   user.ID,
-		EncKey:   user.EncKey,
-		SignKey:  user.SignKey,
-		// TODO: Sign this entry with the admin's (verifier's) private key
+		Username:   username,
+		Email:      email,
+		UserID:     user.ID,
+		EncKey:     user.EncKey,
+		SignKey:    user.SignKey,
+		VerifierID: c.UserID(),
+		Timestamp:  time.Now().Unix(),
 	}
+	entry.Signature = c.SignKey().Sign(entry.Hash())
 
 	err = c.SaveDataFile(ctx, regPath, entry)
 	if err != nil {

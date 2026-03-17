@@ -20,7 +20,8 @@ export default defineConfig({
         launchOptions: {
           args: [
             '--ignore-certificate-errors',
-            '--disable-web-security'
+            '--disable-web-security',
+            '--allow-running-insecure-content'
           ]
         }
       },

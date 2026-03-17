@@ -10,6 +10,10 @@ interface FileEntry {
     mode: number;
     mimeType: string;
     lockbox: Record<string, { kem: string, dem: string }>;
+    accessACL?: {
+        Users: Record<string, number>;
+        Groups: Record<string, number>;
+    };
 }
 
 interface UserQuota {
@@ -34,13 +38,18 @@ class DistFSApp {
     private userID: string = '';
     private homeDir: string | null = null;
     private meta: WebMetadata = { starred: [], recent: [] };
-    private treeData: Map<string, string[]> = new Map(); // path -> child folder names
+    private treeData: Map<string, string[]> = new Map();
+    private isRefreshingTree = false;
 
     constructor() {
         this.client = new WasmClient('worker.js');
         this.client.onReady = () => {
             const statusEl = document.getElementById('status');
             if (statusEl) statusEl.innerText = 'WASM Ready. Awaiting authentication.';
+            const btnLogin = document.getElementById('btn-login') as HTMLButtonElement;
+            if (btnLogin) btnLogin.disabled = false;
+            const btnNew = document.getElementById('btn-new-account') as HTMLButtonElement;
+            if (btnNew) btnNew.disabled = false;
         };
         this.initUI();
         this.setupServiceWorkerBridge();
@@ -63,15 +72,13 @@ class DistFSApp {
                             });
                             if (entry && entry.mimeType !== msg.data.mimeType) {
                                 let newMime = msg.data.mimeType;
-                                // Refine text/plain if extension is .md
                                 if (newMime === 'text/plain; charset=utf-8' && path.endsWith('.md')) {
                                     newMime = 'text/markdown';
                                 }
                                 entry.mimeType = newMime;
-                                console.log(`UI: MIME type corrected via sniffing for ${path}: ${entry.mimeType}`);
+                                console.log(`UI: MIME corrected for ${path}: ${entry.mimeType}`);
                                 this.renderFileList();
                                 if (this.selectedItems.has(entry)) this.renderDetailsPane(entry);
-                                // If the preview overlay is open for THIS file, re-render it
                                 if (!document.getElementById('preview-overlay')!.classList.contains('hidden') && 
                                     document.getElementById('preview-title')!.innerText === entry.name) {
                                     this.openPreview(entry);
@@ -100,7 +107,6 @@ class DistFSApp {
         document.getElementById('btn-cancel-device-flow')?.addEventListener('click', () => window.location.reload());
         document.getElementById('btn-close-preview')?.addEventListener('click', () => this.closePreview());
         document.getElementById('btn-preview-download')?.addEventListener('click', () => this.downloadSelected());
-        
         document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
             document.getElementById('share-modal')!.style.display = 'none';
         });
@@ -145,15 +151,10 @@ class DistFSApp {
     private async updateQuota() {
         try {
             const quota: UserQuota = await this.client.getQuota();
-            const used = quota.used_bytes;
-            const total = quota.total_bytes;
-            const percent = total > 0 ? (used / total) * 100 : 0;
-            document.getElementById('quota-bar-fill')!.style.width = `${percent}%`;
-            document.getElementById('quota-used')!.innerText = this.formatSize(used);
-            document.getElementById('quota-total')!.innerText = total > 0 ? this.formatSize(total) : "Unlimited";
-        } catch (e) {
-            console.error("Failed to fetch quota", e);
-        }
+            document.getElementById('quota-bar-fill')!.style.width = `${quota.total_bytes > 0 ? (quota.used_bytes / quota.total_bytes) * 100 : 0}%`;
+            document.getElementById('quota-used')!.innerText = this.formatSize(quota.used_bytes);
+            document.getElementById('quota-total')!.innerText = quota.total_bytes > 0 ? this.formatSize(quota.total_bytes) : "Unlimited";
+        } catch (e) { console.error("Quota fetch failed", e); }
     }
 
     private async performDeviceFlow(): Promise<string> {
@@ -161,17 +162,17 @@ class DistFSApp {
         const config = await authRes.json();
         const authInfo = await this.client.startDeviceAuth(config.device_authorization_endpoint, config.token_endpoint);
         const modal = document.getElementById('device-flow-modal')!;
-        const link = document.getElementById('device-flow-link')! as HTMLAnchorElement;
         const code = document.getElementById('device-flow-code')!;
+        const link = document.getElementById('device-flow-link')! as HTMLAnchorElement;
+        
         link.href = authInfo.verificationURIComplete || authInfo.verificationURI;
         link.innerText = authInfo.verificationURI;
         code.innerText = authInfo.userCode;
         modal.style.display = 'flex';
+        
         try {
             return await this.client.pollForToken(config.device_authorization_endpoint, config.token_endpoint, authInfo.deviceCode, authInfo.userCode, authInfo.verificationURI, authInfo.interval);
-        } finally {
-            modal.style.display = 'none';
-        }
+        } finally { modal.style.display = 'none'; }
     }
 
     private async handleLogin() {
@@ -179,17 +180,19 @@ class DistFSApp {
         try {
              statusEl.innerText = 'Authorizing...';
              const jwt = await this.performDeviceFlow();
-             statusEl.innerText = 'Fetching backup...';
+             statusEl.innerText = 'Fetching keys...';
              const blobStr = await this.client.pullKeySync(this.serverURL, jwt);
-             const passphrase = prompt("Enter your backup passphrase:");
+             const passphrase = prompt("Enter backup passphrase:");
              if (!passphrase) return;
-             const configStr = await this.client.decryptConfig(blobStr, passphrase);
-             const config = JSON.parse(configStr);
+             const config = JSON.parse(await this.client.decryptConfig(blobStr, passphrase));
              const serverKeyHex = await this.client.fetchServerKey(this.serverURL);
              await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, serverKeyHex);
              this.userID = config.user_id;
              await this.onLoginSuccess();
-        } catch (e: any) { statusEl.innerText = `Login Error: ${e.message}`; }
+        } catch (e: any) { 
+            console.error("Login failed:", e);
+            statusEl.innerText = `Error: ${e.message}`; 
+        }
     }
 
     private async handleNewAccount() {
@@ -200,16 +203,18 @@ class DistFSApp {
             const jwt = await this.performDeviceFlow();
             statusEl.innerText = 'Registering...';
             const userID = await this.client.registerUser(this.serverURL, jwt, keys.signPubKey, keys.encKey);
-            const passphrase = prompt("Registration successful! Enter a backup passphrase:");
+            const passphrase = prompt("Enter backup passphrase:");
             if (!passphrase) return;
             const serverKeyHex = await this.client.fetchServerKey(this.serverURL);
             const config = { user_id: userID, enc_key: keys.decKey, sign_key: keys.signKey, server_key: serverKeyHex };
-            const encryptedBlob = await this.client.encryptConfig(JSON.stringify(config), passphrase);
-            await this.client.init(this.serverURL, config.user_id, config.enc_key, config.sign_key, serverKeyHex);
-            await this.client.pushKeySync(encryptedBlob);
+            await this.client.init(this.serverURL, userID, keys.decKey, keys.signKey, serverKeyHex);
+            await this.client.pushKeySync(await this.client.encryptConfig(JSON.stringify(config), passphrase));
             this.userID = userID;
             await this.onLoginSuccess();
-        } catch (e: any) { statusEl.innerText = `Error: ${e.message}`; }
+        } catch (e: any) { 
+            console.error("Login failed:", e);
+            statusEl.innerText = `Error: ${e.message}`; 
+        }
     }
 
     private async onLoginSuccess() {
@@ -219,12 +224,13 @@ class DistFSApp {
         await this.loadMetadata();
         await this.loadDirectory('/');
         await this.updateQuota();
-        this.refreshFolderTree('/');
+        await this.refreshFolderTree();
     }
 
     private async discoverHome() {
         try {
-            const users = await this.client.listDirectory('/users');
+            const res = await this.client.listDirectory('/users');
+            const users = res.entries;
             for (const u of users) {
                 try {
                     const info = await this.client.statFile(`/users/${u.name}`);
@@ -236,10 +242,7 @@ class DistFSApp {
 
     private async loadMetadata() {
         if (!this.homeDir) return;
-        try {
-            const content = await this.client.readFile(`${this.homeDir}/.distfs_web_meta.json`);
-            this.meta = JSON.parse(content);
-        } catch (e) {}
+        try { this.meta = JSON.parse(await this.client.readFile(`${this.homeDir}/.distfs_web_meta.json`)); } catch (e) {}
     }
 
     private async saveMetadata() {
@@ -247,46 +250,108 @@ class DistFSApp {
         try { await this.client.writeFile(`${this.homeDir}/.distfs_web_meta.json`, JSON.stringify(this.meta)); } catch (e) {}
     }
 
-    private async loadDirectory(path: string) {
-        this.currentPath = path;
-        this.renderBreadcrumbs();
+    private async loadDirectory(path: string, offset: number = 0) {
+        if (offset === 0) {
+            this.currentPath = path;
+            this.renderBreadcrumbs();
+            const fileList = document.getElementById('file-list')!;
+            fileList.innerHTML = '';
+            const loading = document.createElement('div');
+            loading.style.padding = '24px';
+            loading.style.color = 'var(--text-muted)';
+            loading.textContent = 'Syncing metadata...';
+            fileList.appendChild(loading);
+            this.currentEntries = [];
+        }
         const fileList = document.getElementById('file-list')!;
-        fileList.innerHTML = '<div style="padding: 24px; color: var(--text-muted);">Syncing metadata...</div>';
         try {
-            const rawEntries = await this.client.listDirectory(path);
+            const limit = 1000;
+            const res = await this.client.listDirectory(path, offset, limit);
+            const rawEntries = res.entries;
+            console.log(`UI: listDirectory(${path}, ${offset}) returned ${rawEntries.length} entries (total: ${res.total})`);
             const folderNames: string[] = [];
-            
-            this.currentEntries = await Promise.all(rawEntries.map(async (e) => {
-                const fullPath = path === '/' ? `/${e.name}` : `${path}/${e.name}`;
-                try {
-                    const info = await this.client.statFile(fullPath);
-                    if (info.isDir) folderNames.push(info.name);
-                    return info as FileEntry;
-                } catch (err) {
-                    return { ...e, owner: '?', lockbox: {}, mimeType: 'application/octet-stream', mode: 0, group: '?' } as FileEntry;
-                }
-            }));
+            const newEntries: FileEntry[] = [];
 
-            this.treeData.set(path, folderNames);
+            // SEC: Process in smaller batches to avoid overwhelming the WASM worker and browser thread
+            const batchSize = 50;
+            for (let i = 0; i < rawEntries.length; i += batchSize) {
+                const batch = rawEntries.slice(i, i + batchSize);
+                const batchResults = await Promise.all(batch.map(async (e: any) => {
+                    const fullPath = path === '/' ? `/${e.name}` : `${path}/${e.name}`;
+                    try {
+                        const info = await this.client.statFile(fullPath);
+                        if (info.isDir) folderNames.push(info.name);
+                        return info as FileEntry;
+                    } catch (err) {
+                        console.error(`UI: statFile error for ${fullPath}:`, err);
+                        return { name: e.name, isDir: e.isDir, size: e.size, modTime: 0, owner: '?', group: '?', mode: 0, mimeType: 'application/octet-stream', lockbox: {} } as FileEntry;
+                    }
+                }));
+                newEntries.push(...batchResults);
+            }
+            
+            if (offset === 0) fileList.innerHTML = ''; // Clear "Syncing..."
+            this.currentEntries.push(...newEntries);
+            
+            const existingFolders = this.treeData.get(path) || [];
+            this.treeData.set(path, Array.from(new Set([...existingFolders, ...folderNames])));
+            
             this.renderFileList();
-            this.clearSelection();
-            this.updateSidebarActive();
-            this.refreshFolderTree(path);
-        } catch (e: any) { fileList.innerHTML = `<div style="padding: 24px; color: #d93025;">Error: ${e.message}</div>`; }
+            
+            if (offset + limit < res.total) {
+                this.renderLoadMore(path, offset + limit);
+            } else {
+                this.clearSelection();
+                this.updateSidebarActive();
+                if (offset === 0) await this.refreshFolderTree();
+            }
+        } catch (e: any) {
+            console.error(`UI: loadDirectory error for ${path}:`, e);
+            fileList.innerHTML = '';
+            const errDiv = document.createElement('div');
+            errDiv.style.padding = '24px';
+            errDiv.style.color = '#d93025';
+            errDiv.textContent = `Error: ${e.message}`;
+            fileList.appendChild(errDiv);
+        }
     }
 
-    private async refreshFolderTree(parentPath: string) {
+    private renderLoadMore(path: string, nextOffset: number) {
+        const container = document.getElementById('file-list')!;
+        const btn = document.createElement('button');
+        btn.className = 'secondary-btn';
+        btn.style.margin = '24px auto';
+        btn.style.display = 'block';
+        btn.innerText = `Load More (Total: ${this.currentEntries.length}+)`;
+        btn.onclick = () => {
+            btn.innerText = 'Loading...';
+            btn.disabled = true;
+            this.loadDirectory(path, nextOffset);
+        };
+        container.appendChild(btn);
+    }
+
+    private async refreshFolderTree() {
+        if (this.isRefreshingTree) return;
+        this.isRefreshingTree = true;
         const container = document.getElementById('tree-children')!;
-        if (parentPath === '/') container.innerHTML = '';
-        const folders = this.treeData.get(parentPath) || [];
-        for (const name of folders) {
-            const fullPath = parentPath === '/' ? `/${name}` : `${parentPath}/${name}`;
-            const node = document.createElement('div');
-            node.className = 'tree-node';
-            node.innerText = `📁 ${name}`;
-            node.onclick = () => this.loadDirectory(fullPath);
-            container.appendChild(node);
-        }
+        if (!container) return;
+        try {
+            const res = await this.client.listDirectory('/users');
+            const usersRes = res.entries;
+            console.log(`UI: Found ${usersRes.length} users for tree`);
+            container.innerHTML = '';
+            for (const u of usersRes) {
+                console.log(`UI: Adding tree node for ${u.name}`);
+                const fullPath = `/users/${u.name}`;
+                const node = document.createElement('div');
+                node.className = 'tree-node';
+                node.textContent = `📁 ${u.name}`;
+                if (this.currentPath === fullPath || this.currentPath.startsWith(fullPath + '/')) node.classList.add('selected');
+                node.onclick = (e) => { e.stopPropagation(); this.loadDirectory(fullPath); };
+                container.appendChild(node);
+            }
+        } finally { this.isRefreshingTree = false; }
     }
 
     private showRecent() {
@@ -339,7 +404,22 @@ class DistFSApp {
         container.innerHTML = '';
         if (this.viewMode === 'list') {
             const header = document.createElement('div'); header.className = 'file-header';
-            header.innerHTML = `<div class="file-name-cell">Name</div><div class="file-size-cell">Size</div><div class="file-date-cell">Modified</div>`;
+            
+            const nameCell = document.createElement('div');
+            nameCell.className = 'file-name-cell';
+            nameCell.textContent = 'Name';
+            
+            const sizeCell = document.createElement('div');
+            sizeCell.className = 'file-size-cell';
+            sizeCell.textContent = 'Size';
+            
+            const dateCell = document.createElement('div');
+            dateCell.className = 'file-date-cell';
+            dateCell.textContent = 'Modified';
+            
+            header.appendChild(nameCell);
+            header.appendChild(sizeCell);
+            header.appendChild(dateCell);
             container.appendChild(header);
         }
         for (const entry of this.currentEntries) container.appendChild(this.createFileElement(entry));
@@ -350,20 +430,58 @@ class DistFSApp {
         el.className = 'file-item';
         if (this.selectedItems.has(entry)) el.classList.add('selected');
         const icon = entry.isDir ? '📁' : (entry.mimeType.startsWith('image/') ? '🖼️' : '📄');
+        
         if (this.viewMode === 'grid') {
-            const iconDiv = document.createElement('div'); iconDiv.className = 'file-icon';
+            const iconDiv = document.createElement('div');
+            iconDiv.className = 'file-icon';
             if (!entry.isDir && entry.mimeType.startsWith('image/')) {
                 const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
-                const img = document.createElement('img'); img.src = `/distfs-media${fullPath}`; img.alt = entry.name; img.loading = 'lazy';
+                const img = document.createElement('img');
+                img.src = `/distfs-media${fullPath}`;
+                img.alt = entry.name;
+                img.loading = 'lazy';
                 iconDiv.appendChild(img);
-            } else iconDiv.innerText = icon;
-            const nameDiv = document.createElement('div'); nameDiv.className = 'file-name'; nameDiv.innerText = entry.name;
-            const metaDiv = document.createElement('div'); metaDiv.className = 'file-meta'; metaDiv.innerText = entry.isDir ? '--' : this.formatSize(entry.size);
-            el.appendChild(iconDiv); el.appendChild(nameDiv); el.appendChild(metaDiv);
+            } else {
+                iconDiv.textContent = icon;
+            }
+            
+            const nameDiv = document.createElement('div');
+            nameDiv.className = 'file-name';
+            nameDiv.textContent = entry.name;
+            
+            const metaDiv = document.createElement('div');
+            metaDiv.className = 'file-meta';
+            metaDiv.textContent = entry.isDir ? '--' : this.formatSize(entry.size);
+            
+            el.appendChild(iconDiv);
+            el.appendChild(nameDiv);
+            el.appendChild(metaDiv);
         } else {
-            el.innerHTML = `<div class="file-name-cell"><span class="file-icon">${icon}</span><span class="file-name">${entry.name}</span></div>
-                <div class="file-size-cell">${entry.isDir ? '--' : this.formatSize(entry.size)}</div>
-                <div class="file-date-cell">${this.formatDate(entry.modTime)}</div>`;
+            const nameCell = document.createElement('div');
+            nameCell.className = 'file-name-cell';
+            
+            const iconSpan = document.createElement('span');
+            iconSpan.className = 'file-icon';
+            iconSpan.textContent = icon;
+            
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'file-name';
+            nameSpan.textContent = entry.name;
+            
+            nameCell.appendChild(iconSpan);
+            nameCell.appendChild(nameSpan);
+            
+            const sizeCell = document.createElement('div');
+            sizeCell.className = 'file-size-cell';
+            sizeCell.textContent = entry.isDir ? '--' : this.formatSize(entry.size);
+            
+            const dateCell = document.createElement('div');
+            dateCell.className = 'file-date-cell';
+            dateCell.textContent = this.formatDate(entry.modTime);
+            
+            el.appendChild(nameCell);
+            el.appendChild(sizeCell);
+            el.appendChild(dateCell);
         }
         el.onclick = (e) => {
             e.stopPropagation();
@@ -372,10 +490,8 @@ class DistFSApp {
         };
         el.ondblclick = () => {
             const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
-            if (entry.isDir) {
-                this.clearSelection();
-                this.loadDirectory(fullPath);
-            } else this.openPreview(entry);
+            if (entry.isDir) { this.clearSelection(); this.loadDirectory(fullPath); }
+            else this.openPreview(entry);
         };
         el.oncontextmenu = (e) => { e.preventDefault(); if (!this.selectedItems.has(entry)) { this.clearSelection(); this.toggleSelection(entry); } this.showContextMenu(e.clientX, e.clientY, entry); };
         return el;
@@ -396,65 +512,143 @@ class DistFSApp {
     private async openPreview(entry: FileEntry) {
         const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
         const overlay = document.getElementById('preview-overlay')!;
-        const title = document.getElementById('preview-title')!;
         const body = document.getElementById('preview-body')!;
-        title.innerText = entry.name;
-        body.innerHTML = '<div style="color: white">Loading preview...</div>';
+        document.getElementById('preview-title')!.innerText = entry.name;
+        body.innerHTML = '';
+        const loading = document.createElement('div');
+        loading.style.color = 'white';
+        loading.textContent = 'Loading...';
+        body.appendChild(loading);
         overlay.classList.remove('hidden');
         try {
             if (entry.mimeType.startsWith('image/')) {
-                body.innerHTML = `<img src="/distfs-media${fullPath}" style="max-width:100%; max-height:100%; object-fit:contain;">`;
+                const img = document.createElement('img');
+                img.src = `/distfs-media${fullPath}`;
+                img.style.maxWidth = '100%';
+                img.style.maxHeight = '100%';
+                img.style.objectFit = 'contain';
+                body.innerHTML = '';
+                body.appendChild(img);
             } else if (entry.mimeType.startsWith('video/') || entry.mimeType.startsWith('audio/')) {
                 const tag = entry.mimeType.startsWith('video/') ? 'video' : 'audio';
-                body.innerHTML = `<${tag} src="/distfs-media${fullPath}" controls autoplay style="max-width:100%; max-height:100%;"></${tag}>`;
-            } else if (entry.mimeType === 'text/plain' || entry.mimeType === 'text/markdown' || entry.name.endsWith('.md')) {
+                const media = document.createElement(tag);
+                media.src = `/distfs-media${fullPath}`;
+                media.controls = true;
+                media.autoplay = true;
+                media.style.maxWidth = '100%';
+                media.style.maxHeight = '100%';
+                body.innerHTML = '';
+                body.appendChild(media);
+            } else if (entry.mimeType === 'text/plain' || entry.mimeType === 'text/markdown' || entry.name.endsWith('.md') || entry.name.endsWith('.txt')) {
                 const text = await this.client.readFile(fullPath);
+                body.innerHTML = '';
                 if (entry.mimeType === 'text/markdown' || entry.name.endsWith('.md')) {
-                    body.innerHTML = `<div id="markdown-preview" style="background: white; padding: 40px; border-radius: 4px; width: 100%; max-width: 800px; color: black; overflow: auto;">${text.replace(/\n/g, '<br>')}</div>`;
+                    const mdDiv = document.createElement('div');
+                    mdDiv.id = 'markdown-preview';
+                    mdDiv.style.background = 'white';
+                    mdDiv.style.padding = '40px';
+                    mdDiv.style.borderRadius = '4px';
+                    mdDiv.style.width = '100%';
+                    mdDiv.style.maxWidth = '800px';
+                    mdDiv.style.color = 'black';
+                    mdDiv.style.overflow = 'auto';
+                    mdDiv.style.whiteSpace = 'pre-wrap';
+                    mdDiv.textContent = text;
+                    body.appendChild(mdDiv);
                 } else {
-                    body.innerHTML = `<pre style="background: #1e1e1e; color: #d4d4d4; padding: 20px; border-radius: 4px; width: 100%; max-width: 1000px; overflow: auto;">${text}</pre>`;
+                    const pre = document.createElement('pre');
+                    pre.style.background = '#1e1e1e';
+                    pre.style.color = '#d4d4d4';
+                    pre.style.padding = '20px';
+                    pre.style.borderRadius = '4px';
+                    pre.style.width = '100%';
+                    pre.style.maxWidth = '1000px';
+                    pre.style.overflow = 'auto';
+                    pre.textContent = text;
+                    body.appendChild(pre);
                 }
             } else {
-                body.innerHTML = `<div style="color: white; text-align: center;"><div style="font-size: 4rem; margin-bottom: 20px;">📄</div><div>Preview not available for this file type.</div><br><button class="primary-btn" id="btn-fallback-download">Download Instead</button></div>`;
-                document.getElementById('btn-fallback-download')?.addEventListener('click', () => this.downloadSelected());
+                body.innerHTML = '';
+                const fallback = document.createElement('div');
+                fallback.style.color = 'white';
+                fallback.style.textAlign = 'center';
+                
+                const icon = document.createElement('div');
+                icon.style.fontSize = '4rem';
+                icon.textContent = '📄';
+                
+                const text = document.createElement('div');
+                text.textContent = 'No preview available.';
+                
+                const btn = document.createElement('button');
+                btn.className = 'primary-btn';
+                btn.id = 'btn-fallback-download';
+                btn.textContent = 'Download';
+                btn.onclick = () => this.downloadSelected();
+                
+                fallback.appendChild(icon);
+                fallback.appendChild(text);
+                fallback.appendChild(document.createElement('br'));
+                fallback.appendChild(btn);
+                body.appendChild(fallback);
             }
-        } catch (e: any) { body.innerHTML = `<div style="color: #f44336">Failed to load preview: ${e.message}</div>`; }
+        } catch (e: any) {
+            body.innerHTML = '';
+            const errDiv = document.createElement('div');
+            errDiv.style.color = '#f44336';
+            errDiv.textContent = `Error: ${e.message}`;
+            body.appendChild(errDiv);
+        }
     }
 
     private closePreview() { document.getElementById('preview-overlay')!.classList.add('hidden'); document.getElementById('preview-body')!.innerHTML = ''; }
 
     private downloadSelected() {
         for (const entry of this.selectedItems) {
+            const dl = document.createElement('a');
             const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
-            const dlLink = document.createElement('a'); dlLink.href = `/distfs-download${fullPath}`; dlLink.download = entry.name; dlLink.click();
+            dl.href = `/distfs-download${fullPath}`;
+            dl.download = entry.name;
+            dl.click();
         }
     }
 
     private renderDetailsPane(entry: FileEntry | null) {
-        const selectionDiv = document.getElementById('details-selection')!;
-        const emptyDiv = document.getElementById('details-empty')!;
-        if (!entry) { selectionDiv.classList.add('hidden'); emptyDiv.classList.remove('hidden'); return; }
-        emptyDiv.classList.add('hidden'); selectionDiv.classList.remove('hidden');
+        const sel = document.getElementById('details-selection')!;
+        const emp = document.getElementById('details-empty')!;
+        if (!entry) { sel.classList.add('hidden'); emp.classList.remove('hidden'); return; }
+        sel.classList.remove('hidden'); emp.classList.add('hidden');
         document.getElementById('details-name')!.innerText = entry.name;
-        document.getElementById('details-type')!.innerText = entry.isDir ? 'Folder' : (entry.mimeType || 'File');
+        document.getElementById('details-type')!.innerText = entry.isDir ? 'Folder' : entry.mimeType;
         document.getElementById('details-size')!.innerText = entry.isDir ? '--' : this.formatSize(entry.size);
-        document.getElementById('details-location')!.innerText = this.currentPath;
         document.getElementById('details-owner')!.innerText = entry.owner.substring(0,12) + '...';
         document.getElementById('details-date')!.innerText = this.formatDate(entry.modTime);
-        const previewBox = document.getElementById('details-preview-box')!;
-        previewBox.innerHTML = '';
-        if (!entry.isDir && entry.mimeType.startsWith('image/')) {
-            const fullPath = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
-            const img = document.createElement('img'); img.src = `/distfs-media${fullPath}`; previewBox.appendChild(img);
-        } else previewBox.innerText = entry.isDir ? '📁' : '📄';
         const accessList = document.getElementById('access-list')!;
         accessList.innerHTML = '';
         for (const rid of Object.keys(entry.lockbox)) {
-            const isOwner = rid === entry.owner;
-            const item = document.createElement('div'); item.className = 'access-item';
-            item.innerHTML = `<div class="access-avatar">${rid === 'world' ? 'W' : (isOwner ? 'O' : 'U')}</div>
-                <div style="flex:1"><div style="font-weight:500">${rid === 'world' ? 'Public' : rid.substring(0,8)+'...'}</div>
-                <div style="font-size:0.75rem; color:var(--text-muted)">${isOwner ? 'Owner' : 'Authorized'}</div></div>`;
+            const item = document.createElement('div');
+            item.className = 'access-item';
+            
+            const avatar = document.createElement('div');
+            avatar.className = 'access-avatar';
+            avatar.textContent = rid === 'world' ? 'W' : (rid === entry.owner ? 'O' : 'U');
+            
+            const info = document.createElement('div');
+            info.style.flex = '1';
+            
+            const name = document.createElement('div');
+            name.style.fontWeight = '500';
+            name.textContent = rid === 'world' ? 'Public' : rid.substring(0,8)+'...';
+            
+            const role = document.createElement('div');
+            role.style.fontSize = '0.75rem';
+            role.style.color = 'var(--text-muted)';
+            role.textContent = rid === entry.owner ? 'Owner' : 'Authorized';
+            
+            info.appendChild(name);
+            info.appendChild(role);
+            item.appendChild(avatar);
+            item.appendChild(info);
             accessList.appendChild(item);
         }
     }
@@ -471,36 +665,28 @@ class DistFSApp {
             case 'download': this.downloadSelected(); break;
             case 'delete':
                 if (confirm(`Delete ${this.selectedItems.size} items?`)) {
-                    for (const it of this.selectedItems) {
-                        const p = this.currentPath === '/' ? `/${it.name}` : `${this.currentPath}/${it.name}`;
-                        try { await this.client.rm(p); } catch (e: any) { alert(`Failed: ${e.message}`); }
-                    }
+                    for (const it of this.selectedItems) await this.client.rm(this.currentPath === '/' ? `/${it.name}` : `${this.currentPath}/${it.name}`);
                     await this.loadDirectory(this.currentPath);
                 }
                 break;
             case 'rename':
-                const newName = prompt("Enter new name:", entry.name);
+                const newName = prompt("New name:", entry.name);
                 if (newName && newName !== entry.name) {
-                    try { await this.client.mv(fullPath, this.currentPath === '/' ? `/${newName}` : `${this.currentPath}/${newName}`); await this.loadDirectory(this.currentPath); }
-                    catch (e: any) { alert(`Rename failed: ${e.message}`); }
+                    await this.client.mv(fullPath, (this.currentPath === '/' ? '/' : this.currentPath + '/') + newName);
+                    await this.loadDirectory(this.currentPath);
                 }
                 break;
-            case 'star':
-                if (!this.meta.starred.includes(fullPath)) { this.meta.starred.push(fullPath); await this.saveMetadata(); }
-                break;
-            case 'share':
-                document.getElementById('share-file-name')!.innerText = entry.name;
-                document.getElementById('share-modal')!.style.display = 'flex';
-                break;
+            case 'star': if (!this.meta.starred.includes(fullPath)) { this.meta.starred.push(fullPath); await this.saveMetadata(); } break;
+            case 'share': document.getElementById('share-file-name')!.innerText = entry.name; document.getElementById('share-modal')!.style.display = 'flex'; break;
         }
     }
 
     private setupDragAndDrop() {
-        const mainView = document.getElementById('main-view')!;
-        window.addEventListener('dragover', (e) => { e.preventDefault(); mainView.classList.add('dragover'); });
-        window.addEventListener('dragleave', (e) => { if (e.target === document.getElementById('drop-zone')) mainView.classList.remove('dragover'); });
+        const main = document.getElementById('main-view')!;
+        window.addEventListener('dragover', (e) => { e.preventDefault(); main.classList.add('dragover'); });
+        window.addEventListener('dragleave', (e) => { if (e.target === document.getElementById('drop-zone')) main.classList.remove('dragover'); });
         window.addEventListener('drop', (e) => {
-            e.preventDefault(); mainView.classList.remove('dragover');
+            e.preventDefault(); main.classList.remove('dragover');
             if (e.dataTransfer && e.dataTransfer.files.length > 0) {
                 for (const file of e.dataTransfer.files) this.startUpload(file);
             }
@@ -508,51 +694,98 @@ class DistFSApp {
     }
 
     private startUpload(file: File) {
-        const jobID = `upload-${Date.now()}-${file.name}`;
-        this.addJob(jobID, `Uploading ${file.name}`);
-        let progress = 0;
-        const interval = setInterval(() => {
-            progress += 10; this.updateJobProgress(jobID, progress);
-            if (progress >= 100) { clearInterval(interval); setTimeout(() => this.removeJob(jobID), 2000); this.loadDirectory(this.currentPath); }
+        const id = `upload-${Date.now()}-${file.name}`;
+        this.addJob(id, `Uploading ${file.name}`);
+        let p = 0; const iv = setInterval(() => {
+            p += 10; this.updateJobProgress(id, p);
+            if (p >= 100) { clearInterval(iv); setTimeout(() => this.removeJob(id), 2000); this.loadDirectory(this.currentPath); }
         }, 300);
     }
 
     private addJob(id: string, name: string) {
         const mgr = document.getElementById('job-manager')!; mgr.style.display = 'block';
-        const list = document.getElementById('job-list')!;
         const item = document.createElement('div'); item.id = `job-${id}`; item.className = 'job-item';
-        item.innerHTML = `<div class="job-info"><span>${name}</span><span id="job-percent-${id}">0%</span></div>
-            <div class="job-progress-bg"><div class="job-progress-fill" id="job-fill-${id}"></div></div>`;
-        list.appendChild(item); this.updateJobCount();
+        
+        const info = document.createElement('div');
+        info.className = 'job-info';
+        
+        const nameSpan = document.createElement('span');
+        nameSpan.textContent = name;
+        
+        const percentSpan = document.createElement('span');
+        percentSpan.id = `job-percent-${id}`;
+        percentSpan.textContent = '0%';
+        
+        info.appendChild(nameSpan);
+        info.appendChild(percentSpan);
+        
+        const progressBg = document.createElement('div');
+        progressBg.className = 'job-progress-bg';
+        
+        const progressFill = document.createElement('div');
+        progressFill.className = 'job-progress-fill';
+        progressFill.id = `job-fill-${id}`;
+        
+        progressBg.appendChild(progressFill);
+        item.appendChild(info);
+        item.appendChild(progressBg);
+        
+        document.getElementById('job-list')!.appendChild(item); this.updateJobCount();
     }
 
-    private updateJobProgress(id: string, percent: number) {
-        const fill = document.getElementById(`job-fill-${id}`); const text = document.getElementById(`job-percent-${id}`);
-        if (fill) fill.style.width = `${percent}%`; if (text) text.innerText = `${percent}%`;
+    private updateJobProgress(id: string, p: number) {
+        const fill = document.getElementById(`job-fill-${id}`); if (fill) fill.style.width = `${p}%`;
+        const txt = document.getElementById(`job-percent-${id}`); if (txt) txt.innerText = `${p}%`;
     }
 
-    private removeJob(id: string) { const item = document.getElementById(`job-${id}`); if (item) item.remove(); this.updateJobCount(); }
+    private removeJob(id: string) { const it = document.getElementById(`job-${id}`); if (it) it.remove(); this.updateJobCount(); }
 
     private updateJobCount() {
-        const list = document.getElementById('job-list')!; const count = list.children.length;
+        const count = document.getElementById('job-list')!.children.length;
         document.getElementById('job-count')!.innerText = count.toString();
         if (count === 0) document.getElementById('job-manager')!.style.display = 'none';
     }
 
-    private formatSize(bytes: number): string {
-        if (bytes === 0) return '0 B'; const k = 1024; const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
-        const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+    private formatSize(b: number): string {
+        if (b === 0) return '0 B'; const k = 1024; const s = ['B', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(b) / Math.log(k));
+        return parseFloat((b / Math.pow(k, i)).toFixed(1)) + ' ' + s[i];
     }
 
-    private formatDate(timestamp: number): string {
-        if (!timestamp) return '-';
-        return new Date(timestamp * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+    private formatDate(ts: number): string {
+        return ts ? new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
     }
 
-    private handleShareSubmit() {
-        document.getElementById('share-modal')!.style.display = 'none';
-        alert("Shared successfully (Simulated)");
+    private async handleShareSubmit() {
+        if (!this.selectedItems.size) return;
+        const entry = Array.from(this.selectedItems)[0];
+        const email = (document.getElementById('share-target-email') as HTMLInputElement).value;
+        const perms = (document.getElementById('share-perms') as HTMLSelectElement).value;
+        const path = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+        const btn = document.getElementById('btn-confirm-share') as HTMLButtonElement;
+        btn.innerText = 'Sharing...'; btn.disabled = true;
+        try {
+            // 1. Resolve email to UserID securely via Registry
+            const targetID = await this.client.lookupUser(email);
+            if (!targetID) throw new Error("User not found in registry");
+
+            const acl = entry.accessACL || { Users: {}, Groups: {} };
+            if (!acl.Users) acl.Users = {};
+            acl.Users[targetID] = perms === 'rw-' ? 6 : 4;
+
+            // Map UI structure to expected WASM JSON structure
+            const wasmAcl = {
+                users: acl.Users,
+                groups: acl.Groups
+            };
+            await this.client.setACL(path, JSON.stringify(wasmAcl));
+            document.getElementById('share-modal')!.style.display = 'none';
+            alert(`Shared with ${email}`);
+            await this.loadDirectory(this.currentPath);
+        } catch (e: any) { 
+            console.error("UI: Share error:", e);
+            alert(`Error: ${e.message}`); 
+        } finally { btn.innerText = 'Share'; btn.disabled = false; }
     }
 }
 

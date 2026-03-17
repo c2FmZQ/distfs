@@ -26,7 +26,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -110,7 +109,7 @@ type Server struct {
 	clientTLSConfig     *tls.Config
 	keyRotationInterval time.Duration
 
-	forwardTransport *http.Transport
+	forwardTransport http.RoundTripper
 	leaderURLCache   map[raft.ServerAddress]string
 	leaderURLMu      sync.RWMutex
 
@@ -154,50 +153,53 @@ func (t *schemeSwitchingTransport) RoundTrip(req *http.Request) (*http.Response,
 }
 
 // NewServer creates a new Metadata Server.
-func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool, allowInsecure bool) *Server {
+func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool) *Server {
 	retryClient := retryablehttp.NewClient()
 	retryClient.Logger = nil
-	remote := jwks.NewRemote(retryClient, nil)
 
 	resolver := ech.DefaultResolver
 	if disableDoH {
 		resolver = ech.InsecureGoResolver()
 	}
 
-	createTransport := func(tlsCfg *tls.Config) http.RoundTripper {
-		protected := ech.NewTransport()
-		protected.TLSConfig = tlsCfg
-		protected.Resolver = resolver
-
-		if !allowInsecure {
-			return protected
-		}
-
-		standard := http.DefaultTransport.(*http.Transport).Clone()
-		standard.TLSClientConfig = tlsCfg
-		return &schemeSwitchingTransport{
-			standard:  standard,
-			protected: protected,
-		}
+	// 1. standardTransport: For OIDC, JWKS, and standard infrastructure.
+	// Uses ech.Transport (for --disable-doh) and standard TLS (System CAs).
+	var standardTLSConfig *tls.Config
+	if clientTLSConfig != nil {
+		standardTLSConfig = clientTLSConfig.Clone()
+	} else {
+		standardTLSConfig = &tls.Config{}
 	}
+	standardTLSConfig.InsecureSkipVerify = false
+	standardTLSConfig.VerifyPeerCertificate = nil // Standard RSA/ECDSA certs
+	standardTransport := ech.NewTransport()
+	standardTransport.TLSConfig = standardTLSConfig
+	standardTransport.Resolver = resolver
 
-	echTransport := createTransport(clientTLSConfig)
+	// 2. discoveryTransport: For direct node discovery (TOFU).
+	// Uses ech.Transport and bypasses verification (InsecureSkipVerify: true).
+	var discoveryTLSConfig *tls.Config
+	if clientTLSConfig != nil {
+		discoveryTLSConfig = clientTLSConfig.Clone()
+	} else {
+		discoveryTLSConfig = &tls.Config{}
+	}
+	discoveryTLSConfig.InsecureSkipVerify = true
+	discoveryTLSConfig.VerifyPeerCertificate = nil
+	discoveryTransport := ech.NewTransport()
+	discoveryTransport.TLSConfig = discoveryTLSConfig
+	discoveryTransport.Resolver = resolver
 
-	discoveryTLSConfig := func() *tls.Config {
-		if clientTLSConfig == nil {
-			return nil
-		}
-		cfg := clientTLSConfig.Clone()
-		cfg.InsecureSkipVerify = true
-		cfg.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
-			return nil
-		}
-		return cfg
-	}()
-	discoveryTransport := createTransport(discoveryTLSConfig)
+	// 3. forwardTransport: For cluster-internal leader redirection (mTLS).
+	// Uses ech.Transport and strict mTLS (Ed25519 VerifyPeerCertificate hook).
+	clusterTransport := ech.NewTransport()
+	if clientTLSConfig != nil {
+		clusterTransport.TLSConfig = clientTLSConfig.Clone()
+	}
+	clusterTransport.Resolver = resolver
 
-	retryClient.HTTPClient.Transport = discoveryTransport
-	remote = jwks.NewRemote(retryClient, nil)
+	retryClient.HTTPClient.Transport = standardTransport
+	remote := jwks.NewRemote(retryClient, nil)
 
 	s := &Server{
 		nodeID:     nodeID,
@@ -207,7 +209,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		signKey:    signKey,
 		raftSecret: raftSecret,
 		httpClient: &http.Client{
-			Transport: echTransport,
+			Transport: standardTransport,
 			Timeout:   10 * time.Second,
 		},
 		discoveryHTTPClient: &http.Client{
@@ -219,17 +221,15 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		sessionKeyCache:     make(map[string]sessionKeyEntry),
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
-		forwardTransport: &http.Transport{
-			TLSClientConfig: clientTLSConfig,
-		},
-		leaderURLCache:   make(map[raft.ServerAddress]string),
-		stopCh:           make(chan struct{}),
-		batchQueue:       make([]*LogCommand, 0),
-		batchResps:       make([]chan interface{}, 0),
-		batchApplyCh:     make(chan batchRequest, 1000),
-		vault:            vault,
-		decKey:           decKey,
-		epochPrivateKeys: make(map[string]*mlkem.DecapsulationKey768),
+		forwardTransport:    clusterTransport,
+		leaderURLCache:      make(map[raft.ServerAddress]string),
+		stopCh:              make(chan struct{}),
+		batchQueue:          make([]*LogCommand, 0),
+		batchResps:          make([]chan interface{}, 0),
+		batchApplyCh:        make(chan batchRequest, 1000),
+		vault:               vault,
+		decKey:              decKey,
+		epochPrivateKeys:    make(map[string]*mlkem.DecapsulationKey768),
 	}
 	if oidcDiscoveryURL != "" {
 		go s.discoverOIDC(oidcDiscoveryURL)
@@ -348,9 +348,8 @@ func (s *Server) loadClusterSignKey() {
 }
 
 func (s *Server) discoverOIDC(discoveryURL string) {
-	ticker := time.NewTicker(time.Hour)
-	defer ticker.Stop()
-	client := s.discoveryHTTPClient
+	client := s.httpClient
+	refreshInterval := 5 * time.Second // Fast retry during boot
 
 	for {
 		resp, err := client.Get(discoveryURL)
@@ -366,13 +365,18 @@ func (s *Server) discoverOIDC(discoveryURL string) {
 				s.jwks.SetIssuers([]jwks.Issuer{{JWKSURI: conf.JWKSURI}})
 				s.oidcMu.Unlock()
 				logger.Debugf("OIDC discovery successful for %s", conf.Issuer)
+				resp.Body.Close()
+				refreshInterval = time.Hour
 			}
-			resp.Body.Close()
+			if resp != nil {
+				resp.Body.Close()
+			}
 		}
+
 		select {
-		case <-ticker.C:
 		case <-s.stopCh:
 			return
+		case <-time.After(refreshInterval):
 		}
 	}
 }
@@ -458,7 +462,13 @@ func (s *Server) applyBatch(req batchRequest) {
 // Shutdown stops the server and its background workers.
 // Shutdown gracefully stops the server and its background workers.
 func (s *Server) Shutdown() {
-	close(s.stopCh)
+	select {
+	case <-s.stopCh:
+		// already stopped
+	default:
+		close(s.stopCh)
+	}
+
 	if s.replMonitor != nil {
 		s.replMonitor.Stop()
 	}

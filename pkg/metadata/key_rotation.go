@@ -62,7 +62,11 @@ func (w *KeyRotationWorker) Start() {
 
 // Stop stops the rotation worker.
 func (w *KeyRotationWorker) Stop() {
-	close(w.stopChan)
+	select {
+	case <-w.stopChan:
+	default:
+		close(w.stopChan)
+	}
 }
 
 func (w *KeyRotationWorker) run() {
