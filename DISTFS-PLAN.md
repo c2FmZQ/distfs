@@ -1274,5 +1274,64 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Implement proper `Lstat` handling in the FUSE layer to correctly report symlink metadata instead of the target's metadata.
     *   **Testing Strategy:** Create a symlink in a FUSE mount and verify that `ls -l` correctly identifies it as a link (`l` bit) and shows the correct link target.
 
+---
+
+## Phase 66: Standard File Utility Expansion
+
+**Goal:** Expand the `distfs` CLI with a comprehensive suite of standard POSIX-like file utilities to improve usability and administrative efficiency while respecting DistFS's cryptographic constraints.
+
+*   **Step 66.1: Metadata Renaming & Move (`mv`)**
+    *   **Action:** Implement a metadata-only `Move` operation in the client that updates parent directory entries without re-encrypting data.
+    *   **Testing Strategy:** Move a file across directories and verify that its Inode ID and content remain identical, but its path resolution changes.
+*   **Step 66.2: Client-Side Copy (`cp`)**
+    *   **Action:** Implement a client-side copy that downloads, re-encrypts with a new key, and uploads the data as a new object. Support recursive directory copies.
+    *   **Testing Strategy:** Copy a large file and verify that the copy has a distinct Inode ID and a unique Lockbox, but matching plaintext content.
+*   **Step 66.3: Link Management (`ln`, `ln -s`)**
+    *   **Action:** Add CLI support for creating hard links (pointing multiple names to one Inode ID) and symbolic links.
+    *   **Testing Strategy:** Create a hard link, delete the original name, and verify the file persists via the link name with `NLink=1`.
+*   **Step 66.4: Content Inspection (`cat`, `head`, `tail`)**
+    *   **Action:** Implement streaming decryption for stdout output. Support `-n` for partial reads.
+    *   **Testing Strategy:** Pipe `distfs cat` output to `md5sum` and compare against the original local file.
+*   **Step 66.5: Metadata & ACL Inspection (`stat`, `getfacl`)**
+    *   **Action:** Implement POSIX-style metadata display and ACL listing.
+    *   **Testing Strategy:** Assert that `stat` correctly reports file type, mode, and ownership derived from the cryptographically verified Inode.
+*   **Step 66.6: Usage & Quota Reporting (`du`, `df`)**
+    *   **Action:** Implement recursive usage calculation for `du` and standardized quota display for `df`.
+    *   **Testing Strategy:** Compare `du` output against the sum of individual file sizes in a directory tree.
+*   **Step 66.7: ACL Mutation (`setfacl`, `touch`)**
+    *   **Action:** Implement `setfacl` for modifying specific ACL entries and `touch` for creating empty files or updating MTime.
+    *   **Testing Strategy:** Use `setfacl` to grant a user read access and verify they can then successfully `cat` the file.
+
+---
+
+## Phase 67: Architectural Optimization: Parent-Stored Filenames
+
+**Goal:** Refactor the metadata layer to store child filenames directly in the parent directory's `Children` map (encrypted with the parent's key). This eliminates the $O(N)$ bottleneck in directory listings and improves POSIX fidelity for hard links.
+
+*   **Step 67.1: Schema Refactoring (Metadata)**
+    *   **Action:** Update `metadata.Inode.Children` from `map[string]string` (HMAC -> ID) to `map[string]ChildEntry` (HMAC -> {ID, EncryptedName, Nonce}).
+    *   **Action:** Update `ManifestHash` in `pkg/metadata/types.go` to include all fields of `ChildEntry` in the parent's signature.
+    *   **Action:** Remove the `Name` field from `metadata.InodeClientBlob` and delete the transient `name` field and `GetName()`/`SetName()` methods from `metadata.Inode`.
+    *   **Testing Strategy:** Assert that the BoltDB state machine can successfully marshal and unmarshal the new `ChildEntry` structure and that signatures remain valid.
+*   **Step 67.2: Zero-Knowledge Name Encryption**
+    *   **Action:** Implement `EncryptEntryName(parentKey, name) -> (ciphertext, nonce)` and `DecryptEntryName(parentKey, ciphertext, nonce)` in `pkg/client`. Use AES-GCM.
+    *   **Action:** Update `AddEntry` and `RenameRaw` to populate the `EncryptedName` and `Nonce` in the parent's children map.
+    *   **Testing Strategy:** Verify that a user with the parent directory key can recover all child names, while a user without the key sees only opaque HMACs and ciphertexts.
+*   **Step 67.3: Optimized Directory Listing (`ls`)**
+    *   **Action:** Refactor `ReadDirExtended` to decrypt filenames directly from the parent Inode's `Children` map.
+    *   **Action:** Eliminate the requirement to download and verify child Inodes during a standard `ls` operation.
+    *   **Testing Strategy:** Benchmark `ls` on a directory with 1,000 files; assert that execution time is now $O(1)$ relative to the number of child inodes (single metadata fetch).
+*   **Step 67.4: Atomic Rename Support**
+    *   **Action:** Update `RenameRaw` to be a pure parent-metadata operation. Renaming a file should no longer require mutating or re-signing the target Inode.
+    *   **Testing Strategy:** Perform a cross-directory rename and verify that the target Inode's `Version` and `UserSig` remain unchanged.
+*   **Step 67.5: Regression & Compliance Testing**
+    *   **Action:** Run the full E2E suite (`scripts/test-all-e2e.sh`) to ensure no regressions in path resolution, FUSE mounting, or sharing logic.
+    *   **Action:** Verify that hard links now correctly support different names for the same Inode in different directory entries.
+*   **Step 67.6: Finalize Phase 66 Utilities**
+    *   **Action:** Re-verify and complete any remaining work from Phase 66 using the new optimized naming model.
+    *   **Testing Strategy:** Execute `scripts/test-fileutils.sh` and assert all utilities (`cp`, `mv`, `stat`, `ln`, etc.) pass with the improved architecture.
+
+
+
 
 

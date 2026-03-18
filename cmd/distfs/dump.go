@@ -49,9 +49,9 @@ func cmdDumpInodes(ctx context.Context, args []string) {
 
 		// Enqueue children if directory
 		if inode.Type == metadata.DirType && inode.Children != nil {
-			for name, childID := range inode.Children {
-				fmt.Printf("  -> Child: %s (%s)\n", name, childID)
-				queue = append(queue, childID)
+			for name, entry := range inode.Children {
+				fmt.Printf("  -> Child: %s (%s)\n", name, entry.ID)
+				queue = append(queue, entry.ID)
 			}
 		}
 	}

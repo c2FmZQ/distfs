@@ -2992,7 +2992,8 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 
 				// Structural Symmetry Check
 				if i.Type == DirType {
-					for nameHMAC, childID := range i.Children {
+					for nameHMAC, entry := range i.Children {
+						childID := entry.ID
 						childPlain, _ := s.fsm.Get(tx, []byte("inodes"), []byte(childID))
 						if childPlain == nil {
 							encoder.Encode(AuditRecord{

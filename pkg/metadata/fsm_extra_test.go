@@ -129,7 +129,7 @@ func TestFSM_AddChild_Success(t *testing.T) {
 	c1.SignInodeForTest("u1", sk)
 	cb2, _ := json.Marshal(c1)
 
-	p1.Children = map[string]string{"file1": "c1"}
+	p1.Children = map[string]ChildEntry{"file1": {ID: "c1"}}
 	p1.Version = 2
 	p1.SignInodeForTest("u1", sk)
 	pb2, _ := json.Marshal(p1)
@@ -160,7 +160,7 @@ func TestFSM_AddChild_Success(t *testing.T) {
 		if err := json.Unmarshal(v, &res); err != nil {
 			return fmt.Errorf("Unmarshal failed: %v, raw=%s", err, string(v))
 		}
-		if res.Children["file1"] != "c1" {
+		if res.Children["file1"].ID != "c1" {
 			return fmt.Errorf("AddChild failed: %+v", res)
 		}
 		return nil

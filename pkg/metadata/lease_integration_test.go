@@ -59,7 +59,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:     DirType,
 				Version:  2,
 				OwnerID:  "u1",
-				Children: map[string]string{nameHMAC: childID},
+				Children: map[string]ChildEntry{nameHMAC: {ID: childID}},
 			}
 			update.SignInodeForTest("u1", sk)
 			data, _ := json.Marshal(update)
@@ -96,7 +96,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:     DirType,
 				Version:  2,
 				OwnerID:  "u1",
-				Children: map[string]string{nameHMAC: childID},
+				Children: map[string]ChildEntry{nameHMAC: {ID: childID}},
 			}
 			update.SignInodeForTest("u1", sk)
 			data, _ := json.Marshal(update)
@@ -141,7 +141,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:     DirType,
 				Version:  2,
 				NLink:    1, // Keep parent link count
-				Children: map[string]string{nameHMAC: childID},
+				Children: map[string]ChildEntry{nameHMAC: {ID: childID}},
 			}
 			pUpdate.SignInodeForTest("u1", sk)
 			pData, _ := json.Marshal(pUpdate)
@@ -184,7 +184,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:     DirType,
 				Version:  3,
 				NLink:    1,
-				Children: map[string]string{},
+				Children: map[string]ChildEntry{},
 			}
 			pUpdate.SignInodeForTest("u1", sk)
 			pData, _ := json.Marshal(pUpdate)

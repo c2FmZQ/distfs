@@ -408,13 +408,14 @@ func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs m
 		pre := preInodes[id]
 
 		if post.Type == DirType {
-			preChildren := make(map[string]string)
+			preChildren := make(map[string]ChildEntry)
 			if pre != nil {
 				preChildren = pre.Children
 			}
 
-			for nameHMAC, childID := range post.Children {
-				if oldID, wasPresent := preChildren[nameHMAC]; !wasPresent || oldID != childID {
+			for nameHMAC, entry := range post.Children {
+				childID := entry.ID
+				if oldEntry, wasPresent := preChildren[nameHMAC]; !wasPresent || oldEntry.ID != childID {
 					expectedDeltas[childID]++
 					childPlain, _ := fsm.Get(tx, []byte("inodes"), []byte(childID))
 					if childPlain != nil {
@@ -427,9 +428,10 @@ func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs m
 					}
 				}
 			}
-			for nameHMAC, childID := range preChildren {
-				newID, stillPresent := post.Children[nameHMAC]
-				if !stillPresent || newID != childID {
+			for nameHMAC, oldEntry := range preChildren {
+				childID := oldEntry.ID
+				newEntry, stillPresent := post.Children[nameHMAC]
+				if !stillPresent || newEntry.ID != childID {
 					expectedDeltas[childID]--
 				}
 			}
@@ -710,9 +712,10 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 		return err
 	}
 	if inode.Type == DirType {
-		for nameHMAC, existingID := range inode.Children {
-			newID, stillExists := update.Children[nameHMAC]
-			if !stillExists || newID != existingID {
+		for nameHMAC, existingEntry := range inode.Children {
+			existingID := existingEntry.ID
+			newEntry, stillExists := update.Children[nameHMAC]
+			if !stillExists || newEntry.ID != existingID {
 				pathID, ok := leaseBindings[nameHMAC]
 				if !ok {
 					return fmt.Errorf("%w: missing lease binding for change to entry %s", ErrLeaseRequired, nameHMAC)
@@ -2134,8 +2137,8 @@ func (fsm *MetadataFSM) DumpInodes(tx *bolt.Tx) {
 			plain, err := fsm.DecryptValue([]byte("inodes"), v)
 			if err == nil {
 				if err := json.Unmarshal(plain, &inode); err == nil {
-					log.Printf("    Inode %s (%s): Owner=%s Group=%s Version=%d Children=%d Links=%d NLink=%d Unlinked=%v Size=%d",
-						inode.ID, inode.GetName(), inode.OwnerID, inode.GroupID, inode.Version, len(inode.Children), len(inode.Links), inode.NLink, inode.Unlinked, inode.Size)
+					log.Printf("    Inode %s: Owner=%s Group=%s Version=%d Children=%d Links=%d NLink=%d Unlinked=%v Size=%d",
+						inode.ID, inode.OwnerID, inode.GroupID, inode.Version, len(inode.Children), len(inode.Links), inode.NLink, inode.Unlinked, inode.Size)
 				}
 			}
 			return nil

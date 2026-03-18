@@ -15,6 +15,8 @@
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/hex"
 	"flag"
@@ -119,8 +121,32 @@ func main() {
 		cmdPut(ctx, args)
 	case "get":
 		cmdGet(ctx, args)
+	case "cp":
+		cmdCp(ctx, args)
+	case "mv":
+		cmdMv(ctx, args)
+	case "ln":
+		cmdLn(ctx, args)
 	case "rm":
 		cmdRm(ctx, args)
+	case "cat":
+		cmdCat(ctx, args)
+	case "head":
+		cmdHead(ctx, args)
+	case "tail":
+		cmdTail(ctx, args)
+	case "stat":
+		cmdStat(ctx, args)
+	case "du":
+		cmdDu(ctx, args)
+	case "df":
+		cmdDf(ctx, args)
+	case "touch":
+		cmdTouch(ctx, args)
+	case "getfacl":
+		cmdGetFacl(ctx, args)
+	case "setfacl":
+		cmdSetFacl(ctx, args)
 	case "chmod":
 		cmdChmod(ctx, args)
 	case "chgrp":
@@ -195,7 +221,21 @@ func usage() {
 	fmt.Println("  init [--new] -server <url>      Initialize client config (pulls existing keys by default)")
 	fmt.Println("  ls <path>                       List directory")
 	fmt.Println("  mkdir [--owner=id] <path>       Create directory (Admin can specify owner)")
+	fmt.Println("  put <local> <remote>            Upload a file")
+	fmt.Println("  get <remote> <local>            Download a file")
+	fmt.Println("  cp <src> <dst>                  Copy a file or directory")
+	fmt.Println("  mv <src> <dst>                  Move or rename a file or directory")
 	fmt.Println("  rm <path>                       Delete file or directory")
+	fmt.Println("  ln [-s] <target> <link>         Create a hard or symbolic link")
+	fmt.Println("  cat <path>                      Display file content")
+	fmt.Println("  head [-n N] <path>              Display first lines of a file")
+	fmt.Println("  tail [-n N] <path>              Display last lines of a file")
+	fmt.Println("  stat <path>                     Display file status")
+	fmt.Println("  du [-h] <path>                  Display disk usage")
+	fmt.Println("  df [-h]                         Display filesystem usage")
+	fmt.Println("  touch <path>                    Create empty file or update timestamp")
+	fmt.Println("  getfacl <path>                  Get file access control lists")
+	fmt.Println("  setfacl [-m spec] [-x spec] <p> Modify file access control lists")
 	fmt.Println("  chmod <mode> <path>             Change permissions")
 	fmt.Println("  chgrp <group_id> <path>         Change group")
 	fmt.Println("  group-create <name>             Create a new group")
@@ -321,10 +361,9 @@ func saveClient(c *client.Client) {
 
 type LSClient interface {
 	ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)
-	ReadDirExtended(ctx context.Context, path string) ([]*client.DistDirEntry, error)
+	ReadDirExtended(ctx context.Context, path string, fetchMetadata bool) ([]*client.DistDirEntry, error)
 	ReadDirRecursive(ctx context.Context, path string) (map[string][]*client.DistDirEntry, error)
 	NewDirEntry(inode *metadata.Inode, name string, key []byte) *client.DistDirEntry
-	DecryptName(ctx context.Context, inode *metadata.Inode) (string, []byte, error)
 	UserID() string
 }
 
@@ -355,22 +394,16 @@ func runLs(ctx context.Context, c LSClient, args []string) {
 
 	if *directory {
 		// Resolve path to get its inode
-		inodeInfo, _, err := c.ResolvePath(ctx, path)
+		inodeInfo, key, err := c.ResolvePath(ctx, path)
 		if err != nil {
 			log.Fatal(err)
 		}
 
 		name := path
-		var key []byte
 		if path == "/" {
 			name = "/"
 		} else {
-			if decrypted, decryptedKey, err := c.DecryptName(ctx, inodeInfo); err == nil {
-				name = decrypted
-				key = decryptedKey
-			} else {
-				name = filepath.Base(path)
-			}
+			name = filepath.Base(path)
 		}
 
 		entry := c.NewDirEntry(inodeInfo, name, key)
@@ -401,7 +434,7 @@ func runLs(ctx context.Context, c LSClient, args []string) {
 			}
 		}
 	} else {
-		entries, err := c.ReadDirExtended(ctx, path)
+		entries, err := c.ReadDirExtended(ctx, path, *long || *classify || *sortByTime || *sortBySize)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -564,6 +597,438 @@ func cmdRm(ctx context.Context, args []string) {
 		log.Fatal(err)
 	}
 	fmt.Printf("Removed %s\n", path)
+}
+
+func cmdMv(ctx context.Context, args []string) {
+	if len(args) < 2 {
+		log.Fatal("source and destination paths required")
+	}
+	src, dst := args[0], args[1]
+	c := loadClient()
+	if err := c.Rename(ctx, src, dst); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Moved %s to %s\n", src, dst)
+}
+
+func cmdCp(ctx context.Context, args []string) {
+	if len(args) < 2 {
+		log.Fatal("source and destination paths required")
+	}
+	src, dst := args[0], args[1]
+	c := loadClient()
+	if err := c.Copy(ctx, src, dst); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Copied %s to %s\n", src, dst)
+}
+
+func cmdLn(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("ln", flag.ExitOnError)
+	symbolic := fs.Bool("s", false, "Create a symbolic link")
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		log.Fatal("target and link_path required")
+	}
+	target, linkPath := fs.Arg(0), fs.Arg(1)
+	c := loadClient()
+
+	var err error
+	if *symbolic {
+		err = c.Symlink(ctx, target, linkPath)
+	} else {
+		err = c.Link(ctx, target, linkPath)
+	}
+
+	if err != nil {
+		log.Fatal(err)
+	}
+	if *symbolic {
+		fmt.Printf("Created symbolic link %s -> %s\n", linkPath, target)
+	} else {
+		fmt.Printf("Created hard link %s -> %s\n", linkPath, target)
+	}
+}
+
+func cmdCat(ctx context.Context, args []string) {
+	if len(args) < 1 {
+		log.Fatal("path required")
+	}
+	path := args[0]
+	c := loadClient()
+	inode, key, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rc, err := c.ReadFile(ctx, inode.ID, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rc.Close()
+
+	io.Copy(os.Stdout, rc)
+}
+
+func cmdHead(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("head", flag.ExitOnError)
+	lines := fs.Int("n", 10, "Number of lines to show")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		log.Fatal("path required")
+	}
+	path := fs.Arg(0)
+	c := loadClient()
+	inode, key, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	rc, err := c.ReadFile(ctx, inode.ID, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer rc.Close()
+
+	// Simple line-based head
+	scanner := bufio.NewScanner(rc)
+	for i := 0; i < *lines && scanner.Scan(); i++ {
+		fmt.Println(scanner.Text())
+	}
+}
+
+func cmdTail(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("tail", flag.ExitOnError)
+	lines := fs.Int("n", 10, "Number of lines to show")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		log.Fatal("path required")
+	}
+	path := fs.Arg(0)
+	c := loadClient()
+	inode, key, err := c.ResolvePath(ctx, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	r, err := c.NewReader(ctx, inode.ID, key)
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer r.Close()
+
+	// For tail, we can't easily seek lines from the end without reading backwards.
+	// But we can seek to a reasonable estimate or just read the whole file if it's small.
+	// For now, let's read the whole file and keep last N lines.
+	var lastLines []string
+	scanner := bufio.NewScanner(r)
+	for scanner.Scan() {
+		lastLines = append(lastLines, scanner.Text())
+		if len(lastLines) > *lines {
+			lastLines = lastLines[1:]
+		}
+	}
+
+	for _, line := range lastLines {
+		fmt.Println(line)
+	}
+}
+
+func cmdStat(ctx context.Context, args []string) {
+	if len(args) < 1 {
+		log.Fatal("path required")
+	}
+	path := args[0]
+	c := loadClient()
+	info, err := c.Lstat(ctx, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	inode := info.Sys().(*metadata.Inode)
+	fmt.Printf("  File: %s\n", info.Name())
+	fmt.Printf("  Size: %-15d Blocks: %-10d IO Block: %-10d ", info.Size(), (info.Size()+511)/512, 4096)
+	switch inode.Type {
+	case metadata.DirType:
+		fmt.Println("directory")
+	case metadata.FileType:
+		fmt.Println("regular file")
+	case metadata.SymlinkType:
+		fmt.Printf("symbolic link -> %s\n", inode.GetSymlinkTarget())
+	}
+	fmt.Printf("Device: %-15s Inode: %-15s Links: %-10d\n", "distfs", inode.ID[:16], inode.NLink)
+	fmt.Printf("Access: (%04o/%s)  Uid: (%-8s)   Gid: (%-8s)\n", info.Mode().Perm(), info.Mode().String(), inode.OwnerID[:8], inode.GroupID)
+	fmt.Printf("Modify: %s\n", info.ModTime().Format(time.RFC3339))
+}
+
+func cmdDu(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("du", flag.ExitOnError)
+	human := fs.Bool("h", false, "Human readable sizes")
+	fs.Parse(args)
+
+	path := "."
+	if fs.NArg() > 0 {
+		path = fs.Arg(0)
+	}
+
+	c := loadClient()
+	var totalSize int64
+
+	var walk func(string) error
+	walk = func(p string) error {
+		info, err := c.Stat(ctx, p)
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			totalSize += info.Size()
+			return nil
+		}
+		entries, err := c.ReadDirExtended(ctx, p, true)
+		if err != nil {
+			return err
+		}
+		for _, e := range entries {
+			childPath := filepath.Join(p, e.Name())
+			if err := walk(childPath); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	if err := walk(path); err != nil {
+		log.Fatal(err)
+	}
+
+	if *human {
+		fmt.Printf("%s\t%s\n", client.FormatBytes(totalSize), path)
+	} else {
+		fmt.Printf("%d\t%s\n", totalSize, path)
+	}
+}
+
+func cmdDf(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("df", flag.ExitOnError)
+	human := fs.Bool("h", false, "Human readable sizes")
+	fs.Parse(args)
+
+	c := loadClient()
+	quota, usage, err := c.GetQuota(ctx)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("%-20s %-10s %-10s %-10s %-10s\n", "Filesystem", "Size", "Used", "Avail", "Use%")
+
+	sizeStr := strconv.FormatInt(quota.MaxBytes, 10)
+	usedStr := strconv.FormatInt(usage.TotalBytes, 10)
+	availStr := strconv.FormatInt(quota.MaxBytes-usage.TotalBytes, 10)
+	if quota.MaxBytes == 0 {
+		sizeStr = "Inf"
+		availStr = "Inf"
+	}
+
+	if *human {
+		sizeStr = client.FormatBytes(quota.MaxBytes)
+		if quota.MaxBytes == 0 {
+			sizeStr = "Inf"
+		}
+		usedStr = client.FormatBytes(usage.TotalBytes)
+		availStr = client.FormatBytes(quota.MaxBytes - usage.TotalBytes)
+		if quota.MaxBytes == 0 {
+			availStr = "Inf"
+		}
+	}
+
+	percent := "0%"
+	if quota.MaxBytes > 0 {
+		percent = fmt.Sprintf("%d%%", (usage.TotalBytes*100)/quota.MaxBytes)
+	}
+
+	fmt.Printf("%-20s %-10s %-10s %-10s %-10s\n", "distfs", sizeStr, usedStr, availStr, percent)
+}
+
+func cmdTouch(ctx context.Context, args []string) {
+	if len(args) < 1 {
+		log.Fatal("path required")
+	}
+	path := args[0]
+	c := loadClient()
+
+	// Try to resolve path
+	_, err := c.Stat(ctx, path)
+	if err == nil {
+		// File exists, update MTime
+		now := time.Now().UnixNano()
+		err = c.SetAttr(ctx, path, metadata.SetAttrRequest{MTime: &now})
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	// File doesn't exist, create it
+	err = c.CreateFile(ctx, path, bytes.NewReader(nil), 0)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Created empty file %s\n", path)
+}
+
+func cmdGetFacl(ctx context.Context, args []string) {
+	if len(args) < 1 {
+		log.Fatal("path required")
+	}
+	path := args[0]
+	c := loadClient()
+	info, err := c.Stat(ctx, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	inode := info.Sys().(*metadata.Inode)
+	fmt.Printf("# file: %s\n", info.Name())
+	fmt.Printf("# owner: %s\n", inode.OwnerID[:8])
+	fmt.Printf("# group: %s\n", inode.GroupID)
+
+	// Base permissions
+	fmt.Printf("user::%s\n", formatPerms((inode.Mode>>6)&7))
+
+	if inode.AccessACL != nil {
+		for uid, bits := range inode.AccessACL.Users {
+			fmt.Printf("user:%s:%s\n", uid[:8], formatPerms(bits))
+		}
+	}
+
+	fmt.Printf("group::%s\n", formatPerms((inode.Mode>>3)&7))
+
+	if inode.AccessACL != nil {
+		for gid, bits := range inode.AccessACL.Groups {
+			fmt.Printf("group:%s:%s\n", gid, formatPerms(bits))
+		}
+		if inode.AccessACL.Mask != nil {
+			fmt.Printf("mask::%s\n", formatPerms(*inode.AccessACL.Mask))
+		}
+	}
+
+	fmt.Printf("other::%s\n", formatPerms(inode.Mode&7))
+}
+
+func formatPerms(bits uint32) string {
+	res := ""
+	if bits&4 != 0 {
+		res += "r"
+	} else {
+		res += "-"
+	}
+	if bits&2 != 0 {
+		res += "w"
+	} else {
+		res += "-"
+	}
+	if bits&1 != 0 {
+		res += "x"
+	} else {
+		res += "-"
+	}
+	return res
+}
+
+func parsePerms(s string) (uint32, error) {
+	if len(s) == 3 {
+		var res uint32
+		if s[0] == 'r' {
+			res |= 4
+		}
+		if s[1] == 'w' {
+			res |= 2
+		}
+		if s[2] == 'x' {
+			res |= 1
+		}
+		return res, nil
+	}
+	p, err := strconv.ParseUint(s, 8, 32)
+	return uint32(p), err
+}
+
+func cmdSetFacl(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("setfacl", flag.ExitOnError)
+	modify := fs.String("m", "", "Modify ACL entries (e.g. u:user:rw-)")
+	remove := fs.String("x", "", "Remove ACL entries (e.g. u:user)")
+	fs.Parse(args)
+
+	if fs.NArg() < 1 {
+		log.Fatal("path required")
+	}
+	path := fs.Arg(0)
+	c := loadClient()
+	info, err := c.Stat(ctx, path)
+	if err != nil {
+		log.Fatal(err)
+	}
+	inode := info.Sys().(*metadata.Inode)
+
+	acl := inode.AccessACL
+	if acl == nil {
+		acl = &metadata.POSIXAccess{
+			Users:  make(map[string]uint32),
+			Groups: make(map[string]uint32),
+		}
+	}
+
+	if *modify != "" {
+		parts := strings.Split(*modify, ":")
+		if len(parts) < 3 {
+			log.Fatal("invalid modify spec, expected type:id:perms")
+		}
+		t, id, permsStr := parts[0], parts[1], parts[2]
+		bits, err := parsePerms(permsStr)
+		if err != nil {
+			log.Fatalf("invalid permissions: %v", err)
+		}
+
+		switch t {
+		case "u", "user":
+			resolvedID, _, err := c.ResolveUsername(ctx, id)
+			if err != nil {
+				log.Fatalf("failed to resolve user %s: %v", id, err)
+			}
+			acl.Users[resolvedID] = bits
+		case "g", "group":
+			acl.Groups[id] = bits
+		case "m", "mask":
+			acl.Mask = &bits
+		default:
+			log.Fatalf("unsupported ACL type: %s", t)
+		}
+	}
+
+	if *remove != "" {
+		parts := strings.Split(*remove, ":")
+		if len(parts) < 2 {
+			log.Fatal("invalid remove spec, expected type:id")
+		}
+		t, id := parts[0], parts[1]
+		switch t {
+		case "u", "user":
+			resolvedID, _, err := c.ResolveUsername(ctx, id)
+			if err == nil {
+				delete(acl.Users, resolvedID)
+			}
+		case "g", "group":
+			delete(acl.Groups, id)
+		}
+	}
+
+	if err := c.SetAttr(ctx, path, metadata.SetAttrRequest{AccessACL: acl}); err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("ACL of %s updated.\n", path)
 }
 
 func cmdChmod(ctx context.Context, args []string) {

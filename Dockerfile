@@ -39,7 +39,8 @@ COPY scripts/test-audit.sh /bin/test-audit.sh
 COPY scripts/test-registry.sh /bin/test-registry.sh
 COPY scripts/benchmark.sh /bin/benchmark.sh
 COPY scripts/test-fuse-load.sh /bin/test-fuse-load.sh
+COPY scripts/test-fileutils.sh /bin/test-fileutils.sh
 COPY scripts/test-all-e2e.sh /bin/test-all-e2e.sh
-RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-group-quota.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-contact-exchange.sh /bin/test-dump-inodes.sh /bin/test-quota-cmd.sh /bin/test-ls-e2e.sh /bin/test-audit.sh /bin/test-registry.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-all-e2e.sh
+RUN chmod +x /bin/test-e2e.sh /bin/test-fuse.sh /bin/test-ha.sh /bin/test-stress.sh /bin/test-gc.sh /bin/test-integrity.sh /bin/test-public.sh /bin/test-group.sh /bin/test-group-quota.sh /bin/test-keysync-e2e.sh /bin/test-hedged-reads.sh /bin/test-contact-exchange.sh /bin/test-dump-inodes.sh /bin/test-quota-cmd.sh /bin/test-ls-e2e.sh /bin/test-audit.sh /bin/test-registry.sh /bin/benchmark.sh /bin/test-fuse-load.sh /bin/test-fileutils.sh /bin/test-all-e2e.sh
 
 ENTRYPOINT ["/bin/storage-node"]

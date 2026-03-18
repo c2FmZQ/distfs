@@ -249,29 +249,38 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 	// Batch fetch
 	var ids []string
 	for _, encName := range remainingKeys {
-		id := d.inode.Children[encName]
-		ids = append(ids, id)
+		ids = append(ids, d.inode.Children[encName].ID)
 	}
 
-	inodes, err := d.client.getInodes(d.ctx, ids)
+	inodesSlice, err := d.client.getInodes(d.ctx, ids)
 	if err != nil {
 		return nil, err
+	}
+	inodesMap := make(map[string]*metadata.Inode)
+	for _, i := range inodesSlice {
+		inodesMap[i.ID] = i
 	}
 
 	// Update offset only if successful
 	d.offset += len(remainingKeys)
 
 	var entries []fs.DirEntry
-	for _, childInode := range inodes {
-		// Name is already decrypted and verified by getInodes -> VerifyInode
-		childName := childInode.GetName()
-		if childName == "" {
-			childName = "unnamed-" + childInode.ID[:8]
+	for _, encName := range remainingKeys {
+		entry := d.inode.Children[encName]
+		childInode, ok := inodesMap[entry.ID]
+		if !ok {
+			continue
+		}
+
+		childName, err := d.client.DecryptEntryName(d.ctx, d.key, entry.EncryptedName, entry.Nonce)
+		if err != nil {
+			continue
 		}
 
 		entries = append(entries, &DistDirEntry{
 			inode: childInode,
 			name:  childName,
+			id:    entry.ID,
 		})
 	}
 
@@ -282,34 +291,64 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 type DistDirEntry struct {
 	inode *metadata.Inode
 	name  string
+	id    string
 	key   []byte
 }
 
 func (e *DistDirEntry) Name() string { return e.name }
-func (e *DistDirEntry) IsDir() bool  { return e.inode.Type == metadata.DirType }
+func (e *DistDirEntry) IsDir() bool {
+	if e.inode == nil {
+		return false // Unknown
+	}
+	return e.inode.Type == metadata.DirType
+}
 func (e *DistDirEntry) Type() fs.FileMode {
+	if e.inode == nil {
+		return 0
+	}
 	if e.IsDir() {
 		return fs.ModeDir | fs.FileMode(e.inode.Mode)
 	}
 	return fs.FileMode(e.inode.Mode)
 }
 func (e *DistDirEntry) Info() (fs.FileInfo, error) {
+	if e.inode == nil {
+		return nil, fmt.Errorf("inode not loaded")
+	}
 	return &DistFileInfo{inode: e.inode, name: e.name}, nil
 }
 
 func (e *DistDirEntry) Inode() *metadata.Inode { return e.inode }
 
-func (e *DistDirEntry) InodeID() string { return e.inode.ID }
+func (e *DistDirEntry) InodeID() string {
+	if e.inode != nil {
+		return e.inode.ID
+	}
+	return e.id
+}
 func (e *DistDirEntry) Mode() fs.FileMode {
+	if e.inode == nil {
+		return 0
+	}
 	m := fs.FileMode(e.inode.Mode)
 	if e.IsDir() {
 		m |= fs.ModeDir
 	}
 	return m
 }
-func (e *DistDirEntry) Size() int64 { return int64(e.inode.Size) }
+func (e *DistDirEntry) Size() int64 {
+	if e.inode == nil {
+		return 0
+	}
+	return int64(e.inode.Size)
+}
 
-func (e *DistDirEntry) ModTime() time.Time { return time.Unix(0, e.inode.GetMTime()) }
+func (e *DistDirEntry) ModTime() time.Time {
+	if e.inode == nil {
+		return time.Time{}
+	}
+	return time.Unix(0, e.inode.GetMTime())
+}
 
 // DistFileInfo implements fs.FileInfo.
 type DistFileInfo struct {
@@ -324,13 +363,13 @@ func (i *DistFileInfo) ModTime() time.Time { return time.Unix(0, i.inode.GetMTim
 func (i *DistFileInfo) IsDir() bool        { return i.inode.Type == metadata.DirType }
 func (i *DistFileInfo) Sys() any           { return i.inode }
 
-// ReadDirExtended returns a list of directory entries with full metadata.
-func (c *Client) ReadDirExtended(ctx context.Context, path string) ([]*DistDirEntry, error) {
+// ReadDirExtended returns a list of directory entries with optional metadata.
+func (c *Client) ReadDirExtended(ctx context.Context, path string, fetchMetadata bool) ([]*DistDirEntry, error) {
 	inode, key, err := c.ResolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
-	return c.readDirExtended(ctx, inode, key)
+	return c.readDirExtended(ctx, inode, key, fetchMetadata)
 }
 
 // ReadDirPaginated returns a paginated list of directory entries and the total count.
@@ -371,38 +410,17 @@ func (c *Client) readDirPaginated(ctx context.Context, inode *metadata.Inode, ke
 		return nil, total, nil
 	}
 
-	ids := make([]string, 0, end-offset)
-	for _, k := range keys[offset:end] {
-		ids = append(ids, inode.Children[k])
-	}
-
-	inodes, err := c.getInodes(ctx, ids)
-	if err != nil {
-		return nil, 0, err
-	}
-
 	var entries []*DistDirEntry
-	for _, childInode := range inodes {
-		childName := childInode.GetName()
-		if childName == "" {
-			childName = "unnamed-" + childInode.ID[:8]
-		}
-
-		c.keyMu.RLock()
-		meta, ok := c.keyCache[childInode.ID]
-		c.keyMu.RUnlock()
-
-		var childKey []byte
-		if ok {
-			childKey = meta.key
-		} else {
-			childKey = childInode.GetFileKey()
+	for _, k := range keys[offset:end] {
+		entry := inode.Children[k]
+		childName, err := c.DecryptEntryName(ctx, key, entry.EncryptedName, entry.Nonce)
+		if err != nil {
+			continue
 		}
 
 		entries = append(entries, &DistDirEntry{
-			inode: childInode,
-			name:  childName,
-			key:   childKey,
+			id:   entry.ID,
+			name: childName,
 		})
 	}
 
@@ -414,7 +432,7 @@ func (c *Client) readDirPaginated(ctx context.Context, inode *metadata.Inode, ke
 	return entries, total, nil
 }
 
-func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key []byte) ([]*DistDirEntry, error) {
+func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key []byte, fetchMetadata bool) ([]*DistDirEntry, error) {
 	if inode.Type != metadata.DirType {
 		return nil, fmt.Errorf("not a directory")
 	}
@@ -423,37 +441,56 @@ func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key
 		return nil, nil
 	}
 
-	ids := make([]string, 0, len(inode.Children))
-	for _, id := range inode.Children {
-		ids = append(ids, id)
-	}
+	var inodesMap map[string]*metadata.Inode
+	if fetchMetadata {
+		ids := make([]string, 0, len(inode.Children))
+		for _, entry := range inode.Children {
+			ids = append(ids, entry.ID)
+		}
 
-	inodes, err := c.getInodes(ctx, ids)
-	if err != nil {
-		return nil, err
+		inodesSlice, err := c.getInodes(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		inodesMap = make(map[string]*metadata.Inode)
+		for _, i := range inodesSlice {
+			inodesMap[i.ID] = i
+		}
 	}
 
 	var entries []*DistDirEntry
-	for _, childInode := range inodes {
-		childName := childInode.GetName()
-		if childName == "" {
-			childName = "unnamed-" + childInode.ID[:8]
+	for _, entry := range inode.Children {
+		var childInode *metadata.Inode
+		if fetchMetadata {
+			var ok bool
+			childInode, ok = inodesMap[entry.ID]
+			if !ok {
+				continue
+			}
 		}
 
-		c.keyMu.RLock()
-		meta, ok := c.keyCache[childInode.ID]
-		c.keyMu.RUnlock()
+		childName, err := c.DecryptEntryName(ctx, key, entry.EncryptedName, entry.Nonce)
+		if err != nil {
+			continue
+		}
 
 		var childKey []byte
-		if ok {
-			childKey = meta.key
-		} else {
-			childKey = childInode.GetFileKey()
+		if childInode != nil {
+			c.keyMu.RLock()
+			meta, ok := c.keyCache[childInode.ID]
+			c.keyMu.RUnlock()
+
+			if ok {
+				childKey = meta.key
+			} else {
+				childKey = childInode.GetFileKey()
+			}
 		}
 
 		entries = append(entries, &DistDirEntry{
 			inode: childInode,
 			name:  childName,
+			id:    entry.ID,
 			key:   childKey,
 		})
 	}
@@ -471,7 +508,7 @@ func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string]
 	results := make(map[string][]*DistDirEntry)
 	var walk func(string, *metadata.Inode, []byte) error
 	walk = func(p string, currInode *metadata.Inode, currKey []byte) error {
-		entries, err := c.readDirExtended(ctx, currInode, currKey)
+		entries, err := c.readDirExtended(ctx, currInode, currKey, true)
 		if err != nil {
 			return err
 		}
@@ -500,14 +537,6 @@ func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string]
 // NewDirEntry creates a new DistDirEntry from an Inode and name.
 func (c *Client) NewDirEntry(inode *metadata.Inode, name string, key []byte) *DistDirEntry {
 	return &DistDirEntry{inode: inode, name: name, key: key}
-}
-
-// DecryptName decrypts the name of an Inode using the client's identity.
-func (c *Client) DecryptName(ctx context.Context, inode *metadata.Inode) (string, []byte, error) {
-	if err := c.VerifyInode(ctx, inode); err != nil {
-		return "", nil, err
-	}
-	return inode.GetName(), inode.GetFileKey(), nil
 }
 
 // NewDirEntryForTest is used for testing purposes to create a DistDirEntry.

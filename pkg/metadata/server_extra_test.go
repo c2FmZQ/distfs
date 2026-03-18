@@ -817,7 +817,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	dir.Children = map[string]string{"dummy": idFile}
+	dir.Children = map[string]ChildEntry{"dummy": {ID: idFile}}
 	dir.Version = 2
 	dir.SignInodeForTest(u1, usk)
 
@@ -849,7 +849,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 		plain, _ := server.fsm.Get(tx, []byte("inodes"), []byte(idDir))
 		return json.Unmarshal(plain, &updatedDir)
 	})
-	if updatedDir.Children["dummy"] != idFile {
+	if updatedDir.Children["dummy"].ID != idFile {
 		t.Errorf("expected entry dummy -> %s, got %v", idFile, updatedDir.Children)
 	}
 

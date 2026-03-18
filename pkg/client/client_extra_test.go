@@ -821,7 +821,6 @@ func TestVerifyInode_Signatures(t *testing.T) {
 
 	// Must have a valid ClientBlob for successful decryption
 	blob := metadata.InodeClientBlob{
-		Name:  "f1",
 		MTime: time.Now().UnixNano(),
 	}
 	encBlob, _ := c.encryptInodeClientBlob(blob, fileKey)
@@ -863,7 +862,7 @@ func TestVerifyInode_AdminBypass(t *testing.T) {
 		OwnerID:  "userB",
 		Type:     metadata.DirType,
 		Version:  1,
-		Children: map[string]string{"f1": "id1"},
+		Children: map[string]metadata.ChildEntry{"f1": {ID: "id1"}},
 	}
 	inode2.SetSignerID(adminID)
 	inode2.ClientBlob = nil
@@ -943,13 +942,15 @@ func TestClient_FS_Extra(t *testing.T) {
 	if len(des) > 0 {
 		e := des[0]
 		_ = e.Type()
-		fi, _ := e.Info()
-		_ = fi.Name()
-		_ = fi.Size()
-		_ = fi.Mode()
-		_ = fi.ModTime()
-		_ = fi.IsDir()
-		_ = fi.Sys()
+		fi, err := e.Info()
+		if err == nil {
+			_ = fi.Name()
+			_ = fi.Size()
+			_ = fi.Mode()
+			_ = fi.ModTime()
+			_ = fi.IsDir()
+			_ = fi.Sys()
+		}
 
 		// Type assertions
 		if ext, ok := e.(interface{ Inode() *metadata.Inode }); ok {

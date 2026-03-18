@@ -390,12 +390,19 @@ type ClusterStats struct {
 
 // InodeClientBlob contains non-enforcement metadata for an inode.
 type InodeClientBlob struct {
-	Name          string `json:"name"`
 	SymlinkTarget string `json:"symlink_target,omitempty"`
 	InlineData    []byte `json:"inline_data,omitempty"`
 	MTime         int64  `json:"mtime"`
 	UID           uint32 `json:"uid"`
 	GID           uint32 `json:"gid"`
+}
+
+// ChildEntry represents a directory entry with a link to a child Inode
+// and its zero-knowledge encrypted name.
+type ChildEntry struct {
+	ID            string `json:"id"`
+	EncryptedName []byte `json:"enc_name,omitempty"`
+	Nonce         []byte `json:"nonce,omitempty"`
 }
 
 // POSIXAccess defines POSIX.1e draft standard Access Control Lists.
@@ -441,24 +448,24 @@ func (p *POSIXAccess) writeHash(h hash.Hash) {
 
 // Inode represents a file or directory in the metadata layer.
 type Inode struct {
-	ID            string               `json:"id"`
-	Links         map[string]bool      `json:"links"` // Set of "ParentID:NameHMAC"
-	Type          InodeType            `json:"type"`
-	OwnerID       string               `json:"owner_id"` // DistFS User ID
-	GroupID       string               `json:"group_id"` // DistFS Group ID
-	Mode          uint32               `json:"mode"`
-	Size          uint64               `json:"size"`
-	CTime         int64                `json:"ctime"`
-	NLink         uint32               `json:"nlink"`
-	ClientBlob    []byte               `json:"client_blob,omitempty"`
-	Children      map[string]string    `json:"children"`
-	ChunkManifest []ChunkEntry         `json:"manifest"`
-	ChunkPages    []string             `json:"chunk_pages,omitempty"`
-	Lockbox       crypto.Lockbox       `json:"lockbox"`
-	Version       uint64               `json:"version"`
-	IsSystem      bool                 `json:"is_system"`
-	Leases        map[string]LeaseInfo `json:"leases,omitempty"` // Nonce -> LeaseInfo
-	Unlinked      bool                 `json:"unlinked,omitempty"`
+	ID            string                `json:"id"`
+	Links         map[string]bool       `json:"links"` // Set of "ParentID:NameHMAC"
+	Type          InodeType             `json:"type"`
+	OwnerID       string                `json:"owner_id"` // DistFS User ID
+	GroupID       string                `json:"group_id"` // DistFS Group ID
+	Mode          uint32                `json:"mode"`
+	Size          uint64                `json:"size"`
+	CTime         int64                 `json:"ctime"`
+	NLink         uint32                `json:"nlink"`
+	ClientBlob    []byte                `json:"client_blob,omitempty"`
+	Children      map[string]ChildEntry `json:"children"`
+	ChunkManifest []ChunkEntry          `json:"manifest"`
+	ChunkPages    []string              `json:"chunk_pages,omitempty"`
+	Lockbox       crypto.Lockbox        `json:"lockbox"`
+	Version       uint64                `json:"version"`
+	IsSystem      bool                  `json:"is_system"`
+	Leases        map[string]LeaseInfo  `json:"leases,omitempty"` // Nonce -> LeaseInfo
+	Unlinked      bool                  `json:"unlinked,omitempty"`
 
 	AccessACL  *POSIXAccess `json:"access_acl,omitempty"`
 	DefaultACL *POSIXAccess `json:"default_acl,omitempty"`
@@ -471,7 +478,6 @@ type Inode struct {
 	OwnerDelegationSig []byte `json:"owner_delegation_sig,omitempty"` // Phase 50: Owner's signature over (ID + GroupID)
 
 	// Client-side transient state (unexported, not in JSON)
-	name          string
 	symlinkTarget string
 	inlineData    []byte
 	mtime         int64
@@ -480,8 +486,6 @@ type Inode struct {
 	fileKey       []byte
 }
 
-func (i *Inode) GetName() string           { return i.name }
-func (i *Inode) SetName(s string)          { i.name = s }
 func (i *Inode) GetSymlinkTarget() string  { return i.symlinkTarget }
 func (i *Inode) SetSymlinkTarget(s string) { i.symlinkTarget = s }
 func (i *Inode) GetInlineData() []byte     { return i.inlineData }
@@ -594,7 +598,12 @@ func (i *Inode) ManifestHash() []byte {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
-		h.Write([]byte(k + ":" + i.Children[k] + ","))
+		entry := i.Children[k]
+		h.Write([]byte(k + ":" + entry.ID + ","))
+		h.Write([]byte(hex.EncodeToString(entry.EncryptedName)))
+		h.Write([]byte(","))
+		h.Write([]byte(hex.EncodeToString(entry.Nonce)))
+		h.Write([]byte("|"))
 	}
 	h.Write([]byte("|"))
 
@@ -647,7 +656,6 @@ func (i *Inode) SignInodeForTest(userID string, key *crypto.IdentityKey) {
 	if len(i.ClientBlob) == 0 {
 		// For tests, we simulate the ClientBlob so ManifestHash is consistent
 		blob := InodeClientBlob{
-			Name:          i.name,
 			SymlinkTarget: i.symlinkTarget,
 			InlineData:    i.inlineData,
 			MTime:         i.mtime,
@@ -809,25 +817,25 @@ type AdminSetUserLockRequest struct {
 // RedactedInode represents a version of an Inode safe for cluster-wide audit.
 // It contains no cryptographic keys or private plaintext blobs.
 type RedactedInode struct {
-	ID                 string               `json:"id"`
-	Links              map[string]bool      `json:"links"`
-	Type               InodeType            `json:"type"`
-	OwnerID            string               `json:"owner_id"`
-	GroupID            string               `json:"group_id"`
-	Mode               uint32               `json:"mode"`
-	Size               uint64               `json:"size"`
-	CTime              int64                `json:"ctime"`
-	NLink              uint32               `json:"nlink"`
-	Children           map[string]string    `json:"children,omitempty"`
-	Version            uint64               `json:"version"`
-	IsSystem           bool                 `json:"is_system"`
-	Leases             map[string]LeaseInfo `json:"leases,omitempty"`
-	Unlinked           bool                 `json:"unlinked,omitempty"`
-	SignerID           string               `json:"signer_id"`
-	BlobSize           int                  `json:"blob_size"`
-	ChunkPageCount     int                  `json:"chunk_page_count"`
-	RecipientIDs       []string             `json:"recipient_ids"` // List of User/Group IDs in lockbox
-	RegistryRecipients []string             `json:"registry_recipients,omitempty"`
+	ID                 string                `json:"id"`
+	Links              map[string]bool       `json:"links"`
+	Type               InodeType             `json:"type"`
+	OwnerID            string                `json:"owner_id"`
+	GroupID            string                `json:"group_id"`
+	Mode               uint32                `json:"mode"`
+	Size               uint64                `json:"size"`
+	CTime              int64                 `json:"ctime"`
+	NLink              uint32                `json:"nlink"`
+	Children           map[string]ChildEntry `json:"children,omitempty"`
+	Version            uint64                `json:"version"`
+	IsSystem           bool                  `json:"is_system"`
+	Leases             map[string]LeaseInfo  `json:"leases,omitempty"`
+	Unlinked           bool                  `json:"unlinked,omitempty"`
+	SignerID           string                `json:"signer_id"`
+	BlobSize           int                   `json:"blob_size"`
+	ChunkPageCount     int                   `json:"chunk_page_count"`
+	RecipientIDs       []string              `json:"recipient_ids"` // List of User/Group IDs in lockbox
+	RegistryRecipients []string              `json:"registry_recipients,omitempty"`
 }
 
 // RedactedUser represents a user record safe for cluster-wide audit.

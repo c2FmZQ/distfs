@@ -953,8 +953,8 @@ func cmdAdminAudit(ctx context.Context, args []string) {
 			sort.Strings(hmacs)
 
 			for i, h := range hmacs {
-				childID := inode.Children[h]
-				printTree(childID, h, newIndent, i == len(hmacs)-1)
+				entry := inode.Children[h]
+				printTree(entry.ID, h, newIndent, i == len(hmacs)-1)
 			}
 		}
 	}

@@ -219,12 +219,13 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	childID, ok := d.inode.Children[encName]
+	entry, ok := d.inode.Children[encName]
 	d.mu.Unlock()
 
 	if !ok {
 		return nil, syscall.ENOENT
 	}
+	childID := entry.ID
 
 	inode, err := d.fs.client.GetInode(ctx, childID)
 	if err != nil {
@@ -266,34 +267,19 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 	if err == nil {
 		d.inode = updated
 	}
-	var ids []string
-	for _, id := range d.inode.Children {
-		ids = append(ids, id)
-	}
-	d.mu.Unlock()
-
-	if len(ids) == 0 {
-		return nil, nil
-	}
-
-	inodes, err := d.fs.client.GetInodes(ctx, ids)
-	if err != nil {
-		return nil, mapError(err)
-	}
 
 	var dirents []fuse.Dirent
-	for _, childInode := range inodes {
-		name := childInode.GetName()
-		if name == "" {
+	for _, entry := range d.inode.Children {
+		name, err := d.fs.client.DecryptEntryName(ctx, d.key, entry.EncryptedName, entry.Nonce)
+		if err != nil {
 			continue
 		}
 
-		t := fuse.DT_File
-		if childInode.Type == metadata.DirType {
-			t = fuse.DT_Dir
-		}
-		dirents = append(dirents, fuse.Dirent{Name: name, Type: t})
+		// Optimization: We don't fetch the child inode here, so we don't know the exact type.
+		// FUSE DT_Unknown is safe and triggers a subsequent Lookup/Attr if needed.
+		dirents = append(dirents, fuse.Dirent{Name: name, Type: fuse.DT_Unknown})
 	}
+	d.mu.Unlock()
 	return dirents, nil
 }
 

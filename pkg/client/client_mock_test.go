@@ -143,7 +143,6 @@ func TestClient_MockedConflict(t *testing.T) {
 				inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey)
 
 				blob := metadata.InodeClientBlob{
-					Name:  "u1",
 					MTime: time.Now().UnixNano(),
 				}
 				plainBlob, _ := json.Marshal(blob)

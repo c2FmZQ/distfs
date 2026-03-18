@@ -138,6 +138,7 @@ run_test "Quota Command" "/bin/test-quota-cmd.sh" || FAILED=1
 run_test "Enhanced LS E2E" "/bin/test-ls-e2e.sh" || FAILED=1
 run_test "System Audit & Integrity" "/bin/test-audit.sh" || FAILED=1
 run_test "OOB Identity & Registry" "/bin/test-registry.sh" || FAILED=1
+run_test "FileUtils CLI Expansion" "/bin/test-fileutils.sh" || FAILED=1
 
 echo "--- WEB UI TESTS ---" | tee -a $REPORT_FILE
 echo "Running Playwright E2E..." | tee -a $REPORT_FILE

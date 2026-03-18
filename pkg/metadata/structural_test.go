@@ -19,7 +19,7 @@ func TestStructuralInconsistency(t *testing.T) {
 		return fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
 	})
 
-	p := Inode{ID: "p1", Type: DirType, Children: make(map[string]string), OwnerID: "u1"}
+	p := Inode{ID: "p1", Type: DirType, Children: make(map[string]ChildEntry), OwnerID: "u1"}
 	c := Inode{ID: "c1", Type: FileType, OwnerID: "u1"}
 	p.SignInodeForTest("u1", sk)
 	c.SignInodeForTest("u1", sk)
@@ -36,7 +36,7 @@ func TestStructuralInconsistency(t *testing.T) {
 	cb2, _ := json.Marshal(c)
 	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: cb2, UserID: "u1"}.Marshal()})
 
-	p.Children["child_name"] = "c1"
+	p.Children["child_name"] = ChildEntry{ID: "c1"}
 	p.Version = 2
 	p.NLink = 1
 	p.SignInodeForTest("u1", sk)

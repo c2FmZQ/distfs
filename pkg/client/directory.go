@@ -68,7 +68,7 @@ func (c *Client) EnsureRoot(ctx context.Context) (string, error) {
 		Nonce:    nonce,
 		Type:     metadata.DirType,
 		Mode:     0755,
-		Children: make(map[string]string),
+		Children: make(map[string]metadata.ChildEntry),
 		Lockbox:  lb,
 		OwnerID:  c.userID,
 		NLink:    1,
@@ -242,10 +242,11 @@ func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.I
 		mac.Write([]byte(part))
 		encName := hex.EncodeToString(mac.Sum(nil))
 
-		childID, ok := currentInode.Children[encName]
+		entry, ok := currentInode.Children[encName]
 		if !ok {
 			return nil, nil, fmt.Errorf("path component %s not found in %s", part, prefix)
 		}
+		childID := entry.ID
 
 		childInode, err := c.getInode(ctx, childID)
 		if err != nil {
@@ -356,8 +357,8 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to fetch parent: %w", err)
 	}
-	if existingID, exists := parent.Children[encName]; exists {
-		existing, err := c.getInode(ctx, existingID)
+	if entry, exists := parent.Children[encName]; exists {
+		existing, err := c.getInode(ctx, entry.ID)
 		if err == nil {
 			return existing, nil, metadata.ErrExists
 		}
@@ -462,7 +463,7 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			},
 			Type:          iType,
 			Mode:          mode,
-			Children:      make(map[string]string),
+			Children:      make(map[string]metadata.ChildEntry),
 			ChunkManifest: chunkEntries,
 			Lockbox:       lb,
 			AccessACL:     accessACL,
@@ -474,7 +475,6 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			NLink:   1,
 			Version: 1,
 		}
-		newInode.SetName(name)
 		newInode.SetSymlinkTarget(symlinkTarget)
 		newInode.SetFileKey(newKey)
 		newInode.SetMTime(time.Now().UnixNano())
@@ -487,15 +487,29 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 		}
 
 		// Final existence check to prevent overwriting
-		if existingID, exists := parent.Children[encName]; exists && existingID != newID {
+		if existing, exists := parent.Children[encName]; exists && existing.ID != newID {
 			return metadata.ErrExists
+		}
+
+		parentKey, err := c.UnlockInode(ctx, parent)
+		if err != nil {
+			return fmt.Errorf("failed to unlock parent for name encryption: %w", err)
+		}
+
+		encNameBlob, nameNonce, err := c.EncryptEntryName(parentKey, name)
+		if err != nil {
+			return err
 		}
 
 		parent.SetFileKey(parentKey)
 		if parent.Children == nil {
-			parent.Children = make(map[string]string)
+			parent.Children = make(map[string]metadata.ChildEntry)
 		}
-		parent.Children[encName] = newID
+		parent.Children[encName] = metadata.ChildEntry{
+			ID:            newID,
+			EncryptedName: encNameBlob,
+			Nonce:         nameNonce,
+		}
 
 		// 3. Prepare Commands
 		cmdChild, err := c.PrepareCreate(ctx, newInode)
@@ -655,14 +669,20 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 		if err != nil {
 			return fmt.Errorf("failed to get old parent: %w", err)
 		}
-		childID, ok := oldParent.Children[encOldName]
+		entry, ok := oldParent.Children[encOldName]
 		if !ok {
 			return fs.ErrNotExist
 		}
+		childID := entry.ID
 
 		child, err := c.getInode(ctx, childID)
 		if err != nil {
 			return fmt.Errorf("failed to get child: %w", err)
+		}
+
+		childKey, err := c.UnlockInode(ctx, child)
+		if err != nil {
+			return fmt.Errorf("failed to unlock child: %w", err)
 		}
 
 		var newParent *metadata.Inode
@@ -675,22 +695,44 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 			}
 		}
 
+		// Unlock new parent first (needed for name encryption and integrity check)
+		newParentKey, err := c.UnlockInode(ctx, newParent)
+		if err != nil {
+			return fmt.Errorf("failed to unlock new parent for name encryption: %w", err)
+		}
+
 		// 2. Prepare Updates
 		var cmds []metadata.LogCommand
+
+		// Update Child Links
+		if child.Links == nil {
+			child.Links = make(map[string]bool)
+		}
+		delete(child.Links, oldParentID+":"+encOldName)
+		child.Links[newParentID+":"+encNewName] = true
+		child.SetMTime(time.Now().UnixNano())
+		child.SetFileKey(childKey)
+
+		cmdChild, err := c.PrepareUpdate(ctx, *child)
+		if err != nil {
+			return err
+		}
+		cmds = append(cmds, cmdChild)
 
 		// Update Old Parent (Remove)
 		delete(oldParent.Children, encOldName)
 
 		// Handle Overwrite: If target exists, unlink it
-		if existingID, exists := newParent.Children[encNewName]; exists {
-			existing, err := c.getInode(ctx, existingID)
+		if existing, exists := newParent.Children[encNewName]; exists {
+			existingID := existing.ID
+			existingInode, err := c.getInode(ctx, existingID)
 			if err == nil {
-				if existing.NLink > 0 {
-					existing.NLink--
+				if existingInode.NLink > 0 {
+					existingInode.NLink--
 				}
-				delete(existing.Links, newParentID+":"+encNewName)
+				delete(existingInode.Links, newParentID+":"+encNewName)
 
-				cmd, err := c.PrepareUpdate(ctx, *existing)
+				cmd, err := c.PrepareUpdate(ctx, *existingInode)
 				if err != nil {
 					return err
 				}
@@ -700,21 +742,18 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 
 		// Update New Parent (Add)
 		if newParent.Children == nil {
-			newParent.Children = make(map[string]string)
+			newParent.Children = make(map[string]metadata.ChildEntry)
 		}
-		newParent.Children[encNewName] = childID
 
-		// Update Child Inode links and MTime
-		if child.Links != nil {
-			delete(child.Links, oldParentID+":"+encOldName)
-			child.Links[newParentID+":"+encNewName] = true
-		}
-		child.SetMTime(time.Now().UnixNano())
-		cmdChild, err := c.PrepareUpdate(ctx, *child)
+		encNameBlob, nameNonce, err := c.EncryptEntryName(newParentKey, newName)
 		if err != nil {
 			return err
 		}
-		cmds = append(cmds, cmdChild)
+		newParent.Children[encNewName] = metadata.ChildEntry{
+			ID:            childID,
+			EncryptedName: encNameBlob,
+			Nonce:         nameNonce,
+		}
 
 		// Build batch
 		if oldParentID != newParentID {
@@ -747,6 +786,68 @@ func (c *Client) RenameRaw(ctx context.Context, oldParentID string, oldParentKey
 		_, err = c.ApplyBatch(ctx, cmds)
 		return err
 	})
+}
+
+// Copy recursively copies a file or directory from src to dst.
+func (c *Client) Copy(ctx context.Context, src, dst string) error {
+	src = "/" + strings.Trim(src, "/")
+	dst = "/" + strings.Trim(dst, "/")
+
+	inode, _, err := c.ResolvePath(ctx, src)
+	if err != nil {
+		return fmt.Errorf("resolve src: %w", err)
+	}
+
+	return c.copyInternal(ctx, inode, src, dst)
+}
+
+func (c *Client) copyInternal(ctx context.Context, inode *metadata.Inode, src, dst string) error {
+	switch inode.Type {
+	case metadata.FileType:
+		// 1. Download
+		rc, err := c.OpenBlobRead(ctx, src)
+		if err != nil {
+			return fmt.Errorf("open src: %w", err)
+		}
+		defer rc.Close()
+
+		// 2. Upload (CreateFile handles new key generation and encryption)
+		if err := c.CreateFile(ctx, dst, rc, int64(inode.Size)); err != nil {
+			return fmt.Errorf("create dst: %w", err)
+		}
+
+	case metadata.DirType:
+		// 1. Create target directory
+		if err := c.Mkdir(ctx, dst, 0755); err != nil && !errors.Is(err, metadata.ErrExists) {
+			return fmt.Errorf("mkdir dst: %w", err)
+		}
+
+		// 2. List children
+		entries, err := c.ReadDirExtended(ctx, src, true)
+		if err != nil {
+			return fmt.Errorf("readdir src: %w", err)
+		}
+
+		// 3. Recurse
+		for _, entry := range entries {
+			childSrc := filepath.Join(src, entry.Name())
+			childDst := filepath.Join(dst, entry.Name())
+			if err := c.copyInternal(ctx, entry.Inode(), childSrc, childDst); err != nil {
+				return err
+			}
+		}
+
+	case metadata.SymlinkType:
+		target := inode.GetSymlinkTarget()
+		if err := c.Symlink(ctx, target, dst); err != nil {
+			return fmt.Errorf("symlink dst: %w", err)
+		}
+
+	default:
+		return fmt.Errorf("unsupported inode type: %v", inode.Type)
+	}
+
+	return nil
 }
 
 // RemoveEntry deletes a directory entry.
@@ -819,10 +920,11 @@ func (c *Client) RemoveEntryRaw(ctx context.Context, parentID string, parentKey 
 		if err != nil {
 			return err
 		}
-		childID, ok := parent.Children[encName]
+		entry, ok := parent.Children[encName]
 		if !ok {
 			return nil // Already gone
 		}
+		childID := entry.ID
 
 		// 2. Prepare Updates
 		var cmds []metadata.LogCommand
@@ -896,9 +998,8 @@ func (c *Client) Lstat(ctx context.Context, path string) (*DistFileInfo, error) 
 }
 
 // ReadDir returns a list of directory entries for the given path.
-// ReadDir returns a list of directory entries for the given path.
 func (c *Client) ReadDir(ctx context.Context, path string) ([]*DistDirEntry, error) {
-	return c.ReadDirExtended(ctx, path)
+	return c.ReadDirExtended(ctx, path, false)
 }
 
 // Open opens a file or directory for reading.
@@ -1001,10 +1102,24 @@ func (c *Client) LinkRaw(ctx context.Context, parentID string, parentKey []byte,
 		}
 		cmds = append(cmds, cmdTarget)
 
-		if parent.Children == nil {
-			parent.Children = make(map[string]string)
+		parentKey, err := c.UnlockInode(ctx, parent)
+		if err != nil {
+			return fmt.Errorf("failed to unlock parent for name encryption: %w", err)
 		}
-		parent.Children[encName] = targetID
+
+		if parent.Children == nil {
+			parent.Children = make(map[string]metadata.ChildEntry)
+		}
+
+		encNameBlob, nameNonce, err := c.EncryptEntryName(parentKey, name)
+		if err != nil {
+			return err
+		}
+		parent.Children[encName] = metadata.ChildEntry{
+			ID:            targetID,
+			EncryptedName: encNameBlob,
+			Nonce:         nameNonce,
+		}
 		cmdParent, err := c.PrepareUpdate(ctx, *parent)
 		if err != nil {
 			return err
@@ -1040,7 +1155,8 @@ func (c *Client) addEntry(ctx context.Context, path string, iType metadata.Inode
 	mac.Write([]byte(name))
 	encName := hex.EncodeToString(mac.Sum(nil))
 
-	if existingID, ok := parentInode.Children[encName]; ok {
+	if existing, ok := parentInode.Children[encName]; ok {
+		existingID := existing.ID
 		if iType == metadata.FileType {
 			// Update existing file content
 			err := c.writeInodeContent(ctx, existingID, nil, iType, nil, r, size, name, nil, mode, "", parentInode.ID, encName, 0, 0, opts.AccessACL)

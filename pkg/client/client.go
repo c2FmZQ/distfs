@@ -1314,6 +1314,15 @@ func (c *Client) GetUser(ctx context.Context, id string) (*metadata.User, error)
 	return c.getUserInternal(ctx, id, false)
 }
 
+// GetQuota returns the current user's quota and usage.
+func (c *Client) GetQuota(ctx context.Context) (metadata.UserQuota, metadata.UserUsage, error) {
+	user, err := c.GetUser(ctx, c.UserID())
+	if err != nil {
+		return metadata.UserQuota{}, metadata.UserUsage{}, err
+	}
+	return user.Quota, user.Usage, nil
+}
+
 func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache bool) (*metadata.User, error) {
 	if !bypassCache {
 		c.cacheMu.RLock()
@@ -1375,7 +1384,6 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	// 2. Prepare ClientBlob
 	if len(fileKey) > 0 {
 		blob := metadata.InodeClientBlob{
-			Name:          inode.GetName(),
 			SymlinkTarget: inode.GetSymlinkTarget(),
 			InlineData:    inode.GetInlineData(),
 			MTime:         inode.GetMTime(),
@@ -1825,9 +1833,6 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 			}
 		}
 
-		if name != "" {
-			inode.SetName(name)
-		}
 		if uid != 0 || gid != 0 {
 			inode.SetUID(uid)
 			inode.SetGID(gid)
@@ -1861,9 +1866,6 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 			NLink:         1,
 			Version:       1,
 		}
-		if name != "" {
-			inode.SetName(name)
-		}
 		inode.SetUID(uid)
 		inode.SetGID(gid)
 		inode.SetMTime(time.Now().UnixNano())
@@ -1873,9 +1875,6 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 			return err
 		}
 		inode = *created
-		if name != "" {
-			inode.SetName(name)
-		}
 		inode.SetFileKey(fileKey)
 	} else {
 		return err
@@ -2221,6 +2220,29 @@ func (r *FileReader) ReadAt(p []byte, off int64) (int, error) {
 	return r.readInternal(p, true, off)
 }
 
+func (r *FileReader) Seek(offset int64, whence int) (int64, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var newOffset int64
+	switch whence {
+	case io.SeekStart:
+		newOffset = offset
+	case io.SeekCurrent:
+		newOffset = r.offset + offset
+	case io.SeekEnd:
+		newOffset = int64(r.inode.Size) + offset
+	default:
+		return 0, fmt.Errorf("invalid whence: %d", whence)
+	}
+
+	if newOffset < 0 {
+		return 0, fmt.Errorf("negative offset")
+	}
+	r.offset = newOffset
+	return newOffset, nil
+}
+
 func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, error) {
 	currentOff := r.offset
 	if isReadAt {
@@ -2499,9 +2521,9 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	var fileKey []byte
 	var oldInodeID string
 
-	if childID, exists := pInode.Children[nameHMAC]; exists {
-		oldInodeID = childID
-		oldInode, _ := c.getInode(ctx, childID)
+	if entry, exists := pInode.Children[nameHMAC]; exists {
+		oldInodeID = entry.ID
+		oldInode, _ := c.getInode(ctx, entry.ID)
 		if oldInode != nil {
 			fileKey, _ = c.UnlockInode(ctx, oldInode)
 		}
@@ -2554,7 +2576,6 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		Lockbox: lb,
 		Version: 1,
 	}
-	inode.SetName(fileName)
 	inode.SetFileKey(fileKey)
 	// Acquire lease first to prevent concurrent writers on this path.
 	nonce := leaseNonce
@@ -2580,6 +2601,8 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		inode:      *inode,
 		fileKey:    fileKey,
 		parentID:   parentID,
+		parentKey:  pKey,
+		name:       fileName,
 		nameHMAC:   nameHMAC,
 		swapMode:   true,
 		swapPath:   path,
@@ -2728,9 +2751,17 @@ func (w *FileWriter) Close() error {
 					return fmt.Errorf("failed to get parent for swap: %w", err)
 				}
 				if parent.Children == nil {
-					parent.Children = make(map[string]string)
+					parent.Children = make(map[string]metadata.ChildEntry)
 				}
-				parent.Children[w.nameHMAC] = w.inode.ID
+				encName, nameNonce, err := w.client.EncryptEntryName(w.parentKey, w.name)
+				if err != nil {
+					return fmt.Errorf("failed to encrypt name: %w", err)
+				}
+				parent.Children[w.nameHMAC] = metadata.ChildEntry{
+					ID:            w.inode.ID,
+					EncryptedName: encName,
+					Nonce:         nameNonce,
+				}
 				cmdParent, err := w.client.PrepareUpdate(w.ctx, *parent)
 				if err != nil {
 					return err
@@ -2765,10 +2796,18 @@ func (w *FileWriter) Close() error {
 			// 2. Link to Parent
 			_, err = w.client.UpdateInode(w.ctx, w.parentID, func(p *metadata.Inode) error {
 				if p.Children == nil {
-					p.Children = make(map[string]string)
+					p.Children = make(map[string]metadata.ChildEntry)
 				}
 				// MERGE: Only add our entry
-				p.Children[w.nameHMAC] = w.inode.ID
+				encName, nameNonce, err := w.client.EncryptEntryName(w.parentKey, w.name)
+				if err != nil {
+					return err
+				}
+				p.Children[w.nameHMAC] = metadata.ChildEntry{
+					ID:            w.inode.ID,
+					EncryptedName: encName,
+					Nonce:         nameNonce,
+				}
 				return nil
 			})
 		} else {
@@ -3316,9 +3355,17 @@ func (c *Client) SaveDataFiles(ctx context.Context, names []string, data []any) 
 				}
 
 				if parent.Children == nil {
-					parent.Children = make(map[string]string)
+					parent.Children = make(map[string]metadata.ChildEntry)
 				}
-				parent.Children[w.nameHMAC] = w.inode.ID
+				encName, nameNonce, err := c.EncryptEntryName(w.parentKey, w.name)
+				if err != nil {
+					return err
+				}
+				parent.Children[w.nameHMAC] = metadata.ChildEntry{
+					ID:            w.inode.ID,
+					EncryptedName: encName,
+					Nonce:         nameNonce,
+				}
 
 				// Track lease binding for this parent
 				bindings, ok := parentBindings[w.parentID]
@@ -3461,57 +3508,58 @@ func (c *Client) GetInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 
 // VerifyInode verifies the manifest signatures and authorized signers.
 func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
-	// 1. Decrypt ClientBlob if present
-	if len(inode.ClientBlob) > 0 {
-		fileKey := inode.GetFileKey()
-		if len(fileKey) == 0 {
-			// Try cache first
-			c.keyMu.RLock()
-			meta, ok := c.keyCache[inode.ID]
-			c.keyMu.RUnlock()
-			if ok {
-				fileKey = meta.key
-				inode.SetFileKey(fileKey)
+	// 1. Resolve File Key from Lockbox (Needed for both ClientBlob and Phase 67 Names)
+	fileKey := inode.GetFileKey()
+	if len(fileKey) == 0 {
+		// Try cache first
+		c.keyMu.RLock()
+		meta, ok := c.keyCache[inode.ID]
+		c.keyMu.RUnlock()
+		if ok {
+			fileKey = meta.key
+			inode.SetFileKey(fileKey)
+		}
+	}
+
+	if len(fileKey) == 0 {
+		// Try to unlock file key from lockbox
+		if c.decKey != nil {
+			key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
+			if err == nil {
+				fileKey = key
+				inode.SetFileKey(key)
 			}
 		}
-
-		if len(fileKey) == 0 {
-			// Try to unlock file key from lockbox
-			if c.decKey != nil {
-				key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
+		if len(fileKey) == 0 && inode.GroupID != "" {
+			gk, err := c.GetGroupPrivateKey(ctx, inode.GroupID)
+			if err == nil {
+				key, err := inode.Lockbox.GetFileKey(inode.GroupID, gk)
 				if err == nil {
 					fileKey = key
 					inode.SetFileKey(key)
 				}
 			}
-			if len(fileKey) == 0 && inode.GroupID != "" {
-				gk, err := c.GetGroupPrivateKey(ctx, inode.GroupID)
-				if err == nil {
-					key, err := inode.Lockbox.GetFileKey(inode.GroupID, gk)
+		}
+		// Try World Access
+		if len(fileKey) == 0 {
+			if _, exists := inode.Lockbox[metadata.WorldID]; exists {
+				gk, gerr := c.GetWorldPrivateKey(ctx)
+				if gerr == nil {
+					key, err := inode.Lockbox.GetFileKey(metadata.WorldID, gk)
 					if err == nil {
 						fileKey = key
 						inode.SetFileKey(key)
 					}
 				}
 			}
-			// Try World Access
-			if len(fileKey) == 0 {
-				if _, exists := inode.Lockbox[metadata.WorldID]; exists {
-					gk, gerr := c.GetWorldPrivateKey(ctx)
-					if gerr == nil {
-						key, err := inode.Lockbox.GetFileKey(metadata.WorldID, gk)
-						if err == nil {
-							fileKey = key
-							inode.SetFileKey(key)
-						}
-					}
-				}
-			}
 		}
+	}
 
+	// 2. Decrypt ClientBlob if present
+	if len(inode.ClientBlob) > 0 {
 		if len(fileKey) == 0 {
-			// If we can't decrypt, we can't verify the full integrity or see names.
-			return fmt.Errorf("failed to decrypt file key: %w", crypto.ErrRecipientNotFound)
+			// If we can't decrypt, we can't verify the full integrity.
+			return fmt.Errorf("failed to decrypt file key for client blob: %w", crypto.ErrRecipientNotFound)
 		}
 
 		var blob metadata.InodeClientBlob
@@ -3520,7 +3568,6 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 		}
 
 		// Populate transient fields
-		inode.SetName(blob.Name)
 		inode.SetSymlinkTarget(blob.SymlinkTarget)
 		inode.SetInlineData(blob.InlineData)
 		inode.SetMTime(blob.MTime)
@@ -5438,7 +5485,8 @@ func (c *Client) AdminAuditForest(ctx context.Context) (roots []*metadata.Redact
 			}
 			newPath[id] = true
 
-			for _, childID := range inode.Children {
+			for _, entry := range inode.Children {
+				childID := entry.ID
 				if newPath[childID] {
 					reports = append(reports, metadata.InconsistencyReport{
 						Type:     "CYCLE_DETECTED",
@@ -5936,6 +5984,9 @@ func (c *Client) decryptClientBlob(data []byte, key *mlkem.DecapsulationKey768, 
 }
 
 func (c *Client) encryptInodeClientBlob(v interface{}, key []byte) ([]byte, error) {
+	if len(key) == 0 {
+		return nil, fmt.Errorf("encryptInodeClientBlob: key is empty")
+	}
 	data, err := json.Marshal(v)
 	if err != nil {
 		return nil, err
@@ -5952,4 +6003,33 @@ func (c *Client) decryptInodeClientBlob(data []byte, key []byte, v interface{}) 
 		return err
 	}
 	return json.Unmarshal(plain, v)
+}
+
+// EncryptEntryName encrypts a filename using the parent directory's key.
+func (c *Client) EncryptEntryName(parentKey []byte, name string) (ciphertext, nonce []byte, err error) {
+	if len(parentKey) == 0 {
+		return nil, nil, fmt.Errorf("EncryptEntryName: parentKey is empty for %s", name)
+	}
+	nonce = make([]byte, 12)
+	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+		return nil, nil, err
+	}
+	// EncryptDEMWithNonce returns nonce + ciphertext
+	res, err := crypto.EncryptDEMWithNonce(parentKey, nonce, []byte(name))
+	if err != nil {
+		return nil, nil, err
+	}
+	return res, nonce, nil
+}
+
+// DecryptEntryName decrypts a filename using the parent directory's key.
+func (c *Client) DecryptEntryName(ctx context.Context, parentKey []byte, ciphertext, nonce []byte) (string, error) {
+	if len(parentKey) == 0 {
+		return "", errors.New("parent key missing")
+	}
+	plain, err := crypto.DecryptDEMWithNonce(parentKey, nonce, ciphertext)
+	if err != nil {
+		return "", err
+	}
+	return string(plain), nil
 }

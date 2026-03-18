@@ -22,7 +22,7 @@ func (m *mockLSClient) ResolvePath(ctx context.Context, path string) (*metadata.
 	return m.inode, []byte("key"), m.err
 }
 
-func (m *mockLSClient) ReadDirExtended(ctx context.Context, path string) ([]*client.DistDirEntry, error) {
+func (m *mockLSClient) ReadDirExtended(ctx context.Context, path string, fetchMetadata bool) ([]*client.DistDirEntry, error) {
 	return m.entries, m.err
 }
 
