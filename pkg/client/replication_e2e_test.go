@@ -35,7 +35,11 @@ func createDataNode(t *testing.T, metaNode *metadata.RaftNode, id string) (*http
 		LastHeartbeat: time.Now().Unix(),
 	}
 	nb, _ := json.Marshal(nodeInfo)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second).Error(); err != nil {
+	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal register node command: %v", err)
+	}
+	if err := metaNode.Raft.Apply(nbb, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Failed to register node: %v", err)
 	}
 
@@ -50,7 +54,11 @@ func markNodeOffline(t *testing.T, metaNode *metadata.RaftNode, id, address stri
 		LastHeartbeat: time.Now().Add(-10 * time.Minute).Unix(), // Old heartbeat
 	}
 	nb, _ := json.Marshal(nodeInfo)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second).Error(); err != nil {
+	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal node offline command: %v", err)
+	}
+	if err := metaNode.Raft.Apply(nbb, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Failed to mark node offline: %v", err)
 	}
 }
@@ -163,7 +171,11 @@ func TestReplication_OverReplicationPruning(t *testing.T) {
 		NodeIDs: []string{"prune-n3"},
 	}
 	rb, _ := json.Marshal(req)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdAddChunkReplica, Data: rb}.Marshal(), 5*time.Second).Error(); err != nil {
+	rbb, err := metadata.LogCommand{Type: metadata.CmdAddChunkReplica, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal add replica command: %v", err)
+	}
+	if err := metaNode.Raft.Apply(rbb, 5*time.Second).Error(); err != nil {
 		t.Fatalf("AddReplica failed: %v", err)
 	}
 

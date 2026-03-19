@@ -80,7 +80,8 @@ func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.En
 		EncryptedPrivate: csk.MarshalPrivate(),
 	}
 	cskBytes, _ := json.Marshal(cskData)
-	future = raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	lcmdBytes, _ := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal()
+	future = raftNode.Raft.Apply(lcmdBytes, 5*time.Second)
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}

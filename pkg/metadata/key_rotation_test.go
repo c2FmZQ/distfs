@@ -2,6 +2,7 @@
 package metadata
 
 import (
+	"context"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/binary"
@@ -34,7 +35,7 @@ func TestFSMKeyRotation(t *testing.T) {
 	inode := Inode{ID: id1, Nonce: nonce1, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode.SignInodeForTest("u1", sk)
 	iBytes, _ := json.Marshal(inode)
-	if _, err := server.ApplyRaftCommandInternal(CmdCreateInode, iBytes, "u1"); err != nil {
+	if _, err := server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, iBytes, "u1"); err != nil {
 		t.Fatalf("Create Inode Gen 1 failed: %v", err)
 	}
 
@@ -51,7 +52,7 @@ func TestFSMKeyRotation(t *testing.T) {
 	inode2 := Inode{ID: id2, Nonce: nonce2, Type: FileType, OwnerID: "u1", Mode: 0644}
 	inode2.SignInodeForTest("u1", sk)
 	iBytes2, _ := json.Marshal(inode2)
-	if _, err := server.ApplyRaftCommandInternal(CmdCreateInode, iBytes2, "u1"); err != nil {
+	if _, err := server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, iBytes2, "u1"); err != nil {
 		t.Fatalf("Create Inode Gen 2 failed: %v", err)
 	}
 

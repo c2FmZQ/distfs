@@ -99,11 +99,15 @@ func CreateUser(t *testing.T, raftNode *RaftNode, user User) {
 	for user.UID == 0 {
 		user.UID = generateID32()
 	}
+	user.Locked = false
 	userBytes, _ := json.Marshal(user)
 	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
-	cmdBytes, _ := json.Marshal(cmd)
+	cmdBytes, err := cmd.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal CreateUser command: %v", err)
+	}
 	future := raftNode.Raft.Apply(cmdBytes, 10*time.Second)
-	err := future.Error()
+	err = future.Error()
 	if err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
@@ -118,8 +122,11 @@ func CreateUser(t *testing.T, raftNode *RaftNode, user User) {
 		req := AdminSetUserLockRequest{UserID: user.ID, Locked: false}
 		reqBytes, _ := json.Marshal(req)
 		unlockCmd := LogCommand{Type: CmdAdminSetUserLock, Data: reqBytes}
-		unlockBytes, _ := json.Marshal(unlockCmd)
-		raftNode.Raft.Apply(unlockBytes, 10*time.Second)
+		ub, err := unlockCmd.Marshal()
+		if err != nil {
+			t.Fatalf("failed to marshal unlock command: %v", err)
+		}
+		raftNode.Raft.Apply(ub, 10*time.Second)
 	}
 }
 
@@ -182,7 +189,10 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 	}
 	keyBytes, _ := json.Marshal(key)
 	cmd := LogCommand{Type: CmdRotateKey, Data: keyBytes}
-	cmdBytes, _ := json.Marshal(cmd)
+	cmdBytes, err := cmd.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap key command: %v", err)
+	}
 	f = node.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("Bootstrap key apply failed: %v", err)
@@ -196,7 +206,11 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		LastHeartbeat: time.Now().Unix(),
 	}
 	nb, _ := json.Marshal(nodeInfo)
-	f = node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+	nbBytes, err := LogCommand{Type: CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap RegisterNode command: %v", err)
+	}
+	f = node.Raft.Apply(nbBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("Bootstrap RegisterNode failed: %v", err)
 	}
@@ -208,9 +222,28 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		EncryptedPrivate: csk.MarshalPrivate(),
 	}
 	cskBytes, _ := json.Marshal(cskData)
-	f = node.Raft.Apply(LogCommand{Type: CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	cskCmdBytes, err := LogCommand{Type: CmdSetClusterSignKey, Data: cskBytes}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap sign key: %v", err)
+	}
+	f = node.Raft.Apply(cskCmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
+	}
+
+	// Bootstrap World Identity
+	wdk, _ := crypto.GenerateEncryptionKey()
+	world := WorldIdentity{
+		Public:  wdk.EncapsulationKey().Bytes(),
+		Private: crypto.MarshalDecapsulationKey(wdk),
+	}
+	wb, _ := json.Marshal(world)
+	wbBytes, err := LogCommand{Type: CmdInitWorld, Data: wb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap world init: %v", err)
+	}
+	if err := node.Raft.Apply(wbBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Bootstrap world init failed: %v", err)
 	}
 
 	signKey, _ := crypto.GenerateIdentityKey()

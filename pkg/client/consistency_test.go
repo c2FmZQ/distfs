@@ -36,7 +36,11 @@ func TestWriteConsistency_SynchronousReplication(t *testing.T) {
 
 		nodeInfo := metadata.Node{ID: id, Address: ts.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 		nb, _ := json.Marshal(nodeInfo)
-		metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+		nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+		if err != nil {
+			t.Fatalf("failed to marshal node register command: %v", err)
+		}
+		metaNode.Raft.Apply(nbb, 5*time.Second)
 
 		return ts, ds
 	}
@@ -50,8 +54,7 @@ func TestWriteConsistency_SynchronousReplication(t *testing.T) {
 
 	// 2. Write a file
 	content := bytes.Repeat([]byte("A"), 2*1024*1024) // 2 chunks
-	err := c.CreateFile(ctx, "/test-file", bytes.NewReader(content), int64(len(content)))
-	if err != nil {
+	if err := c.CreateFile(ctx, "/test-file", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
@@ -93,7 +96,11 @@ func TestWriteConsistency_QuorumSuccess(t *testing.T) {
 
 		nodeInfo := metadata.Node{ID: id, Address: ts.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 		nb, _ := json.Marshal(nodeInfo)
-		metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+		nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+		if err != nil {
+			t.Fatalf("failed to marshal node register command: %v", err)
+		}
+		metaNode.Raft.Apply(nbb, 5*time.Second)
 
 		return ts, ds
 	}
@@ -109,22 +116,25 @@ func TestWriteConsistency_QuorumSuccess(t *testing.T) {
 	// 2. Write a file
 	content := bytes.Repeat([]byte("quorum test"), 1000)
 
-	var err error
+	var lastErr error
 	for i := 0; i < 5; i++ {
-		err = c.CreateFile(ctx, "/quorum-file", bytes.NewReader(content), int64(len(content)))
-		if err == nil {
+		if err := c.CreateFile(ctx, "/quorum-file", bytes.NewReader(content), int64(len(content))); err == nil {
+			lastErr = nil
 			break
+		} else {
+			lastErr = err
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	if err != nil {
-		t.Fatalf("Expected CreateFile to succeed with 2/3 nodes, but failed: %v", err)
+	if lastErr != nil {
+		t.Fatalf("Expected CreateFile to succeed with 2/3 nodes, but failed: %v", lastErr)
 	}
 }
 
 func TestWriteConsistency_QuorumFailure(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	c, metaNode, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
@@ -142,7 +152,11 @@ func TestWriteConsistency_QuorumFailure(t *testing.T) {
 	register := func(id, addr string) {
 		nodeInfo := metadata.Node{ID: id, Address: addr, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 		nb, _ := json.Marshal(nodeInfo)
-		metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+		nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+		if err != nil {
+			t.Fatalf("failed to marshal node register command: %v", err)
+		}
+		metaNode.Raft.Apply(nbb, 5*time.Second)
 	}
 
 	register("n1", ts1.URL)
@@ -152,8 +166,7 @@ func TestWriteConsistency_QuorumFailure(t *testing.T) {
 	// 2. Write a file
 	content := bytes.Repeat([]byte("fail test"), 1000)
 
-	err := c.CreateFile(ctx, "/fail-file", bytes.NewReader(content), int64(len(content)))
-	if err == nil {
+	if err := c.CreateFile(ctx, "/fail-file", bytes.NewReader(content), int64(len(content))); err == nil {
 		t.Errorf("Expected WriteFile to fail because quorum (2/3) not reached")
 	} else {
 		t.Logf("Caught expected failure: %v", err)
@@ -161,7 +174,8 @@ func TestWriteConsistency_QuorumFailure(t *testing.T) {
 }
 
 func TestFailureRecovery_CleanupOrphans(t *testing.T) {
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 	c, metaNode, _, ts := SetupTestClient(t)
 	defer ts.Close()
 
@@ -178,11 +192,14 @@ func TestFailureRecovery_CleanupOrphans(t *testing.T) {
 
 	nodeInfo := metadata.Node{ID: "n1", Address: ts1.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
-	metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal node register command: %v", err)
+	}
+	metaNode.Raft.Apply(nbb, 5*time.Second)
 
 	// 2. Create an initial file
-	err := c.CreateFile(ctx, "/orphan-test", bytes.NewReader([]byte("initial")), 14)
-	if err != nil {
+	if err := c.CreateFile(ctx, "/orphan-test", bytes.NewReader([]byte("initial")), 14); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
@@ -191,8 +208,7 @@ func TestFailureRecovery_CleanupOrphans(t *testing.T) {
 	ts.Close()
 
 	largeContent := bytes.Repeat([]byte("B"), 2*1024*1024)
-	_, err = c.WriteFile(ctx, "/orphan-test", nil, bytes.NewReader(largeContent), int64(len(largeContent)), 0644)
-	if err == nil {
+	if _, err := c.WriteFile(ctx, "/orphan-test", nil, bytes.NewReader(largeContent), int64(len(largeContent)), 0644); err == nil {
 		t.Errorf("Expected WriteFile to fail due to metadata server closure")
 	}
 

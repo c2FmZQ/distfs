@@ -17,6 +17,7 @@
 package metadata
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -212,7 +213,7 @@ func (g *GCWorker) processDeletion(chunkID string, nodeIDs []string) {
 	// If successfully deleted from all known locations, remove from the persistent GC queue via Raft.
 	if success {
 		data, _ := json.Marshal(chunkID)
-		g.server.ApplyRaftCommandInternal(CmdGCRemove, data, "")
+		g.server.ApplyRaftCommandInternal(context.Background(), CmdGCRemove, data, "")
 	}
 }
 

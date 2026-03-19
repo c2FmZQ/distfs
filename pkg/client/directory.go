@@ -244,7 +244,7 @@ func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.I
 
 		entry, ok := currentInode.Children[encName]
 		if !ok {
-			return nil, nil, fmt.Errorf("path component %s not found in %s", part, prefix)
+			return nil, nil, metadata.ErrNotFound
 		}
 		childID := entry.ID
 

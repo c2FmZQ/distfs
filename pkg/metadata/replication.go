@@ -97,7 +97,7 @@ func (rm *ReplicationMonitor) Scan() {
 			}
 			age := time.Since(time.Unix(n.LastHeartbeat, 0))
 			logger.Debugf("REPL Scan: checking node %s status=%s age=%v", n.ID, n.Status, age)
-			if n.Status == NodeStatusActive && age < 5*time.Minute {
+			if n.Status == NodeStatusActive && age < 15*time.Minute {
 				activeNodes[n.ID] = n
 				activeNodeIDs = append(activeNodeIDs, n.ID)
 				logger.Debugf("REPL Scan: node %s is ACTIVE", n.ID)

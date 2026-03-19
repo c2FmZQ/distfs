@@ -91,7 +91,11 @@ func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.Encapsu
 		EncryptedPrivate: csk.MarshalPrivate(),
 	}
 	cskBytes, _ := json.Marshal(cskData)
-	future = raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	cskCmdBytes, err := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap sign key: %v", err)
+	}
+	future = raftNode.Raft.Apply(cskCmdBytes, 5*time.Second)
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}

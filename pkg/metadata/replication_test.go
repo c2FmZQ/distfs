@@ -2,6 +2,7 @@
 package metadata
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -26,10 +27,26 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	n3 := Node{ID: "n3", Address: "http://127.0.0.1:3333", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	n4 := Node{ID: "n4", Address: "http://127.0.0.1:4444", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal(), 5*time.Second)
+	n1b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n1b, 5*time.Second)
+	n2b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n2b, 5*time.Second)
+	n3b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n3b, 5*time.Second)
+	n4b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n4b, 5*time.Second)
 
 	sk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
@@ -44,7 +61,11 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 		},
 	}
 	inode.SignInodeForTest("u1", sk)
-	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode), UserID: "u1"}.Marshal(), 5*time.Second)
+	ib, err := LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode), UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(ib, 5*time.Second)
 
 	// 3. Mock Data Node for n1
 	var mu sync.Mutex
@@ -62,8 +83,16 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	// Update n1 address to mock and mark n3 as dead (by not updating its heartbeat)
 	n1.Address = n1Mock.URL
 	n3.LastHeartbeat = time.Now().Add(-10 * time.Minute).Unix() // Expired
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
+	nb, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(nb, 5*time.Second)
+	nb, err = LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(nb, 5*time.Second)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -80,7 +109,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	}
 
 	// 5. Verify Inode updated in FSM
-	err := node.FSM.db.View(func(tx *bolt.Tx) error {
+	err = node.FSM.db.View(func(tx *bolt.Tx) error {
 		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("invalid-but-test-mocked"))
 		if err != nil {
 			return err
@@ -121,10 +150,26 @@ func TestReplicationMonitor_Prune(t *testing.T) {
 	n3 := Node{ID: "n3", Address: "http://127.0.0.1:3333", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	n4 := Node{ID: "n4", Address: "http://127.0.0.1:4444", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal(), 5*time.Second)
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal(), 5*time.Second)
+	n1b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n1b, 5*time.Second)
+	n2b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n2)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n2b, 5*time.Second)
+	n3b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n3)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n3b, 5*time.Second)
+	n4b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n4b, 5*time.Second)
 
 	sk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
@@ -139,7 +184,11 @@ func TestReplicationMonitor_Prune(t *testing.T) {
 		},
 	}
 	inode.SignInodeForTest("u1", sk)
-	node.Raft.Apply(LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode), UserID: "u1"}.Marshal(), 5*time.Second)
+	ib, err := LogCommand{Type: CmdCreateInode, Data: mustMarshal(inode), UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(ib, 5*time.Second)
 
 	// 3. Mock Data Nodes for pruning
 	n4Mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -149,7 +198,11 @@ func TestReplicationMonitor_Prune(t *testing.T) {
 	}))
 	defer n4Mock.Close()
 	n4.Address = n4Mock.URL
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal(), 5*time.Second)
+	nb, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n4)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(nb, 5*time.Second)
 
 	time.Sleep(100 * time.Millisecond)
 
@@ -159,7 +212,7 @@ func TestReplicationMonitor_Prune(t *testing.T) {
 	time.Sleep(500 * time.Millisecond) // Wait for background pruning
 
 	// 5. Verify Inode updated in FSM (should have exactly 3 nodes)
-	err := node.FSM.db.View(func(tx *bolt.Tx) error {
+	err = node.FSM.db.View(func(tx *bolt.Tx) error {
 		plain, err := node.FSM.Get(tx, []byte("inodes"), []byte("over-replicated-inode"))
 		if err != nil {
 			return err
@@ -216,17 +269,17 @@ func TestReplication_Scan_Types(t *testing.T) {
 	// 1. Directory (should be skipped)
 	d := Inode{ID: "000000000000000000000000000000d1", Type: DirType, OwnerID: "u1"}
 	db, _ := json.Marshal(d)
-	server.ApplyRaftCommandInternal(CmdCreateInode, db, "")
+	server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, db, "")
 
 	// 2. Symlink (should be skipped)
 	s := Inode{ID: "000000000000000000000000000000e1", Type: SymlinkType, OwnerID: "u1"}
 	sb, _ := json.Marshal(s)
-	server.ApplyRaftCommandInternal(CmdCreateInode, sb, "")
+	server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, sb, "")
 
 	// 3. Empty file (should be skipped)
 	f := Inode{ID: "000000000000000000000000000000ee", Type: FileType, OwnerID: "u1"}
 	fb, _ := json.Marshal(f)
-	server.ApplyRaftCommandInternal(CmdCreateInode, fb, "")
+	server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, fb, "")
 
 	server.replMonitor.Scan()
 }
@@ -269,7 +322,7 @@ func TestGC_DeleteFail(t *testing.T) {
 	// 1. Manually add a fake node that will fail
 	nodeInfo := Node{ID: "fail-node", Address: "http://invalid", Status: NodeStatusActive}
 	nb, _ := json.Marshal(nodeInfo)
-	server.ApplyRaftCommandInternal(CmdRegisterNode, nb, "")
+	server.ApplyRaftCommandInternal(context.Background(), CmdRegisterNode, nb, "")
 
 	// 2. Trigger processDeletion
 	server.gcWorker.processDeletion("chunk1", []string{"fail-node"})

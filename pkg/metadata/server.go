@@ -49,6 +49,7 @@ import (
 	"github.com/c2FmZQ/tlsproxy/jwks"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/hashicorp/go-retryablehttp"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -81,6 +82,9 @@ type Server struct {
 	clusterSignKey *crypto.IdentityKey
 	clusterSignMu  sync.RWMutex
 
+	clusterSignPubKey   []byte
+	clusterSignPubKeyMu sync.RWMutex
+
 	raftSecret string
 
 	httpClient          *http.Client
@@ -94,6 +98,9 @@ type Server struct {
 
 	sessionKeyCache map[string]sessionKeyEntry // SessionToken -> Entry
 	sessionKeyMu    sync.RWMutex
+
+	// Session Validation Cache
+	sessionTokenCache *lru.TwoQueueCache[string, *cachedSession]
 
 	// Request Batching
 	batchMu      sync.Mutex
@@ -123,6 +130,11 @@ type Server struct {
 	// Phase 53.1: Ephemeral Epoch Keys (In-Memory Only)
 	epochPrivateKeys   map[string]*mlkem.DecapsulationKey768
 	epochPrivateKeysMu sync.RWMutex
+}
+
+type cachedSession struct {
+	User   *User
+	Expiry int64
 }
 
 type batchRequest struct {
@@ -201,6 +213,8 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	retryClient.HTTPClient.Transport = standardTransport
 	remote := jwks.NewRemote(retryClient, nil)
 
+	sc, _ := lru.New2Q[string, *cachedSession](1024)
+
 	s := &Server{
 		nodeID:     nodeID,
 		raft:       r,
@@ -219,6 +233,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 		challengeCache:      make(map[string]challengeEntry),
 		requestNonceCache:   make(map[string]time.Time),
 		sessionKeyCache:     make(map[string]sessionKeyEntry),
+		sessionTokenCache:   sc,
 		clientTLSConfig:     clientTLSConfig,
 		keyRotationInterval: keyRotationInterval,
 		forwardTransport:    clusterTransport,
@@ -260,6 +275,22 @@ func (s *Server) RegisterEpochKey(id string, sk *mlkem.DecapsulationKey768) {
 
 func (s *Server) GetClusterSignKey() *crypto.IdentityKey {
 	return s.getClusterSignKey()
+}
+
+func (s *Server) getClusterSignPubKey() []byte {
+	s.clusterSignPubKeyMu.RLock()
+	pub := s.clusterSignPubKey
+	s.clusterSignPubKeyMu.RUnlock()
+
+	if pub == nil {
+		if fetched, err := s.fsm.GetClusterSignPublicKey(); err == nil {
+			s.clusterSignPubKeyMu.Lock()
+			s.clusterSignPubKey = fetched
+			pub = fetched
+			s.clusterSignPubKeyMu.Unlock()
+		}
+	}
+	return pub
 }
 
 func (s *Server) getClusterSignKey() *crypto.IdentityKey {
@@ -402,7 +433,7 @@ func (s *Server) metricsFlusher() {
 			if s.raft.State() == raft.Leader {
 				snap := s.fsm.metrics.SnapshotAndReset()
 				data, _ := json.Marshal(snap)
-				s.ApplyRaftCommandInternal(CmdStoreMetrics, data, "")
+				s.applyRaftDirect(context.Background(), CmdStoreMetrics, data, "")
 			}
 		case <-s.stopCh:
 			return
@@ -427,7 +458,14 @@ func (s *Server) applyBatch(req batchRequest) {
 		Data:   data,
 		Atomic: false, // Server-aggregated batches MUST NOT be atomic to avoid cross-user interference
 	}
-	f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
+	b, err := cmd.Marshal()
+	if err != nil {
+		for _, ch := range req.resps {
+			ch <- fmt.Errorf("failed to marshal batch command: %w", err)
+		}
+		return
+	}
+	f := s.raft.Apply(b, 5*time.Second)
 	if err := f.Error(); err != nil {
 		for _, ch := range req.resps {
 			ch <- err
@@ -552,7 +590,7 @@ func (s *Server) RotateFSMKey() error {
 	}
 	data, _ := json.Marshal(req)
 
-	_, err := s.ApplyRaftCommandInternal(CmdRotateFSMKey, data, "")
+	_, err := s.ApplyRaftCommandInternal(context.Background(), CmdRotateFSMKey, data, "")
 	return err
 }
 
@@ -1030,10 +1068,24 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, status, http.StatusOK)
 }
 
+func (s *Server) getUser(id string) (*User, error) {
+	return s.fsm.GetUser(id)
+}
+
 func (s *Server) authenticate(r *http.Request) (*User, error) {
 	sess := r.Header.Get("Session-Token")
 	if sess == "" {
 		return nil, fmt.Errorf("missing session token")
+	}
+
+	// 0. Check Session Token Cache
+	if s.sessionTokenCache != nil {
+		if sessInfo, ok := s.sessionTokenCache.Get(sess); ok {
+			if time.Now().Unix() <= sessInfo.Expiry {
+				return sessInfo.User, nil
+			}
+			s.sessionTokenCache.Remove(sess)
+		}
 	}
 
 	b, err := base64.StdEncoding.DecodeString(sess)
@@ -1049,8 +1101,8 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	// Verify server's signature over the token
 	payload, _ := json.Marshal(st.Token)
 	valid := false
-	clusterPub, err := s.fsm.GetClusterSignPublicKey()
-	if err == nil && crypto.VerifySignature(clusterPub, payload, st.Signature) {
+	clusterPub := s.getClusterSignPubKey()
+	if clusterPub != nil && crypto.VerifySignature(clusterPub, payload, st.Signature) {
 		valid = true
 	} else if crypto.VerifySignature(s.signKey.Public(), payload, st.Signature) {
 		valid = true
@@ -1064,21 +1116,14 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 		return nil, fmt.Errorf("session expired")
 	}
 
-	var user User
-	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := s.fsm.Get(tx, []byte("users"), []byte(st.Token.UserID))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(plain, &user)
-	})
-	if err != nil {
-		return nil, err
+	user, err := s.fsm.GetUser(st.Token.UserID)
+	if err == nil && s.sessionTokenCache != nil {
+		s.sessionTokenCache.Add(sess, &cachedSession{
+			User:   user,
+			Expiry: st.Token.Expiry,
+		})
 	}
-	return &user, nil
+	return user, err
 }
 
 func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
@@ -1512,7 +1557,13 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 		SessionNonce: sessionNonce,
 	}
 
-	f := s.raft.Apply(logCmd.Marshal(), 10*time.Second)
+	b, err := logCmd.Marshal()
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to marshal batch command: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	f := s.raft.Apply(b, 10*time.Second)
 	if err := f.Error(); err != nil {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
@@ -1816,7 +1867,7 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 			var n Node
 			if err := json.Unmarshal(v, &n); err == nil {
 				age := time.Since(time.Unix(n.LastHeartbeat, 0))
-				if n.Status == NodeStatusActive && n.Address != "" && age < 5*time.Minute {
+				if n.Status == NodeStatusActive && n.Address != "" && age < 15*time.Minute {
 					nodes = append(nodes, n)
 				}
 			}
@@ -1829,6 +1880,20 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(nodes) == 0 {
+		var totalNodes int
+		s.fsm.db.View(func(tx *bolt.Tx) error {
+			s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
+				var n Node
+				if err := json.Unmarshal(v, &n); err == nil {
+					totalNodes++
+					age := time.Since(time.Unix(n.LastHeartbeat, 0))
+					log.Printf("handleAllocateChunk: rejected node %s (Status=%s, Address=%s, Age=%v)", n.ID, n.Status, n.Address, age)
+				}
+				return nil
+			})
+			return nil
+		})
+		log.Printf("handleAllocateChunk: no active nodes found (Total in FSM: %d)", totalNodes)
 		s.writeError(w, r, ErrCodeInternal, "no active nodes", http.StatusServiceUnavailable)
 		return
 	}
@@ -2164,7 +2229,7 @@ func (s *Server) removeNodeInternal(id string) error {
 
 	// 2. Remove from FSM (Registry & Trust)
 	data, _ := json.Marshal(id)
-	_, err := s.ApplyRaftCommandInternal(CmdRemoveNode, data, "")
+	_, err := s.ApplyRaftCommandInternal(context.Background(), CmdRemoveNode, data, "")
 	return err
 }
 
@@ -2295,7 +2360,7 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 	if user, ok := r.Context().Value(userContextKey).(*User); ok && user != nil {
 		userID = user.ID
 	}
-	resp, err := s.ApplyRaftCommandInternal(cmdType, data, userID)
+	resp, err := s.ApplyRaftCommandInternal(r.Context(), cmdType, data, userID)
 	if err != nil {
 		if w == nil {
 			return
@@ -2363,8 +2428,41 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 	}
 }
 
+func (s *Server) applyRaftDirect(ctx context.Context, cmdType CommandType, data []byte, userID string) (interface{}, error) {
+	cmd := &LogCommand{
+		Type:   cmdType,
+		Data:   data,
+		UserID: userID,
+	}
+	b, err := cmd.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal raft command: %w", err)
+	}
+
+	timeout := 5 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		t := time.Until(deadline)
+		if t < timeout {
+			timeout = t
+		}
+	}
+
+	f := s.raft.Apply(b, timeout)
+	if err := f.Error(); err != nil {
+		return nil, err
+	}
+	resp := f.Response()
+	if err, ok := resp.(error); ok {
+		return nil, err
+	}
+	if s, ok := resp.(string); ok && strings.HasPrefix(s, "api error:") {
+		return nil, fmt.Errorf("%s", s)
+	}
+	return resp, nil
+}
+
 // ApplyRaftCommandInternal proposes a command to Raft from an internal server context.
-func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, userID string) (interface{}, error) {
+func (s *Server) ApplyRaftCommandInternal(ctx context.Context, cmdType CommandType, data []byte, userID string) (interface{}, error) {
 	if s.raft.State() != raft.Leader {
 		return nil, fmt.Errorf("not leader")
 	}
@@ -2377,7 +2475,20 @@ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, user
 	}
 
 	if cmd.Atomic {
-		f := s.raft.Apply(cmd.Marshal(), 5*time.Second)
+		b, err := cmd.Marshal()
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal atomic command: %w", err)
+		}
+
+		timeout := 5 * time.Second
+		if deadline, ok := ctx.Deadline(); ok {
+			t := time.Until(deadline)
+			if t < timeout {
+				timeout = t
+			}
+		}
+
+		f := s.raft.Apply(b, timeout)
 		if err := f.Error(); err != nil {
 			return nil, err
 		}
@@ -2407,11 +2518,18 @@ func (s *Server) ApplyRaftCommandInternal(cmdType CommandType, data []byte, user
 	}
 	s.batchMu.Unlock()
 
-	res := <-respCh
-	if err, ok := res.(error); ok && err != nil {
-		return nil, err
+	select {
+	case res := <-respCh:
+		if err, ok := res.(error); ok && err != nil {
+			return nil, err
+		}
+		if s, ok := res.(string); ok && strings.HasPrefix(s, "api error:") {
+			return nil, fmt.Errorf("%s", s)
+		}
+		return res, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return res, nil
 }
 
 // FSM returns the underlying Metadata State Machine.
@@ -3532,7 +3650,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 					ts, payload, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
 					if err == nil {
 						// Success with cached key
-						if err := s.checkReplay(user.ID, ts); err != nil {
+						if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
 							return nil, err
 						}
 						// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
@@ -3597,7 +3715,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	}
 
 	// 3. Replay Protection
-	if err := s.checkReplay(user.ID, ts); err != nil {
+	if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
 		return nil, err
 	}
 
@@ -3606,13 +3724,18 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 	return payload, nil
 }
-func (s *Server) checkReplay(userID string, ts int64) error {
+func (s *Server) checkReplay(userID string, ts int64, ciphertext []byte) error {
 	now := time.Now().UnixNano()
 	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
 		return fmt.Errorf("request timestamp out of range")
 	}
 
-	nonce := userID + ":" + fmt.Sprintf("%d", ts)
+	// Phase 68 refinement: Include part of ciphertext in nonce to allow concurrent requests with same timestamp
+	snippet := ""
+	if len(ciphertext) > 16 {
+		snippet = hex.EncodeToString(ciphertext[:16])
+	}
+	nonce := userID + ":" + fmt.Sprintf("%d", ts) + ":" + snippet
 	s.requestNonceMu.Lock()
 	// Lazy GC
 	for k, v := range s.requestNonceCache {
@@ -3721,13 +3844,17 @@ func (s *Server) checkAndInitWorld() {
 	data, _ := json.Marshal(world)
 
 	cmd := LogCommand{
-
 		Type: CmdInitWorld,
-
 		Data: data,
 	}
 
-	future := s.raft.Apply(cmd.Marshal(), 10*time.Second)
+	b, err := cmd.Marshal()
+	if err != nil {
+		log.Printf("failed to marshal world init command: %v", err)
+		return
+	}
+
+	future := s.raft.Apply(b, 10*time.Second)
 
 	if err := future.Error(); err != nil {
 

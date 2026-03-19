@@ -15,14 +15,17 @@
 package data
 
 import (
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"iter"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/c2FmZQ/storage"
 )
@@ -35,6 +38,13 @@ type DiskStore struct {
 
 // NewDiskStore creates a new DiskStore backed by the provided encrypted storage.
 func NewDiskStore(st *storage.Storage) (*DiskStore, error) {
+	// Pre-create shard directories to avoid syscalls in WriteChunk
+	for i := 0; i < 256; i++ {
+		shard := fmt.Sprintf("%02x", i)
+		if err := os.MkdirAll(filepath.Join(st.Dir(), shard), 0700); err != nil {
+			return nil, fmt.Errorf("failed to create shard directory %s: %w", shard, err)
+		}
+	}
 	return &DiskStore{st: st}, nil
 }
 
@@ -51,29 +61,27 @@ func getShardPath(id string) string {
 }
 
 func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if !validChunkID.MatchString(id) {
 		return fmt.Errorf("invalid chunk id format")
 	}
 
 	name := getShardPath(id)
 
+	s.mu.Lock()
 	// Idempotency: If chunk exists, don't overwrite.
 	// This avoids race conditions with concurrent uploads of identical chunks (e.g. zeros).
 	if exists, _ := s.HasChunk(id); exists {
+		s.mu.Unlock()
 		return nil
 	}
 
-	// Ensure shard directory exists
-	shardDir := filepath.Dir(filepath.Join(s.st.Dir(), name))
-	if err := os.MkdirAll(shardDir, 0700); err != nil {
-		return err
-	}
-
 	wc, err := s.st.OpenBlobWrite(name, name)
+	s.mu.Unlock()
+
 	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return nil // Idempotency: another goroutine is writing it
+		}
 		return err
 	}
 
@@ -88,7 +96,22 @@ func (s *DiskStore) ReadChunk(id string) (io.ReadCloser, error) {
 	if !validChunkID.MatchString(id) {
 		return nil, fmt.Errorf("invalid chunk id format")
 	}
-	return s.st.OpenBlobRead(getShardPath(id))
+	path := getShardPath(id)
+
+	// Phase 68: Retry read a few times to handle races with concurrent writes
+	var rc io.ReadCloser
+	var err error
+	for i := 0; i < 5; i++ {
+		rc, err = s.st.OpenBlobRead(path)
+		if err == nil {
+			return rc, nil
+		}
+		if !os.IsNotExist(err) {
+			return nil, err
+		}
+		time.Sleep(time.Duration(i+1) * 10 * time.Millisecond)
+	}
+	return nil, err
 }
 
 func (s *DiskStore) HasChunk(id string) (bool, error) {

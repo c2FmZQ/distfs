@@ -69,7 +69,8 @@ func (c *Client) GetServerSignKey(ctx context.Context) ([]byte, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, c.newAPIError(resp, resp.Body)
+		body, _ := c.unsealResponse(ctx, resp)
+		return nil, c.newAPIError(resp, body)
 	}
 
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
@@ -103,7 +104,8 @@ func (c *Client) GetServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, c.newAPIError(resp, resp.Body)
+		body, _ := c.unsealResponse(ctx, resp)
+		return nil, c.newAPIError(resp, body)
 	}
 
 	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
@@ -309,6 +311,10 @@ type Client struct {
 	onLeaseExpired func(id string, err error)
 
 	registryDir string
+
+	allocCache  []metadata.Node
+	allocExpiry time.Time
+	allocMu     *sync.RWMutex
 }
 
 // GetRootID returns the ID of the root directory.
@@ -345,6 +351,7 @@ func NewClient(serverAddr string) *Client {
 		mutationLocks: make(map[string]*sync.Mutex),
 		rootID:        metadata.RootID,
 		rootMu:        &sync.RWMutex{},
+		allocMu:       &sync.RWMutex{},
 	}
 }
 
@@ -499,7 +506,8 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return c.newAPIError(resp, resp.Body)
+		body, _ := c.unsealResponse(ctx, resp)
+		return c.newAPIError(resp, body)
 	}
 
 	var challengeRes metadata.AuthChallengeResponse
@@ -545,7 +553,8 @@ func (c *Client) Login(ctx context.Context) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return c.newAPIError(resp, resp.Body)
+		body, _ := c.unsealResponse(ctx, resp)
+		return c.newAPIError(resp, body)
 	}
 
 	var res metadata.SessionResponse
@@ -756,6 +765,9 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 	data, _ := json.Marshal(sr)
 	req.Body = io.NopCloser(bytes.NewReader(data))
 	req.ContentLength = int64(len(data))
+	req.GetBody = func() (io.ReadCloser, error) {
+		return io.NopCloser(bytes.NewReader(data)), nil
+	}
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Content-Type", "application/json")
 	if c.admin {
@@ -824,6 +836,14 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 }
 
 func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
+	c.allocMu.RLock()
+	if time.Now().Before(c.allocExpiry) && len(c.allocCache) > 0 {
+		nodes := c.allocCache
+		c.allocMu.RUnlock()
+		return nodes, nil
+	}
+	c.allocMu.RUnlock()
+
 	var nodes []metadata.Node
 	err := c.withRetry(ctx, func() error {
 		if err := c.acquireControl(ctx); err != nil {
@@ -849,7 +869,8 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
-			return c.newAPIError(resp, resp.Body)
+			body, _ := c.unsealResponse(ctx, resp)
+			return c.newAPIError(resp, body)
 		}
 
 		body, err := c.unsealResponse(ctx, resp)
@@ -859,6 +880,7 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return json.NewDecoder(body).Decode(&nodes)
@@ -867,6 +889,12 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 	if err != nil {
 		return nil, fmt.Errorf("node allocation failed after retries: %w", err)
 	}
+
+	c.allocMu.Lock()
+	c.allocCache = nodes
+	c.allocExpiry = time.Now().Add(1 * time.Minute)
+	c.allocMu.Unlock()
+
 	return nodes, nil
 }
 
@@ -907,6 +935,7 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 
@@ -963,7 +992,8 @@ func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes 
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, resp.Body)
+			body, _ := c.unsealResponse(ctx, resp)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -995,7 +1025,8 @@ func (c *Client) deleteChunk(ctx context.Context, id string, nodes []metadata.No
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNotFound {
-			return c.newAPIError(resp, resp.Body)
+			body, _ := c.unsealResponse(ctx, resp)
+			return c.newAPIError(resp, body)
 		}
 		return nil
 	})
@@ -1074,7 +1105,8 @@ func (c *Client) GetNodes(ctx context.Context) ([]metadata.Node, error) {
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, resp.Body)
+			body, _ := c.unsealResponse(ctx, resp)
+			return c.newAPIError(resp, body)
 		}
 
 		var res struct {
@@ -1161,7 +1193,8 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				defer resp.Body.Close()
 
 				if resp.StatusCode != http.StatusOK {
-					resCh <- result{err: c.newAPIError(resp, resp.Body)}
+					body, _ := c.unsealResponse(lctx, resp)
+					resCh <- result{err: c.newAPIError(resp, body)}
 					return
 				}
 
@@ -1288,6 +1321,7 @@ func (c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEnt
 			defer body.Close()
 
 			if res.StatusCode != http.StatusOK {
+				body, _ := c.unsealResponse(ctx, res)
 				return c.newAPIError(res, body)
 			}
 
@@ -1357,6 +1391,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 
@@ -1567,6 +1602,7 @@ func (c *Client) ApplyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 
@@ -1653,6 +1689,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 
@@ -1746,6 +1783,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 			defer body.Close()
 
 			if resp.StatusCode != http.StatusOK {
+				body, _ := c.unsealResponse(ctx, resp)
 				return c.newAPIError(resp, body)
 			}
 			return json.NewDecoder(body).Decode(&chunkInodes)
@@ -1920,57 +1958,112 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 }
 
 func (c *Client) uploadDataInternal(ctx context.Context, id string, fileKey []byte, r io.Reader, size int64) ([]byte, []metadata.ChunkEntry, error) {
-	var inlineData []byte
-	var chunkEntries []metadata.ChunkEntry
-
 	if size <= metadata.InlineLimit {
-		var err error
-		inlineData, err = io.ReadAll(r)
+		inlineData, err := io.ReadAll(r)
 		if err != nil {
 			return nil, nil, err
 		}
-	} else {
-		// Chunk Path
-		buf := make([]byte, crypto.ChunkSize)
-		var chunkIndex uint64
+		return inlineData, nil, nil
+	}
 
+	type chunkResult struct {
+		index uint64
+		entry metadata.ChunkEntry
+		err   error
+	}
+
+	resCh := make(chan chunkResult)
+	var wg sync.WaitGroup
+	var chunkIndex uint64
+	var readErr error
+
+	// Worker semaphore to limit concurrency
+	workerSem := make(chan struct{}, 8)
+
+	go func() {
+		defer close(resCh)
+		buf := make([]byte, crypto.ChunkSize)
 		for {
 			n, err := io.ReadFull(r, buf)
 			if n > 0 {
-				chunkData := buf[:n]
-				cid, ct, err := crypto.EncryptChunk(fileKey, chunkData, chunkIndex)
-				if err != nil {
-					return nil, nil, err
-				}
+				chunkData := make([]byte, n)
+				copy(chunkData, buf[:n])
+				idx := chunkIndex
 				chunkIndex++
 
-				token, err := c.issueToken(ctx, id, []string{cid}, "W")
-				if err != nil {
-					return nil, nil, fmt.Errorf("token issue failed: %w", err)
-				}
-				nodes, err := c.allocateNodes(ctx)
-				if err != nil {
-					return nil, nil, fmt.Errorf("allocation failed: %w", err)
-				}
-				if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
-					return nil, nil, err
-				}
+				wg.Add(1)
+				go func(data []byte, i uint64) {
+					defer wg.Done()
+					workerSem <- struct{}{}
+					defer func() { <-workerSem }()
 
-				var nodeIDs []string
-				for _, node := range nodes {
-					nodeIDs = append(nodeIDs, node.ID)
-				}
-				chunkEntries = append(chunkEntries, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
+					cid, ct, err := crypto.EncryptChunk(fileKey, data, i)
+					if err != nil {
+						resCh <- chunkResult{err: err}
+						return
+					}
+
+					token, err := c.issueToken(ctx, id, []string{cid}, "W")
+					if err != nil {
+						resCh <- chunkResult{err: fmt.Errorf("token issue failed: %w", err)}
+						return
+					}
+					nodes, err := c.allocateNodes(ctx)
+					if err != nil {
+						resCh <- chunkResult{err: fmt.Errorf("allocation failed: %w", err)}
+						return
+					}
+					if err := c.uploadChunk(ctx, cid, ct, nodes, token); err != nil {
+						resCh <- chunkResult{err: err}
+						return
+					}
+
+					var nodeIDs []string
+					for _, node := range nodes {
+						nodeIDs = append(nodeIDs, node.ID)
+					}
+					resCh <- chunkResult{index: i, entry: metadata.ChunkEntry{ID: cid, Nodes: nodeIDs}}
+				}(chunkData, idx)
 			}
 			if err == io.EOF || err == io.ErrUnexpectedEOF {
 				break
 			}
 			if err != nil {
-				return nil, nil, err
+				readErr = err
+				break
 			}
 		}
+		wg.Wait()
+	}()
+
+	results := make(map[uint64]metadata.ChunkEntry)
+	var firstErr error
+	var count uint64
+
+	for res := range resCh {
+		if res.err != nil {
+			if firstErr == nil {
+				firstErr = res.err
+			}
+			continue
+		}
+		results[res.index] = res.entry
+		count++
 	}
-	return inlineData, chunkEntries, nil
+
+	if readErr != nil {
+		return nil, nil, readErr
+	}
+	if firstErr != nil {
+		return nil, nil, firstErr
+	}
+
+	var chunkEntries []metadata.ChunkEntry
+	for i := uint64(0); i < chunkIndex; i++ {
+		chunkEntries = append(chunkEntries, results[i])
+	}
+
+	return nil, chunkEntries, nil
 }
 
 // WriteFile writes a file. Returns the FileKey used.
@@ -3601,7 +3694,6 @@ func (c *Client) VerifyInode(ctx context.Context, inode *metadata.Inode) error {
 	if err != nil {
 		return fmt.Errorf("failed to fetch signer %s: %w", signerID, err)
 	}
-	logger.Debugf("DEBUG CLIENT: VerifyInode %s (v%d): hash=%x sig=%x pk=%x", inode.ID, inode.Version, hash, inode.UserSig, user.SignKey)
 	if !crypto.VerifySignature(user.SignKey, hash, inode.UserSig) {
 		return fmt.Errorf("invalid manifest signature by %s", signerID)
 	}
@@ -4229,7 +4321,8 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 		}
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, resp.Body)
+			body, _ := c.unsealResponse(ctx, resp)
+			return c.newAPIError(resp, body)
 		}
 		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
 			return err
@@ -4744,10 +4837,10 @@ func (c *Client) releaseData() {
 
 func (c *Client) withRetry(ctx context.Context, op func() error) error {
 	var lastErr error
-	backoff := 100 * time.Millisecond
-	maxBackoff := 10 * time.Second
+	backoff := 50 * time.Millisecond
+	maxBackoff := 500 * time.Millisecond
 
-	for i := 0; i < 5; i++ {
+	for i := 0; ; i++ {
 		err := op()
 		if err == nil {
 			return nil
@@ -4758,10 +4851,17 @@ func (c *Client) withRetry(ctx context.Context, op func() error) error {
 			return err
 		}
 
-		// Exponential backoff with jitter (optimized global PRNG)
+		if i > 0 && i%10 == 0 {
+			log.Printf("withRetry: still retrying after %d attempts, last error: %v", i, err)
+		}
+
+		// Exponential backoff with jitter
 		jitter := time.Duration(mrand.Int63n(int64(backoff / 2)))
 		select {
 		case <-ctx.Done():
+			if lastErr != nil {
+				return fmt.Errorf("%w: %v", ctx.Err(), lastErr)
+			}
 			return ctx.Err()
 		case <-time.After(backoff + jitter):
 		}
@@ -4771,7 +4871,6 @@ func (c *Client) withRetry(ctx context.Context, op func() error) error {
 			backoff = maxBackoff
 		}
 	}
-	return fmt.Errorf("operation failed after retries: %w", lastErr)
 }
 
 func (c *Client) isRetryable(err error) bool {
@@ -4807,17 +4906,26 @@ func (c *Client) isRetryable(err error) bool {
 		strings.Contains(msg, "connection reset") ||
 		strings.Contains(msg, "connection aborted") ||
 		strings.Contains(msg, "timeout") ||
+		strings.Contains(msg, "busy") ||
+		strings.Contains(msg, "retry") ||
+		strings.Contains(msg, "resource temporarily unavailable") ||
 		errors.Is(err, io.EOF) ||
 		errors.Is(err, io.ErrUnexpectedEOF) {
+		// If it's a "not found" error, clear cache before retry to handle eventual consistency
+		if strings.Contains(msg, "no such file") {
+			c.clearPathCache()
+		}
 		return true
 	}
 
 	// 3. API errors
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
+		if apiErr.StatusCode == http.StatusForbidden {
+			return false
+		}
 		if apiErr.StatusCode == http.StatusServiceUnavailable ||
 			apiErr.StatusCode == http.StatusTooManyRequests ||
-			apiErr.StatusCode == http.StatusInternalServerError ||
 			apiErr.Code == metadata.ErrCodeNotLeader {
 			return true
 		}
@@ -4847,7 +4955,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 			(apiErr != nil && apiErr.Code == metadata.ErrCodeVersionConflict) ||
 			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired)
 
-		if isConflict {
+		if isConflict || c.isRetryable(err) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -4894,7 +5002,8 @@ func (c *Client) GetClusterStats(ctx context.Context) (*metadata.ClusterStats, e
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, resp.Body)
+			body, _ := c.unsealResponse(ctx, resp)
+			return c.newAPIError(resp, body)
 		}
 
 		return json.NewDecoder(resp.Body).Decode(&stats)
@@ -4968,6 +5077,7 @@ func (c *Client) AcquireLeases(ctx context.Context, ids []string, duration time.
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5019,6 +5129,7 @@ func (c *Client) ReleaseLeases(ctx context.Context, ids []string, nonce string) 
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5055,6 +5166,7 @@ func (c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, e
 			defer body.Close()
 
 			if resp.StatusCode != http.StatusOK {
+				body, _ := c.unsealResponse(ctx, resp)
 				return c.newAPIError(resp, body)
 			}
 
@@ -5112,6 +5224,7 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 				defer body.Close()
 
 				if resp.StatusCode != http.StatusOK {
+					body, _ := c.unsealResponse(ctx, resp)
 					return c.newAPIError(resp, body)
 				}
 
@@ -5168,6 +5281,7 @@ func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseI
 			defer body.Close()
 
 			if resp.StatusCode != http.StatusOK {
+				body, _ := c.unsealResponse(ctx, resp)
 				return c.newAPIError(resp, body)
 			}
 
@@ -5217,6 +5331,7 @@ func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 			defer body.Close()
 
 			if resp.StatusCode != http.StatusOK {
+				body, _ := c.unsealResponse(ctx, resp)
 				return c.newAPIError(resp, body)
 			}
 
@@ -5260,6 +5375,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 
@@ -5350,6 +5466,7 @@ func (c *Client) AdminAudit(ctx context.Context, handler func(metadata.AuditReco
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 
@@ -5493,6 +5610,7 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5530,6 +5648,7 @@ func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5567,6 +5686,7 @@ func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5608,6 +5728,7 @@ func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked boo
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5645,6 +5766,7 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil
@@ -5682,6 +5804,7 @@ func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQu
 		defer body.Close()
 
 		if resp.StatusCode != http.StatusOK {
+			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 		return nil

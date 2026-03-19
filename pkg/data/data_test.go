@@ -60,7 +60,11 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		Mode:    0644,
 	}
 	inodeBytes, _ := json.Marshal(inode)
-	f := node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdCreateInode, Data: inodeBytes}.Marshal(), 5*time.Second)
+	lcmdBytes, err := metadata.LogCommand{Type: metadata.CmdCreateInode, Data: inodeBytes}.Marshal()
+	if err != nil {
+		t.Fatalf("LogCommand Marshal failed: %v", err)
+	}
+	f := node.Raft.Apply(lcmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("CreateInode failed: %v", err)
 	}
@@ -264,19 +268,20 @@ func TestDiskStore_WriteError(t *testing.T) {
 	st, _ := createTestStorage(t, tmpDir)
 	store, _ := NewDiskStore(st)
 
-	// Make dir read-only to force write error
-	if err := os.Chmod(tmpDir, 0500); err != nil {
-		t.Skip("Cannot chmod")
-	}
-
 	h := sha256.Sum256([]byte("fail"))
 	id := hex.EncodeToString(h[:])
+
+	// Make shard dir read-only to force write error
+	shardDir := filepath.Join(tmpDir, id[:2])
+	if err := os.Chmod(shardDir, 0500); err != nil {
+		t.Skip("Cannot chmod")
+	}
 
 	if err := store.WriteChunk(id, bytes.NewReader([]byte("fail"))); err == nil {
 		t.Error("Expected error writing to readonly dir")
 	}
 
-	os.Chmod(tmpDir, 0755) // Restore
+	os.Chmod(shardDir, 0755) // Restore
 }
 
 func TestAPI(t *testing.T) {
@@ -791,9 +796,10 @@ func TestData_DiskStoreErrors(t *testing.T) {
 
 	// 3. WriteChunk directory error
 	id := "2222222222222222222222222222222222222222222222222222222222222222"
-	// Make root store dir read-only
-	os.Chmod(ds.st.Dir(), 0500)
-	defer os.Chmod(ds.st.Dir(), 0700)
+	// Make shard store dir read-only
+	shardDir = filepath.Join(ds.st.Dir(), id[:2])
+	os.Chmod(shardDir, 0500)
+	defer os.Chmod(shardDir, 0700)
 
 	err = ds.WriteChunk(id, bytes.NewReader([]byte("data")))
 	if err == nil {
@@ -1068,9 +1074,10 @@ func TestData_API_PutError(t *testing.T) {
 
 	id := strings.Repeat("a", 64)
 
-	// Make root dir read-only
-	os.Chmod(tmpDir, 0500)
-	defer os.Chmod(tmpDir, 0700)
+	// Make shard dir read-only
+	shardDir := filepath.Join(tmpDir, id[:2])
+	os.Chmod(shardDir, 0500)
+	defer os.Chmod(shardDir, 0700)
 
 	token := signToken(t, usk, []string{id}, "W")
 	req, _ := http.NewRequest("PUT", "/v1/data/"+id, bytes.NewReader([]byte("data")))
@@ -1105,17 +1112,17 @@ func TestData_DiskStore_WriteErrors(t *testing.T) {
 
 	id := strings.Repeat("b", 64)
 
-	// 1. MkdirAll failure
-	// Make root dir read-only
-	os.Chmod(tmpDir, 0500)
+	// 1. MkdirAll failure (simulated by making shard dir read-only since they're pre-created)
+	shardDir := filepath.Join(tmpDir, id[:2])
+	os.Chmod(shardDir, 0500)
 	err := ds.WriteChunk(id, bytes.NewReader([]byte("data")))
 	if err == nil {
-		t.Error("Expected MkdirAll to fail")
+		t.Error("Expected write to fail for read-only shard directory")
 	}
-	os.Chmod(tmpDir, 0700)
+	os.Chmod(shardDir, 0700)
 
 	// 2. Create failure
-	shardDir := filepath.Join(tmpDir, id[:2])
+	shardDir = filepath.Join(tmpDir, id[:2])
 	os.MkdirAll(shardDir, 0700)
 	os.Chmod(shardDir, 0500)
 	err = ds.WriteChunk(id, bytes.NewReader([]byte("data")))

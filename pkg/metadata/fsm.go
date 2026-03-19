@@ -34,6 +34,7 @@ import (
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/logger"
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
@@ -78,6 +79,8 @@ type MetadataFSM struct {
 	trusted       map[string]bool
 	mu            sync.RWMutex
 
+	userCache *lru.TwoQueueCache[string, *User]
+
 	metrics *MetricsCollector
 }
 
@@ -97,12 +100,15 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		db.Close()
 		return nil, err
 	}
+	uc, _ := lru.New2Q[string, *User](1024)
+
 	fsm := &MetadataFSM{
 		nodeID:        nodeID,
 		db:            db,
 		path:          path,
 		clusterSecret: clusterSecret,
 		trusted:       make(map[string]bool),
+		userCache:     uc,
 		metrics:       NewMetricsCollector(),
 	}
 	db.Update(func(tx *bolt.Tx) error {
@@ -960,6 +966,10 @@ func (fsm *MetadataFSM) executeCreateUser(tx *bolt.Tx, data []byte) interface{} 
 	fsm.Put(tx, []byte("users"), []byte(user.ID), encoded)
 	fsm.Put(tx, []byte("uids"), uint32ToBytes(user.UID), []byte(user.ID))
 
+	if fsm.userCache != nil {
+		fsm.userCache.Remove(user.ID)
+	}
+
 	// Bootstrap: First user is admin
 	if isFirst {
 		logger.Debugf("DEBUG FSM [%s]: Bootstrapping first user %s as admin", fsm.nodeID, user.ID)
@@ -975,6 +985,9 @@ func (fsm *MetadataFSM) executePromoteAdmin(tx *bolt.Tx, data []byte) interface{
 		userID = string(data)
 	}
 	logger.Debugf("DEBUG FSM PromoteAdmin [%s]: promoting user %s", fsm.nodeID, userID)
+	if fsm.userCache != nil {
+		fsm.userCache.Remove(userID)
+	}
 	return fsm.Put(tx, []byte("admins"), []byte(userID), []byte("true"))
 }
 
@@ -1170,6 +1183,9 @@ func (fsm *MetadataFSM) executeSetUserQuota(tx *bolt.Tx, data []byte) interface{
 		user.Quota.MaxInodes = int64(*req.MaxInodes)
 	}
 	encoded, _ := json.Marshal(user)
+	if fsm.userCache != nil {
+		fsm.userCache.Remove(req.UserID)
+	}
 	return fsm.Put(tx, []byte("users"), []byte(req.UserID), encoded)
 }
 
@@ -1196,6 +1212,9 @@ func (fsm *MetadataFSM) executeAdminSetUserLock(tx *bolt.Tx, data []byte) interf
 
 	user.Locked = req.Locked
 	encoded, _ := json.Marshal(user)
+	if fsm.userCache != nil {
+		fsm.userCache.Remove(req.UserID)
+	}
 	return fsm.Put(tx, []byte("users"), []byte(req.UserID), encoded)
 }
 
@@ -1720,6 +1739,41 @@ func (fsm *MetadataFSM) GetClusterSignPrivateKey() ([]byte, error) {
 		return nil
 	})
 	return priv, err
+}
+
+func (fsm *MetadataFSM) GetUser(userID string) (*User, error) {
+	if fsm.userCache != nil {
+		if u, ok := fsm.userCache.Get(userID); ok {
+			return u, nil
+		}
+	}
+
+	var user User
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		plain, err := fsm.Get(tx, []byte("users"), []byte(userID))
+		if err != nil {
+			return err
+		}
+		if plain == nil {
+			return ErrNotFound
+		}
+		if err := json.Unmarshal(plain, &user); err != nil {
+			return err
+		}
+
+		// Phase 68: Check admin status in separate bucket
+		v, _ := fsm.Get(tx, []byte("admins"), []byte(userID))
+		user.IsAdmin = v != nil
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	if fsm.userCache != nil {
+		fsm.userCache.Add(userID, &user)
+	}
+	return &user, nil
 }
 
 func (fsm *MetadataFSM) GetClusterSecret() ([]byte, error) {

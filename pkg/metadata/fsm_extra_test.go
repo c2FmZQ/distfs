@@ -58,7 +58,11 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 	}
 	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
+	ib, err := LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: ib})
 
 	// 2. Add Replica
 	req := AddReplicaRequest{
@@ -67,9 +71,13 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 		NodeIDs: []string{"n2"},
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAddChunkReplica, Data: rb}.Marshal()})
+	rbb, err := LogCommand{Type: CmdAddChunkReplica, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rbb})
 
-	err := fsm.db.View(func(tx *bolt.Tx) error {
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		var res Inode
 		json.Unmarshal(v, &res)
@@ -96,7 +104,11 @@ func TestFSM_AddChild_Success(t *testing.T) {
 	p1 := Inode{ID: "p1", Type: DirType, OwnerID: "u1", NLink: 1}
 	p1.SignInodeForTest("u1", sk)
 	pb1, _ := json.Marshal(p1)
-	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: pb1, UserID: "u1"}.Marshal()})
+	p1b, err := LogCommand{Type: CmdCreateInode, Data: pb1, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := fsm.Apply(&raft.Log{Data: p1b})
 	if fsm.containsError(res) {
 		t.Fatalf("Create parent failed: %v", res)
 	}
@@ -104,7 +116,11 @@ func TestFSM_AddChild_Success(t *testing.T) {
 	c1 := Inode{ID: "c1", Type: FileType, OwnerID: "u1", NLink: 1}
 	c1.SignInodeForTest("u1", sk)
 	cb1, _ := json.Marshal(c1)
-	res = fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: cb1, UserID: "u1"}.Marshal()})
+	c1b, err := LogCommand{Type: CmdCreateInode, Data: cb1, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = fsm.Apply(&raft.Log{Data: c1b})
 	if fsm.containsError(res) {
 		t.Fatalf("Create child failed: %v", res)
 	}
@@ -118,7 +134,11 @@ func TestFSM_AddChild_Success(t *testing.T) {
 		Type:      LeaseExclusive,
 	}
 	lb, _ := json.Marshal(lReq)
-	res = fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: lb, UserID: "u1", SessionNonce: "session1"}.Marshal()})
+	lbBytes, err := LogCommand{Type: CmdAcquireLeases, Data: lb, UserID: "u1", SessionNonce: "session1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = fsm.Apply(&raft.Log{Data: lbBytes})
 	if fsm.containsError(res) {
 		t.Fatalf("Acquire lease failed: %v", res)
 	}
@@ -149,7 +169,11 @@ func TestFSM_AddChild_Success(t *testing.T) {
 		UserID:       "u1",
 		SessionNonce: "session1",
 	}
-	res = fsm.Apply(&raft.Log{Data: batch.Marshal()})
+	bb, err := batch.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = fsm.Apply(&raft.Log{Data: bb})
 	if fsm.containsError(res) {
 		t.Fatalf("Batch Apply failed: %v", res)
 	}
@@ -177,7 +201,11 @@ func TestFSM_SetGroupQuota_Success(t *testing.T) {
 	// 1. Create Group
 	g1 := Group{ID: "g1", GID: 5000, QuotaEnabled: true}
 	gb1, _ := json.Marshal(g1)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateGroup, Data: gb1}.Marshal()})
+	bb, err := LogCommand{Type: CmdCreateGroup, Data: gb1}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: bb})
 
 	// 2. Set Quota
 	req := SetGroupQuotaRequest{
@@ -186,9 +214,13 @@ func TestFSM_SetGroupQuota_Success(t *testing.T) {
 		MaxBytes:  ptr(uint64(1000)),
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetGroupQuota, Data: rb}.Marshal()})
+	rbBytes, err := LogCommand{Type: CmdSetGroupQuota, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rbBytes})
 
-	err := fsm.db.View(func(tx *bolt.Tx) error {
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("groups"), []byte("g1"))
 		var res Group
 		json.Unmarshal(v, &res)
@@ -207,7 +239,11 @@ func TestFSM_SetGroupQuota_Errors(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Malformed
-	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetGroupQuota, Data: MustMarshalJSON("invalid")}.Marshal()})
+	invalidCmd, err := LogCommand{Type: CmdSetGroupQuota, Data: MustMarshalJSON("invalid")}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := fsm.Apply(&raft.Log{Data: invalidCmd})
 	if _, ok := res.(error); !ok {
 		t.Error("Expected error for malformed SetGroupQuota")
 	}
@@ -215,7 +251,11 @@ func TestFSM_SetGroupQuota_Errors(t *testing.T) {
 	// 2. Group not found
 	req := SetGroupQuotaRequest{GroupID: "missing"}
 	rb, _ := json.Marshal(req)
-	res = fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdSetGroupQuota, Data: rb}.Marshal()})
+	rbBytes, err := LogCommand{Type: CmdSetGroupQuota, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res = fsm.Apply(&raft.Log{Data: rbBytes})
 	if res != ErrNotFound {
 		t.Errorf("Expected ErrNotFound for missing group, got %v", res)
 	}
@@ -230,9 +270,13 @@ func TestFSM_StoreKeySync_Success(t *testing.T) {
 		Blob:   KeySyncBlob{KDF: "argon2", Salt: []byte("salt"), Ciphertext: []byte("ct")},
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdStoreKeySync, Data: rb}.Marshal()})
+	rbBytes, err := LogCommand{Type: CmdStoreKeySync, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rbBytes})
 
-	err := fsm.db.View(func(tx *bolt.Tx) error {
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("keysync"), []byte("u1"))
 		var res KeySyncBlob
 		json.Unmarshal(v, &res)
@@ -251,7 +295,11 @@ func TestFSM_StoreKeySync_Errors(t *testing.T) {
 	defer fsm.Close()
 
 	// 1. Malformed
-	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdStoreKeySync, Data: MustMarshalJSON("invalid")}.Marshal()})
+	invalidCmd, err := LogCommand{Type: CmdStoreKeySync, Data: MustMarshalJSON("invalid")}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := fsm.Apply(&raft.Log{Data: invalidCmd})
 	if _, ok := res.(error); !ok {
 		t.Error("Expected error for malformed StoreKeySync")
 	}
@@ -270,7 +318,11 @@ func TestFSM_Leases_Full(t *testing.T) {
 		SessionID: "session1",
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: rb}.Marshal()})
+	rbBytes, err := LogCommand{Type: CmdAcquireLeases, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rbBytes})
 
 	// 2. Release
 	req2 := LeaseRequest{
@@ -279,7 +331,11 @@ func TestFSM_Leases_Full(t *testing.T) {
 		SessionID: "session1",
 	}
 	rb2, _ := json.Marshal(req2)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReleaseLeases, Data: rb2}.Marshal()})
+	rb2Bytes, err := LogCommand{Type: CmdReleaseLeases, Data: rb2}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rb2Bytes})
 }
 
 func TestFSM_KeyRotation_Full(t *testing.T) {
@@ -292,7 +348,11 @@ func TestFSM_KeyRotation_Full(t *testing.T) {
 		Gen:    2,
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdRotateFSMKey, Data: rb}.Marshal()})
+	rbBytes, err := LogCommand{Type: CmdRotateFSMKey, Data: rb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rbBytes})
 
 	// 2. Reencrypt Value
 	req2 := ReencryptRequest{
@@ -300,7 +360,11 @@ func TestFSM_KeyRotation_Full(t *testing.T) {
 		Key:    []byte("cluster_secret"),
 	}
 	rb2, _ := json.Marshal(req2)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReencryptValue, Data: rb2}.Marshal()})
+	rb2Bytes, err := LogCommand{Type: CmdReencryptValue, Data: rb2}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rb2Bytes})
 }
 
 func TestFSM_NodeMgmt_Extra(t *testing.T) {
@@ -309,7 +373,11 @@ func TestFSM_NodeMgmt_Extra(t *testing.T) {
 
 	node := Node{ID: "n1", Address: "http://n1:8080", RaftAddress: "127.0.0.1:9090", Status: NodeStatusActive}
 	nb, _ := json.Marshal(node)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdRegisterNode, Data: nb}.Marshal()})
+	nbBytes, err := LogCommand{Type: CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: nbBytes})
 
 	// 1. ValidateNode
 	if err := fsm.ValidateNode("http://n1:8080"); err != nil {
@@ -365,7 +433,11 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 	}
 	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
+	ib, err := LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: ib})
 
 	// Acquire exclusive lease for update
 	lReq := LeaseRequest{
@@ -375,7 +447,11 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 		Type:      LeaseExclusive,
 	}
 	lb, _ := json.Marshal(lReq)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: lb}.Marshal()})
+	lbBytes, err := LogCommand{Type: CmdAcquireLeases, Data: lb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: lbBytes})
 
 	// 1. enqueueGC (via UpdateInode with NLink=0)
 	inode.NLink = 0
@@ -388,7 +464,11 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 		UserID:       "u1",
 		SessionNonce: "s1",
 	}
-	res := fsm.Apply(&raft.Log{Data: cmdUpdate.Marshal()})
+	ib2, err = cmdUpdate.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := fsm.Apply(&raft.Log{Data: ib2})
 	if fsm.containsError(res) {
 		t.Fatalf("UpdateInode failed: %v", res)
 	}
@@ -399,9 +479,13 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 		SessionID: "s1",
 	}
 	relB, _ := json.Marshal(relReq)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdReleaseLeases, Data: relB, UserID: "u1"}.Marshal()})
+	relBBytes, err := LogCommand{Type: CmdReleaseLeases, Data: relB, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: relBBytes})
 
-	err := fsm.db.View(func(tx *bolt.Tx) error {
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("garbage_collection"))
 		v := b.Get([]byte("c1"))
 		if v == nil {
@@ -440,7 +524,11 @@ func TestFSM_GetLeases_Extra(t *testing.T) {
 		Placeholders: []Inode{placeholder},
 	}
 	rb, _ := json.Marshal(req)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdAcquireLeases, Data: rb, UserID: "u1"}.Marshal()})
+	rbBytes, err := LogCommand{Type: CmdAcquireLeases, Data: rb, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: rbBytes})
 
 	// 2. GetLeases
 	leases, err := fsm.GetLeases()
@@ -466,7 +554,11 @@ func TestFSM_SetAttr_Extra(t *testing.T) {
 	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, Mode: 0600, OwnerID: "u1"}
 	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
+	ib, err := LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: ib})
 
 	// 2. SetAttr via UpdateInode
 	inode.NLink = 1
@@ -474,9 +566,13 @@ func TestFSM_SetAttr_Extra(t *testing.T) {
 	inode.Version = 2
 	inode.SignInodeForTest("u1", sk)
 	ib2, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: ib2, UserID: "u1"}.Marshal()})
+	ib2b, err := LogCommand{Type: CmdUpdateInode, Data: ib2, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: ib2b})
 
-	err := fsm.db.View(func(tx *bolt.Tx) error {
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		var res Inode
 		json.Unmarshal(v, &res)
@@ -514,7 +610,11 @@ func TestFSM_Restore_Full(t *testing.T) {
 	inode := Inode{ID: "00000000000000000000000000000001", Type: FileType, OwnerID: "u1", Version: 1}
 	inode.SignInodeForTest("u1", sk)
 	ib, _ := json.Marshal(inode)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()})
+	ib, err := LogCommand{Type: CmdCreateInode, Data: ib, UserID: "u1"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fsm.Apply(&raft.Log{Data: ib})
 
 	// 2. Snapshot
 	snap, _ := fsm.Snapshot()
@@ -527,13 +627,13 @@ func TestFSM_Restore_Full(t *testing.T) {
 	fsm2, _ := NewMetadataFSM("node2", tmpDir2+"/fsm.db", []byte("test-cluster-secret"))
 	defer fsm2.Close()
 
-	err := fsm2.Restore(io.NopCloser(bytes.NewReader(buf.Bytes())))
+	err = fsm2.Restore(io.NopCloser(bytes.NewReader(buf.Bytes())))
 	if err != nil {
 		t.Fatalf("Restore failed: %v", err)
 	}
 
 	// 4. Verify data
-	err = fsm2.db.View(func(tx *bolt.Tx) error {
+	err = fsm.db.View(func(tx *bolt.Tx) error {
 		v, _ := fsm2.Get(tx, []byte("inodes"), []byte("00000000000000000000000000000001"))
 		if v == nil {
 			return fmt.Errorf("00000000000000000000000000000001 not found after restore")

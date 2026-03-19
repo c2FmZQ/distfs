@@ -239,12 +239,21 @@ func TestClient_AdminMethods(t *testing.T) {
 	var count int
 
 	// Promote user to admin in FSM directly
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: []byte("u1")}.Marshal(), 5*time.Second)
+	u1id, _ := json.Marshal("u1")
+	u1b, err := metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: u1id}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(u1b, 5*time.Second)
 
 	// Register a node
 	nodeInfo := metadata.Node{ID: "n1", Address: "http://127.0.0.1:8080", Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
-	node.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second)
+	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(nbb, 5*time.Second)
 
 	time.Sleep(100 * time.Millisecond) // Wait for apply
 

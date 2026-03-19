@@ -53,7 +53,11 @@ func TestManifestIntegrity(t *testing.T) {
 	createUser(t, raftNode, uA)
 	// Promote to Admin
 	uAIDBytes, _ := json.Marshal(adminID)
-	raftNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes}.Marshal(), 5*time.Second)
+	uAIDCmdBytes, err := metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal admin promote command: %v", err)
+	}
+	raftNode.Raft.Apply(uAIDCmdBytes, 5*time.Second)
 
 	// 2.2 User B
 	userID := "user-b"

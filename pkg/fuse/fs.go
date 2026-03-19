@@ -169,7 +169,9 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 
 	if d.inode == nil {
 		if d.isRoot {
-			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err == nil {
+			if inode, key, err := d.fs.client.ResolvePath(ctx, "/"); err != nil {
+				log.Printf("ResolvePath: %v", err)
+			} else {
 				d.inode = inode
 				d.key = key
 			}
@@ -183,6 +185,7 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	// Freshness check: only refetch if older than 100ms
 	forceRefresh := d.lastUpdate.IsZero()
 	since := time.Since(d.lastUpdate)
+	var refreshErr error
 	if forceRefresh || since > 100*time.Millisecond {
 		id := d.inode.ID
 		d.mu.Unlock() // Release lock for network call
@@ -209,9 +212,12 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 		if err == nil {
 			d.inode = updated
 			d.lastUpdate = time.Now()
-		} else if forceRefresh {
-			d.mu.Unlock()
-			return nil, mapError(err)
+		} else {
+			refreshErr = err
+			if forceRefresh {
+				d.mu.Unlock()
+				return nil, mapError(err)
+			}
 		}
 	}
 
@@ -223,6 +229,9 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	d.mu.Unlock()
 
 	if !ok {
+		if refreshErr != nil {
+			return nil, mapError(refreshErr)
+		}
 		return nil, syscall.ENOENT
 	}
 	childID := entry.ID

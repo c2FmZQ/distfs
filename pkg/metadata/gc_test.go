@@ -29,10 +29,14 @@ func TestGCWorker_RunGC(t *testing.T) {
 
 	// 2. Register Data Node
 	n1 := Node{ID: "n1", Address: dataMock.URL, Status: NodeStatusActive}
-	node.Raft.Apply(LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal(), 5*time.Second)
+	n1b, err := LogCommand{Type: CmdRegisterNode, Data: mustMarshal(n1)}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	node.Raft.Apply(n1b, 5*time.Second)
 
 	// 3. Manually add chunk to GC bucket
-	err := node.FSM.db.Update(func(tx *bolt.Tx) error {
+	err = node.FSM.db.Update(func(tx *bolt.Tx) error {
 		return node.FSM.Put(tx, []byte("garbage_collection"), []byte("gc-chunk-1"), mustMarshal([]string{"n1"}))
 	})
 	if err != nil {

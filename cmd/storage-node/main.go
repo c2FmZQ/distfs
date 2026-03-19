@@ -301,7 +301,11 @@ func main() {
 						}
 						data, _ := json.Marshal(keyData)
 						cmd := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: data}
-						if err := rn.Raft.Apply(cmd.Marshal(), 5*time.Second).Error(); err != nil {
+						b, err := cmd.Marshal()
+						if err != nil {
+							log.Fatalf("failed to marshal cluster sign key command: %v", err)
+						}
+						if err := rn.Raft.Apply(b, 5*time.Second).Error(); err != nil {
 							log.Fatalf("failed to apply cluster sign key: %v", err)
 						}
 					}
@@ -320,7 +324,11 @@ func main() {
 					}
 					nodeBytes, _ := json.Marshal(node)
 					cmd := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nodeBytes}
-					if err := rn.Raft.Apply(cmd.Marshal(), 5*time.Second).Error(); err != nil {
+					b, err := cmd.Marshal()
+					if err != nil {
+						log.Fatalf("failed to marshal register bootstrap node command: %v", err)
+					}
+					if err := rn.Raft.Apply(b, 5*time.Second).Error(); err != nil {
 						log.Fatalf("failed to register bootstrap node: %v", err)
 					}
 
@@ -337,7 +345,12 @@ func main() {
 							}
 							data, _ := json.Marshal(clusterKey)
 							cmd := metadata.LogCommand{Type: metadata.CmdRotateKey, Data: data}
-							rn.Raft.Apply(cmd.Marshal(), 5*time.Second)
+							b, err := cmd.Marshal()
+							if err != nil {
+								log.Printf("ERROR: failed to marshal rotation command: %v", err)
+							} else {
+								rn.Raft.Apply(b, 5*time.Second)
+							}
 						}
 					}
 
@@ -392,6 +405,8 @@ func main() {
 		dataServer.ServeHTTP(w, r)
 	}))
 	publicMux.Handle("/api/debug/", metaServer)
+
+	registerDebugHandlers(publicMux)
 
 	// 6. Internal Router (Cluster)
 	clusterMux := http.NewServeMux()

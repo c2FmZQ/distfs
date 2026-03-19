@@ -17,6 +17,7 @@
 package metadata
 
 import (
+	"context"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -191,7 +192,7 @@ func (w *KeyRotationWorker) reencryptRecord(bucket, key []byte) {
 	}
 	data, _ := json.Marshal(req)
 	// Use background context for system tasks
-	w.server.ApplyRaftCommandInternal(CmdReencryptValue, data, "")
+	w.server.ApplyRaftCommandInternal(context.Background(), CmdReencryptValue, data, "")
 }
 
 func (w *KeyRotationWorker) rotate() {

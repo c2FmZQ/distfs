@@ -3,6 +3,7 @@ package metadata_test
 
 import (
 	"bytes"
+	"context"
 	"crypto/mlkem"
 	"encoding/json"
 	"net/http"
@@ -255,7 +256,7 @@ func TestOwnerImmutability(t *testing.T) {
 	inode := metadata.Inode{ID: "file1", OwnerID: uID, Version: 1, Type: metadata.FileType}
 	inode.SignInodeForTest(uID, sk)
 	ib, _ := json.Marshal(inode)
-	server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ib, uID)
+	server.ApplyRaftCommandInternal(context.Background(), metadata.CmdCreateInode, ib, uID)
 
 	// 3. Attempt to change owner via Update
 	inode.Version = 2
@@ -263,7 +264,7 @@ func TestOwnerImmutability(t *testing.T) {
 	inode.SignInodeForTest(uID, sk)
 	ub, _ := json.Marshal(inode)
 
-	res, err := server.ApplyRaftCommandInternal(metadata.CmdUpdateInode, ub, uID)
+	res, err := server.ApplyRaftCommandInternal(context.Background(), metadata.CmdUpdateInode, ub, uID)
 	if err == nil {
 		if !isFSMError(res) {
 			t.Error("FSM should have rejected OwnerID change")
@@ -294,7 +295,7 @@ func TestFSM_GroupAuthorization(t *testing.T) {
 	inode := metadata.Inode{ID: "file1", OwnerID: u1ID, Version: 1, Type: metadata.FileType}
 	inode.SignInodeForTest(u1ID, sk1)
 	ib, _ := json.Marshal(inode)
-	server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ib, u1ID)
+	server.ApplyRaftCommandInternal(context.Background(), metadata.CmdCreateInode, ib, u1ID)
 
 	// 3. Attempt to assign to group1 (u1 is not a member)
 	inode.Version = 2
@@ -302,7 +303,7 @@ func TestFSM_GroupAuthorization(t *testing.T) {
 	inode.SignInodeForTest(u1ID, sk1)
 	ub, _ := json.Marshal(inode)
 
-	res, err := server.ApplyRaftCommandInternal(metadata.CmdUpdateInode, ub, u1ID)
+	res, err := server.ApplyRaftCommandInternal(context.Background(), metadata.CmdUpdateInode, ub, u1ID)
 	if err == nil {
 		if !isFSMError(res) {
 			t.Error("FSM should have rejected GroupID assignment for non-member")
@@ -315,7 +316,7 @@ func TestFSM_GroupAuthorization(t *testing.T) {
 		return fsm.Put(tx, []byte("groups"), []byte(gID), metadata.MustMarshalJSON(group))
 	})
 
-	res, err = server.ApplyRaftCommandInternal(metadata.CmdUpdateInode, ub, u1ID)
+	res, err = server.ApplyRaftCommandInternal(context.Background(), metadata.CmdUpdateInode, ub, u1ID)
 	if err != nil || isFSMError(res) {
 		t.Errorf("FSM should have allowed GroupID assignment for member: %v", res)
 	}
@@ -357,7 +358,7 @@ func TestFSM_AdminCreation(t *testing.T) {
 	inodeA := metadata.Inode{ID: "dirA", OwnerID: user1ID, Version: 1, Type: metadata.DirType}
 	inodeA.SignInodeForTest(adminID, skA)
 	ibA, _ := json.Marshal(inodeA)
-	res, err := server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ibA, adminID)
+	res, err := server.ApplyRaftCommandInternal(context.Background(), metadata.CmdCreateInode, ibA, adminID)
 	if err != nil || isFSMError(res) {
 		t.Errorf("Admin should be allowed to create inode for another user: %v", res)
 	}
@@ -366,7 +367,7 @@ func TestFSM_AdminCreation(t *testing.T) {
 	inode1 := metadata.Inode{ID: "dir1", OwnerID: adminID, Version: 1, Type: metadata.DirType}
 	inode1.SignInodeForTest(user1ID, sk1)
 	ib1, _ := json.Marshal(inode1)
-	res, err = server.ApplyRaftCommandInternal(metadata.CmdCreateInode, ib1, user1ID)
+	res, err = server.ApplyRaftCommandInternal(context.Background(), metadata.CmdCreateInode, ib1, user1ID)
 	if err == nil {
 		if !isFSMError(res) {
 			t.Error("Normal user should be forbidden from creating inode for another user")

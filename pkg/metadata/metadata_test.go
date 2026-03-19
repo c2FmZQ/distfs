@@ -896,7 +896,11 @@ func TestSecurity_IDOR_User(t *testing.T) {
 	// 4. Admin requests User 2 (Should be FULL)
 	// Promote user1 to admin
 	u1IDBytes, _ := json.Marshal(u1ID)
-	if err := node.Raft.Apply(LogCommand{Type: CmdPromoteAdmin, Data: u1IDBytes, UserID: "bootstrap"}.Marshal(), 5*time.Second).Error(); err != nil {
+	u1Cmd, err := LogCommand{Type: CmdPromoteAdmin, Data: u1IDBytes, UserID: "bootstrap"}.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := node.Raft.Apply(u1Cmd, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Failed to promote user1: %v", err)
 	}
 

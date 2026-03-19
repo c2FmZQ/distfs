@@ -942,9 +942,8 @@ type LogCommand struct {
 	Atomic        bool              `json:"atomic,omitempty"`         // Roll back entire transaction on any sub-command error
 }
 
-func (c LogCommand) Marshal() []byte {
-	b, _ := json.Marshal(c)
-	return b
+func (c LogCommand) Marshal() ([]byte, error) {
+	return json.Marshal(c)
 }
 
 type ReencryptRequest struct {

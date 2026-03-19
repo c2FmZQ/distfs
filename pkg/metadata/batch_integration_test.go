@@ -15,6 +15,7 @@
 package metadata_test
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -166,7 +167,7 @@ func TestBatchAtomicity(t *testing.T) {
 	batchBytes, _ := json.Marshal(batch)
 
 	// Apply batch - Atomic should be true for individual user batches
-	_, err := server.ApplyRaftCommandInternal(metadata.CmdBatch, batchBytes, u1)
+	_, err := server.ApplyRaftCommandInternal(context.Background(), metadata.CmdBatch, batchBytes, u1)
 	if err != nil && !errors.Is(err, metadata.ErrAtomicRollback) {
 		t.Fatalf("Raft apply failed: %v", err)
 	}

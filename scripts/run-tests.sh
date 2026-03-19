@@ -19,19 +19,23 @@ echo "# DistFS Test & Performance Report" > $REPORT
 echo "Date: $(date)" >> $REPORT
 echo "" >> $REPORT
 
-# 1. Build static binaries
+# 1. Build static binaries for Alpine compatibility
 echo "Building binaries (static linking)..."
-mkdir -p bin
-CGO_ENABLED=0 go build -tags debug -o bin/storage-node ./cmd/storage-node
-CGO_ENABLED=0 go build -o bin/distfs ./cmd/distfs
-CGO_ENABLED=0 go build -o bin/distfs-fuse ./cmd/distfs-fuse
-CGO_ENABLED=0 go build -o bin/test-auth ./cmd/test-auth
-CGO_ENABLED=0 go build -o bin/distfs-bench ./cmd/distfs-bench
-CGO_ENABLED=0 go build -o bin/distfs-fuse-load ./cmd/distfs-fuse-load
-CGO_ENABLED=0 go build -o bin/web-test-server ./cmd/web-test-server
+mkdir -p tests/bin
+CGO_ENABLED=0 go build -tags debug -o tests/bin/storage-node ./cmd/storage-node
+CGO_ENABLED=0 go build -tags debug -o tests/bin/distfs ./cmd/distfs
+CGO_ENABLED=0 go build -tags debug -o tests/bin/distfs-fuse ./cmd/distfs-fuse
+CGO_ENABLED=0 go build -tags debug -o tests/bin/test-auth ./cmd/test-auth
+CGO_ENABLED=0 go build -tags debug -o tests/bin/distfs-bench ./cmd/distfs-bench
+CGO_ENABLED=0 go build -tags debug -o tests/bin/distfs-fuse-load ./cmd/distfs-fuse-load
+CGO_ENABLED=0 go build -tags debug -o tests/bin/web-test-server ./cmd/web-test-server
 
 echo "Building WASM module..."
 GOOS=js GOARCH=wasm go build -o web/distfs.wasm ./cmd/distfs-wasm
+
+echo "Transpiling TypeScript..."
+npx tsc
+
 rm -f web/wasm_exec.js
 if [ -f "$(go env GOROOT)/lib/wasm/wasm_exec.js" ]; then
     cp "$(go env GOROOT)/lib/wasm/wasm_exec.js" web/
@@ -88,17 +92,17 @@ fi
 
 # 3. Cleanup existing environment
 echo "Cleaning up Docker environment..."
-docker compose down -v --remove-orphans > /dev/null 2>&1
+docker compose -f tests/docker-compose.yml down -v --remove-orphans > /dev/null 2>&1
 
 # 4. Run E2E Tests & Benchmarks
 echo "Starting E2E and FUSE tests (15m timeout)..."
 # Capture all output
-if ! timeout 15m docker compose up --build --exit-code-from e2e-runner > "$LOG_DIR/all-logs.log" 2>&1; then
+if ! timeout 15m docker compose -f tests/docker-compose.yml up --build --exit-code-from e2e-runner > "$LOG_DIR/all-logs.log" 2>&1; then
     E2E_FAILED=1
 fi
 
 # Extract clean logs from the e2e-runner service
-docker compose logs --no-color --no-log-prefix e2e-runner > "$LOG_DIR/e2e-runner.log" 2>&1 || true
+docker compose -f tests/docker-compose.yml logs --no-color --no-log-prefix e2e-runner > "$LOG_DIR/e2e-runner.log" 2>&1 || true
 
 echo "## E2E and Benchmarks" >> $REPORT
 echo '```' >> $REPORT

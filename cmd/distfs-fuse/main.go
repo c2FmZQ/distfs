@@ -83,6 +83,8 @@ func main() {
 	rootID := flag.String("root-id", "", "Root inode ID to mount (chroot)")
 	flag.Parse()
 
+	startPprofServer()
+
 	config.UsePinentry = *usePinentry
 
 	if *useTPM {

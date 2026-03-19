@@ -15,6 +15,7 @@ import (
 
 var (
 	mountPath = flag.String("mount", "", "FUSE mount point")
+	workDir   = flag.String("workdir", "", "Subdirectory within mount point to perform operations")
 	duration  = flag.Duration("duration", 15*time.Minute, "Test duration")
 	workers   = flag.Int("workers", 8, "Number of concurrent workers")
 	maxSize   = flag.Int64("max-total-size", 1024*1024*1024, "Max total data size (1GB)")
@@ -110,6 +111,9 @@ type metrics struct {
 
 func main() {
 	flag.Parse()
+
+	startPprofServer()
+
 	if *mountPath == "" {
 		fmt.Println("-mount is required")
 		os.Exit(1)
@@ -126,7 +130,7 @@ func main() {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			worker(id, *mountPath, ctx_done, m, state)
+			worker(id, filepath.Join(*mountPath, *workDir), ctx_done, m, state)
 		}(i)
 	}
 
@@ -160,7 +164,10 @@ func worker(id int, base string, done chan struct{}, m *metrics, state *State) {
 	// Create deep hierarchy
 	subDirs := []string{"", "a", "a/b", "c", "d/e"}
 	for _, d := range subDirs {
-		os.MkdirAll(filepath.Join(workerDir, d), 0755)
+		if err := os.MkdirAll(filepath.Join(workerDir, d), 0755); err != nil {
+			fmt.Printf("Worker %d SETUP FAILURE: MkdirAll %s: %v\n", id, d, err)
+			os.Exit(1)
+		}
 	}
 
 	for {

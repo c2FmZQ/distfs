@@ -26,15 +26,18 @@ func TestStructuralInconsistency(t *testing.T) {
 	pb, _ := json.Marshal(p)
 	cb, _ := json.Marshal(c)
 
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: pb, UserID: "u1"}.Marshal()})
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdCreateInode, Data: cb, UserID: "u1"}.Marshal()})
+	pb1, _ := LogCommand{Type: CmdCreateInode, Data: pb, UserID: "u1"}.Marshal()
+	fsm.Apply(&raft.Log{Data: pb1})
+	cb1, _ := LogCommand{Type: CmdCreateInode, Data: cb, UserID: "u1"}.Marshal()
+	fsm.Apply(&raft.Log{Data: cb1})
 
 	// Add reciprocal link to c1 beforehand
 	c.Links = map[string]bool{"p1:child_name": true}
 	c.Version = 2
 	c.SignInodeForTest("u1", sk)
 	cb2, _ := json.Marshal(c)
-	fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdUpdateInode, Data: cb2, UserID: "u1"}.Marshal()})
+	cb2b, _ := LogCommand{Type: CmdUpdateInode, Data: cb2, UserID: "u1"}.Marshal()
+	fsm.Apply(&raft.Log{Data: cb2b})
 
 	p.Children["child_name"] = ChildEntry{ID: "c1"}
 	p.Version = 2
@@ -51,7 +54,8 @@ func TestStructuralInconsistency(t *testing.T) {
 	}
 	batchBytes, _ := json.Marshal(batch)
 
-	res := fsm.Apply(&raft.Log{Data: LogCommand{Type: CmdBatch, Data: batchBytes, Atomic: true, UserID: "u1"}.Marshal()})
+	bb, _ := LogCommand{Type: CmdBatch, Data: batchBytes, Atomic: true, UserID: "u1"}.Marshal()
+	res := fsm.Apply(&raft.Log{Data: bb})
 	if !fsm.containsError(res) {
 		t.Fatalf("expected batch to fail structural validation due to missing child update, but it succeeded")
 	}

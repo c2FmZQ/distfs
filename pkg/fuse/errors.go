@@ -78,7 +78,9 @@ func mapError(err error) error {
 	if strings.Contains(msg, "access denied") || strings.Contains(msg, "forbidden") {
 		return syscall.EACCES
 	}
-	if strings.Contains(msg, "timeout") || strings.Contains(msg, "retry") || strings.Contains(msg, "busy") {
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "retry") ||
+		strings.Contains(msg, "busy") || strings.Contains(msg, "connection refused") ||
+		strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection aborted") {
 		return syscall.EAGAIN
 	}
 	if strings.Contains(msg, "text file busy") {

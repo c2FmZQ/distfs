@@ -44,14 +44,22 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	keyID := "key-1"
 	key := metadata.ClusterKey{ID: keyID, EncKey: ek.Bytes(), DecKey: nil, CreatedAt: time.Now().Unix()}
 	kb, _ := json.Marshal(key)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRotateKey, Data: kb}.Marshal(), 5*time.Second).Error(); err != nil {
+	kbb, err := metadata.LogCommand{Type: metadata.CmdRotateKey, Data: kb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal rotate key: %v", err)
+	}
+	if err := metaNode.Raft.Apply(kbb, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Raft apply RotateKey failed: %v", err)
 	}
 
 	csk, _ := crypto.GenerateIdentityKey()
 	cskData := metadata.ClusterSignKey{Public: csk.Public(), EncryptedPrivate: csk.MarshalPrivate()}
 	cb, _ := json.Marshal(cskData)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cb}.Marshal(), 5*time.Second).Error(); err != nil {
+	cbb, err := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal cluster sign key: %v", err)
+	}
+	if err := metaNode.Raft.Apply(cbb, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Raft apply SetClusterSignKey failed: %v", err)
 	}
 
@@ -83,7 +91,11 @@ func SetupTestClient(t *testing.T) (*Client, *metadata.RaftNode, *metadata.Serve
 	// Register real data node
 	nodeInfo := metadata.Node{ID: "n1", Address: dataTS.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
-	if err := metaNode.Raft.Apply(metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal(), 5*time.Second).Error(); err != nil {
+	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal register node: %v", err)
+	}
+	if err := metaNode.Raft.Apply(nbb, 5*time.Second).Error(); err != nil {
 		t.Fatalf("Raft apply RegisterNode failed: %v", err)
 	}
 

@@ -5,10 +5,15 @@
 /test-auth
 *.key
 /*.log
+/*.pprof
+/test_output.txt
+/client_tests.log
 /data/
 /node*/
 /DISTFS-REPORT.md
-/logs/
+/bin/
+tests/bin/
+logs/
 /web/js/
 /web/wasm_exec.js
 /web/distfs.wasm

@@ -22,23 +22,44 @@ func BootstrapCluster(t *testing.T, raftNode *RaftNode) (*mlkem.EncapsulationKey
 	}
 	keyBytes, _ := json.Marshal(key)
 	cmd := LogCommand{Type: CmdRotateKey, Data: keyBytes}
-	cmdBytes, _ := json.Marshal(cmd)
+	cmdBytes, err := cmd.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap key: %v", err)
+	}
 	future := raftNode.Raft.Apply(cmdBytes, 5*time.Second)
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap cluster key apply failed: %v", err)
 	}
 
-	// Bootstrap cluster sign key
-	csk, _ := crypto.GenerateIdentityKey()
+	signKey, _ := crypto.GenerateIdentityKey()
 	cskData := ClusterSignKey{
-		Public:           csk.Public(),
-		EncryptedPrivate: csk.MarshalPrivate(),
+		Public:           signKey.Public(),
+		EncryptedPrivate: signKey.MarshalPrivate(),
 	}
 	cskBytes, _ := json.Marshal(cskData)
-	future = raftNode.Raft.Apply(LogCommand{Type: CmdSetClusterSignKey, Data: cskBytes}.Marshal(), 5*time.Second)
+	cskCmdBytes, err := LogCommand{Type: CmdSetClusterSignKey, Data: cskBytes}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap sign key: %v", err)
+	}
+	future = raftNode.Raft.Apply(cskCmdBytes, 5*time.Second)
 	if err := future.Error(); err != nil {
 		t.Fatalf("Bootstrap sign key apply failed: %v", err)
 	}
 
-	return dk.EncapsulationKey(), csk.Public()
+	// 3. Bootstrap World Identity
+	wdk, _ := crypto.GenerateEncryptionKey()
+	world := WorldIdentity{
+		Public:  wdk.EncapsulationKey().Bytes(),
+		Private: crypto.MarshalDecapsulationKey(wdk),
+	}
+	wb, _ := json.Marshal(world)
+	wbBytes, err := LogCommand{Type: CmdInitWorld, Data: wb}.Marshal()
+	if err != nil {
+		t.Fatalf("failed to marshal bootstrap world init: %v", err)
+	}
+	if err := raftNode.Raft.Apply(wbBytes, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Bootstrap world init failed: %v", err)
+	}
+
+	return dk.EncapsulationKey(), signKey.Public()
 }

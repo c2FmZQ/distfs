@@ -46,7 +46,8 @@ func isConflict(err error) bool {
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
-		return apiErr.Code == metadata.ErrCodeVersionConflict
+		return apiErr.StatusCode == http.StatusConflict ||
+			apiErr.Code == metadata.ErrCodeVersionConflict
 	}
 	return false
 }
