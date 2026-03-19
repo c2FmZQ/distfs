@@ -136,9 +136,9 @@ The Raft FSM stores the "Inode" table and Directory Structure.
     *   `OwnerID -> List[GroupID]` (Ownership/Management Index).
 *   **Inode Structure:**
     *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, ClientBlob, UserSig, GroupSig}`.
-        *   **ClientBlob:** AES-GCM encrypted metadata (Name, MTime, ACLs, InlineData).
+        *   **ClientBlob:** AES-GCM encrypted metadata (SymlinkTarget, MTime, ACLs, InlineData). Note: Primary filenames are NOT stored in the Inode.
 *   **Directory Structure:** The Metadata Layer MUST know the file system hierarchy to enforce permissions and perform Garbage Collection.
-    *   **Directory Inodes:** Store a list of children: `HMAC(Name) -> InodeID`. This allows traversal and GC traversing without knowing plaintext names.
+    *   **Directory Inodes:** Store a list of children: `HMAC(Name) -> ChildEntry{InodeID, EncryptedName, Nonce}`. This allows traversal and $O(1)$ directory listings without the server knowing plaintext names.
     *   **File Inodes:** Store `ChunkManifest` (List of Chunk IDs + DataNode locations).
     *   **Garbage Collection:** Orphaned Inodes and Chunks (not referenced by any live Inode) are garbage collected.
 

@@ -119,7 +119,7 @@ Used for requests within an established session. Provides improved performance a
   "ctime": 1772517680144,
   "nlink": 1,
   "client_blob": "base64_enc_metadata",
-  "children": {"nameHMAC": "childID"},
+  "children": {"nameHMAC": {"id": "childID", "enc_name": "base64", "nonce": "base64"}},
   "manifest": [{"id": "chunk_hash", "nodes": ["node_id"]}],
   "chunk_pages": ["page_id"],
   "lockbox": {"recipient_id": {"kem": "base64", "dem": "base64"}},
@@ -136,14 +136,11 @@ Used for requests within an established session. Provides improved performance a
 Clients MUST use this schema inside the encrypted `client_blob`:
 ```json
 {
-  "name": "filename",
   "symlink_target": "path",
   "inline_data": "base64",
   "mtime": int64_ns,
   "uid": uint32,
-  "gid": uint32,
-  "signer_id": "user_id",
-  "authorized_signers": ["user_id"]
+  "gid": uint32
 }
 ```
 
@@ -193,7 +190,7 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 7. `[]byte("owner:" + owner_id + "|")`
 8. `[]byte("type:")` + `BigEndian(uint32(type))` + `[]byte("|")`
 9. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
-10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID)` + `[]byte("|")`
+10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID,hex_enc_name,hex_nonce|)` // Each entry is separated by |
 11. `[]byte("manifest:")` + `CSV(chunk_id)` + `[]byte("|")`  // Nodes are EXCLUDED from user-signed content hash.
 12. `[]byte("pages:")` + `SortedCSV(chunk_page_ids)` + `[]byte("|")`
 13. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
