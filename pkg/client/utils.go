@@ -37,6 +37,20 @@ func isNotFound(err error) bool {
 	return false
 }
 
+func isConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, metadata.ErrConflict) {
+		return true
+	}
+	var apiErr *APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.Code == metadata.ErrCodeVersionConflict
+	}
+	return false
+}
+
 func ptr[T any](v T) *T {
 	return &v
 }

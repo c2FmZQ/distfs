@@ -1331,6 +1331,33 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Re-verify and complete any remaining work from Phase 66 using the new optimized naming model.
     *   **Testing Strategy:** Execute `scripts/test-fileutils.sh` and assert all utilities (`cp`, `mv`, `stat`, `ln`, etc.) pass with the improved architecture.
 
+---
+
+## Phase 68: Decentralized Identity & PII Eradication
+
+**Goal:** Eradicate email-based identifiers from the critical path of DistFS to harden its Zero-Knowledge privacy model and align with standard JWT practices. The system will shift to using the immutable `sub` (subject) claim for identity derivation and require purely out-of-band `UserID` exchange for registry additions, removing the server's ability to map identities.
+
+*   **Step 68.1: Identity Derivation via `sub` Claim**
+    *   **Action:** Update the JWT parsing logic in `pkg/metadata/server.go` and `pkg/client/client.go` to extract the `sub` claim instead of `email`.
+    *   **Action:** Modify the `GenerateUserID` function (and equivalent logic) to hash the `sub` claim.
+    *   **Action:** Update the mock auth server (`cmd/test-auth`) to inject a distinct `sub` claim into its generated JWTs.
+    *   **Testing Strategy:** Verify that logging in generates a `UserID` derived from `sub`, and that users with the same email but different `sub` claims are treated as distinct entities.
+*   **Step 68.2: Server Endpoint Removal**
+    *   **Action:** Delete the `/v1/admin/lookup` endpoint from `pkg/metadata/server.go` and its associated handler logic.
+    *   **Action:** Remove the `LookupUsername` and `AdminLookup` methods from the Go Client library.
+    *   **Testing Strategy:** Ensure no client or CLI logic depends on server-side identity resolution.
+*   **Step 68.3: Decentralized Registry Workflow & CLI Refactoring**
+    *   **Action:** Update the CLI command `distfs registry-add` to accept `<alias> <UserID>` instead of an email address.
+    *   **Action:** Update all other CLI commands (`chown`, `group-add`, `setfacl`, `admin-unlock-user`, `admin-user-quota`, etc.) to only accept registry usernames (e.g., `alice`) or full 64-character hex `UserID`s.
+    *   **Action:** Remove automatic email lookups from `ResolveUsername` in the CLI; it must now strictly resolve against the local registry or validate raw `UserID` format.
+    *   **Testing Strategy:** Test the full Contact Exchange flow (`scripts/test-contact-exchange.sh`) using raw `UserID`s to ensure out-of-band security code verification still functions correctly, and verify other commands reject email inputs.
+*   **Step 68.4: E2E Suite Migration**
+    *   **Action:** Update all E2E shell scripts (`test-all-e2e.sh`, `test-fileutils.sh`, `test-group.sh`, etc.) to use the new `registry-add` workflow and `sub`-based authentication.
+    *   **Testing Strategy:** Execute the entire E2E test suite and ensure all tests pass without relying on email lookups.
+*   **Step 68.5: Documentation Updates**
+    *   **Action:** Update `DISTFS.md`, `CLIENT-API.md`, and `SERVER-API.md` to remove references to `AdminLookup`, email-based identity derivation, and to document the new `sub`-claim and strict out-of-band UserID registry-add flows.
+    *   **Testing Strategy:** Review documentation for accuracy and consistency with the implemented zero-knowledge privacy model.
+
 
 
 

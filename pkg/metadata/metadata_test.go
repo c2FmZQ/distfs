@@ -364,9 +364,10 @@ func TestKeySync(t *testing.T) {
 
 	// 2. Setup User
 	email := "sync@example.com"
+	sub := "sub-sync@example.com"
 	secret, _ := node.FSM.GetClusterSecret()
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(email))
+	mac.Write([]byte(sub))
 	userID := hex.EncodeToString(mac.Sum(nil))
 
 	u1Dec, _ := crypto.GenerateEncryptionKey()
@@ -376,7 +377,7 @@ func TestKeySync(t *testing.T) {
 
 	// Mint JWT
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"iss": "test-auth-server", "email": email,
+		"iss": "test-auth-server", "email": email, "sub": sub,
 		"exp": time.Now().Add(time.Hour).Unix(),
 	})
 	jwtToken.Header["kid"] = kid

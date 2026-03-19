@@ -25,9 +25,20 @@ echo "Starting Unified E2E Test Suite..."
 wait_for_ready() {
     echo "Waiting for cluster leader..."
     for i in $(seq 1 30); do
-        if wget -qO- "http://storage-node-1:8080/v1/health" | grep -q '"is_leader":true'; then
+        if wget -qO- "http://storage-node-1:8080/v1/health" 2>/dev/null | grep -q '"is_leader":true'; then
             echo "Cluster leader found."
-            return 0
+            
+            # Also wait for OIDC discovery
+            echo "Waiting for OIDC discovery..."
+            for j in $(seq 1 30); do
+                if wget -qO- "http://storage-node-1:8080/v1/auth/config" 2>/dev/null | grep -q "issuer"; then
+                    echo "OIDC discovery successful."
+                    return 0
+                fi
+                sleep 1
+            done
+            echo "Timed out waiting for OIDC discovery."
+            return 1
         fi
         sleep 1
     done
@@ -44,33 +55,33 @@ echo "Using config directory: $DISTFS_CONFIG_DIR"
 # GLOBAL SETUP: Create Admin
 echo "PERFORMING GLOBAL SETUP..."
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-if ! distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
+if ! distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
     echo "GLOBAL SETUP FAILED: Admin initialization failed"
     exit 1
 fi
 
-ADMIN_ID=$(distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" whoami)
+ADMIN_ID=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" whoami)
 echo "Global Admin ID: $ADMIN_ID"
 
 # 1. Create a Shared Administrators Group for root management
 echo "Creating Administrators group..."
-distfs -disable-doh -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
 ADMIN_GID=$(grep "^ID:" /tmp/admin-group.txt | awk '{print $2}')
 echo "Administrators GID: $ADMIN_GID"
 
 echo "Assigning root directory to Administrators group..."
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chgrp "$ADMIN_GID" /
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0775 /
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chgrp "$ADMIN_GID" /
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0775 /
 
 # 2. Provision Users and Workspaces under /users/
 echo "Provisioning /users base directory..."
-USERS_GROUP_OUT=$(distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create users || true)
+USERS_GROUP_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create users || true)
 USERS_GID=$(echo "$USERS_GROUP_OUT" | grep "ID:" | awk '{print $2}' || echo "")
 if [ -z "$USERS_GID" ]; then
     USERS_GID="users" # Fallback if it already existed and we couldn't parse it easily
 fi
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /users || true
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0755 /users || true
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /users || true
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0755 /users || true
 
 provision_user() {
     name=$1
@@ -80,14 +91,14 @@ provision_user() {
     echo "Provisioning ${name} ($email) at ${path}..."
     
     U_JWT=$(wget -qO- "http://test-auth:8080/mint?email=$email")
-    U_OUT=$(distfs -disable-doh -use-pinentry=false -config "$conf" init --new -server http://storage-node-1:8080 -jwt "$U_JWT")
+    U_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$conf" init --new -server http://storage-node-1:8080 -jwt "$U_JWT")
     U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
     
     # Provision directory and unlock via Global Admin
-    distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$email"
+    distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$U_ID"
     
     # Add to users group to allow traversal
-    distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
+    distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
 }
 
 provision_user "fuse-user" "fuse-user@example.com"
@@ -104,21 +115,21 @@ echo "Provisioning benchmark workspace..."
 BENCH_JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
 # Benchmark uses a persistent config at /tmp/bench-dir/config.json
 mkdir -p /tmp/bench-dir
-BENCH_OUT=$(distfs -disable-doh -use-pinentry=false -config "/tmp/bench-dir/config.json" init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT")
+BENCH_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "/tmp/bench-dir/config.json" init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT")
 BENCH_ID=$(echo "$BENCH_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 # Provision, unlock, and assign to admin group
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user bench-user@example.com
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user "$BENCH_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
 
 # Promote and add to Administrators group
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
 
 # Provision HA directory (world-writable for test flexibility)
 echo "Provisioning /ha..."
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
 
 FAILED=0
 

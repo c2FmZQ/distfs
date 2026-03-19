@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -251,11 +252,11 @@ func usage() {
 	fmt.Println("  admin                           Open interactive cluster management console")
 	fmt.Println("  admin-join <addr>               Add a node to the cluster (discovered via address)")
 	fmt.Println("  admin-remove <id>               Remove a node from the cluster (by node ID)")
-	fmt.Println("  admin-user-quota <email> <max_bytes> <max_inodes> Set user quota (Admin only)")
+	fmt.Println("  admin-user-quota <userID> <max_bytes> <max_inodes> Set user quota (Admin only)")
 	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
-	fmt.Println("  admin-lock-user <email>         Lock a user account")
-	fmt.Println("  admin-unlock-user <email>       Unlock a user account")
-	fmt.Println("  registry-add [--unlock] [--quota <limit>] [--home] <username> <email> Verify and add a user to the registry")
+	fmt.Println("  admin-lock-user <userID>        Lock a user account")
+	fmt.Println("  admin-unlock-user <userID>      Unlock a user account")
+	fmt.Println("  registry-add [--unlock] [--quota <limit>] [--home] <username> <userID> Verify and add a user to the registry")
 	fmt.Println("  admin-audit                     Run a comprehensive system integrity and structural audit")
 	fmt.Println("  admin-create-root [-secondary]  Initialize a new root inode (Admin only, defaults to standard root)")
 	fmt.Println("  whoami                          Display your user ID")
@@ -271,7 +272,7 @@ func cmdInit(ctx context.Context, args []string) {
 	// Auth flags
 	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
 	clientID := fs.String("client-id", "distfs", "The client ID")
-	scopes := fs.String("scopes", "openid,email", "The scopes to request (comma separated)")
+	scopes := fs.String("scopes", "openid", "The scopes to request (comma separated)")
 	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
 	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
@@ -1074,6 +1075,13 @@ func cmdGroupCreate(ctx context.Context, args []string) {
 	c := loadClient()
 	group, err := c.CreateGroup(ctx, name, *quota)
 	if err != nil {
+		if errors.Is(err, metadata.ErrExists) {
+			// Find existing group ID for automated tools
+			if g, _, rerr := c.ResolvePath(ctx, "/.groups/"+name); rerr == nil {
+				log.Printf("Group %s already exists (%s)", name, g.ID)
+				return
+			}
+		}
 		log.Fatal(err)
 	}
 	fmt.Printf("Group %s created.\n", name)

@@ -257,7 +257,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "u": // User Quota
 			m.activeModal = "user-quota"
 			m.inputs = []textinput.Model{
-				newInput("Email/UserID"),
+				newInput("Username/UserID"),
 				newInput("Max Bytes (e.g. 1048576)"),
 				newInput("Max Inodes"),
 			}
@@ -276,7 +276,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "p": // Promote
 			m.activeModal = "promote"
-			m.inputs = []textinput.Model{newInput("Email/UserID")}
+			m.inputs = []textinput.Model{newInput("Username/UserID")}
 			m.focusedInput = 0
 			m.inputs[0].Focus()
 			return m, nil
@@ -327,10 +327,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if m.tab == tabTools {
 		m.lookupInput, cmd = m.lookupInput.Update(msg)
 		if k, ok := msg.(tea.KeyMsg); ok && k.String() == "enter" {
-			email := m.lookupInput.Value()
-			if email != "" {
+			identifier := m.lookupInput.Value()
+			if identifier != "" {
 				return m, func() tea.Msg {
-					id, _, err := m.client.ResolveUsername(m.ctx, email)
+					id, _, err := m.client.ResolveUsername(m.ctx, identifier)
 					if err != nil {
 						return lookupMsg(fmt.Sprintf("Error: %v", err))
 					}
@@ -567,8 +567,8 @@ func (m model) overviewView() string {
 
 func (m model) toolsView() string {
 	return lipgloss.JoinVertical(lipgloss.Left,
-		titleStyle.Render("Blind Lookup"),
-		"Resolve email to User ID:",
+		titleStyle.Render("User Lookup"),
+		"Resolve registry username to User ID:",
 		m.lookupInput.View(),
 		"",
 		"Result:",
@@ -586,13 +586,13 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 
 	switch modal {
 	case "user-quota":
-		email, bytesStr, inodesStr := m.inputs[0].Value(), m.inputs[1].Value(), m.inputs[2].Value()
+		identifier, bytesStr, inodesStr := m.inputs[0].Value(), m.inputs[1].Value(), m.inputs[2].Value()
 		return m, func() tea.Msg {
-			userID := email
-			if !isHexID(email) {
-				id, _, err := m.client.ResolveUsername(m.ctx, email)
+			userID := identifier
+			if !isHexID(identifier) {
+				id, _, err := m.client.ResolveUsername(m.ctx, identifier)
 				if err != nil {
-					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
+					return errMsg(fmt.Errorf("lookup %s: %w", identifier, err))
 				}
 				userID = id
 			}
@@ -622,13 +622,13 @@ func (m *model) handleModalSubmit() (tea.Model, tea.Cmd) {
 			return refresh()
 		}
 	case "promote":
-		email := m.inputs[0].Value()
+		identifier := m.inputs[0].Value()
 		return m, func() tea.Msg {
-			userID := email
-			if !isHexID(email) {
-				id, _, err := m.client.ResolveUsername(m.ctx, email)
+			userID := identifier
+			if !isHexID(identifier) {
+				id, _, err := m.client.ResolveUsername(m.ctx, identifier)
 				if err != nil {
-					return errMsg(fmt.Errorf("lookup %s: %w", email, err))
+					return errMsg(fmt.Errorf("lookup %s: %w", identifier, err))
 				}
 				userID = id
 			}
@@ -684,7 +684,7 @@ func cmdAdmin(ctx context.Context, args []string) {
 	c := loadClient()
 
 	ti := textinput.New()
-	ti.Placeholder = "user@example.com"
+	ti.Placeholder = "userID or registry username"
 	ti.CharLimit = 156
 	ti.Width = 40
 
@@ -727,17 +727,17 @@ func cmdAdminRemove(ctx context.Context, args []string) {
 
 func cmdAdminPromote(ctx context.Context, args []string) {
 	if len(args) < 1 {
-		log.Fatal("usage: admin-promote <email>")
+		log.Fatal("usage: admin-promote <username|userID>")
 	}
-	email := args[0]
+	identifier := args[0]
 	c := loadClient()
 
-	// Resolve email/username to UserID
-	userID := email
-	if !isHexID(email) {
-		id, _, err := c.ResolveUsername(ctx, email)
+	// Resolve username to UserID
+	userID := identifier
+	if !isHexID(identifier) {
+		id, _, err := c.ResolveUsername(ctx, identifier)
 		if err != nil {
-			log.Fatalf("failed to resolve user %s: %v", email, err)
+			log.Fatalf("failed to resolve user %s: %v", identifier, err)
 		}
 		userID = id
 	}
@@ -745,21 +745,21 @@ func cmdAdminPromote(ctx context.Context, args []string) {
 	if err := c.AdminPromote(ctx, userID); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("User %s promoted to Admin successfully.\n", email)
+	fmt.Printf("User %s promoted to Admin successfully.\n", identifier)
 }
 
 func cmdAdminUserQuota(ctx context.Context, args []string) {
 	if len(args) < 3 {
-		log.Fatal("usage: admin-user-quota <email> <max_bytes> <max_inodes>")
+		log.Fatal("usage: admin-user-quota <username|userID> <max_bytes> <max_inodes>")
 	}
-	email, bytesStr, inodesStr := args[0], args[1], args[2]
+	identifier, bytesStr, inodesStr := args[0], args[1], args[2]
 	c := loadClient()
 
-	userID := email
-	if !isHexID(email) {
-		id, _, err := c.ResolveUsername(ctx, email)
+	userID := identifier
+	if !isHexID(identifier) {
+		id, _, err := c.ResolveUsername(ctx, identifier)
 		if err != nil {
-			log.Fatalf("failed to resolve user %s: %v", email, err)
+			log.Fatalf("failed to resolve user %s: %v", identifier, err)
 		}
 		userID = id
 	}
@@ -776,7 +776,7 @@ func cmdAdminUserQuota(ctx context.Context, args []string) {
 	if err := c.AdminSetUserQuota(ctx, req); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("User %s quota updated: %d bytes, %d inodes\n", email, maxBytes, maxInodes)
+	fmt.Printf("User %s quota updated: %d bytes, %d inodes\n", identifier, maxBytes, maxInodes)
 }
 
 func cmdAdminGroupQuota(ctx context.Context, args []string) {
@@ -1037,21 +1037,15 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	fs.Parse(args)
 
 	if fs.NArg() < 2 {
-		log.Fatal("usage: registry-add [--unlock] [--quota <bytes,inodes>] [--home] [--yes] <username> <email>")
+		log.Fatal("usage: registry-add [--unlock] [--quota <bytes,inodes>] [--home] [--yes] <username> <userID>")
 	}
 	username := fs.Arg(0)
-	email := fs.Arg(1)
+	userID := fs.Arg(1)
 
 	c := loadClient()
 
-	// 1. Server Discovery
-	userID := email
-	if !isHexID(email) {
-		id, _, err := c.ResolveUsername(ctx, email)
-		if err != nil {
-			log.Fatalf("Failed to resolve email to UserID: %v", err)
-		}
-		userID = id
+	if !isHexID(userID) {
+		log.Fatalf("Invalid UserID format: must be a 64-character hex string")
 	}
 
 	user, err := c.GetUser(ctx, userID)
@@ -1068,7 +1062,7 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	codeStr := fmt.Sprintf("%02X-%02X-%02X", codeBytes[0], codeBytes[1], codeBytes[2])
 
 	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
-	fmt.Printf("User: %s (%s)\n", username, email)
+	fmt.Printf("User: %s (ID: %s)\n", username, userID)
 	fmt.Printf("Please contact this user out-of-band (e.g., via phone or Signal).\n")
 	fmt.Printf("Ask them to verify their security code matches: %s\n", codeStr)
 	fmt.Printf("-----------------------------------------\n")
@@ -1097,7 +1091,6 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 
 	entry := client.DirectoryEntry{
 		Username:   username,
-		Email:      email,
 		UserID:     user.ID,
 		EncKey:     user.EncKey,
 		SignKey:    user.SignKey,
@@ -1165,19 +1158,19 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
 	if len(args) < 1 {
 		if lock {
-			log.Fatal("usage: admin-lock-user <email|username>")
+			log.Fatal("usage: admin-lock-user <username|userID>")
 		} else {
-			log.Fatal("usage: admin-unlock-user <email|username>")
+			log.Fatal("usage: admin-unlock-user <username|userID>")
 		}
 	}
-	email := args[0]
+	identifier := args[0]
 	c := loadClient()
 
-	userID := email
-	if !isHexID(email) {
-		id, _, err := c.ResolveUsername(ctx, email)
+	userID := identifier
+	if !isHexID(identifier) {
+		id, _, err := c.ResolveUsername(ctx, identifier)
 		if err != nil {
-			log.Fatalf("failed to resolve user %s: %v", email, err)
+			log.Fatalf("failed to resolve user %s: %v", identifier, err)
 		}
 		userID = id
 	}
@@ -1187,8 +1180,8 @@ func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
 	}
 
 	if lock {
-		fmt.Printf("User %s has been locked.\n", userID)
+		fmt.Printf("User %s has been locked.\n", identifier)
 	} else {
-		fmt.Printf("User %s has been unlocked.\n", userID)
+		fmt.Printf("User %s has been unlocked.\n", identifier)
 	}
 }

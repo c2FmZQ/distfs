@@ -53,7 +53,7 @@ The system is designed to scale horizontally, with the following soft limits:
 Users control their identity via an asymmetric key pair using **Post-Quantum Cryptography (PQC)** algorithms (e.g., CRYSTALS-Kyber for encapsulation, CRYSTALS-Dilithium for signatures) to future-proof against quantum threats.
 
 1.  **User Identity Key:** Public key maps to the User ID. Private key signs requests.
-    *   **User ID:** Derived from the user's email using a cluster-wide HMAC to ensure privacy.
+    *   **User ID:** Derived from the user's `sub` (subject) claim using a cluster-wide HMAC to ensure privacy.
 2.  **Cluster Identity (Epoch Keys):** The cluster maintains a rotating set of shared PQC KEM keys ("Epoch Keys") stored in the Raft FSM.
     *   **Shared:** All nodes use the same keys to decrypt client requests, enabling stateless load balancing.
     *   **Rotating:** Keys rotate periodically (e.g., daily) to provide **Forward Secrecy**. Old keys are securely erased from memory and disk.
@@ -66,10 +66,10 @@ Users control their identity via an asymmetric key pair using **Post-Quantum Cry
 
 ### 3.3 Privacy & Identity (The "Dark Registry")
 To minimize PII exposure, the metadata layer operates on opaque identifiers.
-*   **Transient PII:** The server processes user emails (e.g., during OIDC registration) only momentarily in memory.
-*   **Hashed Identifiers:** The persistent User ID is `HMAC-SHA256(Email, ClusterSecret)`.
+*   **Transient PII:** The server processes user identifiers (e.g., `sub` claims during OIDC registration) only momentarily in memory.
+*   **Hashed Identifiers:** The persistent User ID is `HMAC-SHA256(sub, ClusterSecret)`.
     *   **Cluster Secret:** A high-entropy random key generated at cluster bootstrap, stored securely in the Raft FSM, and shared among nodes via mTLS. It never leaves the cluster.
-    *   **Implication:** Logs, snapshots, and disk storage contain no emails or names.
+    *   **Implication:** Logs, snapshots, and disk storage contain no emails, sub claims, or names.
 *   **No Names:** The FSM does **not** store user names (e.g., "Alice"). Users who wish to share their display name must store it in an encrypted file (e.g., `/.profile`) within the file system itself.
 
 ### 3.4 Transport Privacy (Layer 7 E2EE)
@@ -118,14 +118,14 @@ This layer implements a distributed consensus architecture using the Raft protoc
 ### 4.1 State Machine (FSM)
 The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
-    *   `HMAC(email) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
+    *   `HMAC(sub) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
     *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, ClientBlob, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature, QuotaEnabled}`.
         *   **OwnerID:** Can be a `UserID` or another `GroupID`.
         *   **ClientBlob:** AES-GCM encrypted metadata (e.g., Group Name).
         *   **Lockbox:** Shares Group Private Keys among all members.
         *   **RegistryLockbox:** Shares a symmetric **Registry Key** only among authorized managers (`OwnerID`).
-        *   **EncryptedRegistry:** An opaque blob containing member emails and UserIDs, encrypted with the Registry Key.
+        *   **EncryptedRegistry:** An opaque blob containing member UserIDs, encrypted with the Registry Key.
         *   **Usage:** Tracks inodes and bytes used by files assigned to this group.
         *   **Quota:** Resource limits for the group (Effective only if `QuotaEnabled` is true).
         *   **QuotaEnabled:** An immutable boolean decided at group creation. If true, the group is the primary debtor for all its files. If false, the individual file owners are charged.
@@ -186,7 +186,7 @@ To prevent unauthorized hijacking and support collaborative administration, grou
     *   **User-Owned:** If `OwnerID` matches a `UserID`, only that user can sign updates for the group and access the **Member Registry**.
     *   **Group-Owned:** If `OwnerID` matches a `GroupID`, any registered member of the owning group can sign updates and access the **Member Registry** of the target group.
     *   **Self-Managed:** If `OwnerID` equals the group's own `ID`, any member of the group can sign updates and access the **Member Registry**.
-2.  **Member Registry (PII Isolation):** To comply with Zero-Knowledge principles while allowing administrative oversight, member emails are stored in the `EncryptedRegistry`. This blob is encrypted with a unique symmetric key shared only via the `RegistryLockbox`. Regular members who are not authorized managers cannot decrypt this registry and thus cannot see the emails of other members.
+2.  **Member Registry (PII Isolation):** To comply with Zero-Knowledge principles while allowing administrative oversight, member identifiers are stored in the `EncryptedRegistry`. This blob is encrypted with a unique symmetric key shared only via the `RegistryLockbox`. Regular members who are not authorized managers cannot decrypt this registry.
 3.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
 4.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
 5.  **Optimistic Concurrency:** Group updates follow the centralized consistency model described in Section 4.5.
@@ -227,7 +227,7 @@ To support Out-Of-Band (OOB) identity verification without centralizing trust on
 
 1.  **The Registry Structure:** A registry is stored as a standard DistFS directory (e.g., `/registry`). Access to manage this directory is governed by standard group permissions (e.g., the `registry` group).
 2.  **Individual Attestations:** Each verified user is represented by an individual file (e.g., `alice.user`) within the registry directory. This file contains a signed `DirectoryEntry` JSON blob, which includes:
-    *   The user's human-friendly **Username**, **Full Name**, and **Email**.
+    *   The user's human-friendly **Username** and **Full Name**.
     *   The user's PQC **Public Keys** (`ek` and `sk`).
     *   The **VerifierID**: The User ID of the administrator or trusted member who performed the OOB check.
     *   An **Attestation Signature** generated by the Verifier over all the above fields.
@@ -359,10 +359,10 @@ Communication between the Client and Cluster uses JSON over HTTP/2. The Metadata
 
 ### 6.3 Identity & Authentication
 *   **Identity Registry:**
-    *   **Users:** `HMAC(Email) -> Public Keys`. No PII (names/emails) stored.
+    *   **Users:** `HMAC(sub) -> Public Keys`. No PII (names/emails) stored.
     *   **Groups:** `UUID -> Public Keys`.
 *   **User Registration:**
-    *   **Federated Identity:** Users must register via `POST /v1/user/register` providing a valid OIDC ID Token (JWT). The server calculates `HMAC(email)` using the internal Cluster Secret and registers the keys against this hash. The email is discarded immediately.
+    *   **Federated Identity:** Users must register via `POST /v1/user/register` providing a valid OIDC ID Token (JWT). The server calculates `HMAC(sub)` using the internal Cluster Secret and registers the keys against this hash. The subject claim is discarded immediately.
     *   **Automated Configuration:** The cluster leader is configured with an OIDC Discovery URL. It exposes the necessary authorization and token endpoints to clients via the `/v1/auth/config` endpoint, enabling zero-config onboarding.
 *   **Authentication:**
     *   **Client Auth:** Client authenticates with Metadata Server via Sealed Tokens (signed/encrypted) proving identity.
@@ -428,7 +428,6 @@ DistFS provides a comprehensive administrative interface for cluster operators. 
         *   **Redaction:** Administrative listing APIs (Users, Groups, Nodes) return redacted records, stripping private keys and other sensitive material to maintain the Zero-Knowledge boundary.
     *   **Distributed Lock Visibility:** Real-time monitoring of active Inode leases and lock ownership to diagnose contention.
     *   **System Metrics:** Visualize cluster performance, including Raft commit latency, I/O throughput, and disk utilization across nodes.
-    *   **Blind Lookup:** Resolve a plaintext email to its HMAC Hash to locate specific user records.
 *   **Deployment:** The admin console communicates with the standard API port. Because it relies on Layer 7 E2EE and PQC signatures, it does not require mTLS for client access.
 
 ### 7.5 Request Forwarding

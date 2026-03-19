@@ -54,7 +54,7 @@ To bring the DistFS security model to the browser, we utilize **WebAssembly (WAS
 ### 2.4 The "Dark Registry" and OOB Governance
 Enterprise file systems typically ingest plaintext Personally Identifiable Information (PII) like emails, full names, or LDAP attributes into their internal databases, creating massive privacy liabilities.
 
-**The Mechanism:** DistFS utilizes a **Dark Registry**. User identities are derived from an irreversible hash: `HMAC-SHA256(Email, ClusterSecret)`. The server only ever stores and operates on opaque cryptographic UUIDs.
+**The Mechanism:** DistFS utilizes a **Dark Registry**. User identities are derived from an irreversible hash: `HMAC-SHA256(sub_claim, ClusterSecret)`. The server only ever stores and operates on opaque cryptographic UUIDs.
 **The Privacy Boundary:** While the live cluster requires the `ClusterSecret` to function (and could thus deanonymize users via dictionary attacks), this mechanism provides robust **Defense-in-Depth against Offline Leakage**. A stolen database snapshot contains zero plaintext PII and cannot be reverse-engineered without the heavily guarded master secret.
 
 Furthermore, successfully authenticating via Single Sign-On (SSO/OIDC) does *not* grant network access. DistFS enforces a strict Zero-Trust onboarding model requiring an Out-Of-Band (OOB) cryptographic handshake. When a new device registers, its account is marked as `Locked`. The client generates a random 6-digit PIN. An existing Administrator must manually verify this PIN (e.g., over a phone call or in person) and sign a blockchain-style attestation to unlock the account. 

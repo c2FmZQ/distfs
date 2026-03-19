@@ -33,7 +33,7 @@ func startDeviceAuth(args []js.Value) (interface{}, error) {
 			DeviceAuthURL: authEndpoint,
 			TokenURL:      tokenEndpoint,
 		},
-		Scopes: []string{"openid", "email"},
+		Scopes: []string{"openid"},
 	}
 
 	resp, err := oauthConfig.DeviceAuth(context.Background())
@@ -64,7 +64,7 @@ func pollForToken(args []js.Value) (interface{}, error) {
 			DeviceAuthURL: authEndpoint,
 			TokenURL:      tokenEndpoint,
 		},
-		Scopes: []string{"openid", "email"},
+		Scopes: []string{"openid"},
 	}
 
 	// Reconstruct the response object for polling
@@ -534,8 +534,8 @@ func setACL(args []js.Value) (interface{}, error) {
 }
 
 func lookupUser(args []js.Value) (interface{}, error) {
-	email := args[0].String()
-	userID, _, err := c.ResolveUsername(context.Background(), email)
+	identifier := args[0].String()
+	userID, _, err := c.ResolveUsername(context.Background(), identifier)
 	if err != nil {
 		return nil, err
 	}

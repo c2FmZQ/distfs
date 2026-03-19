@@ -35,7 +35,7 @@ onmessage = async (event) => {
                 case 'mv': result = await fn(args.oldPath, args.newPath); break;
                 case 'rm': result = await fn(args.path); break;
                 case 'setACL': result = await fn(args.path, args.aclJSON); break;
-                case 'lookupUser': result = await fn(args.email); break;
+                case 'lookupUser': result = await fn(args.identifier); break;
                 case 'getQuota': result = await fn(); break;
                 case 'generateKeys': result = await fn(); break;
                 case 'fetchServerKey': result = await fn(args.serverURL); break;

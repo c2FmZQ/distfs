@@ -13,19 +13,20 @@ done
 
 echo "Initializing Reader (user2)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-public@example.com")
-distfs -disable-doh -use-pinentry=false -config "$CONFIG2" init --new -server http://storage-node-1:8080 -jwt "$JWT2"
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "user2-public@example.com"
+INIT_OUT2=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG2" init --new -server http://storage-node-1:8080 -jwt "$JWT2")
+U2_ID=$(echo "$INIT_OUT2" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$U2_ID"
 
 echo "User 1 (Owner): Granting world read to workspace /users/public-user..."
-distfs -disable-doh -use-pinentry=false -config "$CONFIG1" chmod 0755 /users/public-user
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG1" chmod 0755 /users/public-user
 
 echo "User 1: Uploading file to public directory..."
 echo "anyone can read this" > /tmp/public.txt
-distfs -disable-doh -use-pinentry=false -config "$CONFIG1" put /tmp/public.txt /users/public-user/readme.txt
-distfs -disable-doh -use-pinentry=false -config "$CONFIG1" chmod 0644 /users/public-user/readme.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG1" put /tmp/public.txt /users/public-user/readme.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG1" chmod 0644 /users/public-user/readme.txt
 
 echo "User 2: Reading public file..."
-distfs -disable-doh -use-pinentry=false -config "$CONFIG2" get /users/public-user/readme.txt /tmp/u2-read.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG2" get /users/public-user/readme.txt /tmp/u2-read.txt
 if grep -q "anyone can read" /tmp/u2-read.txt; then
     echo "PASS: Public read successful"
 else

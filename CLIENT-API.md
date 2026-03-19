@@ -174,7 +174,6 @@ DistFS clients report errors through structured `APIError` objects for server-si
 
 These functions return iterators or perform privileged metadata overrides.
 
-- `(c *Client) AdminLookup(ctx context.Context, email, reason string) (string, error)`
 - `(c *Client) AdminPromote(ctx context.Context, userID string) error`
 - `(c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error]`
 - `(c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group, error]`

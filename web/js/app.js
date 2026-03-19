@@ -82,9 +82,12 @@ class DistFSApp {
         document.getElementById('btn-close-preview')?.addEventListener('click', () => this.closePreview());
         document.getElementById('btn-preview-download')?.addEventListener('click', () => this.downloadSelected());
         document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
+            document.getElementById('btn-confirm-share').innerText = 'Share';
             document.getElementById('share-modal').style.display = 'none';
         });
-        document.getElementById('btn-confirm-share')?.addEventListener('click', () => this.handleShareSubmit());
+        document.getElementById('btn-confirm-share')?.addEventListener('click', () => {
+            this.handleShareSubmit();
+        });
         this.setupDragAndDrop();
         this.setupGlobalClickHandlers();
     }
@@ -675,6 +678,7 @@ class DistFSApp {
                 break;
             case 'share':
                 document.getElementById('share-file-name').innerText = entry.name;
+                document.getElementById('btn-confirm-share').innerText = 'Share';
                 document.getElementById('share-modal').style.display = 'flex';
                 break;
         }
@@ -761,18 +765,24 @@ class DistFSApp {
         return ts ? new Date(ts * 1000).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }) : '-';
     }
     async handleShareSubmit() {
-        if (!this.selectedItems.size)
+        console.log("UI: handleShareSubmit HELLO");
+        if (!this.selectedItems.size) {
+            console.warn("UI: No items selected for sharing");
             return;
+        }
         const entry = Array.from(this.selectedItems)[0];
-        const email = document.getElementById('share-target-email').value;
+        const identifier = document.getElementById('share-target-identifier').value;
         const perms = document.getElementById('share-perms').value;
         const path = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+        console.log(`UI: Sharing ${path} with ${identifier} (perms: ${perms})`);
         const btn = document.getElementById('btn-confirm-share');
         btn.innerText = 'Sharing...';
         btn.disabled = true;
         try {
-            // 1. Resolve email to UserID securely via Registry
-            const targetID = await this.client.lookupUser(email);
+            // 1. Resolve identifier to UserID securely via Registry
+            console.log(`UI: Resolving identifier ${identifier}...`);
+            const targetID = await this.client.lookupUser(identifier);
+            console.log(`UI: Resolved to ${targetID}`);
             if (!targetID)
                 throw new Error("User not found in registry");
             const acl = entry.accessACL || { Users: {}, Groups: {} };
@@ -784,19 +794,37 @@ class DistFSApp {
                 users: acl.Users,
                 groups: acl.Groups
             };
+            console.log(`UI: Setting ACL for ${path}...`);
             await this.client.setACL(path, JSON.stringify(wasmAcl));
+            console.log(`UI: ACL set successfully`);
             document.getElementById('share-modal').style.display = 'none';
-            alert(`Shared with ${email}`);
+            console.log(`UI: Shared with ${identifier}`);
             await this.loadDirectory(this.currentPath);
         }
         catch (e) {
             console.error("UI: Share error:", e);
-            alert(`Error: ${e.message}`);
+            const btn = document.getElementById('btn-confirm-share');
+            btn.innerText = 'Error';
         }
         finally {
-            btn.innerText = 'Share';
+            const btn = document.getElementById('btn-confirm-share');
             btn.disabled = false;
         }
     }
 }
-window.addEventListener('DOMContentLoaded', () => { new DistFSApp(); });
+window.addEventListener('error', (e) => {
+    console.error("GLOBAL ERROR:", e.error);
+});
+window.addEventListener('unhandledrejection', (e) => {
+    console.error("GLOBAL REJECTION:", e.reason);
+});
+window.addEventListener('DOMContentLoaded', () => {
+    console.log("UI: DOMContentLoaded - Initializing DistFSApp");
+    try {
+        new DistFSApp();
+        console.log("UI: DistFSApp initialized successfully");
+    }
+    catch (e) {
+        console.error("UI: FAILED TO INITIALIZE DistFSApp:", e);
+    }
+});

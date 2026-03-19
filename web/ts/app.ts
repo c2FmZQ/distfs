@@ -108,9 +108,12 @@ class DistFSApp {
         document.getElementById('btn-close-preview')?.addEventListener('click', () => this.closePreview());
         document.getElementById('btn-preview-download')?.addEventListener('click', () => this.downloadSelected());
         document.getElementById('btn-cancel-share')?.addEventListener('click', () => {
+            (document.getElementById('btn-confirm-share') as HTMLButtonElement).innerText = 'Share';
             document.getElementById('share-modal')!.style.display = 'none';
         });
-        document.getElementById('btn-confirm-share')?.addEventListener('click', () => this.handleShareSubmit());
+        document.getElementById('btn-confirm-share')?.addEventListener('click', () => {
+            this.handleShareSubmit();
+        });
 
         this.setupDragAndDrop();
         this.setupGlobalClickHandlers();
@@ -677,7 +680,11 @@ class DistFSApp {
                 }
                 break;
             case 'star': if (!this.meta.starred.includes(fullPath)) { this.meta.starred.push(fullPath); await this.saveMetadata(); } break;
-            case 'share': document.getElementById('share-file-name')!.innerText = entry.name; document.getElementById('share-modal')!.style.display = 'flex'; break;
+            case 'share': 
+                document.getElementById('share-file-name')!.innerText = entry.name; 
+                (document.getElementById('btn-confirm-share') as HTMLButtonElement).innerText = 'Share';
+                document.getElementById('share-modal')!.style.display = 'flex'; 
+                break;
         }
     }
 
@@ -757,16 +764,24 @@ class DistFSApp {
     }
 
     private async handleShareSubmit() {
-        if (!this.selectedItems.size) return;
+        console.log("UI: handleShareSubmit HELLO");
+        if (!this.selectedItems.size) {
+            console.warn("UI: No items selected for sharing");
+            return;
+        }
         const entry = Array.from(this.selectedItems)[0];
-        const email = (document.getElementById('share-target-email') as HTMLInputElement).value;
+        const identifier = (document.getElementById('share-target-identifier') as HTMLInputElement).value;
         const perms = (document.getElementById('share-perms') as HTMLSelectElement).value;
         const path = this.currentPath === '/' ? `/${entry.name}` : `${this.currentPath}/${entry.name}`;
+        console.log(`UI: Sharing ${path} with ${identifier} (perms: ${perms})`);
+        
         const btn = document.getElementById('btn-confirm-share') as HTMLButtonElement;
         btn.innerText = 'Sharing...'; btn.disabled = true;
         try {
-            // 1. Resolve email to UserID securely via Registry
-            const targetID = await this.client.lookupUser(email);
+            // 1. Resolve identifier to UserID securely via Registry
+            console.log(`UI: Resolving identifier ${identifier}...`);
+            const targetID = await this.client.lookupUser(identifier);
+            console.log(`UI: Resolved to ${targetID}`);
             if (!targetID) throw new Error("User not found in registry");
 
             const acl = entry.accessACL || { Users: {}, Groups: {} };
@@ -778,15 +793,37 @@ class DistFSApp {
                 users: acl.Users,
                 groups: acl.Groups
             };
+            console.log(`UI: Setting ACL for ${path}...`);
             await this.client.setACL(path, JSON.stringify(wasmAcl));
+            console.log(`UI: ACL set successfully`);
+            
             document.getElementById('share-modal')!.style.display = 'none';
-            alert(`Shared with ${email}`);
+            console.log(`UI: Shared with ${identifier}`);
             await this.loadDirectory(this.currentPath);
         } catch (e: any) { 
             console.error("UI: Share error:", e);
-            alert(`Error: ${e.message}`); 
-        } finally { btn.innerText = 'Share'; btn.disabled = false; }
+            const btn = document.getElementById('btn-confirm-share') as HTMLButtonElement;
+            btn.innerText = 'Error';
+        } finally { 
+            const btn = document.getElementById('btn-confirm-share') as HTMLButtonElement;
+            btn.disabled = false; 
+        }
     }
 }
 
-window.addEventListener('DOMContentLoaded', () => { new DistFSApp(); });
+window.addEventListener('error', (e) => {
+    console.error("GLOBAL ERROR:", e.error);
+});
+window.addEventListener('unhandledrejection', (e) => {
+    console.error("GLOBAL REJECTION:", e.reason);
+});
+
+window.addEventListener('DOMContentLoaded', () => { 
+    console.log("UI: DOMContentLoaded - Initializing DistFSApp");
+    try {
+        new DistFSApp(); 
+        console.log("UI: DistFSApp initialized successfully");
+    } catch (e) {
+        console.error("UI: FAILED TO INITIALIZE DistFSApp:", e);
+    }
+});

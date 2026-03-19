@@ -168,15 +168,6 @@ func TestAdminAPI(t *testing.T) {
 	if len(nodes) < 1 {
 		t.Error("No nodes returned")
 	}
-
-	// 6. Test Lookup
-	id, err := c.AdminLookup(t.Context(), "alice@example.com", "Test Lookup")
-	if err != nil {
-		t.Fatalf("AdminLookup failed: %v", err)
-	}
-	if id == "" {
-		t.Error("Lookup returned empty ID")
-	}
 }
 
 func TestAdminMkdirOwner(t *testing.T) {

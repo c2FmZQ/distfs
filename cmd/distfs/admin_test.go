@@ -204,7 +204,7 @@ func TestAdminConsole_ModalSubmission(t *testing.T) {
 
 	// Test Promote Modal Submission
 	m.activeModal = "promote"
-	m.inputs = []textinput.Model{newInput("Email/UserID")}
+	m.inputs = []textinput.Model{newInput("Username/UserID")}
 	m.inputs[0].SetValue("user-to-promote")
 
 	newModel, cmd := m.handleModalSubmit()

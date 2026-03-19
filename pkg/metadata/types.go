@@ -148,9 +148,9 @@ type UserQuota struct {
 }
 
 // User represents a registered user in the system.
-// IDs are HMAC(email) to preserve privacy.
+// IDs are HMAC(sub) to preserve privacy.
 type User struct {
-	ID      string    `json:"id"` // HMAC(email)
+	ID      string    `json:"id"` // HMAC(sub)
 	UID     uint32    `json:"uid"`
 	SignKey []byte    `json:"sign_key"`
 	EncKey  []byte    `json:"enc_key"`

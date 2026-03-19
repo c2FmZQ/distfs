@@ -35,29 +35,50 @@ const authorizeDeviceCode = async (request: any, userCode: string, email: string
 
 test.describe('DistFS Web Client Phase 64 E2E', () => {
 
+  let USERS_GID = '';
+
   test.beforeAll(async () => {
-    // Create /users directory before any tests run
     const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
+    
+    // Helper to get group ID by name
+    const getGroupID = (name: string) => {
+        try {
+            const out = runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-create ${name}`, 'testpassword');
+            return out.match(/ID:\s+([a-f0-9]+)/)?.[1] || '';
+        } catch (e: any) {
+            const errStr = e.stdout?.toString() || e.message || '';
+            const match = errStr.match(/ID:\s+([a-f0-9]+)/);
+            if (match) return match[1];
+            return '';
+        }
+    };
+
     try {
         runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-create world "World Group"`, 'testpassword');
+    } catch(e) {}
+
+    USERS_GID = getGroupID('users');
+
+    try {
         runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir /users`, 'testpassword');
         runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} chmod 0755 /users`, 'testpassword');
-    } catch (e) {
-        // Might already exist, ignore
-    }
+    } catch (e) {}
   });
-
   test('Workspace Layout and Navigation', async ({ page, request }) => {
-    const email = 'workspace@distfs.local';
+    const email = 'web-workspace@distfs.local';
     const authRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
     const jwt = await authRes.text();
     
     const confFile = `/tmp/ws-${Date.now()}.json`;
-    runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
-    
+    const initOut = runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
+    const userID = initOut.match(/User ID:\s+([a-f0-9]+)/)?.[1] || '';
+
     const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock --quota 100000000,100 ws-user ${email}`, 'testpassword');
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner ws-user /users/ws-user`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock --quota 100000000,100 ws-user ${userID}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-add "${USERS_GID || 'users'}" ws-user`, 'testpassword');
+    try {
+        runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner ws-user /users/ws-user`, 'testpassword');
+    } catch(e) {}
 
     await new Promise(r => setTimeout(r, 2000));
     runCLI(`/bin/distfs -allow-insecure -config ${confFile} mkdir /users/ws-user/Documents`, 'test-passphrase-123');
@@ -114,16 +135,20 @@ test.describe('DistFS Web Client Phase 64 E2E', () => {
   });
 
   test('Multi-select and Batch Actions', async ({ page, request }) => {
-    const email = 'batch@distfs.local';
+    const email = 'web-batch@distfs.local';
     const authRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
     const jwt = await authRes.text();
     
     const confFile = `/tmp/batch-${Date.now()}.json`;
-    runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
-    
+    const initOut = runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
+    const userID = initOut.match(/User ID:\s+([a-f0-9]+)/)?.[1] || '';
+
     const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock batch-user ${email}`, 'testpassword');
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner batch-user /users/batch-user`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock batch-user ${userID}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-add "${USERS_GID || 'users'}" batch-user`, 'testpassword');
+    try {
+        runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner batch-user /users/batch-user`, 'testpassword');
+    } catch(e) {}
 
     await new Promise(r => setTimeout(r, 2000));
     for (let i = 1; i <= 3; i++) {
@@ -166,16 +191,20 @@ test.describe('DistFS Web Client Phase 64 E2E', () => {
   });
 
   test('Content Preview Overlay', async ({ page, request }) => {
-    const email = 'preview@distfs.local';
+    const email = 'web-preview@distfs.local';
     const authRes = await request.get(`http://test-auth:8080/mint?email=${email}`);
     const jwt = await authRes.text();
     
     const confFile = `/tmp/preview-${Date.now()}.json`;
-    runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
-    
+    const initOut = runCLI(`/bin/distfs -allow-insecure -config ${confFile} init --new -server http://storage-node-1:8080 -jwt ${jwt}`, 'test-passphrase-123');
+    const userID = initOut.match(/User ID:\s+([a-f0-9]+)/)?.[1] || '';
+
     const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock preview-user ${email}`, 'testpassword');
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner preview-user /users/preview-user`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock preview-user ${userID}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-add "${USERS_GID || 'users'}" preview-user`, 'testpassword');
+    try {
+        runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner preview-user /users/preview-user`, 'testpassword');
+    } catch(e) {}
 
     await new Promise(r => setTimeout(r, 2000));
     const mdContent = "# DistFS Preview\n\n- E2EE\n- PQC\n- WASM";
@@ -212,31 +241,39 @@ test.describe('DistFS Web Client Phase 64 E2E', () => {
 
   test('Cryptographic Sharing (ACL Updates)', async ({ page, request, browser }) => {
     test.setTimeout(60000);
-    const aliceEmail = 'alice-share@distfs.local';
-    const bobEmail = 'bob-share@distfs.local';
+    const aliceEmail = 'alice-web@distfs.local';
+    const bobEmail = 'bob-web@distfs.local';
+    const aliceAlias = `alice-${Date.now()}`;
+    const bobAlias = `bob-${Date.now()}`;
     
     // 1. Setup Alice
     const aliceAuth = await request.get(`http://test-auth:8080/mint?email=${aliceEmail}`);
     const aliceJwt = await aliceAuth.text();
     const aliceConf = `/tmp/alice-${Date.now()}.json`;
-    runCLI(`/bin/distfs -allow-insecure -config ${aliceConf} init --new -server http://storage-node-1:8080 -jwt ${aliceJwt}`, 'test-passphrase-123');
-    
+    const aliceInitOut = runCLI(`/bin/distfs -allow-insecure -config ${aliceConf} init --new -server http://storage-node-1:8080 -jwt ${aliceJwt}`, 'test-passphrase-123');
+    const aliceID = aliceInitOut.match(/User ID:\s+([a-f0-9]+)/)?.[1] || '';
+
     const adminConfig = process.env.DISTFS_CONFIG_DIR + '/config.json';
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock alice-user ${aliceEmail}`, 'testpassword');
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner alice-user /users/alice-user`, 'testpassword');
-    runCLI(`/bin/distfs -allow-insecure -config ${aliceConf} chmod 0755 /users/alice-user`, 'test-passphrase-123');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock ${aliceAlias} ${aliceID}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-add "${USERS_GID || 'users'}" ${aliceAlias}`, 'testpassword');
+    try {
+        runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} mkdir --owner ${aliceAlias} /users/${aliceAlias}`, 'testpassword');
+    } catch (e) {}
+    runCLI(`/bin/distfs -allow-insecure -config ${aliceConf} chmod 0755 /users/${aliceAlias}`, 'test-passphrase-123');
 
     // 2. Setup Bob
     const bobAuth = await request.get(`http://test-auth:8080/mint?email=${bobEmail}`);
     const bobJwt = await bobAuth.text();
     const bobConf = `/tmp/bob-${Date.now()}.json`;
-    runCLI(`/bin/distfs -allow-insecure -config ${bobConf} init --new -server http://storage-node-1:8080 -jwt ${bobJwt}`, 'test-passphrase-456');
-    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock bob-user ${bobEmail}`, 'testpassword');
+    const bobInitOut = runCLI(`/bin/distfs -allow-insecure -config ${bobConf} init --new -server http://storage-node-1:8080 -jwt ${bobJwt}`, 'test-passphrase-456');
+    const bobID = bobInitOut.match(/User ID:\s+([a-f0-9]+)/)?.[1] || '';
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} registry-add --yes --unlock ${bobAlias} ${bobID}`, 'testpassword');
+    runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-add "${USERS_GID || 'users'}" ${bobAlias}`, 'testpassword');
 
     // 3. Alice creates a file
     await new Promise(r => setTimeout(r, 2000));
     runCLI(`echo "Alice Secret Data" > /tmp/secret.txt`);
-    runCLI(`/bin/distfs -allow-insecure -config ${aliceConf} put /tmp/secret.txt /users/alice-user/secret.txt`, 'test-passphrase-123');
+    runCLI(`/bin/distfs -allow-insecure -config ${aliceConf} put /tmp/secret.txt /users/${aliceAlias}/secret.txt`, 'test-passphrase-123');
 
     // 4. Alice logs in and shares with Bob via UI
     page.on('console', msg => console.log(`BROWSER: ${msg.text()}`));
@@ -254,17 +291,18 @@ test.describe('DistFS Web Client Phase 64 E2E', () => {
     await authorizeDeviceCode(request, aliceCode!, aliceEmail);
     await expect(page.locator('#auth-overlay')).toBeHidden({ timeout: 30000 });
 
-    await page.locator('.tree-node', { hasText: 'alice-user' }).first().click();
+    await page.locator('.tree-node', { hasText: aliceAlias }).first().click();
     await page.click('#file-list >> text=secret.txt', { button: 'right' });
     await page.click('#context-menu >> [data-action="share"]');
     
-    await page.fill('#share-target-email', 'bob-user');
+    await page.fill('#share-target-identifier', bobID);
     await page.selectOption('#share-perms', 'r--');
     
     // Capture state for debugging/docs
     await captureScreenshot(page, 'ws-share-modal-active');
     
     // The global dialog handler will accept the "Shared successfully" alert
+    await expect(page.locator('#btn-confirm-share')).toBeVisible();
     await page.click('#btn-confirm-share');
 
     // Wait for the modal to close to ensure the share completed
@@ -292,7 +330,7 @@ test.describe('DistFS Web Client Phase 64 E2E', () => {
 
     // Bob navigates to Alice's folder
     // Since /users/alice-user is 0755, Bob can see it
-    await bobPage.locator('.tree-node', { hasText: 'alice-user' }).first().click();
+    await bobPage.locator('.tree-node', { hasText: aliceAlias }).first().click();
     await expect(bobPage.locator('#file-list >> text=secret.txt')).toBeVisible({ timeout: 15000 });
     
     // Bob attempts to preview (this requires successful Lockbox decryption)

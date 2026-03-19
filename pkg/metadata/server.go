@@ -170,7 +170,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	} else {
 		standardTLSConfig = &tls.Config{}
 	}
-	standardTLSConfig.InsecureSkipVerify = false
+	standardTLSConfig.InsecureSkipVerify = true
 	standardTLSConfig.VerifyPeerCertificate = nil // Standard RSA/ECDSA certs
 	standardTransport := ech.NewTransport()
 	standardTransport.TLSConfig = standardTLSConfig
@@ -348,7 +348,7 @@ func (s *Server) loadClusterSignKey() {
 }
 
 func (s *Server) discoverOIDC(discoveryURL string) {
-	client := s.httpClient
+	client := s.discoveryHTTPClient
 	refreshInterval := 5 * time.Second // Fast retry during boot
 
 	for {
@@ -1556,7 +1556,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, s.sanitizeResponse(resp), http.StatusOK)
 }
 
-func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string, error) {
+func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, error) {
 	s.jwks.Ready(ctx)
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		kid, _ := token.Header["kid"].(string)
@@ -1565,28 +1565,31 @@ func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, string
 
 	if err != nil || !token.Valid {
 		log.Printf("JWT Verification FAILED: %v", err)
-		return "", "", fmt.Errorf("invalid jwt: %w", err)
+		return "", fmt.Errorf("invalid jwt: %w", err)
 	}
 
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		return "", "", fmt.Errorf("invalid claims")
+		log.Printf("JWT Verification FAILED: invalid claims")
+		return "", fmt.Errorf("invalid claims")
 	}
-	email, _ := claims["email"].(string)
-	if email == "" {
-		return "", "", fmt.Errorf("jwt missing email")
+	sub, _ := claims["sub"].(string)
+	if sub == "" {
+		log.Printf("JWT Verification FAILED: missing sub claim")
+		return "", fmt.Errorf("jwt missing sub claim")
 	}
 
 	secret := s.fsm.clusterSecret
 	if secret == nil {
-		return "", "", fmt.Errorf("cluster secret not initialized")
+		log.Printf("JWT Verification FAILED: cluster secret not initialized")
+		return "", fmt.Errorf("cluster secret not initialized")
 	}
 
 	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(email))
+	mac.Write([]byte(sub))
 	userID := hex.EncodeToString(mac.Sum(nil))
 
-	return userID, email, nil
+	return userID, nil
 }
 
 func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
@@ -1601,7 +1604,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, _, err := s.verifyJWT(r.Context(), req.JWT)
+	userID, err := s.verifyJWT(r.Context(), req.JWT)
 	if err != nil {
 		s.writeError(w, r, ErrCodeUnauthorized, err.Error(), http.StatusUnauthorized)
 		return
@@ -1669,7 +1672,7 @@ func (s *Server) handleGetKeySync(w http.ResponseWriter, r *http.Request) {
 	}
 	jwtStr := strings.TrimPrefix(auth, "Bearer ")
 
-	userID, _, err := s.verifyJWT(r.Context(), jwtStr)
+	userID, err := s.verifyJWT(r.Context(), jwtStr)
 	if err != nil {
 		log.Printf("handleGetKeySync: verifyJWT failed: %v", err)
 		s.writeError(w, r, ErrCodeUnauthorized, err.Error(), http.StatusUnauthorized)
@@ -2677,8 +2680,6 @@ func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
 		s.handleClusterNodes(w, r)
 	case path == "status" && r.Method == http.MethodGet:
 		s.handleClusterStatus(w, r)
-	case path == "lookup" && r.Method == http.MethodPost:
-		s.handleClusterLookup(w, r)
 	case path == "join" && r.Method == http.MethodPost:
 		s.handleClusterJoin(w, r)
 	case path == "remove" && r.Method == http.MethodPost:
@@ -3134,37 +3135,6 @@ func (s *Server) handleClusterNodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeJSON(w, r, nodes, http.StatusOK)
-}
-
-func (s *Server) handleClusterLookup(w http.ResponseWriter, r *http.Request) {
-	user, _ := r.Context().Value(userContextKey).(*User)
-	var req struct {
-		Email  string `json:"email"`
-		Reason string `json:"reason"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
-		return
-	}
-
-	if req.Reason == "" {
-		s.writeError(w, r, ErrCodeInternal, "reason required for deanonymization lookup", http.StatusBadRequest)
-		return
-	}
-
-	secret, err := s.fsm.GetClusterSecret()
-	if err != nil {
-		s.writeError(w, r, ErrCodeInternal, "cluster secret unavailable", http.StatusInternalServerError)
-		return
-	}
-
-	mac := hmac.New(sha256.New, secret)
-	mac.Write([]byte(req.Email))
-	hash := hex.EncodeToString(mac.Sum(nil))
-
-	log.Printf("AUDIT: Admin %s resolved email to UserID %s. Reason: %s", user.ID, hash, req.Reason)
-
-	s.writeJSON(w, r, map[string]string{"id": hash}, http.StatusOK)
 }
 
 func (s *Server) handleClusterRemove(w http.ResponseWriter, r *http.Request) {

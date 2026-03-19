@@ -81,6 +81,7 @@ func main() {
 		}
 		token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 			"email": email,
+			"sub":   "sub-" + email,
 			"iss":   "test-auth-server",
 			"exp":   time.Now().Add(1 * time.Hour).Unix(),
 		})
@@ -146,6 +147,7 @@ func main() {
 
 		token := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
 			"email": flow.Email,
+			"sub":   "sub-" + flow.Email,
 			"iss":   "test-auth-server",
 			"exp":   time.Now().Add(1 * time.Hour).Unix(),
 		})

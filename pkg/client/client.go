@@ -221,7 +221,6 @@ type GroupUpdateFunc func(*metadata.Group) error
 type DirectoryEntry struct {
 	Username   string `json:"username"`
 	FullName   string `json:"full_name"`
-	Email      string `json:"email"`
 	UserID     string `json:"uid"`
 	EncKey     []byte `json:"ek"` // ML-KEM Public Key
 	SignKey    []byte `json:"sk"` // ML-DSA Public Key
@@ -237,8 +236,6 @@ func (e *DirectoryEntry) Hash() []byte {
 	h.Write([]byte(e.Username))
 	h.Write([]byte("|"))
 	h.Write([]byte(e.FullName))
-	h.Write([]byte("|"))
-	h.Write([]byte(e.Email))
 	h.Write([]byte("|"))
 	h.Write([]byte(e.UserID))
 	h.Write([]byte("|"))
@@ -1486,6 +1483,12 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 		}
 
 		results, err := c.ApplyBatch(ctx, []metadata.LogCommand{cmd})
+		if err != nil {
+			if isConflict(err) {
+				continue
+			}
+			return nil, err
+		}
 		if err == nil {
 			if len(results) == 0 {
 				return nil, fmt.Errorf("empty results from updateInode batch")
@@ -4544,6 +4547,21 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		}
 	}
 
+	// 1.5 Pre-fetch ACL recipients
+	aclRecipients := make(map[string]*mlkem.EncapsulationKey768)
+	if attr.AccessACL != nil {
+		for uid, bits := range attr.AccessACL.Users {
+			if (bits & 4) != 0 {
+				u, err := c.GetUser(ctx, uid)
+				if err == nil {
+					if pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey); err == nil {
+						aclRecipients[uid] = pk
+					}
+				}
+			}
+		}
+	}
+
 	// 2. Perform Atomic Update
 	updated, err := c.UpdateInode(ctx, inode.ID, func(i *metadata.Inode) error {
 		// Update local fields
@@ -4596,29 +4614,8 @@ func (c *Client) SetAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		}
 
 		// 2.3 ACL Access Expansion
-		if i.AccessACL != nil {
-			for uid, bits := range i.AccessACL.Users {
-				if (bits & 4) != 0 {
-					user, err := c.GetUser(ctx, uid)
-					if err == nil {
-						upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-						if err == nil {
-							i.Lockbox.AddRecipient(uid, upk, key)
-						}
-					}
-				}
-			}
-			for gid, bits := range i.AccessACL.Groups {
-				if (bits & 4) != 0 {
-					group, err := c.GetGroup(ctx, gid)
-					if err == nil {
-						gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-						if err == nil {
-							i.Lockbox.AddRecipient(gid, gpk, key)
-						}
-					}
-				}
-			}
+		for uid, pk := range aclRecipients {
+			i.Lockbox.AddRecipient(uid, pk, key)
 		}
 
 		return nil
@@ -5272,7 +5269,7 @@ func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}
 }
 
 // ResolveUsername attempts to resolve a user identifier to a DistFS UserID.
-// It prioritizes the local registry, then falls back to admin-only server lookup for emails.
+// It prioritizes the local registry, then falls back to verifying raw 64-character IDs.
 func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string, *DirectoryEntry, error) {
 	if metadata.IsInodeID(identifier) {
 		return identifier, nil, nil // Already a 32-char hex ID (e.g., group ID or root ID)
@@ -5285,11 +5282,7 @@ func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string
 	}
 
 	if strings.Contains(identifier, "@") {
-		if c.admin {
-			id, err := c.AdminLookup(ctx, identifier, "Username Resolution")
-			return id, nil, err
-		}
-		return "", nil, fmt.Errorf("email resolution requires admin privileges (use registry username instead)")
+		return "", nil, fmt.Errorf("email resolution is no longer supported (use registry username instead)")
 	}
 
 	// Try the registry
@@ -5324,51 +5317,6 @@ func (c *Client) ResolveUsername(ctx context.Context, identifier string) (string
 	}
 
 	return entry.UserID, &entry, nil
-}
-
-// AdminLookup resolves a plaintext email to its HMAC-derived User ID.
-func (c *Client) AdminLookup(ctx context.Context, email, reason string) (string, error) {
-	payload, _ := json.Marshal(map[string]string{
-		"email":  email,
-		"reason": reason,
-	})
-	var result struct {
-		ID string `json:"id"`
-	}
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverURL+"/v1/admin/lookup", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, payload); err != nil {
-			return err
-		}
-
-		resp, err := c.httpClient.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-
-		return json.NewDecoder(body).Decode(&result)
-	})
-	return result.ID, err
 }
 
 // AdminAudit streams redacted audit records from the server.

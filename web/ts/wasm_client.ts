@@ -5,6 +5,10 @@ export class WasmClient {
 
     constructor(workerScript: string) {
         this.worker = new Worker(workerScript);
+        this.worker.onerror = (e) => {
+            console.error("WASM Worker Critical Error:", e);
+            this.ready = false;
+        };
         this.worker.onmessage = (e) => {
             if (e.data.type === 'ready') {
                 this.ready = true;
@@ -67,8 +71,8 @@ export class WasmClient {
         return this.invoke('setACL', { path, aclJSON });
     }
 
-    async lookupUser(email: string): Promise<string> {
-        return this.invoke('lookupUser', { email });
+    async lookupUser(identifier: string): Promise<string> {
+        return this.invoke('lookupUser', { identifier });
     }
 
     async getQuota(): Promise<any> {

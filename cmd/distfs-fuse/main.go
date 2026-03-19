@@ -75,7 +75,7 @@ func main() {
 	// Auth flags
 	jwt := flag.String("jwt", "", "OIDC JWT for registration")
 	clientID := flag.String("client-id", "distfs", "The client ID")
-	scopes := flag.String("scopes", "openid,email", "The scopes to request (comma separated)")
+	scopes := flag.String("scopes", "openid", "The scopes to request (comma separated)")
 	authEndpoint := flag.String("auth-endpoint", "", "The authorization endpoint")
 	tokenEndpoint := flag.String("token-endpoint", "", "The token endpoint")
 	qrCode := flag.Bool("qr", false, "Show a QR code of the verification URL")

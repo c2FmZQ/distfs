@@ -282,16 +282,7 @@ func TestClient_AdminMethods(t *testing.T) {
 		t.Fatalf("AdminClusterStatus failed: %v", err)
 	}
 
-	// 5. AdminLookup
-	var uID string
-	uID, err = c.WithAdmin(true).AdminLookup(ctx, "user1@example.com", "Test")
-	if err != nil {
-		// Might fail if cluster secret not set in a way HMAC matches, but handler should be hit
-	} else if uID == "" {
-		t.Error("AdminLookup returned empty ID")
-	}
-
-	// 6. AdminSetUserQuota
+	// 5. AdminSetUserQuota
 	err = c.WithAdmin(true).AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
 		UserID:    "u1",
 		MaxInodes: ptr(uint64(100)),

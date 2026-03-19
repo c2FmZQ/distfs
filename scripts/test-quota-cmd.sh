@@ -13,21 +13,22 @@ export ADMIN_CONFIG="$DISTFS_CONFIG_DIR/config.json"
 echo "User Setup..."
 export USER_CONFIG=/tmp/user-quota.json
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=user-quota@example.com")
-distfs -disable-doh -use-pinentry=false -config "$USER_CONFIG" init --new -server http://storage-node-1:8080 -jwt "$JWT"
-distfs -disable-doh -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "user-quota@example.com"
+INIT_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$USER_CONFIG" init --new -server http://storage-node-1:8080 -jwt "$JWT")
+U_ID=$(echo "$INIT_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$U_ID"
 
 echo "Admin: Setting User Quota..."
-distfs -disable-doh -use-pinentry=false -admin -config "$ADMIN_CONFIG" admin-user-quota user-quota@example.com 5000 10
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$ADMIN_CONFIG" admin-user-quota "$U_ID" 5000 10
 
 echo "User: Creating Group with independent quota..."
-distfs -disable-doh -use-pinentry=false -config "$USER_CONFIG" group-create --quota my-project > /tmp/group-out.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$USER_CONFIG" group-create --quota my-project > /tmp/group-out.txt
 G_ID=$(grep "^ID:" /tmp/group-out.txt | awk '{print $2}')
 
 echo "Admin: Setting Group Quota for G_ID: '$G_ID'..."
-distfs -disable-doh -use-pinentry=false -config "$ADMIN_CONFIG" admin-group-quota "$G_ID" 2000 5
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$ADMIN_CONFIG" admin-group-quota "$G_ID" 2000 5
 
 echo "User: Running 'distfs quota'..."
-distfs -disable-doh -use-pinentry=false -config "$USER_CONFIG" quota > /tmp/quota-out.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$USER_CONFIG" quota > /tmp/quota-out.txt
 cat /tmp/quota-out.txt
 
 echo "Verification: Checking for expected strings..."

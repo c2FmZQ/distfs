@@ -4,6 +4,10 @@ export class WasmClient {
     onReady;
     constructor(workerScript) {
         this.worker = new Worker(workerScript);
+        this.worker.onerror = (e) => {
+            console.error("WASM Worker Critical Error:", e);
+            this.ready = false;
+        };
         this.worker.onmessage = (e) => {
             if (e.data.type === 'ready') {
                 this.ready = true;
@@ -57,8 +61,8 @@ export class WasmClient {
     async setACL(path, aclJSON) {
         return this.invoke('setACL', { path, aclJSON });
     }
-    async lookupUser(email) {
-        return this.invoke('lookupUser', { email });
+    async lookupUser(identifier) {
+        return this.invoke('lookupUser', { identifier });
     }
     async getQuota() {
         return this.invoke('getQuota', {});
