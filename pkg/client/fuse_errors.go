@@ -1,12 +1,12 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
-package fuse
+package client
 
 import (
 	"context"
 	"errors"
 	"net/http"
-
-	"github.com/c2FmZQ/distfs/pkg/client"
 
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"strings"
@@ -20,7 +20,7 @@ func mapError(err error) error {
 	}
 
 	// 1. Check for specific APIError mapping
-	var apiErr *client.APIError
+	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		switch apiErr.StatusCode {
 		case http.StatusNotFound:

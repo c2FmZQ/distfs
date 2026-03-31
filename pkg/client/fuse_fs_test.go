@@ -1,5 +1,7 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
-package fuse
+package client
 
 import (
 	"testing"

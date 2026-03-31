@@ -12,7 +12,9 @@ import (
 )
 
 func TestClient_ReadDataFiles_Consistency(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer metaNode.Shutdown()
 	defer metaServer.Shutdown()
 	defer ts.Close()
@@ -31,7 +33,7 @@ func TestClient_ReadDataFiles_Consistency(t *testing.T) {
 	cfg1 := Config{Version: 1, Secret: "secret-1"}
 	sec1 := Config{Version: 1, Secret: "key-1"}
 
-	if err := c.SaveDataFiles(ctx, []string{path1, path2}, []any{cfg1, sec1}); err != nil {
+	if err := c.saveDataFiles(ctx, []string{path1, path2}, []any{cfg1, sec1}); err != nil {
 		t.Fatalf("Initial save failed: %v", err)
 	}
 
@@ -51,7 +53,7 @@ func TestClient_ReadDataFiles_Consistency(t *testing.T) {
 			default:
 				cfg := Config{Version: version, Secret: fmt.Sprintf("secret-%d", version)}
 				sec := Config{Version: version, Secret: fmt.Sprintf("key-%d", version)}
-				if err := cWriter.SaveDataFiles(ctx, []string{path1, path2}, []any{cfg, sec}); err != nil {
+				if err := cWriter.saveDataFiles(ctx, []string{path1, path2}, []any{cfg, sec}); err != nil {
 					// Conflicts are expected, SaveDataFiles should handle retries but if it fails we just continue
 				}
 				version++
@@ -63,7 +65,7 @@ func TestClient_ReadDataFiles_Consistency(t *testing.T) {
 	// 3. Perform many atomic reads and verify consistency
 	for i := 0; i < 10; i++ {
 		var rCfg, rSec Config
-		if err := c.ReadDataFiles(ctx, []string{path1, path2}, []any{&rCfg, &rSec}); err != nil {
+		if err := c.readDataFiles(ctx, []string{path1, path2}, []any{&rCfg, &rSec}); err != nil {
 			t.Errorf("ReadDataFiles failed at iteration %d: %v", i, err)
 			continue
 		}

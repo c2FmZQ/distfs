@@ -4,25 +4,23 @@ package main
 import (
 	"context"
 	"fmt"
+	"log"
 
-	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"github.com/c2FmZQ/distfs/pkg/client"
 )
 
-func cmdDumpInodes(ctx context.Context, args []string) {
+func cmdDump(ctx context.Context, args []string) {
+	if len(args) < 1 {
+		log.Fatal("usage: distfs dump <path or rootID>")
+	}
+	target := args[0]
+
 	c := loadClient()
 
-	// Start from root
-	rootID := metadata.RootID
-	if len(args) > 0 {
-		// Try to resolve path to ID if arg provided
-		path := args[0]
-		inode, _, err := c.ResolvePath(ctx, path)
-		if err != nil {
-			fmt.Printf("Error resolving path %s: %v. Assuming it's an ID.\n", path, err)
-			rootID = path
-		} else {
-			rootID = inode.ID
-		}
+	// Try to resolve as path first
+	rootID := target
+	if fi, err := c.Stat(ctx, target); err == nil {
+		rootID = fi.Sys().(*client.InodeInfo).ID
 	}
 
 	visited := make(map[string]bool)
@@ -39,7 +37,7 @@ func cmdDumpInodes(ctx context.Context, args []string) {
 		}
 		visited[id] = true
 
-		inode, err := c.GetInode(ctx, id)
+		inode, err := c.AdminGetInodeDump(ctx, id)
 		if err != nil {
 			fmt.Printf("ERROR fetching inode %s: %v\n", id, err)
 			continue
@@ -48,17 +46,15 @@ func cmdDumpInodes(ctx context.Context, args []string) {
 		dumpInode(inode)
 
 		// Enqueue children if directory
-		if inode.Type == metadata.DirType && inode.Children != nil {
-			for name, entry := range inode.Children {
-				fmt.Printf("  -> Child: %s (%s)\n", name, entry.ID)
-				queue = append(queue, entry.ID)
-			}
+		for _, childID := range inode.Children {
+			queue = append(queue, childID)
 		}
 	}
+
 	fmt.Println("--- INODE DUMP END ---")
 }
 
-func dumpInode(i *metadata.Inode) {
+func dumpInode(i *client.InodeDump) {
 	fmt.Printf("Inode ID: %s\n", i.ID)
 	fmt.Printf("  Type: %v\n", i.Type)
 	fmt.Printf("  Mode: %04o\n", i.Mode)
@@ -66,28 +62,28 @@ func dumpInode(i *metadata.Inode) {
 	fmt.Printf("  Owner: %s\n", i.OwnerID)
 	fmt.Printf("  Group: %s\n", i.GroupID)
 	fmt.Printf("  Version: %d\n", i.Version)
-	fmt.Printf("  SignerID: %s\n", i.GetSignerID())
+	fmt.Printf("  SignerID: %s\n", i.SignerID)
 
-	if target := i.GetSymlinkTarget(); target != "" {
-		fmt.Printf("  SymlinkTarget: %s\n", target)
+	if i.SymlinkTarget != "" {
+		fmt.Printf("  SymlinkTarget: %s\n", i.SymlinkTarget)
 	}
 
 	// Print raw signature bytes (truncated)
-	if len(i.UserSig) > 0 {
-		fmt.Printf("  UserSig: %x... (len=%d)\n", i.UserSig[:8], len(i.UserSig))
+	if i.HasUserSig {
+		fmt.Printf("  UserSig: %s... (len=%d)\n", i.UserSigPref, i.UserSigLen)
 	} else {
 		fmt.Printf("  UserSig: <empty>\n")
 	}
 
 	fmt.Printf("  Links: %v\n", i.Links)
-	if len(i.ChunkManifest) > 0 {
-		fmt.Printf("  Chunks: %d\n", len(i.ChunkManifest))
+	if i.NumChunks > 0 {
+		fmt.Printf("  Chunks: %d\n", i.NumChunks)
 	}
-	if len(i.ChunkPages) > 0 {
-		fmt.Printf("  ChunkPages: %d\n", len(i.ChunkPages))
+	if i.NumPages > 0 {
+		fmt.Printf("  ChunkPages: %d\n", i.NumPages)
 	}
-	if data := i.GetInlineData(); data != nil {
-		fmt.Printf("  InlineData: %d bytes\n", len(data))
+	if i.InlineSize > 0 {
+		fmt.Printf("  InlineData: %d bytes\n", i.InlineSize)
 	}
 	fmt.Println("")
 }

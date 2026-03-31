@@ -31,7 +31,6 @@ import (
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
 
 var (
@@ -148,25 +147,28 @@ func main() {
 	if err != nil {
 		log.Fatalf("invalid EncKey: %v", err)
 	}
-	dk, err := crypto.UnmarshalDecapsulationKey(dkBytes)
-	if err != nil {
-		log.Fatalf("failed to unmarshal decapsulation key: %v", err)
-	}
 	skBytes, err := hex.DecodeString(conf.SignKey)
 	if err != nil {
 		log.Fatalf("invalid SignKey: %v", err)
 	}
-	sk := crypto.UnmarshalIdentityKey(skBytes)
 	svKeyBytes, err := hex.DecodeString(conf.ServerKey)
 	if err != nil {
 		log.Fatalf("invalid ServerKey: %v", err)
 	}
-	svKey, err := crypto.UnmarshalEncapsulationKey(svKeyBytes)
-	if err != nil {
-		log.Fatalf("failed to unmarshal server key: %v", err)
-	}
 
-	c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey).WithAdmin(*adminFlag).WithDisableDoH(*disableDoH)
+	c, err = c.WithIdentityBytes(conf.UserID, dkBytes)
+	if err != nil {
+		log.Fatalf("failed to set identity: %v", err)
+	}
+	c, err = c.WithSignKeyBytes(skBytes)
+	if err != nil {
+		log.Fatalf("failed to set sign key: %v", err)
+	}
+	c, err = c.WithServerKeyBytes(svKeyBytes)
+	if err != nil {
+		log.Fatalf("failed to set server key: %v", err)
+	}
+	c = c.WithAdmin(*adminFlag).WithDisableDoH(*disableDoH)
 
 	// Ensure we are logged in
 	if err := c.Login(ctx); err != nil {

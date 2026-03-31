@@ -13,7 +13,9 @@ import (
 )
 
 func TestSymlinks(t *testing.T) {
-	c, node, srv, ts := SetupTestClient(t)
+	c, node, srv, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer node.Shutdown()
 	defer srv.Shutdown()
 	defer ts.Close()
@@ -51,8 +53,8 @@ func TestSymlinks(t *testing.T) {
 		t.Errorf("Expected not a directory")
 	}
 	// Verify it points to the real file's content/inode
-	realInode, _, _ := c.ResolvePath(ctx, filePath)
-	if info.Sys().(*metadata.Inode).ID != realInode.ID {
+	realInode, _, _ := c.resolvePath(ctx, filePath)
+	if info.Sys().(*InodeInfo).ID != realInode.ID {
 		t.Errorf("Stat did not follow absolute symlink")
 	}
 
@@ -60,7 +62,7 @@ func TestSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat(rel_link) failed: %v", err)
 	}
-	if infoRel.Sys().(*metadata.Inode).ID != realInode.ID {
+	if infoRel.Sys().(*InodeInfo).ID != realInode.ID {
 		t.Errorf("Stat did not follow relative symlink")
 	}
 
@@ -69,7 +71,7 @@ func TestSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Lstat failed: %v", err)
 	}
-	if infoL.Sys().(*metadata.Inode).Type != metadata.SymlinkType {
+	if infoL.Sys().(*InodeInfo).Type != metadata.SymlinkType {
 		t.Errorf("Lstat followed symlink, expected SymlinkType")
 	}
 
@@ -82,7 +84,7 @@ func TestSymlinks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat(nested_link) failed: %v", err)
 	}
-	if infoN.Sys().(*metadata.Inode).ID != realInode.ID {
+	if infoN.Sys().(*InodeInfo).ID != realInode.ID {
 		t.Errorf("Stat did not follow nested symlink")
 	}
 

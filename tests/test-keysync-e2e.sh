@@ -38,8 +38,9 @@ USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 /bin/distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$USER_ID"
 
-echo "Admin: Provisioning home directory for $USER_ID..."
-/bin/distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$USER_ID" "/users/$USER_ID" || true
+echo "Admin: Provisioning home directory for $USER_ID via registry..."
+/bin/distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --home "$USER_ID" "$USER_ID"
+/bin/distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$USER_ID"
 
 # 3. Pull Keys to Config 2 (New Device simulation)
 echo "Pulling Keys to Config 2 (New Device simulation)..."

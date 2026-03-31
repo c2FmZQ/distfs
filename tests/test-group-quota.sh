@@ -12,7 +12,7 @@ done
 
 # User Alice already provisioned by test-all-e2e.sh at /users/quota-user
 echo "Alice: Creating group 'quota-test' with independent quota enabled..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG" group-create --quota quota-test > /tmp/group-out.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create --quota --owner quota-user quota-test > /tmp/group-out.txt
 G_ID=$(grep "^ID:" /tmp/group-out.txt | awk '{print $2}')
 
 export DISTFS_CONFIG_DIR="${DISTFS_CONFIG_DIR:-/root/.distfs}"

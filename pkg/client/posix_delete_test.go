@@ -12,7 +12,9 @@ import (
 
 func TestPOSIX_DeleteWhileOpen(t *testing.T) {
 	// 1. Setup Cluster
-	c, metaNode, _, tsMeta := SetupTestClient(t)
+	c, metaNode, _, tsMeta, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer tsMeta.Close()
 
 	if err := c.Mkdir(t.Context(), "/dir", 0755); err != nil {
@@ -47,7 +49,7 @@ func TestPOSIX_DeleteWhileOpen(t *testing.T) {
 	}
 
 	// 5. Verify file is gone from namespace
-	_, _, err = c.ResolvePath(t.Context(), path)
+	_, _, err = c.resolvePath(t.Context(), path)
 	if err == nil {
 		t.Error("Expected error resolving deleted path, got nil")
 	}
@@ -70,7 +72,7 @@ func TestPOSIX_DeleteWhileOpen(t *testing.T) {
 	time.Sleep(200 * time.Millisecond) // Give Raft a moment to apply the release-triggered delete
 
 	// Check if inode is gone
-	_, err = c.GetInode(t.Context(), inodeID)
+	_, err = c.getInode(t.Context(), inodeID)
 	if err == nil {
 		t.Error("Inode still exists via API after last lease released")
 	}

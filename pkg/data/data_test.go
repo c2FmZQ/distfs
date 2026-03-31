@@ -37,9 +37,9 @@ import (
 )
 
 func TestSecurity_ClusterSignKey(t *testing.T) {
-	node, ts, serverSignKey, _, _ := metadata.SetupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := metadata.SetupCluster(t)
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
 
 	// 1. Setup User
 	u1Dec, _ := crypto.GenerateEncryptionKey()
@@ -49,9 +49,9 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		SignKey: u1Sign.Public(),
 		EncKey:  u1Dec.EncapsulationKey().Bytes(),
 	}
-	metadata.CreateUser(t, node, u1)
+	metadata.CreateUser(t, tc.Node, u1, u1Sign, tc.AdminID, tc.AdminSK)
 
-	token1, secret1 := metadata.LoginSessionForTestWithSecret(t, ts, "u1", u1Sign)
+	token1, secret1 := metadata.LoginSessionForTestWithSecret(t, tc.TS, "u1", u1Sign)
 
 	// Create Inode so token issuance succeeds (exists=true check)
 	inode := metadata.Inode{
@@ -64,7 +64,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LogCommand Marshal failed: %v", err)
 	}
-	f := node.Raft.Apply(lcmdBytes, 5*time.Second)
+	f := tc.Node.Raft.Apply(lcmdBytes, 5*time.Second)
 	if err := f.Error(); err != nil {
 		t.Fatalf("CreateInode failed: %v", err)
 	}
@@ -83,7 +83,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 	// Must seal POST requests to /v1/meta/token
 	body := metadata.SealTestRequestSymmetric(t, "u1", u1Sign, secret1, payload)
 
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", tc.TS.URL+"/v1/meta/token", bytes.NewReader(body))
 	req.Header.Set("Session-Token", token1)
 	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, err := http.DefaultClient.Do(req)
@@ -95,7 +95,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		t.Fatalf("Failed to get token: %d %s", resp.StatusCode, string(b))
 	}
 
-	opened := metadata.UnsealTestResponseWithSession(t, u1Dec, secret1, serverSignKey.Public(), resp)
+	opened := metadata.UnsealTestResponseWithSession(t, u1Dec, secret1, tc.NodeSK.Public(), resp)
 
 	var signedToken metadata.SignedAuthToken
 	if err := json.Unmarshal(opened, &signedToken); err != nil {
@@ -108,7 +108,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 	}
 
 	// 3. Verify with Data Node Logic (Strict metaPubKey check)
-	clusterPub, _ := node.FSM.GetClusterSignPublicKey()
+	clusterPub, _ := tc.Node.FSM.GetClusterSignPublicKey()
 
 	tmpDir := t.TempDir()
 	stChunks, _ := createTestStorage(t, tmpDir)
@@ -135,7 +135,7 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		Exp:    time.Now().Add(time.Hour).Unix(),
 	}
 	payload, _ = json.Marshal(capToken)
-	badSig := serverSignKey.Sign(payload)
+	badSig := tc.NodeSK.Sign(payload)
 	forgedToken := metadata.SignedAuthToken{
 		SignerID:  "node-1",
 		Payload:   payload,

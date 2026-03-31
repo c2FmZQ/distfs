@@ -11,7 +11,7 @@ This document describes the exported API of the `pkg/client` and `pkg/fuse` pack
 - `(c *Client) WithIdentity(userID string, key *mlkem.DecapsulationKey768) *Client`: Configures user identity and encryption keys.
 - `(c *Client) WithSignKey(key *crypto.IdentityKey) *Client`: Configures user signing keys.
 - `(c *Client) WithServerKey(key *mlkem.EncapsulationKey768) *Client`: Manually configures the cluster encryption public key.
-- `(c *Client) WithRootAnchor(id, owner string, version uint64) *Client`: Configures the initial trust anchor for the root directory.
+- `(c *Client) WithRootAnchor(id, owner string, pk, ek []byte, version uint64) *Client`: Configures the initial trust anchor for the root directory.
 - `(c *Client) WithRootID(id string) *Client`: Sets a specific Inode ID as the logical root (chroot).
 - `(c *Client) WithAdmin(admin bool) *Client`: Enables administrative bypass mode (requires server-side admin privileges).
 - `(c *Client) WithLeaseExpiredCallback(fn func(id string, err error)) *Client`: Sets a callback to be invoked when a lease expires or its renewal fails.
@@ -19,7 +19,7 @@ This document describes the exported API of the `pkg/client` and `pkg/fuse` pack
 ### 1.2 Authentication & Session
 - `(c *Client) Login(ctx context.Context) error`: Performs challenge-response authentication.
 - `(c *Client) UserID() string`: Returns the configured User ID.
-- `(c *Client) GetRootAnchor() (id, owner string, version uint64)`: Returns the current root anchoring metadata.
+- `(c *Client) GetRootAnchor() (id, owner string, pk, ek []byte, version uint64)`: Returns the current root anchoring metadata.
 
 ### 1.3 Onboarding Utilities
 - `PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error`: High-level flow for registering new accounts or pulling existing ones.
@@ -116,9 +116,10 @@ DistFS implements the standard Go `io/fs` interfaces, allowing it to be used wit
 ## 6. Metadata and Coordination
 
 ### 6.1 Inode Operations
-- `(c *Client) ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)`: Low-level path resolution. Returns the Inode and the raw FileKey.
-- `(c *Client) GetInode(ctx context.Context, id string) (*metadata.Inode, error)`: Fetches an Inode by ID.
-- `(c *Client) UpdateInode(ctx context.Context, id string, fn InodeUpdateFunc) (*metadata.Inode, error)`: Atomic mutation of Inode metadata. Handles automatic version incrementing and signing.
+- `(c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error)`: High-level path resolution returning safe `InodeInfo`.
+- `(c *Client) Lstat(ctx context.Context, path string) (*DistFileInfo, error)`: Stat without following terminal symlinks.
+- `(c *Client) ReadDir(ctx context.Context, path string) ([]*DistDirEntry, error)`: Returns directory entries.
+- *(Note: Raw `metadata.Inode` and `UpdateInode` methods are now unexported to encapsulate internal cryptographic state. Use high-level filesystem methods like `Chmod`, `Setfacl`, and `Rename` for mutations.)*
 
 ### 6.2 Distributed Leases
 
@@ -140,12 +141,12 @@ Leases can be acquired on two types of identifiers:
 DistFS uses groups for shared access. All encryption is end-to-end; the server never sees group keys.
 
 ### 7.1 Group Operations
-- `(c *Client) CreateGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error)`
-- `(c *Client) CreateSystemGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error)` (Admin only)
+- `(c *Client) CreateGroup(ctx context.Context, name string, quotaEnabled bool) (*GroupInfo, error)`
+- `(c *Client) CreateGroupWithOptions(ctx context.Context, name string, quotaEnabled bool, ownerID string) (*GroupInfo, error)`
+- `(c *Client) CreateSystemGroup(ctx context.Context, name string, quotaEnabled bool) (*GroupInfo, error)` (Admin only)
 - `(c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info string, ci *ContactInfo) error`: Adds a member to a group. 
 - `(c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error`: Removes a member.
 - `(c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEntry, error]`
-- `(c *Client) GetGroupMembers(ctx context.Context, groupID string) iter.Seq2[metadata.MemberEntry, error]`
 
 ### 7.2 Discovery
 - `(c *Client) GenerateContactString() (string, error)`: Exports the user's public identity for group invites.

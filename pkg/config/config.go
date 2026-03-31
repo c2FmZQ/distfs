@@ -30,16 +30,23 @@ import (
 	"golang.org/x/term"
 )
 
+// RootAnchor stores the pinned root identity and version
+type RootAnchor struct {
+	RootOwner              string `json:"root_owner,omitempty"`
+	RootOwnerPublicKey     []byte `json:"root_owner_pk,omitempty"`
+	RootOwnerEncryptionKey []byte `json:"root_owner_ek,omitempty"`
+	RootVersion            uint64 `json:"root_version,omitempty"`
+}
+
 // Config represents the client-side configuration.
 type Config struct {
-	ServerURL   string `json:"server_url"`
-	UserID      string `json:"user_id"`
-	EncKey      string `json:"enc_key"`
-	SignKey     string `json:"sign_key"`
-	ServerKey   string `json:"server_key"`
-	RootID      string `json:"root_id,omitempty"`
-	RootOwner   string `json:"root_owner,omitempty"`
-	RootVersion uint64 `json:"root_version,omitempty"`
+	ServerURL     string                `json:"server_url"`
+	UserID        string                `json:"user_id"`
+	EncKey        string                `json:"enc_key"`
+	SignKey       string                `json:"sign_key"`
+	ServerKey     string                `json:"server_key"`
+	DefaultRootID string                `json:"default_root_id,omitempty"`
+	Roots         map[string]RootAnchor `json:"roots,omitempty"`
 }
 
 // Encrypt wraps a config into an encrypted blob.

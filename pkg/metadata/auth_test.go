@@ -12,10 +12,10 @@ import (
 )
 
 func TestChallengeResponseAuth(t *testing.T) {
-	node, ts, _, _, srv := SetupCluster(t)
-	defer node.Shutdown()
-	defer ts.Close()
-	defer srv.Shutdown()
+	tc := SetupCluster(t)
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
+	defer tc.Server.Shutdown()
 
 	// 1. Create a user in FSM
 	userDK, _ := crypto.GenerateEncryptionKey()
@@ -25,12 +25,12 @@ func TestChallengeResponseAuth(t *testing.T) {
 		SignKey: userSK.Public(),
 		EncKey:  userDK.EncapsulationKey().Bytes(),
 	}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, userSK, tc.AdminID, tc.AdminSK)
 
 	// 2. Request Challenge
 	creq := AuthChallengeRequest{UserID: user.ID}
 	b, _ := json.Marshal(creq)
-	resp, err := http.Post(ts.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
+	resp, err := http.Post(tc.TS.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -58,7 +58,7 @@ func TestChallengeResponseAuth(t *testing.T) {
 	b, _ = json.Marshal(solve)
 
 	// 4. Login
-	resp, err = http.Post(ts.URL+"/v1/login", "application/json", bytes.NewReader(b))
+	resp, err = http.Post(tc.TS.URL+"/v1/login", "application/json", bytes.NewReader(b))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +77,7 @@ func TestChallengeResponseAuth(t *testing.T) {
 	}
 
 	// 5. Use Session Token
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/user/"+user.ID, nil)
+	req, _ := http.NewRequest("GET", tc.TS.URL+"/v1/user/"+user.ID, nil)
 	req.Header.Set("Session-Token", sresp.Token)
 
 	resp, err = http.DefaultClient.Do(req)
@@ -91,19 +91,19 @@ func TestChallengeResponseAuth(t *testing.T) {
 }
 
 func TestMutualRaftAuth(t *testing.T) {
-	node, ts, _, _, srv := SetupCluster(t)
-	defer srv.Shutdown()
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
 
 	secret := "testsecret"
 	nonce := []byte("fixed-nonce-for-test-32-bytes---")
 	nonceHex := hex.EncodeToString(nonce)
 
 	// 1. Valid Handshake
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/node/info", nil)
+	req, _ := http.NewRequest("GET", tc.TS.URL+"/v1/node/info", nil)
 	req.Header.Set("X-Raft-Nonce", nonceHex)
-	req.Header.Set("X-Raft-Signature", srv.signNonce(nonce, "LEADER_PROBE"))
+	req.Header.Set("X-Raft-Signature", tc.Server.signNonce(nonce, "LEADER_PROBE"))
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -116,12 +116,12 @@ func TestMutualRaftAuth(t *testing.T) {
 	}
 
 	nodeSig := resp.Header.Get("X-Raft-Response")
-	if !srv.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
+	if !tc.Server.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
 		t.Error("invalid node response signature")
 	}
 
 	// 2. Invalid Leader Signature
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/node/info", nil)
+	req, _ = http.NewRequest("GET", tc.TS.URL+"/v1/node/info", nil)
 	req.Header.Set("X-Raft-Nonce", nonceHex)
 	req.Header.Set("X-Raft-Signature", "wrong-sig")
 
@@ -131,7 +131,7 @@ func TestMutualRaftAuth(t *testing.T) {
 	}
 
 	// 3. Legacy Secret Support (Optional, depending on policy)
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/node/info", nil)
+	req, _ = http.NewRequest("GET", tc.TS.URL+"/v1/node/info", nil)
 	req.Header.Set("X-Raft-Secret", secret)
 
 	resp, _ = http.DefaultClient.Do(req)

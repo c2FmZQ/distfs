@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package metadata
 
@@ -12,10 +14,10 @@ import (
 )
 
 func TestGCWorker_RunGC(t *testing.T) {
-	node, ts, _, _, s := SetupCluster(t)
-	defer s.Shutdown()
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
 
 	// 1. Mock Data Node
 	deleteReceived := false
@@ -33,11 +35,11 @@ func TestGCWorker_RunGC(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node.Raft.Apply(n1b, 5*time.Second)
+	tc.Node.Raft.Apply(n1b, 5*time.Second)
 
 	// 3. Manually add chunk to GC bucket
-	err = node.FSM.db.Update(func(tx *bolt.Tx) error {
-		return node.FSM.Put(tx, []byte("garbage_collection"), []byte("gc-chunk-1"), mustMarshal([]string{"n1"}))
+	err = tc.Node.FSM.db.Update(func(tx *bolt.Tx) error {
+		return tc.Node.FSM.Put(tx, []byte("garbage_collection"), []byte("gc-chunk-1"), mustMarshal([]string{"n1"}))
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +48,7 @@ func TestGCWorker_RunGC(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// 4. Run GC
-	s.ForceGCScan()
+	tc.Server.ForceGCScan()
 
 	time.Sleep(500 * time.Millisecond)
 
@@ -55,8 +57,8 @@ func TestGCWorker_RunGC(t *testing.T) {
 	}
 
 	// 5. Verify removed from GC bucket
-	err = node.FSM.db.View(func(tx *bolt.Tx) error {
-		plain, _ := node.FSM.Get(tx, []byte("garbage_collection"), []byte("gc-chunk-1"))
+	err = tc.Node.FSM.db.View(func(tx *bolt.Tx) error {
+		plain, _ := tc.Node.FSM.Get(tx, []byte("garbage_collection"), []byte("gc-chunk-1"))
 		if plain != nil {
 			return fmt.Errorf("still exists")
 		}

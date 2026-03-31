@@ -18,8 +18,7 @@ import (
 	"bazil.org/fuse/fs"
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
-	"github.com/c2FmZQ/distfs/pkg/crypto"
-	distfuse "github.com/c2FmZQ/distfs/pkg/fuse"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/tpm"
 )
 
@@ -145,36 +144,53 @@ func main() {
 		os.Exit(0)
 	}()
 
-	filesys := distfuse.NewFS(c)
+	filesys := client.NewFS(c)
 
 	if err := fs.Serve(conn, filesys); err != nil {
 		log.Fatal(err)
 	}
 }
-
 func loadClient(conf *config.Config, rootID string, disableDoH bool) *client.Client {
-	c := client.NewClient(conf.ServerURL)
-
-	dkBytes, _ := hex.DecodeString(conf.EncKey)
-	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
-
-	skBytes, _ := hex.DecodeString(conf.SignKey)
-	sk := crypto.UnmarshalIdentityKey(skBytes)
-
-	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
-	svKey, err := crypto.UnmarshalEncapsulationKey(svKeyBytes)
-	if err != nil {
-		log.Fatalf("failed to unmarshal server key: %v", err)
-	}
-
-	c = c.WithIdentity(conf.UserID, dk).
-		WithSignKey(sk).
-		WithServerKey(svKey).
-		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
+	c := client.NewClient(conf.ServerURL).
 		WithDisableDoH(disableDoH)
 
-	if rootID != "" {
-		c = c.WithRootID(rootID)
+	dkBytes, _ := hex.DecodeString(conf.EncKey)
+	skBytes, _ := hex.DecodeString(conf.SignKey)
+	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
+
+	rid := conf.DefaultRootID
+	if rid == "" {
+		rid = metadata.RootID
 	}
+	if rootID != "" {
+		rid = rootID
+	}
+
+	var rowner string
+	var rpk, rek []byte
+	var rver uint64
+
+	if anchor, ok := conf.Roots[rid]; ok {
+		rowner = anchor.RootOwner
+		rpk = anchor.RootOwnerPublicKey
+		rek = anchor.RootOwnerEncryptionKey
+		rver = anchor.RootVersion
+	}
+
+	var err error
+	c, err = c.WithIdentityBytes(conf.UserID, dkBytes)
+	if err != nil {
+		log.Fatalf("failed to set identity: %v", err)
+	}
+	c, err = c.WithSignKeyBytes(skBytes)
+	if err != nil {
+		log.Fatalf("failed to set sign key: %v", err)
+	}
+	c, err = c.WithServerKeyBytes(svKeyBytes)
+	if err != nil {
+		log.Fatalf("failed to set server key: %v", err)
+	}
+	c = c.WithRootAnchorBytes(rid, rowner, rpk, rek, rver)
+
 	return c
 }

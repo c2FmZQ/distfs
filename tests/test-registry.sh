@@ -33,6 +33,7 @@ echo "PASS: Locked user rejected"
 echo "3. Admin provisioning Bob via registry..."
 # Note: we use echo "y" to pipe the "yes" confirmation to the OOB prompt
 echo "y" | distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --unlock --quota 1000000,5000 --home bob-reg "$BOB_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$BOB_ID"
 
 # 4. Verify Bob can now access his home directory
 echo "4. Verifying Bob's unlocked access..."

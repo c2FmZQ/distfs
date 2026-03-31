@@ -46,16 +46,17 @@ func TestClientSessionManagement(t *testing.T) {
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
 	}
-	createUser(t, metaNode, user)
+	metadata.BootstrapBackbone(t, metaNode, user.ID, dk, userSignKey)
+	createUser(t, metaNode, user, userSignKey, user.ID, userSignKey)
 
 	// 3. Client
-	c := NewClient(tsMeta.URL) // dataAddr not needed for meta test
-	c = c.WithIdentity(user.ID, dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	c := NewClient(tsMeta.URL).WithRegistry("") // Disable registry for session test
+	c = c.withIdentity(user.ID, dk)
+	c = c.withSignKey(userSignKey)
+	c = c.withServerKey(serverEK)
 
 	// 4. Trigger first request (should trigger Login)
-	_, err = c.GetUser(t.Context(), user.ID)
+	_, err = c.getUser(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("First request failed: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestClientSessionManagement(t *testing.T) {
 	}
 
 	// 5. Trigger second request (should reuse token)
-	_, err = c.GetUser(t.Context(), user.ID)
+	_, err = c.getUser(t.Context(), user.ID)
 	if err != nil {
 		t.Fatalf("Second request failed: %v", err)
 	}

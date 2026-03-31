@@ -1,18 +1,6 @@
-// Copyright 2026 TTBT Enterprises LLC
-//
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//      http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
+//go:build !wasm
 
-package metadata_test
+package client
 
 import (
 	"context"
@@ -20,23 +8,21 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/http/httptest"
 	"sync"
 	"testing"
 
-	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	bolt "go.etcd.io/bbolt"
 )
 
 func TestRequestBatching(t *testing.T) {
-	node, _, _, _, server := metadata.SetupCluster(t)
-	defer server.Shutdown()
-	defer node.Shutdown()
+	tc := metadata.SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
 
 	// Wait for leader
-	metadata.WaitLeader(t, node.Raft)
+	metadata.WaitLeader(t, tc.Node.Raft)
 
 	// Launch concurrent requests
 	const numReqs = 50
@@ -55,7 +41,7 @@ func TestRequestBatching(t *testing.T) {
 				EncKey:  dk.EncapsulationKey().Bytes(),
 			}
 
-			metadata.CreateUser(t, node, user)
+			metadata.CreateUser(t, tc.Node, user, sk, tc.AdminID, tc.AdminSK)
 		}(i)
 	}
 
@@ -69,7 +55,7 @@ func TestRequestBatching(t *testing.T) {
 	// Verify all users created
 	for i := 0; i < numReqs; i++ {
 		// Read FSM directly
-		server.FSM().DB().View(func(tx *bolt.Tx) error {
+		tc.Server.FSM().DB().View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("users"))
 			v := b.Get([]byte(fmt.Sprintf("user-%d", i)))
 			if v == nil {
@@ -81,42 +67,35 @@ func TestRequestBatching(t *testing.T) {
 }
 
 func TestSessionKeyMemoization(t *testing.T) {
-	node, _, _, _, server := metadata.SetupCluster(t)
-	defer server.Shutdown()
-	defer node.Shutdown()
-	metadata.WaitLeader(t, node.Raft)
+	tc := metadata.SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	metadata.WaitLeader(t, tc.Node.Raft)
 
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-	userID := "user-mem"
-	user := metadata.User{
-		ID:      userID,
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
+	// Use Admin Client for testing memoization (Phase 69 compliance)
+	c, err := NewClient(tc.TS.URL).WithRegistry("").
+		withIdentity(tc.AdminID, tc.AdminDK).
+		withSignKey(tc.AdminSK).
+		WithServerKeyBytes(tc.EpochEK)
+	if err != nil {
+		t.Fatal(err)
 	}
-	metadata.CreateUser(t, node, user)
-
-	tsMeta := httptest.NewServer(server)
-	defer tsMeta.Close()
-
-	c := client.NewClient(tsMeta.URL)
-	c = c.WithIdentity(userID, dk)
-	c = c.WithSignKey(userSignKey)
+	c = c.WithAdmin(true)
 
 	if err := c.Login(t.Context()); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
 
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
-		t.Fatalf("EnsureRoot failed: %v", err)
+	if err := c.BootstrapFileSystem(t.Context()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
 	}
 
 	if err := c.Mkdir(t.Context(), "/m1", 0755); err != nil {
 		t.Fatalf("First Mkdir failed: %v", err)
 	}
 
-	if server.SessionKeyCacheSize() != 1 {
-		t.Errorf("Expected 1 session key in cache, got %d", server.SessionKeyCacheSize())
+	if tc.Server.SessionKeyCacheSize() != 1 {
+		t.Errorf("Expected 1 session key in cache, got %d", tc.Server.SessionKeyCacheSize())
 	}
 
 	if err := c.Mkdir(t.Context(), "/m2", 0755); err != nil {
@@ -125,10 +104,9 @@ func TestSessionKeyMemoization(t *testing.T) {
 }
 
 func TestBatchAtomicity(t *testing.T) {
-	node, _, _, _, server := metadata.SetupCluster(t)
-	defer server.Shutdown()
-	defer node.Shutdown()
-	metadata.WaitLeader(t, node.Raft)
+	tc := metadata.SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
 
 	// Create user
 	dk, _ := crypto.GenerateEncryptionKey()
@@ -140,11 +118,11 @@ func TestBatchAtomicity(t *testing.T) {
 		EncKey:  dk.EncapsulationKey().Bytes(),
 		Quota:   metadata.UserQuota{MaxInodes: 1}, // Only allow 1 inode
 	}
-	metadata.CreateUser(t, node, user)
+	metadata.CreateUser(t, tc.Node, user, sk, tc.AdminID, tc.AdminSK)
 
 	// Prepare a batch:
 	// 1. Create Inode 0000000000000000000000000000000f (Valid)
-	// 2. Create Inode 0000000000000000000000000000002f (Should FAIL due to quota)
+	// 2. Create Inode 00000000000000000000000000000002f (Should FAIL due to quota)
 
 	nonce1 := make([]byte, 16)
 	rand.Read(nonce1)
@@ -167,13 +145,13 @@ func TestBatchAtomicity(t *testing.T) {
 	batchBytes, _ := json.Marshal(batch)
 
 	// Apply batch - Atomic should be true for individual user batches
-	_, err := server.ApplyRaftCommandInternal(context.Background(), metadata.CmdBatch, batchBytes, u1)
+	_, err := tc.Server.ApplyRaftCommandInternal(context.Background(), metadata.CmdBatch, batchBytes, u1)
 	if err != nil && !errors.Is(err, metadata.ErrAtomicRollback) {
 		t.Fatalf("Raft apply failed: %v", err)
 	}
 
 	// Verify 0000000000000000000000000000000f was NOT created (atomicity check)
-	server.FSM().DB().View(func(tx *bolt.Tx) error {
+	tc.Server.FSM().DB().View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("inodes"))
 		if b.Get([]byte(id1)) != nil {
 			t.Errorf("Inode 1 was created despite batch failure")

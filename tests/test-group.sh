@@ -16,16 +16,18 @@ echo "Initializing user2 (Group Member)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-group@example.com")
 INIT_OUT2=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG2" init --new -server http://storage-node-1:8080 -jwt "$JWT2")
 U2_ID=$(echo "$INIT_OUT2" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$U2_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock user2-group "$U2_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$U2_ID"
 
 echo "Initializing user3 (Non-Member)..."
 JWT3=$(wget -qO- "http://test-auth:8080/mint?email=user3-group@example.com")
 INIT_OUT3=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG3" init --new -server http://storage-node-1:8080 -jwt "$JWT3")
 U3_ID=$(echo "$INIT_OUT3" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$U3_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock user3-group "$U3_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$U3_ID"
 
 echo "User 1: Creating group 'project-x'..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG1" group-create project-x > /tmp/group-out.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create --owner group-user project-x > /tmp/group-out.txt
 G1_ID=$(grep "^ID:" /tmp/group-out.txt | awk '{print $2}')
 echo "Group project-x ID: $G1_ID"
 
@@ -57,7 +59,7 @@ fi
 
 echo "User 2 (Member): Attempting to write (overwrite)..."
 echo "u2 update" > /tmp/u2-update.txt
-distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG2" put /tmp/u2-update.txt /users/group-user/shared/plan.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG2" put -f /tmp/u2-update.txt /users/group-user/shared/plan.txt
 
 echo "User 1 (Owner): Verifying member's update..."
 distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG1" get /users/group-user/shared/plan.txt /tmp/u1-verify.txt

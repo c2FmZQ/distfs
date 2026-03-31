@@ -15,7 +15,8 @@ echo "Initializing Reader (user2)..."
 JWT2=$(wget -qO- "http://test-auth:8080/mint?email=user2-public@example.com")
 INIT_OUT2=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG2" init --new -server http://storage-node-1:8080 -jwt "$JWT2")
 U2_ID=$(echo "$INIT_OUT2" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$U2_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock user2-public "$U2_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$U2_ID"
 
 echo "User 1 (Owner): Granting world read to workspace /users/public-user..."
 distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG1" chmod 0755 /users/public-user

@@ -172,11 +172,7 @@ func pushKeySync(args []js.Value) (interface{}, error) {
 		return nil, fmt.Errorf("client not initialized")
 	}
 	blobStr := args[0].String()
-	var blob metadata.KeySyncBlob
-	if err := json.Unmarshal([]byte(blobStr), &blob); err != nil {
-		return nil, err
-	}
-	if err := c.PushKeySync(context.Background(), &blob); err != nil {
+	if err := c.PushKeySyncJSON(context.Background(), blobStr); err != nil {
 		return nil, err
 	}
 	return true, nil
@@ -188,41 +184,18 @@ func pullKeySync(args []js.Value) (interface{}, error) {
 	
 	tempClient := client.NewClient(serverURL).WithDisableDoH(true)
 	
-	blob, err := tempClient.PullKeySync(context.Background(), token)
-	if err != nil {
-		return nil, err
-	}
-	
-	blobBytes, err := json.Marshal(blob)
-	if err != nil {
-		return nil, err
-	}
-	return string(blobBytes), nil
+	return tempClient.PullKeySyncJSON(context.Background(), token)
 }
 
 func fetchServerKey(args []js.Value) (interface{}, error) {
 	serverURL := args[0].String()
 	tempClient := client.NewClient(serverURL).WithDisableDoH(true)
 	
-	req, err := http.NewRequestWithContext(context.Background(), "GET", serverURL+"/v1/meta/key", nil)
+	keyBytes, err := tempClient.GetServerKeyBytes(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	resp, err := tempClient.HTTPClient().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("failed to fetch server key: %d", resp.StatusCode)
-	}
-	
-	sKey, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	return hex.EncodeToString(sKey), nil
+	return hex.EncodeToString(keyBytes), nil
 }
 
 func registerUser(args []js.Value) (interface{}, error) {
@@ -230,6 +203,7 @@ func registerUser(args []js.Value) (interface{}, error) {
 	jwt := args[1].String()
 	signKeyPubHex := args[2].String()
 	encKeyHex := args[3].String()
+	sigHex := args[4].String()
 
 	signKeyPubBytes, err := hex.DecodeString(signKeyPubHex)
 	if err != nil {
@@ -239,41 +213,14 @@ func registerUser(args []js.Value) (interface{}, error) {
 	if err != nil {
 		return nil, err
 	}
-
-	payload := map[string]interface{}{
-		"jwt":      jwt,
-		"sign_key": signKeyPubBytes,
-		"enc_key":  encKeyBytes,
+	sigBytes, err := hex.DecodeString(sigHex)
+	if err != nil {
+		return nil, err
 	}
-	body, _ := json.Marshal(payload)
 
 	tempClient := client.NewClient(serverURL).WithDisableDoH(true)
 	
-	req, err := http.NewRequestWithContext(context.Background(), "POST", serverURL+"/v1/user/register", bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("failed to create registration request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	
-	resp, err := tempClient.HTTPClient().Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("registration failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("registration failed: %d %s", resp.StatusCode, string(b))
-	}
-
-	var user struct {
-		ID string `json:"id"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return user.ID, nil
+	return tempClient.RegisterUser(context.Background(), jwt, signKeyPubBytes, encKeyBytes, sigBytes)
 }
 
 func initClient(args []js.Value) (interface{}, error) {
@@ -284,19 +231,24 @@ func initClient(args []js.Value) (interface{}, error) {
 	serverKeyHex := args[4].String()
 
 	decKeyBytes, _ := hex.DecodeString(decKeyHex)
-	decKey, _ := crypto.UnmarshalDecapsulationKey(decKeyBytes)
-
 	signKeyBytes, _ := hex.DecodeString(signKeyHex)
-	signKey := crypto.UnmarshalIdentityKey(signKeyBytes)
-
 	serverKeyBytes, _ := hex.DecodeString(serverKeyHex)
-	serverKey, _ := crypto.UnmarshalEncapsulationKey(serverKeyBytes)
 
-	c = client.NewClient(serverURL).
-		WithIdentity(userID, decKey).
-		WithSignKey(signKey).
-		WithServerKey(serverKey).
-		WithDisableDoH(true)
+	var err error
+	c, err = client.NewClient(serverURL).
+		WithIdentityBytes(userID, decKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	c, err = c.WithSignKeyBytes(signKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	c, err = c.WithServerKeyBytes(serverKeyBytes)
+	if err != nil {
+		return nil, err
+	}
+	c = c.WithDisableDoH(true)
 
 	return true, nil
 }
@@ -351,7 +303,7 @@ func statFile(args []js.Value) (interface{}, error) {
 		return nil, err
 	}
 
-	inode := info.Sys().(*metadata.Inode)
+	inode := info.Sys().(*client.InodeInfo)
 
 	mimeType := mime.TypeByExtension(filepath.Ext(path))
 	if mimeType == "" {
@@ -361,8 +313,8 @@ func statFile(args []js.Value) (interface{}, error) {
 	lockbox := make(map[string]interface{})
 	for k, v := range inode.Lockbox {
 		lockbox[k] = map[string]interface{}{
-			"kem": hex.EncodeToString(v.KEMCiphertext),
-			"dem": hex.EncodeToString(v.DEMCiphertext),
+			"kem": hex.EncodeToString(v.KEM),
+			"dem": hex.EncodeToString(v.DEM),
 		}
 	}
 
@@ -446,15 +398,15 @@ func getQuota(args []js.Value) (interface{}, error) {
 	if c == nil {
 		return nil, fmt.Errorf("client not initialized")
 	}
-	user, err := c.GetUser(context.Background(), c.UserID())
+	quota, usage, err := c.GetQuota(context.Background())
 	if err != nil {
 		return nil, err
 	}
 	return map[string]interface{}{
-		"used_bytes":  user.Usage.TotalBytes,
-		"total_bytes": user.Quota.MaxBytes,
-		"used_inodes": user.Usage.InodeCount,
-		"total_inodes": user.Quota.MaxInodes,
+		"used_bytes":   usage.TotalBytes,
+		"total_bytes":  quota.MaxBytes,
+		"used_inodes":  usage.InodeCount,
+		"total_inodes": quota.MaxInodes,
 	}, nil
 }
 
@@ -519,15 +471,12 @@ func setACL(args []js.Value) (interface{}, error) {
 	path := args[0].String()
 	aclJSON := args[1].String()
 
-	var acl metadata.POSIXAccess
+	var acl client.ACL
 	if err := json.Unmarshal([]byte(aclJSON), &acl); err != nil {
 		return nil, fmt.Errorf("invalid ACL JSON: %w", err)
 	}
 
-	err := c.SetAttr(context.Background(), path, metadata.SetAttrRequest{
-		AccessACL: &acl,
-	})
-	if err != nil {
+	if err := c.Setfacl(context.Background(), path, acl); err != nil {
 		return nil, err
 	}
 	return true, nil

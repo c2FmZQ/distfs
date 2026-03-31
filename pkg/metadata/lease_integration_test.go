@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package metadata
 
@@ -36,7 +38,14 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 		u := User{ID: "u1", SignKey: sk.Public()}
 		fsm.Put(tx, []byte("users"), []byte("u1"), MustMarshalJSON(u))
 
-		p := Inode{ID: parentID, Type: DirType, Version: 1, OwnerID: "u1", NLink: 1}
+		p := Inode{
+			ID:      parentID,
+			Type:    DirType,
+			Version: 1,
+			OwnerID: "u1",
+			NLink:   1,
+			Links:   map[string]bool{"root:parent": true},
+		}
 		p.SignInodeForTest("u1", sk)
 		pb, _ := json.Marshal(p)
 		fsm.executeCreateInode(tx, pb, "u1")

@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package metadata
 
@@ -24,7 +26,11 @@ import (
 )
 
 func TestServer_MiscHandlers(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -40,7 +46,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 		SignKey: usk.Public(),
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	// Promote to Admin
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
 	token := LoginSessionForTest(t, ts, u1, usk)
@@ -217,7 +223,11 @@ func TestServer_MiscHandlers(t *testing.T) {
 }
 
 func TestServer_AdminHandlers(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -233,14 +243,15 @@ func TestServer_AdminHandlers(t *testing.T) {
 		SignKey: usk.Public(),
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// Create Group g1
-	group := Group{ID: "g1", OwnerID: u1, GID: 5000, Version: 1, QuotaEnabled: true}
+	group := Group{ID: "g1", OwnerID: u1, GID: 5000, Version: 1, QuotaEnabled: true, SignerID: u1}
+	group.Signature = usk.Sign(group.Hash())
 	gb, _ := json.Marshal(group)
-	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, gb, "")
+	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, gb, u1)
 
 	// handleClusterLeases
 	req, _ := http.NewRequest("GET", ts.URL+"/v1/admin/leases", nil)
@@ -278,6 +289,14 @@ func TestServer_AdminHandlers(t *testing.T) {
 	}
 
 	// 12. handleSetGroupQuota
+	// Create group first
+	g1 := Group{ID: "g1", GID: 2001, QuotaEnabled: true, OwnerID: u1, SignerID: u1}
+	g1.Signature = usk.Sign(g1.Hash())
+	g1b, _ := json.Marshal(g1)
+	if res, err := server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, g1b, u1); err != nil || server.fsm.containsError(res) {
+		t.Fatalf("Create Group g1 failed: err=%v, res=%v", err, res)
+	}
+
 	groupQuotaReq := SetGroupQuotaRequest{GroupID: "g1", MaxInodes: ptr(uint64(50))}
 
 	gqrb, _ := json.Marshal(groupQuotaReq)
@@ -292,7 +311,11 @@ func TestServer_AdminHandlers(t *testing.T) {
 }
 
 func TestServer_ClusterAdminHandlers(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -301,7 +324,7 @@ func TestServer_ClusterAdminHandlers(t *testing.T) {
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
 	token := LoginSessionForTest(t, ts, u1, usk)
 
@@ -341,7 +364,10 @@ func TestServer_OIDCDiscovery(t *testing.T) {
 	}))
 	defer tsOIDC.Close()
 
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -360,14 +386,21 @@ func TestServer_OIDCDiscovery(t *testing.T) {
 }
 
 func TestServer_RegisterUser_Idempotency(t *testing.T) {
-	node, ts, _, _, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	srv := tc.Server
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
 }
 
 func TestServer_IssueToken_Permissions(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -375,11 +408,11 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false}, usk, tc.AdminID, tc.AdminSK)
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false})
+	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false}, usk2, tc.AdminID, tc.AdminSK)
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// 1. World Readable file (owned by u1)
@@ -418,7 +451,10 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 }
 
 func TestServer_UnsealExtraErrors(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -426,7 +462,7 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 
 	// 1. Invalid JSON
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader([]byte("not-json")))
@@ -448,7 +484,10 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 }
 
 func TestServer_LoginExtraErrors(t *testing.T) {
-	node, ts, _, _, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	srv := tc.Server
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -456,7 +495,7 @@ func TestServer_LoginExtraErrors(t *testing.T) {
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 
 	// 1. Missing challenge entry
 	solve := AuthChallengeSolve{UserID: u1, Challenge: []byte("missing"), Signature: make([]byte, 64)}
@@ -493,7 +532,9 @@ func TestServer_LoginExtraErrors(t *testing.T) {
 }
 
 func TestServer_AuthChallenge_LazyGC(t *testing.T) {
-	_, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer ts.Close()
 
@@ -549,7 +590,10 @@ func TestServer_Forwarding_NoLeader(t *testing.T) {
 }
 
 func TestServer_LifecycleAndConfig(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -566,7 +610,11 @@ func TestServer_LifecycleAndConfig(t *testing.T) {
 }
 
 func TestServer_BatchErrors(t *testing.T) {
-	node, ts, _, ek, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	srv := tc.Server
+	ek := tc.EpochEK
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -575,7 +623,7 @@ func TestServer_BatchErrors(t *testing.T) {
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// handleBatch with invalid command type
@@ -592,7 +640,10 @@ func TestServer_BatchErrors(t *testing.T) {
 }
 
 func TestServer_ApplyBatch_Errors(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -610,7 +661,11 @@ func TestServer_ApplyBatch_Errors(t *testing.T) {
 }
 
 func TestServer_GetInodes_EdgeCases(t *testing.T) {
-	node, ts, _, ek, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	srv := tc.Server
+	ek := tc.EpochEK
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -618,7 +673,7 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	token1 := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Fetch missing inode
@@ -635,7 +690,11 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 }
 
 func TestServer_Batch_Forbidden(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -643,11 +702,11 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false}, usk, tc.AdminID, tc.AdminSK)
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false})
+	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false}, usk2, tc.AdminID, tc.AdminSK)
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// u1 owns 0000000000000000000000000000000f
@@ -673,7 +732,9 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 }
 
 func TestServer_GetKeySync_Errors(t *testing.T) {
-	_, ts, _, _, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	ts := tc.TS
+	srv := tc.Server
 	defer srv.Shutdown()
 	defer ts.Close()
 
@@ -693,7 +754,11 @@ func TestServer_GetKeySync_Errors(t *testing.T) {
 }
 
 func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
-	node, ts, _, ek, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	srv := tc.Server
+	ek := tc.EpochEK
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -701,7 +766,7 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	u1Cmd, _ := LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()
 	node.FSM.Apply(&raft.Log{Data: u1Cmd})
 	token := LoginSessionForTest(t, ts, u1, usk)
@@ -732,7 +797,11 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 
 func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	// Discovery expects mTLS (resp.TLS != nil)
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -743,7 +812,7 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	u1Cmd, _ := LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()
 	node.FSM.Apply(&raft.Log{Data: u1Cmd})
 	token := LoginSessionForTest(t, ts, u1, usk)
@@ -774,7 +843,11 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 }
 
 func TestServer_MiscHandlers_More(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
+	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -782,7 +855,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 
 	u1 := "admin"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "bootstrap")
 	token := LoginSessionForTest(t, ts, u1, usk)
 
@@ -857,7 +930,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	}
 
 	// 3. handleGetGroupSignKey (Success)
-	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, MustMarshalJSON(Group{
+	gMore := Group{
 		ID:               "g_more",
 		OwnerID:          u1,
 		GID:              5001,
@@ -865,7 +938,10 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 		Lockbox: crypto.Lockbox{
 			u1 + ":sign": crypto.LockboxEntry{KEMCiphertext: []byte("fake"), DEMCiphertext: []byte("fake")},
 		},
-	}), "")
+		SignerID: u1,
+	}
+	gMore.Signature = usk.Sign(gMore.Hash())
+	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, MustMarshalJSON(gMore), u1)
 
 	time.Sleep(500 * time.Millisecond) // Long sleep for group appear
 
@@ -888,7 +964,9 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 }
 
 func TestServer_DebugHandlers_Extra(t *testing.T) {
-	_, ts, _, _, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	ts := tc.TS
+	srv := tc.Server
 	defer srv.Shutdown()
 	defer ts.Close()
 
@@ -908,7 +986,11 @@ func TestServer_DebugHandlers_Extra(t *testing.T) {
 }
 
 func TestServer_handleBatch_More(t *testing.T) {
-	node, ts, _, ek, srv := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	ek := tc.EpochEK
+	srv := tc.Server
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -916,7 +998,7 @@ func TestServer_handleBatch_More(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public()})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Batch Create
@@ -957,7 +1039,11 @@ func TestServer_handleBatch_More(t *testing.T) {
 }
 
 func TestServer_Permissions_Thorough(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	ek := tc.EpochEK
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -965,15 +1051,27 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false})
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false}, usk, tc.AdminID, tc.AdminSK)
 
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false})
+	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false}, usk2, tc.AdminID, tc.AdminSK)
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// 1. Group Readable
-	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, MustMarshalJSON(Group{ID: "g1", GID: 5001, OwnerID: u1, Members: map[string]bool{u2: true}}), "")
+	g1SK, _ := crypto.GenerateIdentityKey()
+	g1HMAC := computeTestHMAC(g1SK.Public(), u2)
+	g1 := Group{
+		ID:          "g1",
+		GID:         5001,
+		OwnerID:     u1,
+		MembersHMAC: map[string]bool{g1HMAC: true},
+		SignKey:     g1SK.Public(),
+		SignerID:    u1,
+		Version:     1,
+	}
+	g1.Signature = usk.Sign(g1.Hash())
+	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, MustMarshalJSON(g1), "u1")
 	time.Sleep(100 * time.Millisecond)
 
 	inode := Inode{ID: "0000000000000000000000000000000a", OwnerID: u1, GroupID: "g1", Mode: 0640, Type: FileType}
@@ -1007,12 +1105,12 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	}
 }
 
-func ptr[T any](v T) *T {
-	return &v
-}
-
 func TestServer_SetAttr(t *testing.T) {
-	node, ts, _, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	ek := tc.EpochEK
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -1027,7 +1125,7 @@ func TestServer_SetAttr(t *testing.T) {
 		SignKey: usk.Public(),
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// Create an inode
@@ -1084,7 +1182,7 @@ func TestServer_SetAttr(t *testing.T) {
 	u2 := "bob"
 	usk2, _ := crypto.GenerateIdentityKey()
 	user2 := User{ID: u2, UID: 1002, SignKey: usk2.Public()}
-	CreateUser(t, node, user2)
+	CreateUser(t, tc.Node, user2, usk2, tc.AdminID, tc.AdminSK)
 	token2 := LoginSessionForTest(t, ts, u2, usk2)
 
 	// Bob tries to change Alice's file
@@ -1104,7 +1202,12 @@ func TestServer_SetAttr(t *testing.T) {
 }
 
 func TestServer_HealthAndStatus(t *testing.T) {
-	node, ts, usk, ek, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	usk := tc.AdminSK
+	ek := tc.EpochEK
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -1120,7 +1223,7 @@ func TestServer_HealthAndStatus(t *testing.T) {
 	// Cluster Status (under Admin)
 	u1 := "admin"
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
-	CreateUser(t, node, user)
+	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
 	token := LoginSessionForTest(t, ts, u1, usk)
 
@@ -1136,11 +1239,13 @@ func TestServer_HealthAndStatus(t *testing.T) {
 
 func TestServer_Forwarding(t *testing.T) {
 	// Node 1 (Leader)
-	n1, ts1, _, _, s1 := SetupCluster(t)
+	tc := SetupCluster(t)
+	n1 := tc.Node
+	ts1 := tc.TS
+	s1 := tc.Server
 	defer s1.Shutdown()
 	defer n1.Shutdown()
 	defer ts1.Close()
-
 	// Node 2 (Follower)
 	tmpDir2 := t.TempDir()
 	st2, _ := createTestStorage(t, tmpDir2)

@@ -15,12 +15,15 @@
 package metadata
 
 import (
+	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"hash"
+	"io"
 	"sort"
 	"strconv"
 
@@ -69,6 +72,8 @@ const (
 	ErrCodeStructuralInconsistency = "DISTFS_STRUCTURAL_INCONSISTENCY"
 	// ErrCodeQuotaDisabled indicates an attempt to set quota on a group where it is disabled.
 	ErrCodeQuotaDisabled = "DISTFS_QUOTA_DISABLED"
+	// ErrCodeNoNodes indicates no storage nodes are available or registered.
+	ErrCodeNoNodes = "DISTFS_NO_NODES"
 )
 
 // OIDCConfig represents the OpenID Connect configuration needed by clients for authentication.
@@ -147,24 +152,56 @@ type UserQuota struct {
 	MaxBytes  int64 `json:"max_bytes"`
 }
 
+// ComputeNameHMAC calculates the HMAC-SHA256 of a filename using the parent's file key.
+func ComputeNameHMAC(parentKey []byte, name string) string {
+	mac := hmac.New(sha256.New, parentKey)
+	mac.Write([]byte(name))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// ComputeMemberHMAC calculates the HMAC-SHA256 of a UserID using the group's sign key.
+func ComputeMemberHMAC(signKey []byte, userID string) string {
+	mac := hmac.New(sha256.New, signKey)
+	mac.Write([]byte(userID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// BootstrapWorldDK is a well-known, high-entropy constant used as the initial
+// world decryption key during cluster bootstrap. It allows Alice to encrypt
+// her first registry entry such that it is discoverable by subsequent joining
+// clients before the users group is fully established.
+var BootstrapWorldDK = []byte("DistFS-Bootstrap-World-DK-Anchor") // 32 bytes
+
 // User represents a registered user in the system.
 // IDs are HMAC(sub) to preserve privacy.
 type User struct {
-	ID      string    `json:"id"` // HMAC(sub)
-	UID     uint32    `json:"uid"`
-	SignKey []byte    `json:"sign_key"`
-	EncKey  []byte    `json:"enc_key"`
-	Usage   UserUsage `json:"usage"`
-	Quota   UserQuota `json:"quota"`
-	IsAdmin bool      `json:"is_admin"`
-	Locked  bool      `json:"locked"`
+	ID        string    `json:"id"` // HMAC(sub)
+	UID       uint32    `json:"uid"`
+	SignKey   []byte    `json:"sign_key"`
+	EncKey    []byte    `json:"enc_key"`
+	Usage     UserUsage `json:"usage"`
+	Quota     UserQuota `json:"quota"`
+	IsAdmin   bool      `json:"is_admin"`
+	Locked    bool      `json:"locked"`
+	Signature []byte    `json:"signature,omitempty"`
+}
+
+func (u *User) Hash() []byte {
+	h := sha256.New()
+	h.Write([]byte("user_v1|"))
+	h.Write(u.SignKey)
+	h.Write([]byte("|"))
+	h.Write(u.EncKey)
+	// We exclude ID because it's computed by server via HMAC(sub, ClusterSecret)
+	return h.Sum(nil)
 }
 
 // RegisterUserRequest is the payload for user registration.
 type RegisterUserRequest struct {
-	JWT     string `json:"jwt"`
-	SignKey []byte `json:"sign_key"`
-	EncKey  []byte `json:"enc_key"`
+	JWT       string `json:"jwt"`
+	SignKey   []byte `json:"sign_key"`
+	EncKey    []byte `json:"enc_key"`
+	Signature []byte `json:"signature"` // Self-signature of (SignKey || EncKey)
 }
 
 // MemberEntry represents a record in the encrypted member registry.
@@ -184,7 +221,8 @@ type Group struct {
 	ID                string          `json:"id"`
 	GID               uint32          `json:"gid"`
 	OwnerID           string          `json:"owner_id"` // User ID or Group ID
-	Members           map[string]bool `json:"members"`
+	MembersHMAC       map[string]bool `json:"members_hmac"`
+	Nonce             []byte          `json:"nonce"`                  // Mutation nonce for replay protection
 	EncKey            []byte          `json:"enc_key"`                // ML-KEM Public Key
 	SignKey           []byte          `json:"sign_key"`               // ML-DSA Public Key
 	EncryptedSignKey  []byte          `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
@@ -241,13 +279,17 @@ type CreateGroupRequest struct {
 // Hash calculates a cryptographic hash of the group metadata for signing.
 func (g *Group) Hash() []byte {
 	h := crypto.NewHash()
-	h.Write([]byte("DistFS-Group-v1|"))
+	h.Write([]byte("DistFS-Group-v2|"))
 	h.Write([]byte("group-id:" + g.ID + "|"))
 
 	v := make([]byte, 8)
 	binary.BigEndian.PutUint64(v, g.Version)
 	h.Write([]byte("v:"))
 	h.Write(v)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("nonce:"))
+	h.Write(g.Nonce)
 	h.Write([]byte("|"))
 
 	if g.IsSystem {
@@ -263,17 +305,17 @@ func (g *Group) Hash() []byte {
 	h.Write([]byte("owner:" + g.OwnerID + "|"))
 	h.Write([]byte("signer:" + g.SignerID + "|"))
 
-	// Write Members (sorted for canonicality)
-	h.Write([]byte("members:"))
-	keys := make([]string, 0, len(g.Members))
-	for k := range g.Members {
+	// Write MembersHMAC (sorted for canonicality)
+	h.Write([]byte("members_hmac:"))
+	keys := make([]string, 0, len(g.MembersHMAC))
+	for k := range g.MembersHMAC {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
 		h.Write([]byte(k))
 		h.Write([]byte(":"))
-		if g.Members[k] {
+		if g.MembersHMAC[k] {
 			h.Write([]byte("1,"))
 		} else {
 			h.Write([]byte("0,"))
@@ -457,13 +499,13 @@ type Inode struct {
 	Size          uint64                `json:"size"`
 	CTime         int64                 `json:"ctime"`
 	NLink         uint32                `json:"nlink"`
+	IsRoot        bool                  `json:"is_root,omitempty"`
 	ClientBlob    []byte                `json:"client_blob,omitempty"`
 	Children      map[string]ChildEntry `json:"children"`
 	ChunkManifest []ChunkEntry          `json:"manifest"`
 	ChunkPages    []string              `json:"chunk_pages,omitempty"`
 	Lockbox       crypto.Lockbox        `json:"lockbox"`
 	Version       uint64                `json:"version"`
-	IsSystem      bool                  `json:"is_system"`
 	Leases        map[string]LeaseInfo  `json:"leases,omitempty"` // Nonce -> LeaseInfo
 	Unlinked      bool                  `json:"unlinked,omitempty"`
 
@@ -471,10 +513,11 @@ type Inode struct {
 	DefaultACL *POSIXAccess `json:"default_acl,omitempty"`
 
 	// Manifest Integrity (Phase 31 & 47 & 50)
-	Nonce              []byte `json:"nonce,omitempty"` // Cryptographic commitment to OwnerID
+	Nonce              []byte `json:"nonce"` // Cryptographic commitment to OwnerID
 	SignerID           string `json:"signer_id,omitempty"`
 	UserSig            []byte `json:"user_sig,omitempty"` // Signature by user's ML-DSA identity key
 	GroupSig           []byte `json:"group_sig,omitempty"`
+	GroupSignerID      string `json:"group_signer_id,omitempty"`      // ID of the group whose key was used for GroupSig
 	OwnerDelegationSig []byte `json:"owner_delegation_sig,omitempty"` // Phase 50: Owner's signature over (ID + GroupID)
 
 	// Client-side transient state (unexported, not in JSON)
@@ -509,6 +552,27 @@ func GenerateInodeID(ownerID string, nonce []byte) string {
 	h.Write([]byte("|"))
 	h.Write(nonce)
 	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// GenerateGroupID computes a cryptographically verifiable Group ID bound to the creator's OwnerID.
+// For self-owned groups, use the SelfOwnedGroup magic string as the ownerID.
+// ID = hex(SHA256("group_v1|" || OwnerID || "|" || Nonce))[:32]
+func GenerateGroupID(ownerID string, nonce []byte) string {
+	h := sha256.New()
+	h.Write([]byte("group_v1|"))
+	h.Write([]byte(ownerID))
+	h.Write([]byte("|"))
+	h.Write(nonce)
+	return hex.EncodeToString(h.Sum(nil))[:32]
+}
+
+// GenerateNonce creates a random 16-byte nonce for cryptographic commitments.
+func GenerateNonce() []byte {
+	b := make([]byte, NonceLength)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		panic(err) // rand.Reader should never fail
+	}
+	return b
 }
 
 func (i *Inode) DelegationHash() []byte {
@@ -546,13 +610,11 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(m)
 	h.Write([]byte("|"))
 
-	h.Write([]byte("gid_str:" + i.GroupID + "|"))
-
-	if i.IsSystem {
-		h.Write([]byte("sys:1|"))
-	} else {
-		h.Write([]byte("sys:0|"))
+	if i.IsRoot {
+		h.Write([]byte("is_root:true|"))
 	}
+
+	h.Write([]byte("gid_str:" + i.GroupID + "|"))
 
 	if i.AccessACL != nil {
 		h.Write([]byte("aacl:"))
@@ -569,6 +631,11 @@ func (i *Inode) ManifestHash() []byte {
 
 	h.Write([]byte("owner:" + i.OwnerID + "|"))
 	h.Write([]byte("signer:" + i.SignerID + "|"))
+	h.Write([]byte("group_signer:" + i.GroupSignerID + "|"))
+
+	h.Write([]byte("nonce:"))
+	h.Write(i.Nonce)
+	h.Write([]byte("|"))
 
 	t := make([]byte, 4)
 	binary.BigEndian.PutUint32(t, uint32(i.Type))
@@ -828,7 +895,6 @@ type RedactedInode struct {
 	NLink              uint32                `json:"nlink"`
 	Children           map[string]ChildEntry `json:"children,omitempty"`
 	Version            uint64                `json:"version"`
-	IsSystem           bool                  `json:"is_system"`
 	Leases             map[string]LeaseInfo  `json:"leases,omitempty"`
 	Unlinked           bool                  `json:"unlinked,omitempty"`
 	SignerID           string                `json:"signer_id"`
@@ -901,6 +967,16 @@ var (
 	ErrStructuralInconsistency = errors.New("structural inconsistency detected")
 	ErrQuotaExceeded           = errors.New("quota exceeded")
 	ErrQuotaDisabled           = errors.New("group quota is disabled")
+	ErrForbidden               = errors.New("forbidden")
+)
+
+const (
+	// SelfOwnedGroup is a magic string for Group.OwnerID that indicates the group
+	// is owned by itself. This breaks the circular dependency in GroupID derivation.
+	SelfOwnedGroup = "distfs-self-owned-group"
+
+	// NonceLength is the required length for all cryptographic commitment nonces.
+	NonceLength = 16
 )
 
 type CommandType uint8

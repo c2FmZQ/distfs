@@ -100,7 +100,9 @@ func NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir string, st *
 			return nil
 		}
 
-		if fsm.IsTrusted(edPub) {
+		// Check if peer is in FSM
+		derivedID := NodeIDFromPublicKey(edPub)
+		if n, err := fsm.GetNode(derivedID); err == nil && n != nil && n.Status == NodeStatusActive {
 			return nil
 		}
 

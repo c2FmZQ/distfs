@@ -120,8 +120,10 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
     *   `HMAC(sub) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
-    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, ClientBlob, MemberList, Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature, QuotaEnabled}`.
-        *   **OwnerID:** Can be a `UserID` or another `GroupID`.
+    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, ClientBlob, Members (HMAC), Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature, QuotaEnabled, Nonce}`.
+        *   **OwnerID:** The immutable identity authorized to manage the group. Can be a `UserID` or another `GroupID`.
+        *   **Nonce:** A mandatory 16-byte random value. The Group ID is cryptographically bound to the OwnerID and this Nonce during creation (`GenerateGroupID`).
+        *   **Members (HMAC):** A map of `HMAC-SHA256(GroupSignKey, UserID) -> true`. This provides the server with a way to enforce membership permissions without exposing a plaintext list of users.
         *   **ClientBlob:** AES-GCM encrypted metadata (e.g., Group Name).
         *   **Lockbox:** Shares Group Private Keys among all members.
         *   **RegistryLockbox:** Shares a symmetric **Registry Key** only among authorized managers (`OwnerID`).
@@ -135,7 +137,10 @@ The Raft FSM stores the "Inode" table and Directory Structure.
     *   `UserID -> List[GroupID]` (Direct Membership Index).
     *   `OwnerID -> List[GroupID]` (Ownership/Management Index).
 *   **Inode Structure:**
-    *   `UUID -> {OwnerID, GroupID, Mode, Manifest, Lockbox, ClientBlob, UserSig, GroupSig}`.
+    *   `UUID -> {OwnerID, GroupID, GroupSignerID, Mode, Nonce, Manifest, Lockbox, ClientBlob, UserSig, GroupSig, OwnerDelegationSig, IsRoot}`.
+        *   **GroupSignerID:** The ID of the group whose signing key was used for the `GroupSig` (enables attribution).
+        *   **Nonce:** A mandatory 16-byte random value committed at creation to cryptographically bind the `OwnerID` to the Inode ID.
+        *   **IsRoot:** A boolean flag enforcing that the root directory is never group or world writable, maintaining strict namespace integrity.
         *   **ClientBlob:** AES-GCM encrypted metadata (SymlinkTarget, MTime, ACLs, InlineData). Note: Primary filenames are NOT stored in the Inode.
 *   **Directory Structure:** The Metadata Layer MUST know the file system hierarchy to enforce permissions and perform Garbage Collection.
     *   **Directory Inodes:** Store a list of children: `HMAC(Name) -> ChildEntry{InodeID, EncryptedName, Nonce}`. This allows traversal and $O(1)$ directory listings without the server knowing plaintext names.
@@ -179,17 +184,26 @@ Metadata operations in DistFS follow an **Optimistic Concurrency Control (OCC)**
     *   **Root Protection:** Inodes with no parent links (Filesystem Roots) are protected from deletion and unlinking operations.
     *   **Empty Directory Protection:** A request to delete a directory Inode (NLink=0) is rejected if the directory still contains children in its metadata.
 
-### 4.6 Group Management & Authorization
-To prevent unauthorized hijacking and support collaborative administration, group mutations (updates to membership, keys, or names) are subject to strict cryptographic authorization.
+### 4.6 Group Management & Authorization (Registry-Backed)
+DistFS employs a "Registry-Backed" model where the definitive source of truth for a group's identity and keys is a signed attestation file in the `/registry` directory.
 
-1.  **Ownership Model:**
-    *   **User-Owned:** If `OwnerID` matches a `UserID`, only that user can sign updates for the group and access the **Member Registry**.
-    *   **Group-Owned:** If `OwnerID` matches a `GroupID`, any registered member of the owning group can sign updates and access the **Member Registry** of the target group.
-    *   **Self-Managed:** If `OwnerID` equals the group's own `ID`, any member of the group can sign updates and access the **Member Registry**.
-2.  **Member Registry (PII Isolation):** To comply with Zero-Knowledge principles while allowing administrative oversight, member identifiers are stored in the `EncryptedRegistry`. This blob is encrypted with a unique symmetric key shared only via the `RegistryLockbox`. Regular members who are not authorized managers cannot decrypt this registry.
-3.  **Signature Requirement:** All `UpdateGroup` requests must be signed by the requester's personal ML-DSA Identity Key. The server verifies that the `SignerID` is authorized based on the ownership model above.
-4.  **No Recursion:** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also a member of Group B.
-5.  **Optimistic Concurrency:** Group updates follow the centralized consistency model described in Section 4.5.
+**Architectural Boundary:** The "Registry" is entirely a Client-Side concept. To the server's FSM, the `/registry` directory and its contents are simply opaque Inodes and encrypted `ClientBlob` data. The metadata server never parses or verifies a `GroupDirectoryEntry` or `DirectoryEntry`. All attestation verification is performed locally by the client.
+
+1.  **Ownership Model (Immutable):**
+    *   **User-Owned:** If `OwnerID` matches a `UserID`, only that user can sign updates.
+    *   **Group-Owned:** If `OwnerID` matches a `GroupID`, any authorized member of the owning group can manage the group. This includes **Self-Management** (Group A owning itself).
+    *   **Immutability:** The `OwnerID` is set at creation by an Administrator and cannot be changed.
+2.  **The Registry Attestation:** Every group is represented by a `/registry/<name>.group` file.
+    *   **Content:** A signed `GroupDirectoryEntry` containing the GroupID and its public keys.
+    *   **Permissions:** Visibility is granted to the `users` group via POSIX ACLs (`r-x` on directory, `r--` on file).
+    *   **Trust Anchor:** Clients verify that the keys and OwnerID stored in the FSM match the signed attestation in the Registry.
+3.  **Privacy (HMAC Membership):** To prevent membership leaks, the FSM stores memberships as `HMAC-SHA256(GroupSignKey, UserID)`. The server can verify membership for the current requester but cannot "dump" the member list.
+4.  **Management Authorization (The One-Hop Rule):** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also an explicit member of Group B.
+5.  **Signature Requirement:** All group updates must be signed by the requester's ML-DSA Identity Key. The server verifies this signature and confirms the signer is an authorized manager based on the ownership model.
+6.  **Decoupled Registry Anchoring:** Groups are created in the FSM by any user. However, for a group to be widely discoverable and verifiable via the Sovereign Chain of Trust, an Administrator must explicitly "anchor" it by creating the `/registry/<name>.group` attestation file using the standard filesystem API.
+7.  **Client-Side Verification (Dual-Cache Architecture):**
+    *   **Verified Cache:** Operations requiring trust (e.g., encrypting new files, verifying delegations) strictly require the group to pass the full `VerifyGroup` flow (cross-checking the registry attestation). These are stored in a `verifiedGroupCache`.
+    *   **Unverified Cache (Read-Only):** To break circular dependencies during path resolution (e.g., reading the `/registry` itself) and to optimize read performance, clients use an `unverifiedGroupCache`. The client extracts the decryption key from the unverified group's Lockbox. If the server spoofed the key, the subsequent AEAD decryption of the target `Inode` inherently fails, preserving the Zero-Knowledge boundary without requiring full registry verification for every read operation.
 
 ### 4.7 Group Discovery
 To support collaboration without a central directory, the metadata layer provides authenticated users with a way to discover groups they are involved in.
@@ -220,6 +234,7 @@ To support multi-tenancy and specialized organizational structures, DistFS suppo
 1.  **Independent Hierarchies:** While the system provides a default root (`metadata.RootID`), administrators can initialize any number of independent directory trees. Each root is a fully functional, self-contained filesystem with its own encryption keys and lockbox.
 2.  **Explicit Initialization:** Roots must be explicitly initialized using the `admin-create-root` command. This ensures that the cluster does not automatically create namespace structures unless directed by an authorized administrator.
 3.  **Client-Side Chroot:** The client library and FUSE mount tool support "chrooting" to any authorized Inode ID. When a client is rooted at a specific Inode, all path resolutions (starting from `/`) are relative to that Inode.
+    *   **Configuration:** The client configuration file (`config.json`) uses a `Roots` map, allowing users to configure and easily switch between multiple named roots without configuration corruption or manual editing.
 4.  **Isolation:** A chrooted client has no visibility or access to the original global root or other siblings in the hierarchy, providing a robust mechanism for namespace isolation.
 
 ### 4.10 Identity & Discovery (The Distributed Directory)
@@ -242,7 +257,7 @@ DistFS employs a strict "Zero-Trust" posture for new registrations, preventing u
     *   Crucially, a locked user cannot retrieve the `WorldIdentity` private key, preventing them from accessing world-readable files before they are formally vetted.
     *   A locked user's default storage and inode quota is strictly **Zero**.
 3.  **Administrative Onboarding:** To gain cluster access, a new user must undergo a guided onboarding flow (`distfs registry-add --unlock`):
-    *   **OOB Verification:** An admin verifies the user's PQC key fingerprint via an external channel.
+    *   **OOB Verification:** An admin verifies the user's PQC key fingerprint via an external channel using a 3-byte hex security code (e.g., `4A-B2-CF`).
     *   **Attestation:** The admin creates the user's entry in the canonical `/registry`.
     *   **Unlock & Quota:** The admin issues an FSM command to set `Locked: false` and provisions an initial quota.
     *   **Workspace:** The admin provisions a home directory (`/users/<username>`) and grants the user traversal rights by adding them to the `users` group.
@@ -448,3 +463,44 @@ DistFS utilizes a two-tiered trust model to resolve the circular dependency betw
 3.  **Snapshot Portability:**
     *   When a Raft snapshot is transferred to a Follower, the `system` bucket remains encrypted with the `ClusterSecret`.
     *   Since every authorized Follower has the `ClusterSecret` in its local Tier 1 vault, it can immediately decrypt the root anchors and bootstrap its local FSM state.
+
+## 8. Sovereign Bootstrap & Chain of Trust
+
+DistFS uses a rigorous, recursive trust model to initialize the cluster without relying on hardcoded secrets or central authorities.
+
+### 8.1 The Sovereign Bootstrap (Alice)
+The first user to register with a cluster ("Alice") becomes the sovereign anchor for the entire system.
+1.  **Identity Anchor:** Alice registers her PQC keys. The server automatically grants her administrative privileges as the first user.
+2.  **Namespace Root:** Alice creates the root Inode (`/`) and becomes its immutable owner.
+3.  **Backbone Provisioning:** Alice creates the system namespaces (`/registry`, `/users`) and the foundational groups (`admin`, `registry`, `users`).
+4.  **Permission Delegation:** Alice grants the `users` group **Read-Only** access to the backbone structures (`/`, `/registry`, `/users`) via POSIX ACLs.
+5.  **Self-Attestation:** Alice creates her own identity file `/registry/alice.user`, signed with her private key.
+
+### 8.2 Trust Hand-off (Registering Bob)
+When Alice registers a new user ("Bob"), she facilitates a cryptographic hand-off:
+1.  **Registration:** Bob registers his public keys with the server (Locked by default).
+2.  **Backbone Access:** Alice unlocks Bob and adds him to the `users` group. 
+3.  **Lockbox Update:** Adding Bob to the `users` group cryptographically encapsulates the `users` group private key for Bob's public key. Bob now has the mathematical means to read the backbone.
+
+### 8.3 Optimistic Verification (The Bob Flow)
+To break circular dependencies during trust bootstrapping, DistFS uses an **Aggregate Optimistic Verification** algorithm. Identity verification is split into two asynchronous phases:
+
+1.  **Optimistic Phase (Discovery):**
+    *   **VerifyInode:** When an Inode is fetched, the client immediately verifies its ML-DSA signature using the signer's public key (retrieved from the server). It then adds the `SignerID`, `OwnerID`, and any `ACL` members to an aggregate **Verification Queue**.
+    *   **VerifyGroup:** Similarly, when a Group is fetched, its signature is verified using the server-provided signer key, and the group's identities are added to the Verification Queue.
+    *   **Proceed:** The client continues the operation (e.g., resolving the next path component) using these provisionally valid keys.
+
+2.  **Confirmation Phase (Anchoring):**
+    *   Once the target object is reachable (or at logical checkpoints like the end of `ResolvePath`), the client processes the **Verification Queue**.
+    *   For each ID in the queue, it resolves the registry anchor (`/registry/<ID>.user` or `.group-id`) using the same Optimistic Phase logic (ensuring no recursion).
+    *   It verifies the attestation signature using the verifier's key from the server.
+    *   It cross-checks the keys used in the Optimistic Phase against the keys committed in the registry.
+    *   If the cross-check passes, the identities are promoted to the `verifiedGroupCache`.
+
+This separation allows `VerifyInode` and `VerifyGroup` to remain fast and recursion-free, while still ensuring that every key used is eventually validated against the cluster's sovereign anchors.
+
+### 8.4 Root Identity Pinning (TOFU)
+To ensure the long-term stability of the trust anchor and protect against server-side "Identity Swapping" attacks, clients implement **Trust On First Use (TOFU)** for the Root Owner.
+1.  **Pinned Anchor:** The first time a client resolves the root inode and successfully verifies the owner's identity via the registry, it saves the **`RootOwnerPublicKey`** in its local encrypted configuration.
+2.  **Immutability Enforcement:** In all subsequent sessions, the client verifies that the Root Owner's ID and Public Key match the pinned values.
+3.  **Local Fallback:** If the `/registry` becomes unavailable or is tampered with, the client can use its pinned `RootOwnerPublicKey` to verify foundational structures (like the `users` group) that were signed by the anchor.

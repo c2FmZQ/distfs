@@ -45,6 +45,42 @@ type OnboardingOptions struct {
 	AllowInsecure bool
 }
 
+// RegisterUser registers a new user with the server.
+func (c *Client) RegisterUser(ctx context.Context, jwt string, signKeyPub, encKeyPub, signature []byte) (string, error) {
+	payload := metadata.RegisterUserRequest{
+		JWT:       jwt,
+		SignKey:   signKeyPub,
+		EncKey:    encKeyPub,
+		Signature: signature,
+	}
+	body, _ := json.Marshal(payload)
+
+	req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/user/register", bytes.NewReader(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to create registration request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("registration failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("registration failed: %d %s", resp.StatusCode, string(b))
+	}
+
+	var user struct {
+		ID string `json:"id"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
+		return "", fmt.Errorf("failed to decode response: %w", err)
+	}
+	return user.ID, nil
+}
+
 // GetOIDCToken retrieves an OIDC token using the device flow or returns the provided JWT.
 // It prioritizes returning the ID Token if available.
 func GetOIDCToken(ctx context.Context, opts OnboardingOptions) (string, error) {
@@ -59,7 +95,7 @@ func GetOIDCToken(ctx context.Context, opts OnboardingOptions) (string, error) {
 		// Discovery from server
 		httpClient := NewClient(opts.ServerURL).
 			WithDisableDoH(opts.DisableDoH).
-			WithAllowInsecure(opts.AllowInsecure).httpClient
+			WithAllowInsecure(opts.AllowInsecure).httpClient()
 		req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/auth/config", nil)
 		if err != nil {
 			return "", fmt.Errorf("failed to create auth config request: %w", err)
@@ -111,7 +147,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 
 	httpClient := NewClient(opts.ServerURL).
 		WithDisableDoH(opts.DisableDoH).
-		WithAllowInsecure(opts.AllowInsecure).httpClient
+		WithAllowInsecure(opts.AllowInsecure).httpClient()
 
 	// Fetch Server Key
 	req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/meta/key", nil)
@@ -141,13 +177,20 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		dk, _ := crypto.GenerateEncryptionKey()
 		sk, _ := crypto.GenerateIdentityKey()
 
-		payload := map[string]interface{}{
-			"jwt":      token,
-			"sign_key": sk.Public(),
-			"enc_key":  dk.EncapsulationKey().Bytes(),
+		// Sign the registration (SignKey || EncKey)
+		userForHash := metadata.User{
+			SignKey: sk.Public(),
+			EncKey:  dk.EncapsulationKey().Bytes(),
+		}
+		sig := sk.Sign(userForHash.Hash())
+
+		payload := metadata.RegisterUserRequest{
+			JWT:       token,
+			SignKey:   sk.Public(),
+			EncKey:    dk.EncapsulationKey().Bytes(),
+			Signature: sig,
 		}
 		body, _ := json.Marshal(payload)
-
 		req, err := http.NewRequestWithContext(ctx, "POST", opts.ServerURL+"/v1/user/register", bytes.NewReader(body))
 		if err != nil {
 			return fmt.Errorf("failed to create registration request: %w", err)
@@ -180,24 +223,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		}
 
 		c := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH)
-		c = c.WithIdentity(conf.UserID, dk).WithSignKey(sk).WithServerKey(svKey)
-
-		// Ensure root exists and capture anchor
-		if _, err := c.EnsureRoot(ctx); err != nil && err != metadata.ErrExists {
-			if apiErr, ok := err.(*APIError); ok && apiErr.Code == metadata.ErrCodeForbidden {
-				// User is locked, which is expected for new accounts in a zero-trust setup.
-				// We can't fetch the root anchor yet, but onboarding is otherwise complete.
-				fmt.Println("Notice: Account is currently locked pending administrator approval.")
-			} else {
-				return fmt.Errorf("failed to ensure root: %w", err)
-			}
-		}
-		rid, rowner, rver := c.GetRootAnchor()
-		if rid != "" {
-			conf.RootID = rid
-			conf.RootOwner = rowner
-			conf.RootVersion = rver
-		}
+		c = c.withIdentity(conf.UserID, dk).withSignKey(sk).withServerKey(svKey)
 
 		// Capture passphrase once
 		password, err := config.GetPassword("Enter passphrase to protect your account: ", true)
@@ -216,7 +242,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 			return err
 		}
 
-		if err := c.PushKeySync(ctx, blob); err != nil {
+		if err := c.pushKeySync(ctx, blob); err != nil {
 			fmt.Printf("Warning: cloud backup failed: %v\n", err)
 		} else {
 			fmt.Println("Cloud backup (KeySync) successful.")
@@ -226,7 +252,7 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 	} else {
 		// Existing account flow (Pull)
 		c := NewClient(opts.ServerURL).WithDisableDoH(opts.DisableDoH)
-		blob, err := c.PullKeySync(ctx, token)
+		blob, err := c.pullKeySync(ctx, token)
 		if err != nil {
 			return fmt.Errorf("failed to pull keys: %w (did you mean --new?)", err)
 		}

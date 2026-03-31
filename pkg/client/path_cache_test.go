@@ -71,7 +71,7 @@ func TestPathCache(t *testing.T) {
 	userID := "user-1"
 	createUser(t, metaNode, metadata.User{
 		ID: userID, SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
-	})
+	}, userSignKey, userID, userSignKey)
 
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
@@ -84,16 +84,18 @@ func TestPathCache(t *testing.T) {
 	})
 
 	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity(userID, dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	c = c.withIdentity(userID, dk)
+	c = c.withSignKey(userSignKey)
+	c = c.withServerKey(serverEK)
+	c = c.WithAdmin(true) // Bootstrap requires admin
 
-	// We MUST initialize root with signer info if we want to bypass EnsureRoot's check later
-	// But EnsureRoot uses createInode which signs it.
-	// The problem is that TestPathCache might be seeing an UNSIGNED root if it was pre-created.
-	// Actually EnsureRoot is called below.
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
-		t.Fatal(err)
+	if err := c.Login(t.Context()); err != nil {
+		t.Fatalf("Login failed: %v", err)
+	}
+
+	// Phase 69: Initialize Backbone
+	if err := c.BootstrapFileSystem(t.Context()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
 	}
 
 	// 2. Create deep hierarchy
@@ -117,7 +119,7 @@ func TestPathCache(t *testing.T) {
 
 	atomic.StoreUint64(&getInodeCount, 0)
 	t.Log("Starting first resolution (sequential)...")
-	_, _, err := c.ResolvePath(t.Context(), "/a/b/c/f.txt")
+	_, _, err := c.resolvePath(t.Context(), "/a/b/c/f.txt")
 	if err != nil {
 		t.Fatalf("First resolve failed: %v", err)
 	}
@@ -135,7 +137,7 @@ func TestPathCache(t *testing.T) {
 	// Expect exactly 0 Inode fetches (f.txt) because of the cache hit + validation.
 	atomic.StoreUint64(&getInodeCount, 0)
 	t.Log("Starting second resolution (cached)...")
-	_, _, err = c.ResolvePath(t.Context(), "/a/b/c/f.txt")
+	_, _, err = c.resolvePath(t.Context(), "/a/b/c/f.txt")
 	if err != nil {
 		t.Fatalf("Second resolve failed: %v", err)
 	}
@@ -159,7 +161,7 @@ func TestPathCache(t *testing.T) {
 	if err := c.CreateFile(t.Context(), "/a/b/c/f2.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := c.ResolvePath(t.Context(), "/a/b/c/f2.txt"); err != nil {
+	if _, _, err := c.resolvePath(t.Context(), "/a/b/c/f2.txt"); err != nil {
 		t.Fatal(err)
 	}
 	_, ok = c.getPathCache("/a/b/c/f2.txt")
@@ -184,7 +186,7 @@ func TestPathCache(t *testing.T) {
 	})
 
 	// Resolving /stale should fall back to sequential (which fails with 404)
-	_, _, err = c.ResolvePath(t.Context(), "/stale")
+	_, _, err = c.resolvePath(t.Context(), "/stale")
 	if err == nil {
 		t.Error("Expected error for non-existent path")
 	}

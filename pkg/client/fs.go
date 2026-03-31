@@ -20,6 +20,7 @@ import (
 	"io"
 	"io/fs"
 	"path"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -57,7 +58,7 @@ func (d *DistFS) Open(name string) (fs.File, error) {
 	}
 
 	fullPath := path.Join(d.basePath, name)
-	inode, key, err := d.client.ResolvePath(d.ctx, fullPath)
+	inode, key, err := d.client.resolvePath(d.ctx, fullPath)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
@@ -72,7 +73,7 @@ func (d *DistFS) Open(name string) (fs.File, error) {
 	}
 
 	// It's a file
-	reader, err := d.client.NewReader(d.ctx, inode.ID, key)
+	reader, err := d.client.newReader(d.ctx, inode.ID, key)
 	if err != nil {
 		return nil, &fs.PathError{Op: "open", Path: name, Err: err}
 	}
@@ -125,11 +126,11 @@ func (d *DistFS) Stat(name string) (fs.FileInfo, error) {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: fs.ErrInvalid}
 	}
 	fullPath := path.Join(d.basePath, name)
-	inode, _, err := d.client.ResolvePath(d.ctx, fullPath)
+	inode, _, err := d.client.resolvePath(d.ctx, fullPath)
 	if err != nil {
 		return nil, &fs.PathError{Op: "stat", Path: name, Err: err}
 	}
-	return &DistFileInfo{inode: inode, name: path.Base(name)}, nil
+	return d.client.newFileInfo(inode, path.Base(name)), nil
 }
 
 // Sub implements fs.SubFS.
@@ -150,7 +151,7 @@ func (d *DistFS) ReadLink(name string) (string, error) {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: fs.ErrInvalid}
 	}
 	fullPath := path.Join(d.basePath, name)
-	inode, _, err := d.client.ResolvePathExtended(d.ctx, fullPath, false)
+	inode, _, err := d.client.resolvePathExtended(d.ctx, fullPath, false)
 	if err != nil {
 		return "", &fs.PathError{Op: "readlink", Path: name, Err: err}
 	}
@@ -175,11 +176,12 @@ func (f *noGlobFS) ReadDir(name string) ([]fs.DirEntry, error) {
 
 // DistFile implements fs.File
 type DistFile struct {
+	client *Client
 	reader *FileReader
 }
 
 func (f *DistFile) Stat() (fs.FileInfo, error) {
-	return &DistFileInfo{inode: f.reader.Stat(), name: f.reader.inode.ID}, nil
+	return f.client.newFileInfo(f.reader.inode, f.reader.inode.ID), nil
 }
 
 func (f *DistFile) Read(p []byte) (int, error) {
@@ -205,7 +207,7 @@ type DistDir struct {
 }
 
 func (d *DistDir) Stat() (fs.FileInfo, error) {
-	return &DistFileInfo{inode: d.inode, name: d.inode.ID}, nil
+	return d.client.newFileInfo(d.inode, d.inode.ID), nil
 }
 
 func (d *DistDir) Read(p []byte) (int, error) {
@@ -272,16 +274,12 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 			continue
 		}
 
-		childName, err := d.client.DecryptEntryName(d.ctx, d.key, entry.EncryptedName, entry.Nonce)
+		childName, err := d.client.decryptEntryName(d.ctx, d.key, entry.EncryptedName, entry.Nonce)
 		if err != nil {
 			continue
 		}
 
-		entries = append(entries, &DistDirEntry{
-			inode: childInode,
-			name:  childName,
-			id:    entry.ID,
-		})
+		entries = append(entries, d.client.newDirEntry(childInode, childName, entry.ID, nil))
 	}
 
 	return entries, nil
@@ -289,83 +287,123 @@ func (d *DistDir) ReadDir(n int) ([]fs.DirEntry, error) {
 
 // DistDirEntry implements fs.DirEntry.
 type DistDirEntry struct {
-	inode *metadata.Inode
-	name  string
-	id    string
-	key   []byte
+	client *Client
+	info   InodeInfo
+	name   string
+	id     string
+	key    []byte
 }
 
 func (e *DistDirEntry) Name() string { return e.name }
 func (e *DistDirEntry) IsDir() bool {
-	if e.inode == nil {
-		return false // Unknown
-	}
-	return e.inode.Type == metadata.DirType
+	return e.info.IsDir()
 }
 func (e *DistDirEntry) Type() fs.FileMode {
-	if e.inode == nil {
-		return 0
-	}
 	if e.IsDir() {
-		return fs.ModeDir | fs.FileMode(e.inode.Mode)
+		return fs.ModeDir | fs.FileMode(e.info.Mode)
 	}
-	return fs.FileMode(e.inode.Mode)
+	return fs.FileMode(e.info.Mode)
 }
 func (e *DistDirEntry) Info() (fs.FileInfo, error) {
-	if e.inode == nil {
-		return nil, fmt.Errorf("inode not loaded")
-	}
-	return &DistFileInfo{inode: e.inode, name: e.name}, nil
+	return &DistFileInfo{info: e.info, name: e.name}, nil
 }
 
-func (e *DistDirEntry) Inode() *metadata.Inode { return e.inode }
-
 func (e *DistDirEntry) InodeID() string {
-	if e.inode != nil {
-		return e.inode.ID
-	}
 	return e.id
 }
 func (e *DistDirEntry) Mode() fs.FileMode {
-	if e.inode == nil {
-		return 0
-	}
-	m := fs.FileMode(e.inode.Mode)
+	m := fs.FileMode(e.info.Mode)
 	if e.IsDir() {
 		m |= fs.ModeDir
 	}
 	return m
 }
 func (e *DistDirEntry) Size() int64 {
-	if e.inode == nil {
-		return 0
-	}
-	return int64(e.inode.Size)
+	return int64(e.info.Size)
 }
 
 func (e *DistDirEntry) ModTime() time.Time {
-	if e.inode == nil {
-		return time.Time{}
+	return time.Unix(0, e.info.MTime)
+}
+
+// StatDirEntry returns a directory entry for the given path, following symlinks.
+func (c *Client) StatDirEntry(ctx context.Context, path string) (*DistDirEntry, error) {
+	inode, key, err := c.resolvePathExtended(ctx, path, true)
+	if err != nil {
+		return nil, err
 	}
-	return time.Unix(0, e.inode.GetMTime())
+	name := filepath.Base(strings.TrimRight(path, "/"))
+	if name == "" || name == "." {
+		name = "/"
+	}
+	return c.newDirEntry(inode, name, inode.ID, key), nil
+}
+
+// LstatDirEntry returns a directory entry for the given path, without following the final symlink.
+func (c *Client) LstatDirEntry(ctx context.Context, path string) (*DistDirEntry, error) {
+	inode, key, err := c.resolvePathExtended(ctx, path, false)
+	if err != nil {
+		return nil, err
+	}
+	name := filepath.Base(strings.TrimRight(path, "/"))
+	if name == "" || name == "." {
+		name = "/"
+	}
+	return c.newDirEntry(inode, name, inode.ID, key), nil
+}
+
+func (c *Client) newFileInfo(i *metadata.Inode, name string) *DistFileInfo {
+	info := InodeInfo{
+		ID:            i.ID,
+		Type:          i.Type,
+		Mode:          i.Mode,
+		Size:          i.Size,
+		OwnerID:       i.OwnerID,
+		GroupID:       i.GroupID,
+		NLink:         i.NLink,
+		Version:       i.Version,
+		MTime:         i.GetMTime(),
+		SymlinkTarget: i.GetSymlinkTarget(),
+		AccessACL:     fromInternalACL(i.AccessACL),
+		DefaultACL:    fromInternalACL(i.DefaultACL),
+	}
+	if i.Lockbox != nil {
+		info.Lockbox = make(map[string]struct {
+			KEM []byte
+			DEM []byte
+		})
+		for k, v := range i.Lockbox {
+			info.Lockbox[k] = struct {
+				KEM []byte
+				DEM []byte
+			}{
+				KEM: v.KEMCiphertext,
+				DEM: v.DEMCiphertext,
+			}
+		}
+	}
+	return &DistFileInfo{
+		info: info,
+		name: name,
+	}
 }
 
 // DistFileInfo implements fs.FileInfo.
 type DistFileInfo struct {
-	inode *metadata.Inode
-	name  string
+	info InodeInfo
+	name string
 }
 
 func (i *DistFileInfo) Name() string       { return i.name }
-func (i *DistFileInfo) Size() int64        { return int64(i.inode.Size) }
-func (i *DistFileInfo) Mode() fs.FileMode  { return fs.FileMode(i.inode.Mode) }
-func (i *DistFileInfo) ModTime() time.Time { return time.Unix(0, i.inode.GetMTime()) }
-func (i *DistFileInfo) IsDir() bool        { return i.inode.Type == metadata.DirType }
-func (i *DistFileInfo) Sys() any           { return i.inode }
+func (i *DistFileInfo) Size() int64        { return int64(i.info.Size) }
+func (i *DistFileInfo) Mode() fs.FileMode  { return fs.FileMode(i.info.Mode) }
+func (i *DistFileInfo) ModTime() time.Time { return time.Unix(0, i.info.MTime) }
+func (i *DistFileInfo) IsDir() bool        { return i.info.IsDir() }
+func (i *DistFileInfo) Sys() any           { return &i.info }
 
 // ReadDirExtended returns a list of directory entries with optional metadata.
 func (c *Client) ReadDirExtended(ctx context.Context, path string, fetchMetadata bool) ([]*DistDirEntry, error) {
-	inode, key, err := c.ResolvePath(ctx, path)
+	inode, key, err := c.resolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
@@ -374,7 +412,7 @@ func (c *Client) ReadDirExtended(ctx context.Context, path string, fetchMetadata
 
 // ReadDirPaginated returns a paginated list of directory entries and the total count.
 func (c *Client) ReadDirPaginated(ctx context.Context, path string, offset, limit int) ([]*DistDirEntry, int, error) {
-	inode, key, err := c.ResolvePath(ctx, path)
+	inode, key, err := c.resolvePath(ctx, path)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -413,14 +451,16 @@ func (c *Client) readDirPaginated(ctx context.Context, inode *metadata.Inode, ke
 	var entries []*DistDirEntry
 	for _, k := range keys[offset:end] {
 		entry := inode.Children[k]
-		childName, err := c.DecryptEntryName(ctx, key, entry.EncryptedName, entry.Nonce)
+		childName, err := c.decryptEntryName(ctx, key, entry.EncryptedName, entry.Nonce)
 		if err != nil {
 			continue
 		}
 
 		entries = append(entries, &DistDirEntry{
-			id:   entry.ID,
-			name: childName,
+			client: c,
+			info:   InodeInfo{ID: entry.ID},
+			id:     entry.ID,
+			name:   childName,
 		})
 	}
 
@@ -469,7 +509,7 @@ func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key
 			}
 		}
 
-		childName, err := c.DecryptEntryName(ctx, key, entry.EncryptedName, entry.Nonce)
+		childName, err := c.decryptEntryName(ctx, key, entry.EncryptedName, entry.Nonce)
 		if err != nil {
 			continue
 		}
@@ -487,12 +527,7 @@ func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key
 			}
 		}
 
-		entries = append(entries, &DistDirEntry{
-			inode: childInode,
-			name:  childName,
-			id:    entry.ID,
-			key:   childKey,
-		})
+		entries = append(entries, c.newDirEntry(childInode, childName, entry.ID, childKey))
 	}
 
 	return entries, nil
@@ -500,14 +535,18 @@ func (c *Client) readDirExtended(ctx context.Context, inode *metadata.Inode, key
 
 // ReadDirRecursive returns all entries in the directory tree starting at path.
 func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string][]*DistDirEntry, error) {
-	inode, key, err := c.ResolvePath(ctx, path)
+	inode, key, err := c.resolvePath(ctx, path)
 	if err != nil {
 		return nil, err
 	}
 
 	results := make(map[string][]*DistDirEntry)
-	var walk func(string, *metadata.Inode, []byte) error
-	walk = func(p string, currInode *metadata.Inode, currKey []byte) error {
+	var walk func(string, string, []byte) error
+	walk = func(p string, currID string, currKey []byte) error {
+		currInode, err := c.getInode(ctx, currID)
+		if err != nil {
+			return err
+		}
 		entries, err := c.readDirExtended(ctx, currInode, currKey, true)
 		if err != nil {
 			return err
@@ -520,7 +559,7 @@ func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string]
 					childPath += "/"
 				}
 				childPath += e.Name()
-				if err := walk(childPath, e.inode, e.key); err != nil {
+				if err := walk(childPath, e.id, e.key); err != nil {
 					return err
 				}
 			}
@@ -528,18 +567,59 @@ func (c *Client) ReadDirRecursive(ctx context.Context, path string) (map[string]
 		return nil
 	}
 
-	if err := walk(path, inode, key); err != nil {
+	if err := walk(path, inode.ID, key); err != nil {
 		return nil, err
 	}
 	return results, nil
 }
 
-// NewDirEntry creates a new DistDirEntry from an Inode and name.
-func (c *Client) NewDirEntry(inode *metadata.Inode, name string, key []byte) *DistDirEntry {
-	return &DistDirEntry{inode: inode, name: name, key: key}
+// newDirEntry creates a new DistDirEntry from an Inode and name.
+func (c *Client) newDirEntry(i *metadata.Inode, name string, inodeID string, key []byte) *DistDirEntry {
+	res := &DistDirEntry{
+		client: c,
+		name:   name,
+		id:     inodeID,
+		key:    key,
+	}
+	if i != nil {
+		res.info = InodeInfo{
+			ID:            i.ID,
+			Type:          i.Type,
+			Mode:          i.Mode,
+			Size:          i.Size,
+			OwnerID:       i.OwnerID,
+			GroupID:       i.GroupID,
+			NLink:         i.NLink,
+			Version:       i.Version,
+			MTime:         i.GetMTime(),
+			SymlinkTarget: i.GetSymlinkTarget(),
+			AccessACL:     fromInternalACL(i.AccessACL),
+			DefaultACL:    fromInternalACL(i.DefaultACL),
+		}
+	} else {
+		res.info = InodeInfo{ID: inodeID}
+	}
+	return res
 }
 
 // NewDirEntryForTest is used for testing purposes to create a DistDirEntry.
-func NewDirEntryForTest(inode *metadata.Inode, name string, key []byte) *DistDirEntry {
-	return &DistDirEntry{inode: inode, name: name, key: key}
+func NewDirEntryForTest(i *metadata.Inode, name string, key []byte) *DistDirEntry {
+	return &DistDirEntry{
+		info: InodeInfo{
+			ID:            i.ID,
+			Type:          i.Type,
+			Mode:          i.Mode,
+			Size:          i.Size,
+			OwnerID:       i.OwnerID,
+			GroupID:       i.GroupID,
+			Version:       i.Version,
+			MTime:         i.GetMTime(),
+			SymlinkTarget: i.GetSymlinkTarget(),
+			AccessACL:     fromInternalACL(i.AccessACL),
+			DefaultACL:    fromInternalACL(i.DefaultACL),
+		},
+		name: name,
+		id:   i.ID,
+		key:  key,
+	}
 }

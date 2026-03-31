@@ -23,6 +23,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log"
 	"os"
 	"path/filepath"
@@ -33,7 +34,6 @@ import (
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/tpm"
 	"golang.org/x/term"
@@ -174,6 +174,8 @@ func main() {
 		cmdAdminRemove(ctx, args)
 	case "registry-add":
 		cmdRegistryAdd(ctx, args)
+	case "registry-add-group":
+		cmdRegistryAddGroup(ctx, args)
 	case "admin-lock-user":
 		cmdAdminLockUser(ctx, args, true)
 	case "admin-unlock-user":
@@ -193,7 +195,7 @@ func main() {
 	case "quota":
 		cmdQuota(ctx, args)
 	case "dump-inodes":
-		cmdDumpInodes(ctx, args)
+		cmdDump(ctx, args)
 	default:
 		usage()
 	}
@@ -257,6 +259,7 @@ func usage() {
 	fmt.Println("  admin-lock-user <userID>        Lock a user account")
 	fmt.Println("  admin-unlock-user <userID>      Unlock a user account")
 	fmt.Println("  registry-add [--unlock] [--quota <limit>] [--home] <username> <userID> Verify and add a user to the registry")
+	fmt.Println("  registry-add-group <name> <groupID>  Anchor a group in the registry for discovery")
 	fmt.Println("  admin-audit                     Run a comprehensive system integrity and structural audit")
 	fmt.Println("  admin-create-root [-secondary]  Initialize a new root inode (Admin only, defaults to standard root)")
 	fmt.Println("  whoami                          Display your user ID")
@@ -311,29 +314,47 @@ func loadClient() *client.Client {
 		WithDisableDoH(*disableDoH)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
-	dk, _ := crypto.UnmarshalDecapsulationKey(dkBytes)
-
 	skBytes, _ := hex.DecodeString(conf.SignKey)
-	sk := crypto.UnmarshalIdentityKey(skBytes)
-
 	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
-	svKey, err := crypto.UnmarshalEncapsulationKey(svKeyBytes)
-	if err != nil {
-		log.Fatalf("failed to unmarshal server key: %v", err)
+
+	rid := conf.DefaultRootID
+	if rid == "" {
+		rid = metadata.RootID
+	}
+	if *rootID != "" {
+		rid = *rootID
 	}
 
-	c = c.WithIdentity(conf.UserID, dk).
-		WithSignKey(sk).
-		WithServerKey(svKey).
-		WithRootAnchor(conf.RootID, conf.RootOwner, conf.RootVersion).
+	var rowner string
+	var rpk, rek []byte
+	var rver uint64
+
+	if anchor, ok := conf.Roots[rid]; ok {
+		rowner = anchor.RootOwner
+		rpk = anchor.RootOwnerPublicKey
+		rek = anchor.RootOwnerEncryptionKey
+		rver = anchor.RootVersion
+	}
+
+	c, err = c.WithIdentityBytes(conf.UserID, dkBytes)
+	if err != nil {
+		log.Fatalf("failed to load identity: %v", err)
+	}
+	c, err = c.WithSignKeyBytes(skBytes)
+	if err != nil {
+		log.Fatalf("failed to load signing key: %v", err)
+	}
+	c, err = c.WithServerKeyBytes(svKeyBytes)
+	if err != nil {
+		log.Fatalf("failed to load server key: %v", err)
+	}
+
+	c = c.WithRootAnchorBytes(rid, rowner, rpk, rek, rver).
 		WithAdmin(*adminFlag).
 		WithDisableDoH(*disableDoH).
 		WithAllowInsecure(*allowInsecure).
 		WithRegistry(*registryDir)
 
-	if *rootID != "" {
-		c = c.WithRootID(*rootID)
-	}
 	return c
 }
 
@@ -344,27 +365,51 @@ func saveClient(c *client.Client) {
 		return
 	}
 
-	rid, rowner, rver := c.GetRootAnchor()
-	if rid == conf.RootID && rowner == conf.RootOwner && rver == conf.RootVersion {
+	rid, rowner, rpk, rek, rver := c.GetRootAnchor()
+	if rid == "" {
+		return
+	}
+
+	if conf.Roots == nil {
+		conf.Roots = make(map[string]config.RootAnchor)
+	}
+
+	anchor := config.RootAnchor{
+		RootOwner:              rowner,
+		RootOwnerPublicKey:     rpk,
+		RootOwnerEncryptionKey: rek,
+		RootVersion:            rver,
+	}
+
+	existing, exists := conf.Roots[rid]
+	changed := !exists || existing.RootOwner != rowner || existing.RootVersion != rver || !bytes.Equal(existing.RootOwnerPublicKey, rpk) || !bytes.Equal(existing.RootOwnerEncryptionKey, rek)
+
+	isDefault := conf.DefaultRootID == "" || conf.DefaultRootID == rid || rid == metadata.RootID
+
+	if !changed && !isDefault {
 		return // No change
 	}
 
-	conf.RootID = rid
-	conf.RootOwner = rowner
-	conf.RootVersion = rver
+	conf.Roots[rid] = anchor
 
-	// We need the password. config.Save will prompt for it.
-	// This might be annoying for every 'ls' if the version changes often.
-	// For now, let's only save if explicitly requested or on 'init'.
-	// Actually, let's just NOT save automatically in the CLI for now to avoid UX friction.
-	// In distfs-fuse it makes more sense.
+	if isDefault {
+		conf.DefaultRootID = rid
+	}
+
+	// Save the updated configuration
+	if err := config.Save(*conf, *configPath); err != nil {
+		log.Printf("Warning: failed to save config: %v", err)
+	} else {
+		fmt.Println("Local configuration updated with root anchor.")
+	}
 }
 
 type LSClient interface {
-	ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)
+	Stat(ctx context.Context, path string) (*client.DistFileInfo, error)
+	Lstat(ctx context.Context, path string) (*client.DistFileInfo, error)
+	LstatDirEntry(ctx context.Context, path string) (*client.DistDirEntry, error)
 	ReadDirExtended(ctx context.Context, path string, fetchMetadata bool) ([]*client.DistDirEntry, error)
 	ReadDirRecursive(ctx context.Context, path string) (map[string][]*client.DistDirEntry, error)
-	NewDirEntry(inode *metadata.Inode, name string, key []byte) *client.DistDirEntry
 	UserID() string
 }
 
@@ -394,20 +439,11 @@ func runLs(ctx context.Context, c LSClient, args []string) {
 	}
 
 	if *directory {
-		// Resolve path to get its inode
-		inodeInfo, key, err := c.ResolvePath(ctx, path)
+		entry, err := c.LstatDirEntry(ctx, path)
 		if err != nil {
 			log.Fatal(err)
 		}
 
-		name := path
-		if path == "/" {
-			name = "/"
-		} else {
-			name = filepath.Base(path)
-		}
-
-		entry := c.NewDirEntry(inodeInfo, name, key)
 		processAndPrintEntries(os.Stdout, []*client.DistDirEntry{entry}, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
 		return
 	}
@@ -658,12 +694,7 @@ func cmdCat(ctx context.Context, args []string) {
 	}
 	path := args[0]
 	c := loadClient()
-	inode, key, err := c.ResolvePath(ctx, path)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	rc, err := c.ReadFile(ctx, inode.ID, key)
+	rc, err := c.OpenBlobRead(ctx, path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -682,12 +713,7 @@ func cmdHead(ctx context.Context, args []string) {
 	}
 	path := fs.Arg(0)
 	c := loadClient()
-	inode, key, err := c.ResolvePath(ctx, path)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	rc, err := c.ReadFile(ctx, inode.ID, key)
+	rc, err := c.OpenBlobRead(ctx, path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -710,12 +736,7 @@ func cmdTail(ctx context.Context, args []string) {
 	}
 	path := fs.Arg(0)
 	c := loadClient()
-	inode, key, err := c.ResolvePath(ctx, path)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	r, err := c.NewReader(ctx, inode.ID, key)
+	r, err := c.OpenBlobRead(ctx, path)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -749,7 +770,7 @@ func cmdStat(ctx context.Context, args []string) {
 		log.Fatal(err)
 	}
 
-	inode := info.Sys().(*metadata.Inode)
+	inode := info.Sys().(*client.InodeInfo)
 	fmt.Printf("  File: %s\n", info.Name())
 	fmt.Printf("  Size: %-15d Blocks: %-10d IO Block: %-10d ", info.Size(), (info.Size()+511)/512, 4096)
 	switch inode.Type {
@@ -758,7 +779,7 @@ func cmdStat(ctx context.Context, args []string) {
 	case metadata.FileType:
 		fmt.Println("regular file")
 	case metadata.SymlinkType:
-		fmt.Printf("symbolic link -> %s\n", inode.GetSymlinkTarget())
+		fmt.Printf("symbolic link -> %s\n", inode.SymlinkTarget)
 	}
 	fmt.Printf("Device: %-15s Inode: %-15s Links: %-10d\n", "distfs", inode.ID[:16], inode.NLink)
 	fmt.Printf("Access: (%04o/%s)  Uid: (%-8s)   Gid: (%-8s)\n", info.Mode().Perm(), info.Mode().String(), inode.OwnerID[:8], inode.GroupID)
@@ -865,7 +886,7 @@ func cmdTouch(ctx context.Context, args []string) {
 	if err == nil {
 		// File exists, update MTime
 		now := time.Now().UnixNano()
-		err = c.SetAttr(ctx, path, metadata.SetAttrRequest{MTime: &now})
+		err = c.SetMTime(ctx, path, now)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -891,7 +912,7 @@ func cmdGetFacl(ctx context.Context, args []string) {
 		log.Fatal(err)
 	}
 
-	inode := info.Sys().(*metadata.Inode)
+	inode := info.Sys().(*client.InodeInfo)
 	fmt.Printf("# file: %s\n", info.Name())
 	fmt.Printf("# owner: %s\n", inode.OwnerID[:8])
 	fmt.Printf("# group: %s\n", inode.GroupID)
@@ -972,11 +993,11 @@ func cmdSetFacl(ctx context.Context, args []string) {
 	if err != nil {
 		log.Fatal(err)
 	}
-	inode := info.Sys().(*metadata.Inode)
+	inode := info.Sys().(*client.InodeInfo)
 
 	acl := inode.AccessACL
 	if acl == nil {
-		acl = &metadata.POSIXAccess{
+		acl = &client.ACL{
 			Users:  make(map[string]uint32),
 			Groups: make(map[string]uint32),
 		}
@@ -1026,7 +1047,7 @@ func cmdSetFacl(ctx context.Context, args []string) {
 		}
 	}
 
-	if err := c.SetAttr(ctx, path, metadata.SetAttrRequest{AccessACL: acl}); err != nil {
+	if err := c.Setfacl(ctx, path, *acl); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("ACL of %s updated.\n", path)
@@ -1043,8 +1064,7 @@ func cmdChmod(ctx context.Context, args []string) {
 	}
 
 	c := loadClient()
-	m32 := uint32(mode)
-	if err := c.SetAttr(ctx, path, metadata.SetAttrRequest{Mode: &m32}); err != nil {
+	if err := c.Chmod(ctx, path, fs.FileMode(mode)); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Mode of %s changed to %s\n", path, modeStr)
@@ -1057,7 +1077,7 @@ func cmdChgrp(ctx context.Context, args []string) {
 	groupID, path := args[0], args[1]
 
 	c := loadClient()
-	if err := c.SetAttr(ctx, path, metadata.SetAttrRequest{GroupID: &groupID}); err != nil {
+	if err := c.Chgrp(ctx, path, groupID); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("Group of %s changed to %s\n", path, groupID)
@@ -1066,6 +1086,7 @@ func cmdChgrp(ctx context.Context, args []string) {
 func cmdGroupCreate(ctx context.Context, args []string) {
 	fs := flag.NewFlagSet("group-create", flag.ExitOnError)
 	quota := fs.Bool("quota", false, "Enable independent group quota (charged to group, not owner)")
+	owner := fs.String("owner", "", "Initial group owner (username or UserID)")
 	fs.Parse(args)
 
 	if fs.NArg() < 1 {
@@ -1073,19 +1094,30 @@ func cmdGroupCreate(ctx context.Context, args []string) {
 	}
 	name := fs.Arg(0)
 	c := loadClient()
-	group, err := c.CreateGroup(ctx, name, *quota)
-	if err != nil {
-		if errors.Is(err, metadata.ErrExists) {
-			// Find existing group ID for automated tools
-			if g, _, rerr := c.ResolvePath(ctx, "/.groups/"+name); rerr == nil {
-				log.Printf("Group %s already exists (%s)", name, g.ID)
-				return
-			}
+
+	if !*adminFlag {
+		log.Fatal("group-create now requires -admin privileges to anchor in /registry")
+	}
+
+	ownerID := ""
+	if *owner != "" {
+		var err error
+		ownerID, _, err = c.ResolveUsername(ctx, *owner)
+		if err != nil {
+			log.Fatalf("failed to resolve owner %s: %v", *owner, err)
 		}
+	}
+
+	group, err := c.CreateGroupWithOptions(ctx, name, *quota, ownerID)
+	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("Group %s created.\n", name)
+	if err := c.AnchorGroupInRegistry(ctx, name, group.ID); err != nil {
+		log.Fatalf("failed to anchor group in registry: %v", err)
+	}
+	fmt.Printf("Group %s created and anchored in /registry.\n", name)
 	fmt.Printf("ID: %s\n", group.ID)
+	fmt.Printf("Owner: %s\n", group.OwnerID)
 	fmt.Printf("QuotaEnabled: %v\n", group.QuotaEnabled)
 }
 
@@ -1095,14 +1127,24 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 	fs.Parse(args)
 
 	if fs.NArg() < 2 {
-		log.Fatal("group_id and user_id/contact_string required")
+		log.Fatal("group_id/group_name and user_id/contact_string required")
 	}
-	groupID, userArg := fs.Arg(0), fs.Arg(1)
+	groupArg, userArg := fs.Arg(0), fs.Arg(1)
 	info := ""
 	if fs.NArg() > 2 {
 		info = fs.Arg(2)
 	}
 	c := loadClient()
+
+	// Resolve Group
+	groupID := groupArg
+	if !metadata.IsInodeID(groupArg) {
+		id, _, err := c.ResolveGroupName(ctx, groupArg)
+		if err != nil {
+			log.Fatalf("Failed to resolve group %s: %v", groupArg, err)
+		}
+		groupID = id
+	}
 
 	userID := userArg
 	var ci *client.ContactInfo
@@ -1163,32 +1205,64 @@ func cmdContactInfo(ctx context.Context, args []string) {
 
 func cmdGroupMembers(ctx context.Context, args []string) {
 	if len(args) < 1 {
-		log.Fatal("group_id required")
+		log.Fatal("group_id/group_name required")
 	}
-	groupID := args[0]
+	groupArg := args[0]
 	c := loadClient()
 
-	fmt.Printf("Members of group %s:\n", groupID)
+	// Resolve Group
+	groupID := groupArg
+	if !metadata.IsInodeID(groupArg) {
+		id, _, err := c.ResolveGroupName(ctx, groupArg)
+		if err != nil {
+			log.Fatalf("Failed to resolve group %s: %v", groupArg, err)
+		}
+		groupID = id
+	}
+
+	fmt.Printf("Members of group %s (%s):\n", groupArg, groupID)
 	fmt.Printf("%-64s %s\n", "User ID", "User Info")
 	fmt.Println(strings.Repeat("-", 80))
-	for m, err := range c.GetGroupMembers(ctx, groupID) {
-		if err != nil {
-			log.Fatal(err)
-		}
-		fmt.Printf("%-64s %s\n", m.UserID, m.Info)
+	members, err := c.AdminGetGroupMembers(ctx, groupID)
+	if err != nil {
+		log.Fatal(err)
+	}
+	for userID, info := range members {
+		fmt.Printf("%-64s %s\n", userID, info)
 	}
 }
 
 func cmdGroupRemove(ctx context.Context, args []string) {
 	if len(args) < 2 {
-		log.Fatal("group_id and user_id required")
+		log.Fatal("group_id/group_name and user_id/username required")
 	}
-	groupID, userID := args[0], args[1]
+	groupArg, userArg := args[0], args[1]
 	c := loadClient()
+
+	// Resolve Group
+	groupID := groupArg
+	if !metadata.IsInodeID(groupArg) {
+		id, _, err := c.ResolveGroupName(ctx, groupArg)
+		if err != nil {
+			log.Fatalf("Failed to resolve group %s: %v", groupArg, err)
+		}
+		groupID = id
+	}
+
+	// Resolve User
+	userID := userArg
+	if !metadata.IsInodeID(userArg) && len(userArg) != 64 {
+		id, _, err := c.ResolveUsername(ctx, userArg)
+		if err != nil {
+			log.Fatalf("Failed to resolve user %s: %v", userArg, err)
+		}
+		userID = id
+	}
+
 	if err := c.RemoveUserFromGroup(ctx, groupID, userID); err != nil {
 		log.Fatal(err)
 	}
-	fmt.Printf("User %s removed from group %s\n", userID, groupID)
+	fmt.Printf("User %s removed from group %s\n", userArg, groupArg)
 }
 
 func cmdGroupList(ctx context.Context, args []string) {
@@ -1201,21 +1275,24 @@ func cmdGroupList(ctx context.Context, args []string) {
 			log.Fatal(err)
 		}
 		name := "[HIDDEN]"
-		if decrypted, err := c.DecryptGroupName(ctx, e); err == nil {
+		if decrypted, err := c.AdminDecryptGroupName(ctx, e); err == nil {
 			name = decrypted
-		}
-		if e.IsSystem {
-			name = "[SYSTEM] " + name
 		}
 		fmt.Printf("%-32s %-20s %s\n", e.ID, name, e.Role)
 	}
 }
 
 func cmdPut(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("local and remote paths required")
+	fs := flag.NewFlagSet("put", flag.ExitOnError)
+	force := fs.Bool("f", false, "Force overwrite existing file")
+	fs.Parse(args)
+
+	fArgs := fs.Args()
+	if len(fArgs) < 2 {
+		fmt.Println("Usage: distfs put [-f] <local> <remote>")
+		os.Exit(1)
 	}
-	local, remote := args[0], args[1]
+	local, remote := fArgs[0], fArgs[1]
 	f, err := os.Open(local)
 	if err != nil {
 		log.Fatal(err)
@@ -1228,7 +1305,32 @@ func cmdPut(ctx context.Context, args []string) {
 	}
 
 	c := loadClient()
-	if err := c.CreateFile(ctx, remote, f, info.Size()); err != nil {
+
+	var opts client.MkdirOptions
+	if *force {
+		// Phase 69: Support overwrite in 'put' by preserving existing metadata
+		if fi, err := c.Lstat(ctx, remote); err == nil {
+			inode := fi.Sys().(*client.InodeInfo)
+			// Ensure we have the file key for group signature generation in RemoveEntry
+			if err := c.EnsureFileKey(ctx, remote); err != nil {
+				log.Printf("cmdPut: EnsureFileKey warning: %v", err)
+			}
+
+			m := uint32(fi.Mode()) & 0777
+			opts.Mode = &m
+			opts.GroupID = inode.GroupID
+			opts.AccessACL = inode.AccessACL
+			opts.DefaultACL = inode.DefaultACL
+
+			if err := c.RemoveEntry(ctx, remote); err != nil {
+				log.Fatalf("failed to remove existing file for overwrite: %v", err)
+			}
+		} else if !errors.Is(err, metadata.ErrNotFound) {
+			log.Fatalf("failed to check existing file: %v", err)
+		}
+	}
+
+	if err := c.CreateFileExtended(ctx, remote, f, info.Size(), opts); err != nil {
 		log.Fatal(err)
 	}
 	fmt.Printf("File %s uploaded to %s.\n", local, remote)
@@ -1240,12 +1342,7 @@ func cmdGet(ctx context.Context, args []string) {
 	}
 	remote, local := args[0], args[1]
 	c := loadClient()
-	inode, key, err := c.ResolvePath(ctx, remote)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	rc, err := c.ReadFile(ctx, inode.ID, key)
+	rc, err := c.OpenBlobRead(ctx, remote)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -1277,13 +1374,13 @@ func cmdGroupChown(ctx context.Context, args []string) {
 
 func cmdQuota(ctx context.Context, args []string) {
 	c := loadClient()
-	user, err := c.GetUser(ctx, c.UserID())
+	quota, usage, err := c.GetQuota(ctx)
 	if err != nil {
 		log.Fatalf("Failed to fetch user info: %v", err)
 	}
 
 	fmt.Printf("Personal Usage for %s:\n", c.UserID())
-	displayUsage(user.Usage, user.Quota)
+	displayUsage(usage, quota)
 
 	managedGroups := 0
 	for g, err := range c.ListGroups(ctx) {
@@ -1298,7 +1395,7 @@ func cmdQuota(ctx context.Context, args []string) {
 			managedGroups++
 			fmt.Println()
 			name := "[HIDDEN]"
-			if decrypted, err := c.DecryptGroupName(ctx, g); err == nil {
+			if decrypted, err := c.AdminDecryptGroupName(ctx, g); err == nil {
 				name = decrypted
 			}
 			fmt.Printf("Group: %s (%s)\n", name, g.ID)

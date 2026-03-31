@@ -3,10 +3,12 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"iter"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -14,7 +16,6 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
@@ -69,8 +70,7 @@ type AdminClient interface {
 	AdminPromote(ctx context.Context, userID string) error
 	AdminJoinNode(ctx context.Context, address string) error
 	AdminRemoveNode(ctx context.Context, id string) error
-	DecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error)
-	ResolvePath(ctx context.Context, path string) (*metadata.Inode, []byte, error)
+	AdminDecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error)
 	MkdirExtended(ctx context.Context, path string, perm os.FileMode, opts client.MkdirOptions) error
 }
 
@@ -392,16 +392,12 @@ func (m *model) updateGroupTable() {
 		name := "[HIDDEN]"
 		// Attempt to decrypt if admin has access
 		// We can reuse the group list logic from the client
-		if decrypted, err := m.client.DecryptGroupName(m.ctx, metadata.GroupListEntry{
+		if decrypted, err := m.client.AdminDecryptGroupName(m.ctx, metadata.GroupListEntry{
 			ID:         g.ID,
 			ClientBlob: g.ClientBlob,
 			Lockbox:    g.Lockbox,
 		}); err == nil {
 			name = decrypted
-		}
-
-		if g.IsSystem {
-			name = "[SYSTEM] " + name
 		}
 
 		rows = append(rows, table.Row{
@@ -802,6 +798,7 @@ func cmdAdminGroupQuota(ctx context.Context, args []string) {
 }
 
 func cmdAdminCreateRoot(ctx context.Context, args []string) {
+	fmt.Printf("DEBUG: cmdAdminCreateRoot called with args: %v\n", args)
 	fs := flag.NewFlagSet("admin-create-root", flag.ExitOnError)
 	secondary := fs.Bool("secondary", false, "Generate a secondary root inode instead of the canonical system root")
 	fs.Parse(args)
@@ -811,89 +808,21 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 	id := metadata.RootID
 	if *secondary {
 		// Provide a non-canonical placeholder to trigger client's generation logic.
-		// EnsureRoot will detect this is not RootID, generate a proper nonce and ID,
-		// and return the newly generated cryptographically committed ID.
 		id = "secondary-placeholder-id-0000000"
 	}
 	c = c.WithRootID(id)
 
-	var finalID string
-	var err error
-	if finalID, err = c.EnsureRoot(ctx); err != nil {
-		log.Fatal(err)
+	fmt.Println("Bootstrapping system backbone...")
+	if err := c.BootstrapFileSystem(ctx); err != nil {
+		log.Fatalf("BootstrapFileSystem failed: %v", err)
 	}
+
+	finalID, _, _, _, _ := c.GetRootAnchor()
 	fmt.Printf("Root inode %s initialized successfully.\n", finalID)
+	fmt.Println("Backbone provisioned successfully.")
 
-	// Phase 49: System Backbone Bootstrapping
-	// Only do this for the canonical root to avoid cluttering secondary roots.
-	if finalID == metadata.RootID {
-		fmt.Println("Bootstrapping system backbone...")
-
-		// 1. Create Admin Group
-		adminGroup, err := c.CreateGroup(ctx, "admin", false)
-		if err != nil && !strings.Contains(err.Error(), "already exists") {
-			log.Printf("Warning: failed to create admin group: %v", err)
-		}
-
-		// 2. Create System Groups (owned by admin group)
-		var registryGroupID, usersGroupID string
-		if adminGroup != nil {
-			// Registry Group
-			regGroup, err := c.CreateGroup(ctx, "registry", true) // Quota enabled
-			if err == nil {
-				registryGroupID = regGroup.ID
-				// Chown to admin group
-				_, err = c.UpdateGroup(ctx, regGroup.ID, func(g *metadata.Group) error {
-					g.OwnerID = ":" + adminGroup.ID
-					return nil
-				})
-			}
-
-			// Users Group
-			usrGroup, err := c.CreateGroup(ctx, "users", true) // Quota enabled
-			if err == nil {
-				usersGroupID = usrGroup.ID
-				// Chown to admin group
-				_, err = c.UpdateGroup(ctx, usrGroup.ID, func(g *metadata.Group) error {
-					g.OwnerID = ":" + adminGroup.ID
-					return nil
-				})
-			}
-		}
-
-		// 3. Create Backbone Directories
-		// /registry
-		optsReg := client.MkdirOptions{}
-		if usersGroupID != "" {
-			optsReg.AccessACL = &metadata.POSIXAccess{
-				Groups: map[string]uint32{usersGroupID: 5}, // r-x
-			}
-			optsReg.DefaultACL = &metadata.POSIXAccess{
-				Groups: map[string]uint32{usersGroupID: 4}, // r-- for inherited files
-			}
-		}
-
-		if err := c.MkdirExtended(ctx, "/registry", 0770, optsReg); err != nil && !strings.Contains(err.Error(), "already exists") {
-			log.Printf("Warning: failed to create /registry: %v", err)
-		} else if registryGroupID != "" {
-			c.SetAttr(ctx, "/registry", metadata.SetAttrRequest{GroupID: &registryGroupID})
-		}
-
-		// /users
-		optsUsr := client.MkdirOptions{}
-		if err := c.MkdirExtended(ctx, "/users", 0755, optsUsr); err != nil && !strings.Contains(err.Error(), "already exists") {
-			log.Printf("Warning: failed to create /users: %v", err)
-		} else if usersGroupID != "" {
-			c.SetAttr(ctx, "/users", metadata.SetAttrRequest{GroupID: &usersGroupID})
-		}
-
-		// 4. Initial Registry Entry (Admin self-attestation)
-		// To do this, we need GenerateContactString logic adapted for DirectoryEntry.
-		// For now, we print a message that it should be done via registry-add.
-		fmt.Println("Backbone provisioned. Use 'distfs registry-add' to populate the registry.")
-	}
+	saveClient(c)
 }
-
 func cmdAdminAudit(ctx context.Context, args []string) {
 	c := loadClient()
 
@@ -1048,18 +977,10 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 		log.Fatalf("Invalid UserID format: must be a 64-character hex string")
 	}
 
-	user, err := c.GetUser(ctx, userID)
+	codeStr, err := c.GetUserVerificationCode(ctx, userID)
 	if err != nil {
-		log.Fatalf("Failed to fetch user from server: %v", err)
+		log.Fatalf("Failed to fetch user verification code: %v", err)
 	}
-
-	// 2. OOB Handshake (Simulation for CLI)
-	// Compute a deterministic "verification code" based on the user's public keys.
-	h := crypto.NewHash()
-	h.Write(user.EncKey)
-	h.Write(user.SignKey)
-	codeBytes := h.Sum(nil)
-	codeStr := fmt.Sprintf("%02X-%02X-%02X", codeBytes[0], codeBytes[1], codeBytes[2])
 
 	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
 	fmt.Printf("User: %s (ID: %s)\n", username, userID)
@@ -1079,41 +1000,15 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	}
 
 	// 3. Attestation & Registry Update
-	// For simplicity in this iteration, we create an empty file with the Username
-	// to represent the attestation. In a real scenario, this would be a signed JSON blob.
-	regPath := *registryDir + "/" + username + ".user"
-
-	// Ensure registry directory exists
-	err = c.Mkdir(ctx, *registryDir, 0775)
-	if err != nil && !strings.Contains(err.Error(), "already exists") {
-		log.Fatalf("Failed to access registry directory: %v", err)
-	}
-
-	entry := client.DirectoryEntry{
-		Username:   username,
-		UserID:     user.ID,
-		EncKey:     user.EncKey,
-		SignKey:    user.SignKey,
-		VerifierID: c.UserID(),
-		Timestamp:  time.Now().Unix(),
-	}
-	entry.Signature = c.SignKey().Sign(entry.Hash())
-
-	err = c.SaveDataFile(ctx, regPath, entry)
-	if err != nil {
-		log.Fatalf("Failed to write registry entry: %v", err)
-	}
-
-	mode := uint32(0644)
-	if err := c.SetAttr(ctx, regPath, metadata.SetAttrRequest{Mode: &mode}); err != nil {
-		log.Fatalf("Failed to make registry entry world-readable: %v", err)
+	if err := c.AnchorUserInRegistry(ctx, username, userID, c.UserID()); err != nil {
+		log.Fatalf("Failed to anchor user in registry: %v", err)
 	}
 
 	fmt.Printf("Successfully added %s to the registry.\n", username)
 
 	// 4. Handle Flags
 	if *unlock {
-		err := c.AdminSetUserLock(ctx, user.ID, false)
+		err := c.AdminSetUserLock(ctx, userID, false)
 		if err != nil {
 			log.Fatalf("Failed to unlock user: %v", err)
 		}
@@ -1128,7 +1023,7 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 		bytesLim, _ := strconv.ParseUint(parts[0], 10, 64)
 		inodesLim, _ := strconv.ParseUint(parts[1], 10, 64)
 		err := c.AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
-			UserID:    user.ID,
+			UserID:    userID,
 			MaxBytes:  &bytesLim,
 			MaxInodes: &inodesLim,
 		})
@@ -1142,17 +1037,57 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 		homePath := "/users/" + username
 		// Ensure /users exists
 		err = c.Mkdir(ctx, "/users", 0755)
-		if err != nil && !strings.Contains(err.Error(), "already exists") {
+		if err != nil && !isConflict(err) {
 			log.Fatalf("Failed to access /users directory: %v", err)
 		}
 
-		opts := client.MkdirOptions{OwnerID: user.ID}
+		opts := client.MkdirOptions{OwnerID: userID}
 		err = c.MkdirExtended(ctx, homePath, 0700, opts)
-		if err != nil {
+		if err != nil && !isConflict(err) {
 			log.Fatalf("Failed to provision home directory: %v", err)
 		}
 		fmt.Printf("Provisioned home directory: %s\n", homePath)
 	}
+}
+
+func cmdRegistryAddGroup(ctx context.Context, args []string) {
+	fs := flag.NewFlagSet("registry-add-group", flag.ExitOnError)
+	fs.Parse(args)
+
+	if fs.NArg() < 2 {
+		log.Fatal("usage: registry-add-group <name> <groupID>")
+	}
+	name := fs.Arg(0)
+	groupID := fs.Arg(1)
+
+	c := loadClient()
+
+	if !isHexID(groupID) {
+		log.Fatalf("Invalid GroupID format: must be a 64-character hex string")
+	}
+
+	fmt.Printf("Anchoring group '%s' in the registry...\n", name)
+	if err := c.AnchorGroupInRegistry(ctx, name, groupID); err != nil {
+		log.Fatalf("Failed to anchor group in registry: %v", err)
+	}
+
+	fmt.Printf("SUCCESS: Group %s successfully added to registry.\n", name)
+}
+
+func isConflict(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, metadata.ErrConflict) || errors.Is(err, metadata.ErrExists) {
+		return true
+	}
+	var apiErr *client.APIError
+	if errors.As(err, &apiErr) {
+		return apiErr.StatusCode == http.StatusConflict ||
+			apiErr.Code == metadata.ErrCodeVersionConflict ||
+			apiErr.Code == metadata.ErrCodeExists
+	}
+	return false
 }
 
 func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {

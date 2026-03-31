@@ -2,6 +2,8 @@
 
 DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system. It is designed as a research platform to explore the boundaries of zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.
 
+> **Design Documentation:** For a comprehensive technical deep-dive into the architecture and security model, refer to the [DISTFS.md](DISTFS.md) living design document.
+
 The core tension DistFS resolves is the fundamental incompatibility between high-fidelity POSIX environments and a zero-knowledge model. POSIX file systems require complex, dynamic metadata manipulation—such as granular Access Control Lists (ACLs), atomic renames, hierarchical directory traversal, and distributed locking. Conversely, a zero-knowledge model mandates that the server infrastructure remains mathematically blind to the data payload and structural filenames.
 
 Note: While DistFS ensures data and filenames are cryptographically opaque, the server explicitly manages a **Social Metadata Graph** (Group memberships and ACL identifiers) to enforce POSIX semantics. This represents a deliberate trade-off where organizational structure is observable by the infrastructure to enable complex sharing.
@@ -59,6 +61,17 @@ Enterprise file systems typically ingest plaintext Personally Identifiable Infor
 
 Furthermore, successfully authenticating via Single Sign-On (SSO/OIDC) does *not* grant network access. DistFS enforces a strict Zero-Trust onboarding model requiring an Out-Of-Band (OOB) cryptographic handshake. When a new device registers, its account is marked as `Locked`. The client generates a random 6-digit PIN. An existing Administrator must manually verify this PIN (e.g., over a phone call or in person) and sign a blockchain-style attestation to unlock the account. 
 **The Benefit:** Eradicates Sybil attacks where an adversary registers thousands of identities, and guarantees that offline database exfiltration leaks zero PII.
+
+### 2.5 The Sovereign Chain of Trust
+To ensure the integrity of the zero-knowledge model even if the server is compromised, DistFS implements a decentralized, sovereign chain of trust.
+
+**The Mechanism:**
+*   **Sovereign Bootstrap:** The first user to register with a cluster becomes the **Identity Anchor**. They create the root inode (`/`) and provision the foundational system groups.
+*   **Cryptographic Binding:** Every file ID is cryptographically bound to its owner's identity via hashing (`ID = Hash(OwnerID || Nonce)`). This prevents a compromised server from silently "swapping" file ownership in the database.
+*   **Aggregate Optimistic Verification:** The client library utilizes an asynchronous verification model. It provisionally allows operations using server-provided keys while simultaneously verifying those keys against signed attestations in the `/registry` in the background.
+*   **Root Identity Pinning (TOFU):** Upon the first successful mount, the client pins the Root Owner's public key in its local configuration, providing Trust-On-First-Use protection against cluster hijacking.
+
+**The Benefit:** Ensures that mathematical truth (signatures and hashes) always overrides the server's database claims, making the system resilient to total infrastructure compromise.
 
 ---
 
@@ -145,7 +158,7 @@ The `distfs` binary provides a set of tools for manual interaction with the encr
     *   `./distfs mkdir <path>`
     *   `./distfs rm <path>`
 *   **Data Operations:**
-    *   `./distfs put <local_file> <remote_path>`
+    *   `./distfs put [-f] <local_file> <remote_path>` (use `-f` to overwrite preserving metadata)
     *   `./distfs get <remote_path> <local_file>`
 
 ### 5.6 FUSE Integration (POSIX Testing)

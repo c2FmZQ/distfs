@@ -1,10 +1,11 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package client
 
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -29,9 +30,9 @@ func TestClient_MockedErrors(t *testing.T) {
 
 	sk, _ := crypto.GenerateIdentityKey()
 	dk, _ := crypto.GenerateEncryptionKey()
-	c := NewClient("http://mock").WithSignKey(sk).WithIdentity("u1", dk)
+	c := NewClient("http://mock").withSignKey(sk).withIdentity("u1", dk)
 
-	c.httpClient.Transport = &mockRoundTripper{
+	c.httpCli.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusInternalServerError,
@@ -40,17 +41,20 @@ func TestClient_MockedErrors(t *testing.T) {
 		},
 	}
 
-	_, err := c.ApplyBatch(ctx, []metadata.LogCommand{{Type: metadata.CmdCreateInode}})
+	_, err := c.applyBatch(ctx, []metadata.LogCommand{{Type: metadata.CmdCreateInode}})
 	if err == nil {
 		t.Error("Expected error from ApplyBatch")
 	}
 
-	_, err = c.getInode(ctx, "00000000000000000000000000000001")
+	nonce := metadata.GenerateNonce()
+	inodeID := metadata.GenerateInodeID("u1", nonce)
+
+	_, err = c.getInode(ctx, inodeID)
 	if err == nil {
 		t.Error("Expected error from getInode")
 	}
 
-	_, err = c.UpdateInode(ctx, "00000000000000000000000000000001", func(i *metadata.Inode) error { return nil })
+	_, err = c.updateInode(ctx, inodeID, func(i *metadata.Inode) error { return nil })
 	if err == nil {
 		t.Error("Expected error from updateInode")
 	}
@@ -60,10 +64,10 @@ func TestClient_MockedRetry(t *testing.T) {
 	ctx := context.Background()
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
-	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk)
+	c := NewClient("http://mock").withServerKey(dk.EncapsulationKey()).withSignKey(sk).withIdentity("u1", dk)
 
 	attempts := 0
-	c.httpClient.Transport = &mockRoundTripper{
+	c.httpCli.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			if req.URL.Path == "/v1/auth/challenge" {
 				chal := make([]byte, 32)
@@ -108,10 +112,9 @@ func TestClient_MockedConflict(t *testing.T) {
 	ctx := context.Background()
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
-	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk).WithAdmin(true)
+	c := NewClient("http://mock").withServerKey(dk.EncapsulationKey()).withSignKey(sk).withIdentity("u1", dk).WithAdmin(true).WithRegistry("")
 
-	nonce := make([]byte, 16)
-	rand.Read(nonce)
+	nonce := metadata.GenerateNonce()
 	inodeID := metadata.GenerateInodeID("u1", nonce)
 
 	// Pre-login to avoid login logic in mock
@@ -119,7 +122,7 @@ func TestClient_MockedConflict(t *testing.T) {
 	c.sessionExpiry = time.Now().Add(time.Hour)
 
 	attempts := 0
-	c.httpClient.Transport = &mockRoundTripper{
+	c.httpCli.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			if req.Method == "GET" {
 				if strings.Contains(req.URL.Path, "/v1/user/") {
@@ -169,10 +172,8 @@ func TestClient_MockedConflict(t *testing.T) {
 
 			// Return a successful batch response after 2 attempts
 			attempts++
-			nonce := make([]byte, 16)
-			// For tests, use a valid nonce and ID pair
+			// For tests, use the SAME inodeID but incremented version
 			u1ID := "u1"
-			inodeID := metadata.GenerateInodeID(u1ID, nonce)
 			updatedInode := metadata.Inode{ID: inodeID, Nonce: nonce, Version: 2, Type: metadata.FileType, OwnerID: u1ID}
 			updatedInode.SignInodeForTest("u1", sk)
 			ib, _ := json.Marshal(updatedInode)
@@ -185,7 +186,7 @@ func TestClient_MockedConflict(t *testing.T) {
 		},
 	}
 
-	_, err := c.UpdateInode(ctx, inodeID, func(i *metadata.Inode) error {
+	_, err := c.updateInode(ctx, inodeID, func(i *metadata.Inode) error {
 		return nil
 	})
 	if err != nil {
@@ -200,9 +201,9 @@ func TestClient_MockedUnsealError(t *testing.T) {
 	ctx := context.Background()
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
-	c := NewClient("http://mock").WithServerKey(dk.EncapsulationKey()).WithSignKey(sk).WithIdentity("u1", dk)
+	c := NewClient("http://mock").withServerKey(dk.EncapsulationKey()).withSignKey(sk).withIdentity("u1", dk)
 
-	c.httpClient.Transport = &mockRoundTripper{
+	c.httpCli.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
 			return &http.Response{
 				StatusCode: http.StatusOK,

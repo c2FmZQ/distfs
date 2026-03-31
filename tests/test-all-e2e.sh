@@ -50,6 +50,7 @@ wait_for_ready || exit 1
 
 # Use a clean temporary directory for this run's configuration
 export DISTFS_CONFIG_DIR=$(mktemp -d)
+export DISTFS_PASSWORD="testpassword"
 echo "Using config directory: $DISTFS_CONFIG_DIR"
 
 # GLOBAL SETUP: Create Admin
@@ -63,25 +64,24 @@ fi
 ADMIN_ID=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" whoami)
 echo "Global Admin ID: $ADMIN_ID"
 
-# 1. Create a Shared Administrators Group for root management
+# Phase 69: System Backbone Bootstrapping
+# Initializing canonical root now correctly provisions backbone directories and groups.
+echo "Initializing canonical root and system backbone..."
+if ! distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" admin-create-root; then
+    echo "GLOBAL SETUP FAILED: admin-create-root failed"
+    exit 1
+fi
+
+# 1. Shared Administrators Group for root management
+# The 'admin' group already exists from admin-create-root, but we create an 'administrators' one
+# for the test to verify that anchoring works for newly created groups.
 echo "Creating Administrators group..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
 ADMIN_GID=$(grep "^ID:" /tmp/admin-group.txt | awk '{print $2}')
 echo "Administrators GID: $ADMIN_GID"
 
-echo "Assigning root directory to Administrators group..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chgrp "$ADMIN_GID" /
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0775 /
-
-# 2. Provision Users and Workspaces under /users/
-echo "Provisioning /users base directory..."
-USERS_GROUP_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create users || true)
-USERS_GID=$(echo "$USERS_GROUP_OUT" | grep "ID:" | awk '{print $2}' || echo "")
-if [ -z "$USERS_GID" ]; then
-    USERS_GID="users" # Fallback if it already existed and we couldn't parse it easily
-fi
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /users || true
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0755 /users || true
+# Note: USERS_GID is correctly "users" as created by admin-create-root
+USERS_GID="users"
 
 provision_user() {
     name=$1
@@ -125,6 +125,7 @@ distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_
 # Promote and add to Administrators group
 distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
 distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" bench-user
 
 # Provision HA directory (world-writable for test flexibility)
 echo "Provisioning /ha..."

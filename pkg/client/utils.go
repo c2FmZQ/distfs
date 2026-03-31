@@ -41,13 +41,14 @@ func isConflict(err error) bool {
 	if err == nil {
 		return false
 	}
-	if errors.Is(err, metadata.ErrConflict) {
+	if errors.Is(err, metadata.ErrConflict) || errors.Is(err, metadata.ErrExists) {
 		return true
 	}
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == http.StatusConflict ||
-			apiErr.Code == metadata.ErrCodeVersionConflict
+			apiErr.Code == metadata.ErrCodeVersionConflict ||
+			apiErr.Code == metadata.ErrCodeExists
 	}
 	return false
 }

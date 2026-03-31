@@ -1,5 +1,7 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
-package fuse
+package client
 
 import (
 	"bytes"
@@ -17,7 +19,6 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
@@ -35,10 +36,10 @@ func createTestStorageLocal(t *testing.T, dir string) (*storage.Storage, storage
 	return st, mk
 }
 
-var nextTestUID uint32 = 1000
+var nextFuseTestUID uint32 = 1000
 
-func createUserLocal(t *testing.T, raftNode *metadata.RaftNode, user metadata.User) {
-	metadata.CreateUser(t, raftNode, user)
+func createUserLocal(t *testing.T, raftNode *metadata.RaftNode, user metadata.User, userSK *crypto.IdentityKey, adminID string, adminSK *crypto.IdentityKey) {
+	metadata.CreateUser(t, raftNode, user, userSK, adminID, adminSK)
 }
 
 func waitLeaderLocal(t *testing.T, r *raft.Raft) {
@@ -89,9 +90,12 @@ func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.En
 	return dk.EncapsulationKey(), dk, csk.Public()
 }
 
-func registerNodeLocal(t *testing.T, serverURL, secret string, node metadata.Node) {
+func registerNodeLocal(t *testing.T, serverEndpoint, secret string, node metadata.Node) {
+	if node.LastHeartbeat == 0 {
+		node.LastHeartbeat = time.Now().Unix()
+	}
 	body, _ := json.Marshal(node)
-	req, _ := http.NewRequest("POST", serverURL+"/v1/node", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", serverEndpoint+"/v1/node", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Raft-Secret", secret)
 	resp, err := http.DefaultClient.Do(req)
@@ -136,12 +140,13 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 
 	dk, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
+	adminSK, _ := crypto.GenerateIdentityKey()
 	user := metadata.User{
 		ID:      "user-fuse",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
 	}
-	createUserLocal(t, metaNode, user)
+	createUserLocal(t, metaNode, user, userSignKey, "admin", adminSK)
 
 	// 2. Setup Data Node
 	dataDir := t.TempDir()
@@ -158,21 +163,22 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 	}
 	registerNodeLocal(t, tsMeta.URL, "testsecret", node)
 
-	newClient := func() *client.Client {
-		c := client.NewClient(tsMeta.URL)
-		c = c.WithIdentity("user-fuse", dk)
-		c = c.WithSignKey(userSignKey)
-		c = c.WithServerKey(serverEK)
+	newClient := func() *Client {
+		c := NewClient(tsMeta.URL)
+		c = c.withIdentity("user-fuse", dk)
+		c = c.withSignKey(userSignKey)
+		c = c.withServerKey(serverEK)
+		c = c.WithAdmin(true)
 		return c
 	}
 
-	// 3. Initialize Root once
-	if _, err := newClient().EnsureRoot(t.Context()); err != nil {
-		t.Fatalf("Initial EnsureRoot failed: %v", err)
+	// 3. Initialize Backbone once
+	if err := newClient().BootstrapFileSystem(t.Context()); err != nil {
+		t.Fatalf("Initial BootstrapFileSystem failed: %v", err)
 	}
 
 	// 4. Setup Client and Mount Point
-	mount := func(mountpoint string) (func(), *client.Client) {
+	mount := func(mountpoint string) (func(), *Client) {
 		c := newClient()
 
 		//conn, err := fuse.Mount(mountpoint, fuse.AsyncRead())

@@ -16,11 +16,17 @@ package crypto
 
 import (
 	"crypto/mlkem"
+	"crypto/rand"
+	"fmt"
 )
 
 // GenerateEncryptionKey generates a post-quantum key pair for encryption (ML-KEM-768).
 func GenerateEncryptionKey() (*mlkem.DecapsulationKey768, error) {
-	return mlkem.GenerateKey768()
+	seed := make([]byte, 64)
+	if _, err := rand.Read(seed); err != nil {
+		return nil, err
+	}
+	return mlkem.NewDecapsulationKey768(seed)
 }
 
 // Encapsulate generates a shared secret and its ciphertext for the given public key.
@@ -33,13 +39,19 @@ func Decapsulate(privKey *mlkem.DecapsulationKey768, ciphertext []byte) ([]byte,
 	return privKey.Decapsulate(ciphertext)
 }
 
-// MarshalDecapsulationKey serializes the private key.
+// MarshalDecapsulationKey serializes the private key (returns the 64-byte seed).
 func MarshalDecapsulationKey(dk *mlkem.DecapsulationKey768) []byte {
 	return dk.Bytes()
 }
 
-// UnmarshalDecapsulationKey deserializes the private key.
+// UnmarshalDecapsulationKey deserializes the private key (expects the 64-byte seed).
 func UnmarshalDecapsulationKey(b []byte) (*mlkem.DecapsulationKey768, error) {
+	if len(b) != 64 {
+		// If we have the full marshaled key (1184 bytes), we can't use it with NewDecapsulationKey768.
+		// This suggests we should have stored the seed.
+		// For now, let's log the error.
+		return nil, fmt.Errorf("mlkem: invalid seed length %d (expected 64)", len(b))
+	}
 	return mlkem.NewDecapsulationKey768(b)
 }
 

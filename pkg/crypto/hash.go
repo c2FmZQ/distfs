@@ -15,6 +15,7 @@
 package crypto
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"hash"
 )
@@ -22,4 +23,13 @@ import (
 // NewHash returns a new SHA256 hash.
 func NewHash() hash.Hash {
 	return sha256.New()
+}
+
+// GenerateNonce returns 16 random bytes.
+func GenerateNonce() []byte {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		panic(err) // Should never happen with crypto/rand
+	}
+	return b
 }

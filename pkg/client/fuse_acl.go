@@ -1,4 +1,6 @@
-package fuse
+//go:build !wasm
+
+package client
 
 import (
 	"bytes"

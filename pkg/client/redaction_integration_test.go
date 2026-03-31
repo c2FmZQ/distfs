@@ -1,5 +1,6 @@
-// Copyright 2026 TTBT Enterprises LLC
-package metadata_test
+//go:build !wasm
+
+package client
 
 import (
 	"bytes"
@@ -8,38 +9,41 @@ import (
 	"testing"
 	"time"
 
-	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 func TestAdminRedaction(t *testing.T) {
-	node, ts, _, _, srv := metadata.SetupCluster(t)
-	defer srv.Shutdown()
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := metadata.SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
 
 	// 1. Create Admin
 	adminID := "admin"
 	dkA, _ := crypto.GenerateEncryptionKey()
 	skA, _ := crypto.GenerateIdentityKey()
 	uA := metadata.User{ID: adminID, UID: 1001, SignKey: skA.Public(), EncKey: dkA.EncapsulationKey().Bytes()}
-	metadata.CreateUser(t, node, uA)
+	metadata.CreateUser(t, tc.Node, uA, skA, tc.AdminID, tc.AdminSK)
 	uAIDBytes, _ := json.Marshal(uA.ID)
 	uAIDCmd, err := metadata.LogCommand{Type: metadata.CmdPromoteAdmin, Data: uAIDBytes, UserID: "bootstrap"}.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := node.Raft.Apply(uAIDCmd, 5*time.Second).Error(); err != nil {
+	if err := tc.Node.Raft.Apply(uAIDCmd, 5*time.Second).Error(); err != nil {
 		t.Fatal(err)
 	}
 
 	// 2. Setup Admin Client
-	c := client.NewClient(ts.URL)
-	c = c.WithIdentity(adminID, dkA).WithSignKey(skA)
-	ekBytes, _ := c.GetServerSignKey(t.Context())
-	ek, _ := crypto.UnmarshalEncapsulationKey(ekBytes)
-	c = c.WithServerKey(ek)
+	c := NewClient(tc.TS.URL).withIdentity(adminID, dkA).withSignKey(skA)
+	ekBytes, err := c.GetServerKeyBytes(t.Context())
+	if err != nil {
+		t.Fatalf("Failed to get server encryption key: %v", err)
+	}
+	c, err = c.WithServerKeyBytes(ekBytes)
+	if err != nil {
+		t.Fatalf("WithServerKeyBytes failed: %v", err)
+	}
 	if err := c.Login(t.Context()); err != nil {
 		t.Fatalf("Login failed: %v", err)
 	}
@@ -47,7 +51,7 @@ func TestAdminRedaction(t *testing.T) {
 	// 3. Register Node
 	n := metadata.Node{ID: "node1", Status: metadata.NodeStatusActive, Address: "1.2.3.4", PublicKey: []byte("node-pk"), SignKey: []byte("node-sk")}
 	nodeBytes, _ := json.Marshal(n)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/node", bytes.NewReader(nodeBytes))
+	req, _ := http.NewRequest("POST", tc.TS.URL+"/v1/node", bytes.NewReader(nodeBytes))
 	req.Header.Set("X-Raft-Secret", "testsecret")
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
@@ -59,7 +63,7 @@ func TestAdminRedaction(t *testing.T) {
 	}
 
 	// 4. Create Group
-	group, err := c.CreateGroup(t.Context(), "test-group", false)
+	group, err := c.createGroup(t.Context(), "test-group", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -112,8 +116,8 @@ func TestAdminRedaction(t *testing.T) {
 		}
 	}
 
-	// 8. Verify FULL metadata is still available via handleGetGroup (for authorized users/admins)
-	fetched, err := c.GetGroup(t.Context(), group.ID)
+	// 8. Verify FULL metadata is still available via getGroup (for authorized users/admins)
+	fetched, err := c.getGroup(t.Context(), group.ID)
 	if err != nil {
 		t.Fatalf("GetGroup failed: %v", err)
 	}

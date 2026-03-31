@@ -30,6 +30,38 @@ type IdentityKey struct {
 	pub  *mldsa65.PublicKey
 }
 
+// IdentityPublicKey represents a user's public signing key.
+type IdentityPublicKey struct {
+	pub *mldsa65.PublicKey
+}
+
+func (k *IdentityPublicKey) Verify(msg, sig []byte) bool {
+	return mldsa65.Verify(k.pub, msg, nil, sig)
+}
+
+func UnmarshalIdentityPublicKey(b []byte) (*IdentityPublicKey, error) {
+	if len(b) != mldsa65.PublicKeySize {
+		return nil, fmt.Errorf("invalid public key size")
+	}
+	var pub mldsa65.PublicKey
+	if err := pub.UnmarshalBinary(b); err != nil {
+		return nil, err
+	}
+	return &IdentityPublicKey{pub: &pub}, nil
+}
+
+func UnmarshalIdentityPrivateKey(b []byte) (*IdentityKey, error) {
+	if len(b) != mldsa65.PrivateKeySize {
+		return nil, fmt.Errorf("invalid private key size")
+	}
+	var priv mldsa65.PrivateKey
+	if err := priv.UnmarshalBinary(b); err != nil {
+		return nil, err
+	}
+	// ML-DSA private key usually contains the public key bytes
+	return &IdentityKey{priv: &priv, pub: priv.Public().(*mldsa65.PublicKey)}, nil
+}
+
 // GenerateIdentityKey creates a new random identity key.
 func GenerateIdentityKey() (*IdentityKey, error) {
 	pub, priv, err := mldsa65.GenerateKey(rand.Reader)

@@ -54,24 +54,30 @@ func TestStorageAPI_Leases(t *testing.T) {
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
 
+	// Register a data node (BootstrapFileSystem needs one to write attestations)
+	tsData, _ := createDataNode(t, metaNode, "data1")
+	defer tsData.Close()
+
 	dk, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
 	userID := "user-storage"
+	metadata.BootstrapBackbone(t, metaNode, userID, dk, userSignKey)
 	createUser(t, metaNode, metadata.User{
 		ID: userID, SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
-	})
+	}, userSignKey, userID, userSignKey)
 
 	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity(userID, dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	c = c.withIdentity(userID, dk)
+	c = c.withSignKey(userSignKey)
+	c = c.withServerKey(serverEK)
+	c = c.WithAdmin(true) // Bootstrap requires admin
 
 	if err := c.Login(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
-		t.Fatal(err)
+	if err := c.BootstrapFileSystem(t.Context()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
 	}
 
 	// 2. Create files
@@ -81,16 +87,16 @@ func TestStorageAPI_Leases(t *testing.T) {
 	f1 := "/dir/f1"
 	f2 := "/dir/f2"
 	data := testData{Name: "Initial", Value: 100}
-	if err := c.SaveDataFile(t.Context(), f1, data); err != nil {
+	if err := c.saveDataFile(t.Context(), f1, data); err != nil {
 		t.Fatalf("Save f1 failed: %v", err)
 	}
-	if err := c.SaveDataFile(t.Context(), f2, data); err != nil {
+	if err := c.saveDataFile(t.Context(), f2, data); err != nil {
 		t.Fatalf("Save f2 failed: %v", err)
 	}
 
 	// 3. Test Atomic Acquire
 	paths := []string{f1, f2}
-	if err := c.AcquireLeases(t.Context(), paths, 10*time.Second, LeaseOptions{Type: metadata.LeaseExclusive}); err != nil {
+	if err := c.acquireLeases(t.Context(), paths, 10*time.Second, LeaseOptions{Type: metadata.LeaseExclusive}); err != nil {
 		t.Fatalf("AcquireLeases failed: %v", err)
 	}
 
@@ -98,25 +104,30 @@ func TestStorageAPI_Leases(t *testing.T) {
 	c2 := NewClient(tsMeta.URL)
 	dk2, _ := crypto.GenerateEncryptionKey()
 	sk2, _ := crypto.GenerateIdentityKey()
-	createUser(t, metaNode, metadata.User{
+	metadata.CreateUser(t, metaNode, metadata.User{
 		ID: "user-2", SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes(),
-	})
-	c2 = c2.WithIdentity("user-2", dk2).WithSignKey(sk2).WithServerKey(serverEK)
+	}, sk2, userID, userSignKey)
+	u2Obj := metadata.User{ID: "user-2", SignKey: sk2.Public(), EncKey: dk2.EncapsulationKey().Bytes()}
+	if err := c.AnchorUserInRegistry(t.Context(), "user-2", u2Obj.ID, userID); err != nil {
+		t.Fatalf("Anchor user-2 failed: %v", err)
+	}
+
+	c2 = c2.withIdentity("user-2", dk2).withSignKey(sk2).withServerKey(serverEK)
 	if err := c2.Login(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 
-	err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, LeaseOptions{Type: metadata.LeaseExclusive})
+	err := c2.acquireLeases(t.Context(), []string{f1}, 5*time.Second, LeaseOptions{Type: metadata.LeaseExclusive})
 	if err == nil {
 		t.Error("Expected conflict error for leased file, got nil")
 	}
 
 	// 5. Test Release and Re-acquire
-	if err := c.ReleaseLeases(t.Context(), paths, ""); err != nil {
+	if err := c.releaseLeases(t.Context(), paths, ""); err != nil {
 		t.Fatalf("ReleaseLeases failed: %v", err)
 	}
 
-	if err := c2.AcquireLeases(t.Context(), []string{f1}, 5*time.Second, LeaseOptions{Type: metadata.LeaseExclusive}); err != nil {
+	if err := c2.acquireLeases(t.Context(), []string{f1}, 5*time.Second, LeaseOptions{Type: metadata.LeaseExclusive}); err != nil {
 		t.Fatalf("c2 failed to acquire released lease: %v", err)
 	}
 }
@@ -141,25 +152,32 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
 
+	// Register a data node (BootstrapFileSystem needs one to write attestations)
+	tsData, _ := createDataNode(t, metaNode, "data1")
+	defer tsData.Close()
+
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
+	metadata.BootstrapBackbone(t, metaNode, "u1", dk, sk)
 	createUser(t, metaNode, metadata.User{
 		ID: "u1", SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes(),
-	})
+	}, sk, "u1", sk)
 
-	c := NewClient(tsMeta.URL).WithIdentity("u1", dk).WithSignKey(sk).WithServerKey(serverEK)
+	c := NewClient(tsMeta.URL).withIdentity("u1", dk).withSignKey(sk).withServerKey(serverEK).WithAdmin(true)
 	c.Login(t.Context())
-	_, _ = c.EnsureRoot(t.Context())
+	if err := c.BootstrapFileSystem(t.Context()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
+	}
 
 	// 2. Prepare file
 	path := "/tx-test.json"
 	data := testData{Name: "v1", Value: 1}
-	if err := c.SaveDataFile(t.Context(), path, data); err != nil {
+	if err := c.saveDataFile(t.Context(), path, data); err != nil {
 		t.Fatalf("SaveDataFile failed: %v", err)
 	}
 
 	// 3. Perform Transactional Update
-	commit, err := c.OpenForUpdate(t.Context(), path, &data)
+	commit, err := c.openForUpdate(t.Context(), path, &data)
 	if err != nil {
 		t.Fatalf("OpenForUpdate failed: %v", err)
 	}
@@ -170,7 +188,7 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 
 	// 4. Verify result
 	var final testData
-	if err := c.ReadDataFile(t.Context(), path, &final); err != nil {
+	if err := c.readDataFile(t.Context(), path, &final); err != nil {
 		t.Fatal(err)
 	}
 	if final.Value != 2 || final.Name != "v2" {
@@ -178,14 +196,14 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 	}
 
 	// 5. Test Abort
-	commit2, err := c.OpenForUpdate(t.Context(), path, &data)
+	commit2, err := c.openForUpdate(t.Context(), path, &data)
 	if err != nil {
 		t.Fatalf("OpenForUpdate 2 failed: %v", err)
 	}
 	data.Value = 999
 	commit2(false) // Abort
 
-	c.ReadDataFile(t.Context(), path, &final)
+	c.readDataFile(t.Context(), path, &final)
 	if final.Value != 2 {
 		t.Errorf("Abort failed, data was updated to %d", final.Value)
 	}
@@ -193,7 +211,9 @@ func TestStorageAPI_TransactionalUpdate(t *testing.T) {
 
 func TestStorageAPI_ReadConsistency(t *testing.T) {
 	// 1. Setup Cluster
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 2. Prepare two related files (e.g., config and its key)
@@ -204,7 +224,7 @@ func TestStorageAPI_ReadConsistency(t *testing.T) {
 		data1 := testData{Name: "matched", Value: val}
 		data2 := testData{Name: "matched", Value: val}
 		// SaveDataFiles uses ONE atomic batch commit
-		if err := wc.SaveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
+		if err := wc.saveDataFiles(t.Context(), []string{path1, path2}, []any{data1, data2}); err != nil {
 			t.Logf("Save batch %d failed: %v", val, err)
 		}
 	}
@@ -213,16 +233,16 @@ func TestStorageAPI_ReadConsistency(t *testing.T) {
 	t.Log("Initial files created")
 
 	// Verify they exist
-	if _, _, err := c.ResolvePath(t.Context(), path1); err != nil {
+	if _, _, err := c.resolvePath(t.Context(), path1); err != nil {
 		t.Fatalf("f1 not found after create: %v", err)
 	}
-	if _, _, err := c.ResolvePath(t.Context(), path2); err != nil {
+	if _, _, err := c.resolvePath(t.Context(), path2); err != nil {
 		t.Fatalf("f2 not found after create: %v", err)
 	}
 
 	// 3. Start background writer doing matched swaps
 	// Use a DIFFERENT client instance to ensure lease conflicts
-	cWriter := NewClient(ts.URL).WithIdentity(c.userID, c.decKey).WithSignKey(c.signKey).WithServerKey(c.serverKey)
+	cWriter := NewClient(ts.URL).withIdentity(c.userID, c.decKey).withSignKey(c.signKey).withServerKey(c.serverKey)
 	cWriter.Login(t.Context())
 
 	done := make(chan bool)
@@ -238,7 +258,7 @@ func TestStorageAPI_ReadConsistency(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		var res1, res2 testData
 		ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-		err := c.ReadDataFiles(ctx, []string{path1, path2}, []any{&res1, &res2})
+		err := c.readDataFiles(ctx, []string{path1, path2}, []any{&res1, &res2})
 		cancel()
 		if err != nil {
 			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, metadata.ErrConflict) {

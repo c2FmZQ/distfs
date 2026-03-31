@@ -1358,7 +1358,67 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Update `DISTFS.md`, `CLIENT-API.md`, and `SERVER-API.md` to remove references to `AdminLookup`, email-based identity derivation, and to document the new `sub`-claim and strict out-of-band UserID registry-add flows.
     *   **Testing Strategy:** Review documentation for accuracy and consistency with the implemented zero-knowledge privacy model.
 
+---
 
+## Phase 69: Secure Group Registry & HMAC Membership
+**Goal:** Harden group security by anchoring identity in the /registry, preserving membership privacy with HMACs, and enforcing immutable hierarchical ownership.
 
-
-
+*   **Step 69.1: Schema & Types Expansion**
+    *   **Action:** Define `GroupDirectoryEntry` struct in `pkg/client/client.go`.
+    *   **Action:** Update `metadata.Group` struct:
+        1. Change `Members` to `MembersHMAC map[string]bool`.
+        2. Add `Nonce []byte` for mutation replay protection.
+    *   **Action:** Ensure `Group.Hash()` includes the `MembersHMAC` list and the `Nonce`.
+*   **Step 69.2: FSM Enforcement Logic**
+    *   **Action:** Implement `verifyGroupSignature` in `pkg/metadata/fsm.go`.
+    *   **Action:** Update `executeCreateGroup`:
+        1. Verify the ML-DSA signature using the creator's public key (Anyone can create a group).
+    *   **Action:** Update `executeUpdateGroup`:
+        1. Enforce `OwnerID` immutability.
+        2. Verify the `Nonce` has not been used before for this group (tracking in a new `group_nonces` bucket).
+        3. Perform "One-Hop" management check: verify signer is the `OwnerID` (if User) or a member of the owning group (if Group).
+        4. Verify the ML-DSA signature using the signer's public key.
+    *   **Action:** Update membership checks to use `HMAC-SHA256(GroupSignKey, UserID)`.
+*   **Step 69.3: Client-Side Dual-Cache Architecture & Aggregate Optimistic Verification**
+    *   **Goal:** Break circular dependencies during registry resolution using an "Aggregate Optimistic Verification" pattern.
+    *   **Action:** Implement a dual-cache system in `pkg/client/client.go`:
+        *   `verifiedGroupCache`: Stores fully verified, cryptographically anchored group metadata.
+        *   `unverifiedGroupCache`: Stores metadata retrieved from the server that is still pending registry confirmation.
+    *   **Action:** Implement Aggregate Optimistic Verification Algorithm:
+        1.  **Phase 1 (Optimistic Discovery):** Update `VerifyInode` and `VerifyGroup` to only perform Tier 1 (ML-DSA) signature verification using server-provided keys.
+        2.  **Phase 1 (Queueing):** Add `SignerID`, `OwnerID`, and `ACL` members to a `toVerify` queue (internal to the operation context).
+        3.  **Phase 2 (Confirmation Loop):** Implement `c.processVerificationQueue(ctx, queue)` which resolves registry anchors for all pending IDs.
+        4.  **Phase 2 (Cross-Check):** Verify registry attestations using verifier keys from the server. Cross-check against the provisionally used Tier 1 keys.
+        5.  **Phase 3 (Promotion):** Move confirmed identities to `verifiedGroupCache`.
+    *   **Action:** Integrate the verification loop into `ResolvePath` and high-level operations.
+    *   **Action:** Remove the legacy `skipVerifyContextKey` and `"users"` group exceptions from the client.
+    *   **Action:** Update `CreateGroup` in `pkg/client/client.go` to simply initialize the FSM state via `CmdCreateGroup`.
+    *   **Action:** Implement `AnchorGroupInRegistry(ctx, name, groupID)` in `pkg/client/client.go` using the high-level POSIX API:
+        1.  Marshal the `GroupDirectoryEntry`.
+        2.  Call `c.CreateFile` to create `/registry/<name>.group` with the correct POSIX ACLs inherited from the parent directory.
+        3.  Call `c.Link` to create a hard link from `/registry/<group_id>.group-id` to `/registry/<name>.group` for O(1) ID resolution.
+    *   **Action:** Ensure `AnchorGroupInRegistry` signs the `GroupDirectoryEntry` using the administrator's identity key.
+*   **Step 69.4: Registry Integration & ACLs**
+    *   **Action:** Implement `distfs registry add-group <name> <groupID>` CLI command. This command calls `AnchorGroupInRegistry` and relies on the FSM's native POSIX ACLs on `/registry` to restrict execution to administrators.
+    *   **Action:** Ensure registry files use POSIX ACLs granting read access to the `users` group instead of world-readable bits.
+*   **Step 69.5: Security Testing Strategy**
+    *   **Unit Test (FSM):** Verify \`executeUpdateGroup\` rejects unauthorized signers and owner modifications.
+    *   **Unit Test (Privacy):** Verify that the FSM \`MembersHMAC\` map does not contain raw UserIDs.
+    *   **Integration Test (Atomic):** Force a failure in the registry file creation and verify the FSM group record is rolled back.
+    *   **Security Test (Hijack):** Manually alter group keys in the FSM and verify the client detects the mismatch against the Registry attestation.
+    *   **Hierarchical Test:** Verify a member of Group B can manage Group A if B owns A.
+*   **Step 69.6: Architectural Boundary Enforcement (Registry Refactoring)**
+    *   **Goal:** Strictly separate client-side registry concepts from the server-side metadata API, ensuring the FSM remains blind to application-layer identity schemas.
+    *   **Action:** Move `DirectoryEntry` and `GroupDirectoryEntry` structs (and their associated methods) from `pkg/metadata/types.go` to the client package (`pkg/client/registry.go`).
+    *   **Action:** Simplify FSM tests (`pkg/metadata/test_helpers.go`) by removing complex client-side registry anchoring logic from `BootstrapBackbone`. Server-side tests should only create raw `User` and `Group` primitives.
+    *   **Testing Strategy:** Ensure `pkg/client` integration tests still pass after the structs are moved and the server test helpers are simplified.
+*   **Step 69.7: Cryptographic Group ID Binding & Nonce Integrity**
+    *   **Goal:** Mathematically bind Group IDs to their creators (OwnerID) and enforce entropy requirements for all commitment nonces.
+    *   **Action:** Update `pkg/metadata/types.go` to implement `GenerateGroupID(ownerID string, nonce []byte) string`.
+    *   **Action:** Use the magic string `"distfs-self-owned-group"` for `OwnerID` in self-managed groups to break the circular dependency.
+    *   **Action:** Update `createGroupInternal` in `pkg/client/client.go` to use `metadata.GenerateGroupID` and generate a 16-byte random nonce for each new group.
+    *   **Action:** Update `VerifyInode` and `VerifyGroup` in `pkg/client/client.go` to enforce `len(nonce) == 16` for all commitment nonces and re-verify the `GroupID` binding: `Group.ID == GenerateGroupID(Group.OwnerID, Group.Nonce)`.
+    *   **Testing Strategy:**
+        1. Create a self-owned group and verify its `OwnerID` is the magic string and its ID is correctly derived.
+        2. Attempt to verify an inode or group with an 8-byte nonce and assert it fails.
+        3. Manually modify a group's `OwnerID` in a mock response and verify `VerifyGroup` rejects it.

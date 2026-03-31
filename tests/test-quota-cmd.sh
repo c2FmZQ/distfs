@@ -15,13 +15,14 @@ export USER_CONFIG=/tmp/user-quota.json
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=user-quota@example.com")
 INIT_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$USER_CONFIG" init --new -server http://storage-node-1:8080 -jwt "$JWT")
 U_ID=$(echo "$INIT_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$U_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock user-quota "$U_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$U_ID"
 
 echo "Admin: Setting User Quota..."
 distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$ADMIN_CONFIG" admin-user-quota "$U_ID" 5000 10
 
 echo "User: Creating Group with independent quota..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -config "$USER_CONFIG" group-create --quota my-project > /tmp/group-out.txt
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$ADMIN_CONFIG" group-create --quota --owner user-quota my-project > /tmp/group-out.txt
 G_ID=$(grep "^ID:" /tmp/group-out.txt | awk '{print $2}')
 
 echo "Admin: Setting Group Quota for G_ID: '$G_ID'..."

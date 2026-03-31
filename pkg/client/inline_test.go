@@ -18,70 +18,30 @@ package client
 
 import (
 	"bytes"
-	"crypto/rand"
 	"io"
-	"net/http/httptest"
 	"testing"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
-	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
-	"github.com/hashicorp/raft"
 )
 
 func TestSmallFileInlining(t *testing.T) {
-	// 1. Setup Cluster
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
+	adminClient, metaNode, _, ts, adminID, adminSK := setupTestClient(t)
 	defer metaNode.Shutdown()
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-	waitLeader(t, metaNode.Raft)
+	defer ts.Close()
 
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-	createUser(t, metaNode, metadata.User{
-		ID: "user-1", SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
-	})
-
-	dataDir := t.TempDir()
-	dataSt, _ := createTestStorage(t, dataDir)
-	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	tsData := httptest.NewServer(dataServer)
-	defer tsData.Close()
-	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{
-		ID: "d1", Address: tsData.URL, Status: metadata.NodeStatusActive,
-	})
-
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	// 1. Setup User
+	c, _, _ := provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
 
 	// 2. Write Small File (Inlined)
 	smallContent := []byte("small file content")
-	nonce := make([]byte, 16)
-	rand.Read(nonce)
+	nonce := metadata.GenerateNonce()
 	fileID := metadata.GenerateInodeID("user-1", nonce)
-	if _, err := c.WriteFile(t.Context(), fileID, nonce, bytes.NewReader(smallContent), int64(len(smallContent)), 0644); err != nil {
+	if _, err := c.writeFile(t.Context(), fileID, nonce, bytes.NewReader(smallContent), int64(len(smallContent)), 0644); err != nil {
 		t.Fatalf("Write small file failed: %v", err)
 	}
 
 	// 3. Verify Inode state
-	inode, err := c.GetInode(t.Context(), fileID)
+	inode, err := c.getInode(t.Context(), fileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -93,7 +53,7 @@ func TestSmallFileInlining(t *testing.T) {
 	}
 
 	// 4. Read back
-	rc, err := c.ReadFile(t.Context(), fileID, nil)
+	rc, err := c.readFile(t.Context(), fileID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,12 +66,14 @@ func TestSmallFileInlining(t *testing.T) {
 	// 5. Grow file beyond InlineLimit (Eviction)
 	largeSize := metadata.InlineLimit + 100
 	largeContent := bytes.Repeat([]byte("A"), largeSize)
-	if _, err := c.WriteFile(t.Context(), fileID, nil, bytes.NewReader(largeContent), int64(len(largeContent)), 0644); err != nil {
+	// For eviction, we need a fresh nonce for the new large inode or it must be an update.
+	// WriteFile with the same fileID will trigger UpdateInode.
+	if _, err := c.writeFile(t.Context(), fileID, nil, bytes.NewReader(largeContent), int64(len(largeContent)), 0644); err != nil {
 		t.Fatalf("Grow file failed: %v", err)
 	}
 
 	// 6. Verify Eviction
-	inode, err = c.GetInode(t.Context(), fileID)
+	inode, err = c.getInode(t.Context(), fileID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +85,7 @@ func TestSmallFileInlining(t *testing.T) {
 	}
 
 	// 7. Read back large
-	rc, err = c.ReadFile(t.Context(), fileID, nil)
+	rc, err = c.readFile(t.Context(), fileID, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

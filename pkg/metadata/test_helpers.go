@@ -5,15 +5,20 @@ package metadata
 
 import (
 	"bytes"
+	"crypto/hmac"
 	"crypto/mlkem"
+	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +28,16 @@ import (
 	"github.com/hashicorp/raft"
 	bolt "go.etcd.io/bbolt"
 )
+
+func ptr[T any](v T) *T {
+	return &v
+}
+
+func computeTestHMAC(signKey []byte, userID string) string {
+	mac := hmac.New(sha256.New, signKey)
+	mac.Write([]byte(userID))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 func UnsealTestResponse(t *testing.T, userDecKey *mlkem.DecapsulationKey768, serverSignPK []byte, resp *http.Response) []byte {
 	return UnsealTestResponseWithSession(t, userDecKey, nil, serverSignPK, resp)
@@ -95,39 +110,136 @@ func (n NoopValidator) ValidateNode(address string) error {
 	return nil
 }
 
-func CreateUser(t *testing.T, raftNode *RaftNode, user User) {
+func CreateUser(t *testing.T, raftNode *RaftNode, user User, userSK *crypto.IdentityKey, adminID string, adminSK *crypto.IdentityKey) {
 	for user.UID == 0 {
 		user.UID = generateID32()
 	}
 	user.Locked = false
+	user.Signature = userSK.Sign(user.Hash())
 	userBytes, _ := json.Marshal(user)
-	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes}
-	cmdBytes, err := cmd.Marshal()
-	if err != nil {
-		t.Fatalf("failed to marshal CreateUser command: %v", err)
-	}
+	cmd := LogCommand{Type: CmdCreateUser, Data: userBytes, UserID: user.ID}
+	cmdBytes, _ := cmd.Marshal()
+
 	future := raftNode.Raft.Apply(cmdBytes, 10*time.Second)
-	err = future.Error()
-	if err != nil {
+	if err := future.Error(); err != nil {
 		t.Fatalf("CreateUser failed: %v", err)
 	}
 	if resp := future.Response(); resp != nil {
-		if err, ok := resp.(error); ok {
+		if err, ok := resp.(error); ok && err != nil {
 			t.Fatalf("Create user fsm failed: %v", err)
 		}
 	}
 
-	// Explicitly unlock if the test specified Locked: false
-	if !user.Locked {
-		req := AdminSetUserLockRequest{UserID: user.ID, Locked: false}
-		reqBytes, _ := json.Marshal(req)
-		unlockCmd := LogCommand{Type: CmdAdminSetUserLock, Data: reqBytes}
-		ub, err := unlockCmd.Marshal()
-		if err != nil {
-			t.Fatalf("failed to marshal unlock command: %v", err)
-		}
-		raftNode.Raft.Apply(ub, 10*time.Second)
+	// 1. Unlock account (via admin)
+	req := AdminSetUserLockRequest{UserID: user.ID, Locked: false}
+	reqBytes, _ := json.Marshal(req)
+	unlockCmd := LogCommand{
+		Type:   CmdAdminSetUserLock,
+		Data:   reqBytes,
+		UserID: adminID,
 	}
+	ub, _ := unlockCmd.Marshal()
+	if err := raftNode.Raft.Apply(ub, 10*time.Second).Error(); err != nil {
+		t.Fatalf("UnlockUser failed: %v", err)
+	}
+}
+
+// BootstrapBackbone provisions ONLY server-side foundations: buckets, admin user, and system groups.
+// It DOES NOT create any inodes, as directory structure is a client concern.
+func BootstrapBackbone(t *testing.T, raftNode *RaftNode, adminID string, adminDK *mlkem.DecapsulationKey768, adminSK *crypto.IdentityKey) {
+	adminUPK := adminDK.EncapsulationKey()
+
+	apply := func(cmdType CommandType, data interface{}) {
+		b, _ := json.Marshal(data)
+		cmd := LogCommand{
+			Type:   cmdType,
+			Data:   b,
+			UserID: adminID,
+		}
+		cb, _ := cmd.Marshal()
+		future := raftNode.Raft.Apply(cb, 10*time.Second)
+		if err := future.Error(); err != nil {
+			t.Fatalf("BootstrapBackbone apply %v failed (raft): %v", cmdType, err)
+		}
+		if resp := future.Response(); resp != nil {
+			if err, ok := resp.(error); ok && err != nil {
+				// Allow "already exists" for idempotency
+				if strings.Contains(err.Error(), "already exists") {
+					return
+				}
+				t.Fatalf("BootstrapBackbone apply %v failed (fsm): %v", cmdType, err)
+			}
+		}
+	}
+
+	// 1. Ensure Buckets
+	raftNode.FSM.db.Update(func(tx *bolt.Tx) error {
+		buckets := []string{"users", "admins", "groups", "gids", "owner_groups", "inodes", "nodes", "system"}
+		for _, b := range buckets {
+			tx.CreateBucketIfNotExists([]byte(b))
+		}
+		return nil
+	})
+
+	// 2. Create Admin User (Self-Signed)
+	adminUser := User{
+		ID:      adminID,
+		UID:     1000,
+		SignKey: adminSK.Public(),
+		EncKey:  adminDK.EncapsulationKey().Bytes(),
+		Locked:  false,
+	}
+	adminUser.Signature = adminSK.Sign(adminUser.Hash())
+	apply(CmdCreateUser, adminUser)
+
+	// Also mark as admin in the admins bucket
+	raftNode.FSM.db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("admins"))
+		return b.Put([]byte(adminID), []byte("true"))
+	})
+
+	// 3. Create foundational groups
+	createGroup := func(id string, gid uint32, ownerID string) (Group, *mlkem.DecapsulationKey768) {
+		dk, _ := crypto.GenerateEncryptionKey()
+		sk, _ := crypto.GenerateIdentityKey()
+		lb := crypto.NewLockbox()
+		lb.AddRecipient(adminID, adminUPK, crypto.MarshalDecapsulationKey(dk))
+		lb.AddRecipient(adminID+":sign", adminUPK, sk.MarshalPrivate())
+
+		nonce := GenerateNonce()
+		derivedID := GenerateGroupID(ownerID, nonce)
+		if id == "" {
+			id = derivedID
+		}
+
+		// Initialize MembersHMAC
+		membersHMAC := make(map[string]bool)
+		membersHMAC[ComputeMemberHMAC(sk.Public(), adminID)] = true
+		if ownerID != "" && ownerID != adminID && ownerID != SelfOwnedGroup {
+			membersHMAC[ComputeMemberHMAC(sk.Public(), ownerID)] = true
+		}
+
+		g := Group{
+			ID:           id,
+			GID:          gid,
+			OwnerID:      ownerID,
+			MembersHMAC:  membersHMAC,
+			Nonce:        nonce,
+			Version:      1,
+			QuotaEnabled: true,
+			EncKey:       dk.EncapsulationKey().Bytes(),
+			SignKey:      sk.Public(),
+			SignerID:     adminID,
+			Lockbox:      lb,
+		}
+		g.Signature = adminSK.Sign(g.Hash())
+		apply(CmdCreateGroup, g)
+		return g, dk
+	}
+
+	adminG, _ := createGroup("", 1000, SelfOwnedGroup)
+	_, _ = createGroup("", 1001, adminG.ID)
+	_, _ = createGroup("", 1002, adminG.ID)
 }
 
 func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_crypto.MasterKey) {
@@ -139,7 +251,69 @@ func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_cryp
 	return st, mk
 }
 
-func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKey, []byte, *Server) {
+func BootstrapClusterKeys(t *testing.T, raftNode *RaftNode) (*mlkem.EncapsulationKey768, *mlkem.DecapsulationKey768, *crypto.IdentityKey, string, *crypto.IdentityKey, *mlkem.DecapsulationKey768) {
+	// 1. Bootstrap cluster key (Epoch Key)
+	dk, _ := crypto.GenerateEncryptionKey()
+	ek := dk.EncapsulationKey()
+	keyID := "key-1"
+
+	key := ClusterKey{
+		ID:        keyID,
+		EncKey:    ek.Bytes(),
+		DecKey:    nil, // DO NOT store private key in FSM
+		CreatedAt: time.Now().Unix(),
+	}
+
+	// 2. Bootstrap cluster sign key
+	csk, _ := crypto.GenerateIdentityKey()
+	cskData := ClusterSignKey{
+		Public:           csk.Public(),
+		EncryptedPrivate: csk.MarshalPrivate(),
+	}
+
+	// 3. Server-specific keys (Identity + Decryption)
+	signKey, _ := crypto.GenerateIdentityKey()
+	nodeDecKey, _ := crypto.GenerateEncryptionKey()
+
+	// 4. Directly initialize state in FSM to avoid Raft deadlocks during bootstrap
+	raftNode.FSM.db.Update(func(tx *bolt.Tx) error {
+		tx.CreateBucketIfNotExists([]byte("system"))
+		raftNode.FSM.Put(tx, []byte("system"), []byte("epoch_key_"+keyID), MustMarshalJSON(key))
+		raftNode.FSM.Put(tx, []byte("system"), []byte("active_epoch_key"), []byte(keyID))
+		raftNode.FSM.Put(tx, []byte("system"), []byte("cluster_sign_key"), MustMarshalJSON(cskData))
+		return nil
+	})
+
+	return ek, dk, csk, keyID, signKey, nodeDecKey
+}
+
+var (
+	TestAdminID string
+	TestAdminSK *crypto.IdentityKey
+)
+
+type TestCluster struct {
+	Node          *RaftNode
+	TS            *httptest.Server
+	NodeSK        *crypto.IdentityKey
+	ClusterSecret []byte
+	Server        *Server
+	AdminID       string
+	AdminSK       *crypto.IdentityKey
+	AdminDK       *mlkem.DecapsulationKey768
+	EpochEK       []byte
+	EpochID       string
+}
+
+func SetupCluster(t *testing.T) *TestCluster {
+	return setupClusterInternal(t, true)
+}
+
+func SetupRawCluster(t *testing.T) *TestCluster {
+	return setupClusterInternal(t, false)
+}
+
+func setupClusterInternal(t *testing.T, bootstrapBackbone bool) *TestCluster {
 	tmpDir := t.TempDir()
 
 	mk, err := storage_crypto.CreateAESMasterKeyForTest()
@@ -174,86 +348,90 @@ func SetupCluster(t *testing.T) (*RaftNode, *httptest.Server, *crypto.IdentityKe
 		t.Fatalf("Bootstrap failed: %v", err)
 	}
 
+	// Bootstrap Keys
+	ek, dk, _, keyID, signKey, nodeDecKey := BootstrapClusterKeys(t, node)
+
 	WaitLeader(t, node.Raft)
 
-	// Bootstrap cluster key
-	dk, _ := crypto.GenerateEncryptionKey()
-	ek := dk.EncapsulationKey()
-	keyID := "key-1"
-
-	key := ClusterKey{
-		ID:        keyID,
-		EncKey:    ek.Bytes(),
-		DecKey:    nil, // DO NOT store private key in FSM
-		CreatedAt: time.Now().Unix(),
-	}
-	keyBytes, _ := json.Marshal(key)
-	cmd := LogCommand{Type: CmdRotateKey, Data: keyBytes}
-	cmdBytes, err := cmd.Marshal()
-	if err != nil {
-		t.Fatalf("failed to marshal bootstrap key command: %v", err)
-	}
-	f = node.Raft.Apply(cmdBytes, 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Bootstrap key apply failed: %v", err)
-	}
-
-	// Register the bootstrapped node in FSM
-	nodeInfo := Node{
-		ID:            nodeID,
-		RaftAddress:   string(node.Transport.LocalAddr()),
-		Status:        NodeStatusActive,
-		LastHeartbeat: time.Now().Unix(),
-	}
-	nb, _ := json.Marshal(nodeInfo)
-	nbBytes, err := LogCommand{Type: CmdRegisterNode, Data: nb}.Marshal()
-	if err != nil {
-		t.Fatalf("failed to marshal bootstrap RegisterNode command: %v", err)
-	}
-	f = node.Raft.Apply(nbBytes, 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Bootstrap RegisterNode failed: %v", err)
-	}
-
-	// Bootstrap cluster sign key
-	csk, _ := crypto.GenerateIdentityKey()
-	cskData := ClusterSignKey{
-		Public:           csk.Public(),
-		EncryptedPrivate: csk.MarshalPrivate(),
-	}
-	cskBytes, _ := json.Marshal(cskData)
-	cskCmdBytes, err := LogCommand{Type: CmdSetClusterSignKey, Data: cskBytes}.Marshal()
-	if err != nil {
-		t.Fatalf("failed to marshal bootstrap sign key: %v", err)
-	}
-	f = node.Raft.Apply(cskCmdBytes, 5*time.Second)
-	if err := f.Error(); err != nil {
-		t.Fatalf("Bootstrap sign key apply failed: %v", err)
-	}
-
-	// Bootstrap World Identity
-	wdk, _ := crypto.GenerateEncryptionKey()
-	world := WorldIdentity{
-		Public:  wdk.EncapsulationKey().Bytes(),
-		Private: crypto.MarshalDecapsulationKey(wdk),
-	}
-	wb, _ := json.Marshal(world)
-	wbBytes, err := LogCommand{Type: CmdInitWorld, Data: wb}.Marshal()
-	if err != nil {
-		t.Fatalf("failed to marshal bootstrap world init: %v", err)
-	}
-	if err := node.Raft.Apply(wbBytes, 5*time.Second).Error(); err != nil {
-		t.Fatalf("Bootstrap world init failed: %v", err)
-	}
-
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
 	server := NewServer(nodeID, node.Raft, node.FSM, "", signKey, "testsecret", nil, 0, NewNodeVault(st), nodeDecKey, true)
+	server.RegisterEpochKey(keyID, dk) // Register the bootstrapped key
 	ts := httptest.NewServer(server)
 
-	server.RegisterEpochKey(keyID, dk)
+	// Register the bootstrapped node in FSM
+	fsm := node.FSM
+	err = fsm.DB().Update(func(tx *bolt.Tx) error {
+		buckets := []string{"users", "admins", "groups", "gids", "owner_groups", "inodes", "nodes", "system"}
+		for _, b := range buckets {
+			tx.CreateBucketIfNotExists([]byte(b))
+		}
 
-	return node, ts, signKey, ek.Bytes(), server
+		fsm.Put(tx, []byte("admins"), []byte("system"), []byte("true"))
+
+		// --- CRITICAL: Initialize Tier 2 Trust Anchor (KeyRing) ---
+		fsm.Put(tx, []byte("system"), []byte("fsm_keyring"), node.FSM.GetFSMKeyRing())
+
+		// Bootstrap World Identity
+		wdk, _ := crypto.GenerateEncryptionKey()
+		world := WorldIdentity{
+			Public:  wdk.EncapsulationKey().Bytes(),
+			Private: crypto.MarshalDecapsulationKey(wdk),
+		}
+		fsm.Put(tx, []byte("system"), []byte("world_identity"), MustMarshalJSON(world))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("Direct bootstrap failed: %v", err)
+	}
+
+	// --- Phase 69: Registry Backbone Bootstrapping ---
+	adminID := node.FSM.ComputeUserID("alice")
+	adminSK, _ := crypto.GenerateIdentityKey()
+	adminDK, _ := crypto.GenerateEncryptionKey()
+
+	if bootstrapBackbone {
+		// 1. Provision Backbone (Groups + Directories) using Alice's signature
+		// This also creates the admin user record in FSM
+		BootstrapBackbone(t, node, adminID, adminDK, adminSK)
+	} else {
+		// Just create the admin user so we can login
+		admin := User{
+			ID:      adminID,
+			UID:     1000,
+			SignKey: adminSK.Public(),
+			EncKey:  adminDK.EncapsulationKey().Bytes(),
+		}
+		admin.Signature = adminSK.Sign(admin.Hash())
+		b, _ := json.Marshal(admin)
+		cmd, _ := LogCommand{Type: CmdCreateUser, Data: b}.Marshal()
+		if err := node.Raft.Apply(cmd, 5*time.Second).Error(); err != nil {
+			t.Fatalf("Failed to create admin user: %v", err)
+		}
+		// Also mark as admin
+		aid, _ := json.Marshal(adminID)
+		acmd, _ := LogCommand{Type: CmdPromoteAdmin, Data: aid}.Marshal()
+		if err := node.Raft.Apply(acmd, 5*time.Second).Error(); err != nil {
+			t.Fatalf("Failed to promote admin: %v", err)
+		}
+	}
+
+	t.Cleanup(func() {
+		ts.Close()
+		server.Shutdown()
+		node.Shutdown()
+	})
+
+	return &TestCluster{
+		Node:          node,
+		TS:            ts,
+		NodeSK:        signKey,
+		ClusterSecret: clusterSecret,
+		Server:        server,
+		AdminID:       adminID,
+		AdminSK:       adminSK,
+		AdminDK:       adminDK,
+		EpochEK:       ek.Bytes(),
+		EpochID:       keyID,
+	}
 }
 
 func LoginSessionForTest(t *testing.T, ts *httptest.Server, userID string, userSignKey *crypto.IdentityKey) string {
@@ -338,7 +516,7 @@ func SealTestRequestSymmetric(t *testing.T, userID string, userSignKey *crypto.I
 
 	kemSize := mlkem.CiphertextSize768
 	dummyKEM := make([]byte, kemSize)
-	// rand.Read(dummyKEM) -> Use zeros for consistency
+	rand.Read(dummyKEM)
 
 	sealed := make([]byte, len(dummyKEM)+len(demCT))
 	copy(sealed[0:len(dummyKEM)], dummyKEM)
@@ -399,4 +577,60 @@ func CreateSessionTokenForTest(userID string) string {
 	}
 	b, _ := json.Marshal(st)
 	return base64.StdEncoding.EncodeToString(b)
+}
+
+func JoinUsersGroup(t *testing.T, raftNode *RaftNode, groupID string, userID string, adminID string, adminSK *crypto.IdentityKey) {
+	// 1. Fetch existing users group
+	var g Group
+	raftNode.FSM.db.View(func(tx *bolt.Tx) error {
+		plain, _ := raftNode.FSM.Get(tx, []byte("groups"), []byte(groupID))
+		return json.Unmarshal(plain, &g)
+	})
+
+	// 2. Add user
+	var user User
+	raftNode.FSM.db.View(func(tx *bolt.Tx) error {
+		plain, _ := raftNode.FSM.Get(tx, []byte("users"), []byte(userID))
+		return json.Unmarshal(plain, &user)
+	})
+
+	if g.MembersHMAC == nil {
+		g.MembersHMAC = make(map[string]bool)
+	}
+	if g.Lockbox == nil {
+		g.Lockbox = make(crypto.Lockbox)
+	}
+	g.MembersHMAC[ComputeMemberHMAC(g.SignKey, userID)] = true
+
+	// Also update Lockbox so the user can actually use the group
+	upk, _ := crypto.UnmarshalEncapsulationKey(user.EncKey)
+
+	// We need the group private keys to re-encrypt them for the new member
+	// In tests, the admin has access to everything.
+	// But wait, JoinUsersGroup doesn't have the group DK.
+	// We stored it in 'system' bucket in BootstrapBackbone!
+	var gdkBytes []byte
+	raftNode.FSM.db.View(func(tx *bolt.Tx) error {
+		gdkBytes, _ = raftNode.FSM.Get(tx, []byte("system"), []byte("test_users_dk"))
+		return nil
+	})
+
+	g.Lockbox.AddRecipient(userID, upk, gdkBytes)
+
+	g.Version++
+	g.Nonce = make([]byte, 16)
+	rand.Read(g.Nonce)
+	g.SignerID = adminID
+	g.Signature = adminSK.Sign(g.Hash())
+
+	data, _ := json.Marshal(g)
+	cmd := LogCommand{
+		Type:   CmdUpdateGroup,
+		Data:   data,
+		UserID: adminID,
+	}
+	cb, _ := cmd.Marshal()
+	if err := raftNode.Raft.Apply(cb, 10*time.Second).Error(); err != nil {
+		t.Fatalf("JoinUsersGroup Apply failed: %v", err)
+	}
 }

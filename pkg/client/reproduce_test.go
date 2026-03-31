@@ -51,7 +51,8 @@ func TestAddEntryRegression(t *testing.T) {
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
 	}
-	createUser(t, metaNode, user)
+	metadata.BootstrapBackbone(t, metaNode, "user-test", dk, userSignKey)
+	createUser(t, metaNode, user, userSignKey, "user-test", userSignKey)
 
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
@@ -72,13 +73,22 @@ func TestAddEntryRegression(t *testing.T) {
 	metaNode.Raft.Apply(cmdBytes, 5*time.Second)
 
 	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-test", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	c = c.withIdentity("user-test", dk)
+	c = c.withSignKey(userSignKey)
+	c = c.withServerKey(serverEK)
+	c = c.WithAdmin(true) // Bootstrap requires admin
 
-	if _, err := c.EnsureRoot(context.Background()); err != nil {
-		t.Fatalf("EnsureRoot failed: %v", err)
+	if err := c.Login(context.Background()); err != nil {
+		t.Fatalf("Login failed: %v", err)
 	}
+
+	if err := c.BootstrapFileSystem(context.Background()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
+	}
+
+	// Capture initial count after bootstrap (likely 2: /users, /registry)
+	rootInit, _ := c.getInode(context.Background(), metadata.RootID)
+	initialCount := len(rootInit.Children)
 
 	// 2. CONCURRENT ADD ENTRY
 	const numFiles = 50
@@ -95,14 +105,13 @@ func TestAddEntryRegression(t *testing.T) {
 
 			// Create a fresh client per goroutine to simulate separate sessions
 			ci := NewClient(tsMeta.URL)
-			ci = ci.WithIdentity("user-test", dk)
-			ci = ci.WithSignKey(userSignKey)
-			ci = ci.WithServerKey(serverEK)
+			ci = ci.withIdentity("user-test", dk)
+			ci = ci.withSignKey(userSignKey)
+			ci = ci.withServerKey(serverEK)
 
-			name := fmt.Sprintf("file-%d", idx)
-			_, _, err := ci.AddEntry(context.Background(), metadata.RootID, nil, name, metadata.FileType, nil, 0, "", 0644, "", 1000, 1000)
-			if err != nil {
-				errs <- fmt.Errorf("AddEntry(%s) failed: %v", name, err)
+			name := fmt.Sprintf("dir-%d", idx)
+			if err := ci.Mkdir(context.Background(), "/"+name, 0755); err != nil {
+				errs <- fmt.Errorf("Mkdir %s failed: %w", name, err)
 			}
 		}(i)
 	}
@@ -121,9 +130,9 @@ func TestAddEntryRegression(t *testing.T) {
 	}
 
 	t.Logf("Final Root Version: %d", root.Version)
-	t.Logf("Final Root Children: %d", len(root.Children))
+	t.Logf("Final Root Children: %d (Initial: %d)", len(root.Children), initialCount)
 
-	if len(root.Children) != numFiles {
-		t.Errorf("LOST CHILDREN! Expected %d, got %d", numFiles, len(root.Children))
+	if len(root.Children)-initialCount != numFiles {
+		t.Fatalf("LOST CHILDREN! Expected %d added, got %d (Final=%d, Initial=%d)", numFiles, len(root.Children)-initialCount, len(root.Children), initialCount)
 	}
 }

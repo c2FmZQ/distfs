@@ -182,8 +182,8 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 	} else {
 		standardTLSConfig = &tls.Config{}
 	}
-	standardTLSConfig.InsecureSkipVerify = true
-	standardTLSConfig.VerifyPeerCertificate = nil // Standard RSA/ECDSA certs
+	standardTLSConfig.InsecureSkipVerify = false
+	standardTLSConfig.VerifyPeerCertificate = nil
 	standardTransport := ech.NewTransport()
 	standardTransport.TLSConfig = standardTLSConfig
 	standardTransport.Resolver = resolver
@@ -379,7 +379,7 @@ func (s *Server) loadClusterSignKey() {
 }
 
 func (s *Server) discoverOIDC(discoveryURL string) {
-	client := s.discoveryHTTPClient
+	client := s.httpClient
 	refreshInterval := 5 * time.Second // Fast retry during boot
 
 	for {
@@ -597,9 +597,12 @@ func (s *Server) RotateFSMKey() error {
 type contextKey string
 
 const (
-	userContextKey        contextKey = "user"
-	adminBypassContextKey contextKey = "admin-bypass"
-	sessionKeyContextKey  contextKey = "session-key"
+	userContextKey             contextKey = "user"
+	adminBypassContextKey      contextKey = "admin-bypass"
+	sessionKeyContextKey       contextKey = "session-key"
+	requestSignatureContextKey contextKey = "request-signature"
+	requestTimestampContextKey contextKey = "request-timestamp"
+	sessionNonceContextKey     contextKey = "session-nonce"
 )
 
 func (s *Server) SetRaftAddress(addr string) {
@@ -720,6 +723,18 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if user != nil {
+		ctx := context.WithValue(r.Context(), userContextKey, user)
+
+		sessionToken := r.Header.Get("Session-Token")
+		if sessionToken != "" {
+			st, stErr := s.parseSessionToken(sessionToken)
+			if stErr == nil {
+				ctx = context.WithValue(ctx, sessionNonceContextKey, st.Nonce)
+			}
+		}
+
+		*r = *r.WithContext(ctx)
+
 		if user.Locked {
 			// Locked users can only access endpoints necessary for unlocking/setup
 			if r.URL.Path != "/v1/user/keysync" && r.URL.Path != "/v1/user/me" {
@@ -750,9 +765,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		ctx := context.WithValue(r.Context(), userContextKey, user)
+		ctx = context.WithValue(r.Context(), userContextKey, user)
 		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
-			logger.Debugf("DEBUG AUTH: User %s provided Admin-Bypass header", user.ID)
 			ctx = context.WithValue(ctx, adminBypassContextKey, true)
 		}
 		r = r.WithContext(ctx)
@@ -846,8 +860,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		isAdmin := s.fsm.IsAdmin(user.ID)
-		bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-		logger.Debugf("DEBUG ADMIN ROUTE [%s]: user=%q isAdmin=%v bypass=%v", s.nodeID, user.ID, isAdmin, bypass)
 		if !isAdmin {
 			s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 			return
@@ -858,7 +870,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 7. Authenticated Standard Routes (Inode / User / Group)
 	if strings.HasPrefix(r.URL.Path, "/v1/user/") || strings.HasPrefix(r.URL.Path, "/v1/group/") || strings.HasPrefix(r.URL.Path, "/v1/meta/") {
-		logger.Debugf("ROUTER: Path=%s Method=%s", r.URL.Path, r.Method)
 		if user == nil {
 			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 			return
@@ -1182,7 +1193,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.challengeMu.Unlock()
 
 	if !ok || entry.UserID != solve.UserID {
-		logger.Debugf("DEBUG: handleLogin: invalid challenge or user ID mismatch. entryFound=%v, entryUser=%s, solveUser=%s", ok, entry.UserID, solve.UserID)
 		s.writeError(w, r, ErrCodeInternal, "invalid or expired challenge", http.StatusUnauthorized)
 		return
 	}
@@ -1195,7 +1205,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 		if plain == nil {
-			logger.Debugf("DEBUG: handleLogin: user %s not found in FSM", solve.UserID)
 			return fmt.Errorf("user not found")
 		}
 		return json.Unmarshal(plain, &user)
@@ -1206,7 +1215,6 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
-		logger.Debugf("DEBUG: handleLogin: invalid signature for user %s", solve.UserID)
 		s.writeError(w, r, ErrCodeInternal, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -1335,33 +1343,14 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		isAdmin := s.fsm.IsAdmin(user.ID)
 		if bypass && isAdmin {
 			// Bypass enabled and authorized
-		} else if inode.OwnerID != user.ID {
-			// World Readable/Writable?
-			if req.Mode == "R" && (inode.Mode&0004) != 0 {
-				// Authorized for reading
-			} else if req.Mode == "W" && (inode.Mode&0002) != 0 {
-				// Authorized for writing
-			} else if inode.GroupID != "" {
-				inGroup, _ := s.fsm.IsUserInGroup(user.ID, inode.GroupID)
-				if inGroup {
-					if req.Mode == "R" && (inode.Mode&0040) != 0 {
-						// Authorized for group reading
-					} else if req.Mode == "W" && (inode.Mode&0020) != 0 {
-						// Authorized for group writing
-					} else {
-						msg := fmt.Sprintf("forbidden: group permission check failed (inode=%s group=%s user=%s mode=%s inode_mode=%o)", req.InodeID, inode.GroupID, user.ID, req.Mode, inode.Mode)
-						log.Printf("ERROR: handleIssueToken: %s", msg)
-						s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
-						return
-					}
-				} else {
-					msg := fmt.Sprintf("forbidden: user not in group (inode=%s group=%s user=%s)", req.InodeID, inode.GroupID, user.ID)
-					log.Printf("ERROR: handleIssueToken: %s", msg)
-					s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
-					return
-				}
-			} else {
-				msg := fmt.Sprintf("forbidden: permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
+		} else {
+			reqBit := uint32(0004) // R
+			if req.Mode == "W" {
+				reqBit = 0002 // W
+			}
+
+			if !evaluatePOSIXAccess(s.fsm, &inode, user.ID, reqBit) {
+				msg := fmt.Sprintf("forbidden: POSIX permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
 				log.Printf("ERROR: handleIssueToken: %s", msg)
 				s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
 				return
@@ -1507,9 +1496,22 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 				s.writeError(w, r, ErrCodeInternal, "invalid group data", http.StatusBadRequest)
 				return
 			}
-			if group.OwnerID != user.ID {
-				s.writeError(w, r, ErrCodeForbidden, "cannot create group for another user", http.StatusForbidden)
-				return
+			// Phase 69: Delegation to FSM authorization logic.
+			// Any user can create a Self-Owned group.
+			// Hierarchical creation (creating for another owner) requires management permission.
+			if group.OwnerID != SelfOwnedGroup {
+				isAdmin := s.fsm.IsAdmin(user.ID)
+				if !isAdmin {
+					// Check if user has permission to manage the target owner
+					// We do a View here to safely check FSM state
+					err := s.fsm.db.View(func(tx *bolt.Tx) error {
+						return s.fsm.checkGroupManagementPermission(tx, &group, user.ID)
+					})
+					if err != nil {
+						s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
+						return
+					}
+				}
 			}
 			if group.IsSystem && !s.fsm.IsAdmin(user.ID) {
 				s.writeError(w, r, ErrCodeForbidden, "only admins can create system groups", http.StatusForbidden)
@@ -1538,15 +1540,11 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			if err := json.Unmarshal(b, &st); err == nil {
 				sessionNonce = st.Token.Nonce
 			} else {
-				logger.Debugf("DEBUG SERVER handleBatch: Unmarshal session failed: %v", err)
 			}
 		} else {
-			logger.Debugf("DEBUG SERVER handleBatch: Decode session failed: %v", err)
 		}
 	} else {
-		logger.Debugf("DEBUG SERVER handleBatch: Session-Token header is empty")
 	}
-	logger.Debugf("DEBUG SERVER handleBatch: extracted sessionNonce=%s from header", sessionNonce)
 
 	// Phase 41/42: Client-submitted batches are always atomic.
 	logCmd := LogCommand{
@@ -1593,7 +1591,7 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if errors.Is(actualErr, ErrQuotaExceeded) || errors.Is(actualErr, ErrQuotaDisabled) {
+		if errors.Is(actualErr, ErrQuotaExceeded) || errors.Is(actualErr, ErrQuotaDisabled) || errors.Is(actualErr, ErrForbidden) {
 			status = http.StatusForbidden
 		} else if errors.Is(actualErr, ErrConflict) || errors.Is(actualErr, ErrExists) || errors.Is(actualErr, ErrLeaseRequired) {
 			status = http.StatusConflict
@@ -1704,10 +1702,11 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := User{
-		ID:      userID,
-		UID:     uid,
-		SignKey: req.SignKey,
-		EncKey:  req.EncKey,
+		ID:        userID,
+		UID:       uid,
+		SignKey:   req.SignKey,
+		EncKey:    req.EncKey,
+		Signature: req.Signature,
 	}
 	body, _ := json.Marshal(user)
 
@@ -1893,6 +1892,11 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 			})
 			return nil
 		})
+		if totalNodes == 0 {
+			log.Printf("handleAllocateChunk: no nodes found in FSM")
+			s.writeError(w, r, ErrCodeNoNodes, "no storage nodes registered", http.StatusNotFound)
+			return
+		}
 		log.Printf("handleAllocateChunk: no active nodes found (Total in FSM: %d)", totalNodes)
 		s.writeError(w, r, ErrCodeInternal, "no active nodes", http.StatusServiceUnavailable)
 		return
@@ -2087,7 +2091,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 }
 
 // evaluatePOSIXAccess checks permissions against the POSIX.1e ACL specification.
-func evaluatePOSIXAccess(inode *Inode, userID string, inOwningGroup bool, userGroups []string, requiredMode uint32) bool {
+func evaluatePOSIXAccess(fsm *MetadataFSM, inode *Inode, userID string, requiredMode uint32) bool {
 	// requiredMode must be in the 3-bit space (e.g. 4 for read, 2 for write)
 	req := requiredMode
 
@@ -2113,14 +2117,16 @@ func evaluatePOSIXAccess(inode *Inode, userID string, inOwningGroup bool, userGr
 	matchedGroup := false
 	var groupUnion uint32 = 0
 
-	if inOwningGroup {
-		matchedGroup = true
-		groupUnion |= (inode.Mode >> 3) & 7
+	if inode.GroupID != "" {
+		if inGroup, _ := fsm.IsUserInGroup(userID, inode.GroupID); inGroup {
+			matchedGroup = true
+			groupUnion |= (inode.Mode >> 3) & 7
+		}
 	}
 
 	if inode.AccessACL != nil && inode.AccessACL.Groups != nil {
-		for _, gid := range userGroups {
-			if bits, ok := inode.AccessACL.Groups[gid]; ok {
+		for gid, bits := range inode.AccessACL.Groups {
+			if inGroup, _ := fsm.IsUserInGroup(userID, gid); inGroup {
 				matchedGroup = true
 				groupUnion |= bits
 			}
@@ -2128,17 +2134,20 @@ func evaluatePOSIXAccess(inode *Inode, userID string, inOwningGroup bool, userGr
 	}
 
 	if matchedGroup {
-		return (groupUnion & mask & req) != 0
+		result := (groupUnion & mask & req) != 0
+		return result
 	}
 
 	// 4. Other
 	otherBits := inode.Mode & 7
-	return (otherBits & req) != 0
+	result := (otherBits & req) != 0
+	return result
 }
 
 func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string) error {
 	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-	if bypass && s.fsm.IsAdmin(user.ID) {
+	isAdmin := s.fsm.IsAdmin(user.ID)
+	if bypass && isAdmin {
 		return nil
 	}
 	var inode Inode
@@ -2156,13 +2165,7 @@ func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string
 		return err
 	}
 
-	inOwningGroup := false
-	if inode.GroupID != "" {
-		inOwningGroup, _ = s.fsm.IsUserInGroup(user.ID, inode.GroupID)
-	}
-	userGroups, _ := s.fsm.GetUserGroupIDs(user.ID)
-
-	if evaluatePOSIXAccess(&inode, user.ID, inOwningGroup, userGroups, 0004) {
+	if evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0004) {
 		return nil
 	}
 
@@ -2257,25 +2260,9 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	// 2. Check Authorization
-	authorized := false
-	if group.OwnerID == user.ID {
-		authorized = true
-	} else if group.Members != nil && group.Members[user.ID] {
-		authorized = true
-	} else {
-		// Check if OwnerID is a group we are in
-		inOwningGroup, _ := s.fsm.IsUserInGroup(user.ID, group.OwnerID)
-		if inOwningGroup {
-			authorized = true
-		}
-	}
-
-	isAdmin := s.fsm.IsAdmin(user.ID)
-	if !authorized && !isAdmin {
-		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
-		return
-	}
+	// 2. Authorization: Any authenticated user can read group metadata
+	// (Public keys are needed for integrity verification of group-signed inodes).
+	// Group membership remains private via the MembersHMAC map.
 
 	data, _ := json.Marshal(group)
 	w.Header().Set("Content-Type", "application/json")
@@ -2312,6 +2299,12 @@ func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedG
 	authorized := false
 	if existing.OwnerID == user.ID {
 		authorized = true
+	} else if existing.OwnerID == SelfOwnedGroup {
+		// Verify requester is a member of the group itself
+		inGroup, _ := s.fsm.IsUserInGroup(user.ID, existing.ID)
+		if inGroup {
+			authorized = true
+		}
 	} else {
 		// Check if OwnerID is a group we are in
 		inGroup, _ := s.fsm.IsUserInGroup(user.ID, existing.OwnerID)
@@ -2467,11 +2460,14 @@ func (s *Server) ApplyRaftCommandInternal(ctx context.Context, cmdType CommandTy
 		return nil, fmt.Errorf("not leader")
 	}
 
+	sessionNonce, _ := ctx.Value(sessionNonceContextKey).(string)
+
 	cmd := &LogCommand{
-		Type:   cmdType,
-		Data:   data,
-		UserID: userID,
-		Atomic: cmdType == CmdBatch,
+		Type:         cmdType,
+		Data:         data,
+		UserID:       userID,
+		SessionNonce: sessionNonce,
+		Atomic:       cmdType == CmdBatch,
 	}
 
 	if cmd.Atomic {
@@ -2626,13 +2622,7 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 		return err
 	}
 
-	inOwningGroup := false
-	if inode.GroupID != "" {
-		inOwningGroup, _ = s.fsm.IsUserInGroup(user.ID, inode.GroupID)
-	}
-	userGroups, _ := s.fsm.GetUserGroupIDs(user.ID)
-
-	if evaluatePOSIXAccess(&inode, user.ID, inOwningGroup, userGroups, 0002) {
+	if evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0002) {
 		return nil
 	}
 
@@ -2846,6 +2836,8 @@ func (s *Server) sanitizeResponse(res interface{}) interface{} {
 			code = ErrCodeAtomicRollback
 		} else if errors.Is(err, ErrQuotaDisabled) {
 			code = ErrCodeQuotaDisabled
+		} else if errors.Is(err, ErrForbidden) {
+			code = ErrCodeForbidden
 		}
 		return APIErrorResponse{Code: code, Message: err.Error()}
 	}
@@ -2901,7 +2893,8 @@ func (s *Server) RedactGroup(g *Group) {
 	g.Lockbox = nil
 	g.RegistryLockbox = nil
 	g.EncryptedRegistry = nil
-	g.Members = nil // Bulk lists shouldn't reveal member IDs
+	g.MembersHMAC = nil // Bulk lists shouldn't reveal member IDs
+	// NOTE: g.Signature must REMAINS for client-side verification
 }
 
 func (s *Server) RedactNode(n *Node) {
@@ -3041,7 +3034,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 						Usage:        g.Usage,
 						Quota:        g.Quota,
 						QuotaEnabled: g.QuotaEnabled,
-						MemberCount:  len(g.Members),
+						MemberCount:  len(g.MembersHMAC),
 						IsSystem:     g.IsSystem,
 					},
 				})
@@ -3100,7 +3093,6 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 					NLink:          i.NLink,
 					Children:       i.Children,
 					Version:        i.Version,
-					IsSystem:       i.IsSystem,
 					Leases:         i.Leases,
 					Unlinked:       i.Unlinked,
 					SignerID:       i.SignerID,
@@ -3310,7 +3302,6 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		lastDiscoveryErr = err
-		logger.Debugf("DEBUG: Discovery of %s failed (attempt %d): %v", req.Address, i+1, err)
 		time.Sleep(100 * time.Millisecond)
 	}
 
@@ -3443,7 +3434,6 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		} else {
 			lastPushErr = err
 		}
-		logger.Debugf("DEBUG: Push to %s failed (attempt %d): %v", bootstrapURL, i+1, lastPushErr)
 		select {
 		case <-r.Context().Done():
 			return
@@ -3647,15 +3637,21 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 					s.sessionKeyMu.RUnlock()
 					// Treat as cache miss, fall back to KEM
 				} else {
-					ts, payload, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
+					ts, payload, sig, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
 					if err == nil {
 						// Success with cached key
 						if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
 							return nil, err
 						}
 						// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
-						*r = *r.WithContext(context.WithValue(r.Context(), sessionKeyContextKey, entry.key))
+						ctx := context.WithValue(r.Context(), sessionKeyContextKey, entry.key)
+						// Phase 69: Pass L7 signature, timestamp and session nonce to handlers
+						ctx = context.WithValue(ctx, requestSignatureContextKey, sig)
+						ctx = context.WithValue(ctx, requestTimestampContextKey, ts)
+						ctx = context.WithValue(ctx, sessionNonceContextKey, st.Nonce)
+						*r = *r.WithContext(ctx)
 						return payload, nil
+					} else {
 					}
 					// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
 				}
@@ -3677,22 +3673,23 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 		// it means we just became leader or the key was generated by a previous leader.
 		// We MUST rotate to a new key that we hold in-memory.
 		if s.raft.State() == raft.Leader {
-			logger.Debugf("DEBUG: active epoch key %s missing in-memory, triggering rotation", active.ID)
 			go s.keyWorker.rotate()
 		}
 		return nil, fmt.Errorf("active epoch key private part not available in-memory")
 	}
 
 	// 2. Open (Full KEM)
-	ts, payload, sharedSecret, err := crypto.OpenRequest(dk, user.SignKey, sealed.Sealed)
+	ts, payload, sharedSecret, sig, err := crypto.OpenRequest(dk, user.SignKey, sealed.Sealed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open request: %w", err)
 	}
 
+	var sessionNonce string
 	// Phase 53.1: Update session key cache if we have a session token.
 	// This ensures that subsequent requests can use the symmetric path with the new shared secret.
 	if sessionToken != "" {
 		if st, err := s.parseSessionToken(sessionToken); err == nil {
+			sessionNonce = st.Nonce
 			s.sessionKeyMu.Lock()
 			s.sessionKeyCache[st.Nonce] = sessionKeyEntry{
 				key:    sharedSecret,
@@ -3720,7 +3717,15 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	}
 
 	// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
-	*r = *r.WithContext(context.WithValue(r.Context(), sessionKeyContextKey, sharedSecret))
+	ctx := context.WithValue(r.Context(), sessionKeyContextKey, sharedSecret)
+	// Phase 69: Pass L7 signature, timestamp and session nonce to handlers
+	ctx = context.WithValue(ctx, requestSignatureContextKey, sig)
+	ctx = context.WithValue(ctx, requestTimestampContextKey, ts)
+	if sessionNonce != "" {
+		ctx = context.WithValue(ctx, sessionNonceContextKey, sessionNonce)
+	}
+
+	*r = *r.WithContext(ctx)
 
 	return payload, nil
 }
@@ -3965,21 +3970,37 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req LeaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	// Use Session Nonce as the unique owner ID for the lease
-	req.SessionID = sessionNonce
-	req.UserID = user.ID
-	if req.Duration == 0 {
-		req.Duration = int64(2 * time.Minute) // Default duration
+	var req LeaseRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "bad request format", http.StatusBadRequest)
+		return
 	}
 
-	body, _ := json.Marshal(req)
-	s.ApplyRaftCommandRaw(w, r, CmdAcquireLeases, body, http.StatusOK)
+	if req.Duration == 0 {
+		req.Duration = int64(2 * time.Minute) // Default duration
+		// NOTE: If we modify it here and re-marshal, we break the signature.
+		// So we must ensure the client provides a duration if they want it signed correctly.
+		// For now, we'll re-marshal ONLY if not sealed.
+	}
+
+	if r.Header.Get("X-DistFS-Sealed") == "true" {
+		s.ApplyRaftCommandRaw(w, r, CmdAcquireLeases, body, http.StatusOK)
+	} else {
+		// Use Session Nonce as the unique owner ID for the lease
+		req.SessionID = sessionNonce
+		req.UserID = user.ID
+		if req.Duration == 0 {
+			req.Duration = int64(2 * time.Minute)
+		}
+		newBody, _ := json.Marshal(req)
+		s.ApplyRaftCommandRaw(w, r, CmdAcquireLeases, newBody, http.StatusOK)
+	}
 }
 
 func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
@@ -4007,16 +4028,26 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req LeaseRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
 
-	req.SessionID = sessionNonce
-	req.UserID = user.ID
-	body, _ := json.Marshal(req)
-	s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
+	var req LeaseRequest
+	if err := json.Unmarshal(body, &req); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "bad request format", http.StatusBadRequest)
+		return
+	}
+
+	if r.Header.Get("X-DistFS-Sealed") == "true" {
+		s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, body, http.StatusOK)
+	} else {
+		req.SessionID = sessionNonce
+		req.UserID = user.ID
+		newBody, _ := json.Marshal(req)
+		s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, newBody, http.StatusOK)
+	}
 }
 
 func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {

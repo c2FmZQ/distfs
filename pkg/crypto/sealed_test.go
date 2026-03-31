@@ -18,13 +18,13 @@ func TestOpenRequestSymmetric(t *testing.T) {
 	}
 
 	// First open normally to get shared secret
-	_, _, sharedSecret, err := OpenRequest(serverDK, clientID.Public(), sealed)
+	_, _, sharedSecret, _, err := OpenRequest(serverDK, clientID.Public(), sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Now open symmetrically
-	ts, opened, err := OpenRequestSymmetric(sharedSecret, clientID.Public(), sealed)
+	ts, opened, sig, err := OpenRequestSymmetric(sharedSecret, clientID.Public(), sealed)
 	if err != nil {
 		t.Fatalf("OpenRequestSymmetric failed: %v", err)
 	}
@@ -35,20 +35,23 @@ func TestOpenRequestSymmetric(t *testing.T) {
 	if ts == 0 {
 		t.Error("Timestamp is zero")
 	}
+	if len(sig) != SignatureSize() {
+		t.Error("Invalid signature length")
+	}
 
 	// Error cases
-	if _, _, err := OpenRequestSymmetric(sharedSecret, clientID.Public(), sealed[:10]); err == nil {
+	if _, _, _, err := OpenRequestSymmetric(sharedSecret, clientID.Public(), sealed[:10]); err == nil {
 		t.Error("Expected error for short data")
 	}
 
 	badSecret := make([]byte, 32)
-	if _, _, err := OpenRequestSymmetric(badSecret, clientID.Public(), sealed); err == nil {
+	if _, _, _, err := OpenRequestSymmetric(badSecret, clientID.Public(), sealed); err == nil {
 		t.Error("Expected error for bad shared secret")
 	}
 
 	badSig := append([]byte{}, sealed...)
 	badSig[len(badSig)-1] ^= 0xFF
-	if _, _, err := OpenRequestSymmetric(sharedSecret, clientID.Public(), badSig); err == nil {
+	if _, _, _, err := OpenRequestSymmetric(sharedSecret, clientID.Public(), badSig); err == nil {
 		t.Error("Expected error for bad signature")
 	}
 }
@@ -143,12 +146,12 @@ func TestOpenRequest_MoreErrors(t *testing.T) {
 	clientID, _ := GenerateIdentityKey()
 
 	// 1. Too short
-	if _, _, _, err := OpenRequest(serverDK, clientID.Public(), make([]byte, 10)); err == nil {
+	if _, _, _, _, err := OpenRequest(serverDK, clientID.Public(), make([]byte, 10)); err == nil {
 		t.Error("Expected error for short data")
 	}
 
 	// 2. Bad KEM
-	if _, _, _, err := OpenRequest(serverDK, clientID.Public(), make([]byte, 1000)); err == nil {
+	if _, _, _, _, err := OpenRequest(serverDK, clientID.Public(), make([]byte, 1000)); err == nil {
 		t.Error("Expected error for bad KEM")
 	}
 
@@ -157,7 +160,7 @@ func TestOpenRequest_MoreErrors(t *testing.T) {
 	sharedSecret, kemCT := Encapsulate(serverPK)
 	badInner, _ := EncryptDEM(sharedSecret, []byte("short"))
 	sealed := append(kemCT, badInner...)
-	if _, _, _, err := OpenRequest(serverDK, clientID.Public(), sealed); err == nil {
+	if _, _, _, _, err := OpenRequest(serverDK, clientID.Public(), sealed); err == nil {
 		t.Error("Expected error for short inner")
 	}
 }

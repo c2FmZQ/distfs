@@ -24,7 +24,9 @@ import (
 
 func TestClient_ExtraFS(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Mkdir
@@ -113,7 +115,9 @@ func TestClient_ExtraFS(t *testing.T) {
 
 func TestClient_Links(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	err := c.Mkdir(ctx, "/dir", 0755)
@@ -148,11 +152,11 @@ func TestClient_Links(t *testing.T) {
 	}
 
 	// Verify hard link
-	inode1, _, err := c.ResolvePath(ctx, "/dir/f1")
+	inode1, _, err := c.resolvePath(ctx, "/dir/f1")
 	if err != nil {
 		t.Fatal(err)
 	}
-	inode2, _, err := c.ResolvePath(ctx, "/dir/f2")
+	inode2, _, err := c.resolvePath(ctx, "/dir/f2")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +167,9 @@ func TestClient_Links(t *testing.T) {
 
 func TestClient_DeleteExtra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	content := []byte("bye")
@@ -177,7 +183,7 @@ func TestClient_DeleteExtra(t *testing.T) {
 		t.Fatalf("Remove failed: %v", err)
 	}
 
-	_, _, err = c.ResolvePath(ctx, "/delete_me")
+	_, _, err = c.resolvePath(ctx, "/delete_me")
 	if err == nil {
 		t.Error("File should be gone")
 	}
@@ -185,7 +191,9 @@ func TestClient_DeleteExtra(t *testing.T) {
 
 func TestClient_SubFS(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	c.Mkdir(ctx, "/a", 0755)
@@ -210,7 +218,9 @@ func TestClient_SubFS(t *testing.T) {
 
 func TestClient_ReadDirRecursive(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	c.Mkdir(ctx, "/dir1", 0755)
@@ -232,11 +242,20 @@ func TestClient_ReadDirRecursive(t *testing.T) {
 
 func TestClient_AdminMethods(t *testing.T) {
 	ctx := context.Background()
-	c, node, _, ts := SetupTestClient(t)
+	c, node, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	var err error
 	var count int
+
+	// Create user u1 and group g1 for testing
+	u1sk, _ := crypto.GenerateIdentityKey()
+	u1dk, _ := crypto.GenerateEncryptionKey()
+	metadata.CreateUser(t, node, metadata.User{ID: "u1", SignKey: u1sk.Public(), EncKey: u1dk.EncapsulationKey().Bytes()}, u1sk, adminID, adminSK)
+
+	g1, _ := c.createGroup(ctx, "g1", true)
 
 	// Promote user to admin in FSM directly
 	u1id, _ := json.Marshal("u1")
@@ -244,16 +263,25 @@ func TestClient_AdminMethods(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	node.Raft.Apply(u1b, 5*time.Second)
+	if err := node.Raft.Apply(u1b, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to promote u1: %v", err)
+	}
+
+	// Invalidate client's user cache so it fetches the new IsAdmin status
+	c.cacheMu.Lock()
+	delete(c.userCache, "u1")
+	c.cacheMu.Unlock()
 
 	// Register a node
-	nodeInfo := metadata.Node{ID: "n1", Address: "http://127.0.0.1:8080", Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
+	nodeInfo := metadata.Node{ID: "n2", Address: "http://127.0.0.1:8080", Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
 	nb, _ := json.Marshal(nodeInfo)
 	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	node.Raft.Apply(nbb, 5*time.Second)
+	if err := node.Raft.Apply(nbb, 5*time.Second).Error(); err != nil {
+		t.Fatalf("Failed to register node: %v", err)
+	}
 
 	time.Sleep(100 * time.Millisecond) // Wait for apply
 
@@ -303,30 +331,32 @@ func TestClient_AdminMethods(t *testing.T) {
 
 	// 7. AdminSetGroupQuota
 	err = c.WithAdmin(true).AdminSetGroupQuota(ctx, metadata.SetGroupQuotaRequest{
-		GroupID:   "g1",
+		GroupID:   g1.ID,
 		MaxInodes: ptr(uint64(50)),
 		MaxBytes:  ptr(uint64(500)),
 	})
 	if err != nil {
 		// Might fail if g1 not created yet
 	}
-
 	// 8. MkdirExtended (Admin owner override)
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
 	uek2, _ := crypto.GenerateEncryptionKey()
 	user2 := metadata.User{
 		ID:      u2,
+		UID:     1002,
 		SignKey: usk2.Public(),
 		EncKey:  uek2.EncapsulationKey().Bytes(),
 	}
-	metadata.CreateUser(t, node, user2)
-
-	err = c.WithAdmin(true).MkdirExtended(ctx, "/admin-owned-for-u2", 0755, MkdirOptions{OwnerID: u2})
+	metadata.CreateUser(t, node, user2, usk2, adminID, adminSK)
+	if err := c.AnchorUserInRegistry(ctx, "u2", user2.ID, adminID); err != nil {
+		t.Fatalf("Failed to anchor u2: %v", err)
+	}
+	err = c.WithAdmin(true).MkdirExtended(ctx, "/admin-owned-by-u2", 0700, MkdirOptions{OwnerID: u2})
 	if err != nil {
 		t.Fatalf("MkdirExtended (Admin) failed: %v", err)
 	}
-	inode, _, err2 := c.ResolvePath(ctx, "/admin-owned-for-u2")
+	inode, _, err2 := c.WithAdmin(true).resolvePath(ctx, "/admin-owned-by-u2")
 	if err2 != nil {
 		t.Fatalf("ResolvePath failed: %v", err2)
 	}
@@ -355,17 +385,19 @@ func TestClient_AdminMethods(t *testing.T) {
 
 func TestClient_GroupsExtra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. CreateGroup
-	group, err := c.CreateGroup(ctx, "group1", false)
+	group, err := c.createGroup(ctx, "group1", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
 
 	// 2. GetGroupName
-	name, err := c.GetGroupName(ctx, group)
+	name, err := c.getGroupName(ctx, group)
 	if err != nil {
 		// Might fail if not in registry
 	} else if name != "group1" {
@@ -375,7 +407,9 @@ func TestClient_GroupsExtra(t *testing.T) {
 
 func TestClient_Blob(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	content := []byte("blob data")
@@ -398,7 +432,9 @@ func TestClient_Blob(t *testing.T) {
 
 func TestClient_RenameExtra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	c.Mkdir(ctx, "/dir1", 0755)
@@ -431,7 +467,9 @@ func TestClient_RenameExtra(t *testing.T) {
 
 func TestClient_RemoveExtraError(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	c.Mkdir(ctx, "/dir", 0755)
@@ -446,7 +484,9 @@ func TestClient_RemoveExtraError(t *testing.T) {
 
 func TestClient_EnsureRootExtra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Root already exists
@@ -465,7 +505,9 @@ func TestClient_EnsureRootExtra(t *testing.T) {
 
 func TestClient_UnsealExtraErrors(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Not sealed
@@ -536,7 +578,7 @@ func TestClient_LoginExtraErrors(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	c := NewClient(ts.URL).WithIdentity("u1", nil).WithSignKey(sk)
+	c := NewClient(ts.URL).withIdentity("u1", nil).withSignKey(sk)
 	err := c.Login(ctx)
 	if err == nil || !strings.Contains(err.Error(), "signature") {
 		t.Errorf("Expected signature error, got %v", err)
@@ -560,7 +602,9 @@ func TestClient_UploadExtraError(t *testing.T) {
 
 func TestClient_CreateLockboxExtra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	fileKey := make([]byte, 32)
@@ -572,7 +616,15 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 	}
 
 	// 2. Group access (0040)
-	group, _ := c.CreateGroup(ctx, "g1", false)
+	group, err := c.createGroup(ctx, "g1", false)
+	if err != nil {
+		t.Fatalf("CreateGroup failed: %v", err)
+	}
+	// Phase 69: Must anchor in registry for VerifyGroup to succeed in GetGroup
+	if err := c.AnchorGroupInRegistry(ctx, "g1", group.ID); err != nil {
+		t.Fatalf("AnchorGroupInRegistry failed: %v", err)
+	}
+
 	lb2, _ := c.createLockbox(ctx, fileKey, 0640, c.userID, group.ID, nil)
 	if _, ok := lb2[group.ID]; !ok {
 		t.Errorf("Group %s missing from lockbox", group.ID)
@@ -581,19 +633,21 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 
 func TestClient_MiscMethods(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. WithRootAnchor
-	c2 := c.WithRootAnchor("root-id", "owner-id", 10)
-	id, owner, rver := c2.GetRootAnchor()
-	if id != "root-id" || owner != "owner-id" || rver != 10 {
-		t.Errorf("WithRootAnchor failed: %s %s %d", id, owner, rver)
+	c2 := c.withRootAnchor("root-id", "owner-id", []byte("pk"), []byte("ek"), 10)
+	id, owner, rpk, rek, rver := c2.GetRootAnchor()
+	if id != "root-id" || owner != "owner-id" || rver != 10 || string(rpk) != "pk" || string(rek) != "ek" {
+		t.Errorf("WithRootAnchor failed: %s %s %d %s %s", id, owner, rver, rpk, rek)
 	}
 
 	// 2. UserID
-	if c.UserID() != "u1" {
-		t.Errorf("Expected u1, got %s", c.UserID())
+	if c.UserID() != adminID {
+		t.Errorf("Expected %s, got %s", adminID, c.UserID())
 	}
 
 	// 3. ToFS
@@ -605,8 +659,8 @@ func TestClient_MiscMethods(t *testing.T) {
 	// 4. GetServerKey (Pre-configured)
 	dk, _ := crypto.GenerateEncryptionKey()
 	ek := dk.EncapsulationKey()
-	c3 := c.WithServerKey(ek)
-	pk, err := c3.GetServerKey(ctx)
+	c3 := c.withServerKey(ek)
+	pk, err := c3.getServerKey(ctx)
 	if err != nil || pk == nil {
 		t.Errorf("GetServerKey failed: %v", err)
 	}
@@ -628,13 +682,13 @@ func TestClient_MiscMethods(t *testing.T) {
 	rc.Close()
 
 	// 7. GetInodes
-	_, err = c.GetInodes(ctx, []string{c.GetRootID()})
+	_, err = c.getInodes(ctx, []string{c.getRootID()})
 	if err != nil {
 		t.Errorf("GetInodes failed: %v", err)
 	}
 
 	// 8. GetClusterStats
-	_, err = c.GetClusterStats(ctx)
+	_, err = c.getClusterStats(ctx)
 	if err != nil {
 		t.Errorf("GetClusterStats failed: %v", err)
 	}
@@ -642,7 +696,9 @@ func TestClient_MiscMethods(t *testing.T) {
 
 func TestClient_ResolvePath_InvalidCache(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	c.Mkdir(ctx, "/dir", 0755)
@@ -656,7 +712,7 @@ func TestClient_ResolvePath_InvalidCache(t *testing.T) {
 	})
 
 	// 2. Resolve should detect invalid cache and fix it
-	inode, _, err := c.ResolvePath(ctx, "/dir/f1")
+	inode, _, err := c.resolvePath(ctx, "/dir/f1")
 	if err != nil {
 		t.Fatalf("ResolvePath failed after cache poisoning: %v", err)
 	}
@@ -667,7 +723,9 @@ func TestClient_ResolvePath_InvalidCache(t *testing.T) {
 
 func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	ctx := context.Background()
-	c1, node, _, ts := SetupTestClient(t)
+	c1, node, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Setup u2
@@ -675,21 +733,49 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	usk2, _ := crypto.GenerateIdentityKey()
 	udk2, _ := crypto.GenerateEncryptionKey()
 	user2 := metadata.User{ID: u2, SignKey: usk2.Public(), EncKey: udk2.EncapsulationKey().Bytes()}
-	metadata.CreateUser(t, node, user2)
-	time.Sleep(100 * time.Millisecond) // Wait for FSM application
+	metadata.CreateUser(t, node, user2, usk2, adminID, adminSK)
 
-	c2 := NewClient(ts.URL).WithIdentity(u2, udk2).WithSignKey(usk2)
+	// Fetch users group ID
+	info, err := c1.Stat(ctx, "/users")
+	if err != nil {
+		t.Fatalf("Stat /users failed: %v", err)
+	}
+	usersGID := info.Sys().(*InodeInfo).GroupID
+
+	// Anchor user2
+	if err := c1.AnchorUserInRegistry(ctx, "u2", user2.ID, adminID); err != nil {
+		t.Fatalf("Failed to anchor u2: %v", err)
+	}
+
+	svKey, _ := c1.getServerKeys()
+	c2 := NewClient(ts.URL).withIdentity(u2, udk2).withSignKey(usk2).withServerKey(svKey).WithRegistry("/registry")
 	if err := c2.Login(ctx); err != nil {
 		t.Fatalf("u2 login failed: %v", err)
 	}
 
+	// Create ContactInfo for u2 using c2
+	contactStr, err := c2.GenerateContactString()
+	if err != nil {
+		t.Fatalf("GenerateContactString failed: %v", err)
+	}
+	contact, err := c1.ParseContactString(contactStr)
+	if err != nil {
+		t.Fatalf("ParseContactString failed: %v", err)
+	}
+
+	// Join users group via client
+	if err := c1.AddUserToGroup(ctx, usersGID, u2, "u2-test", contact); err != nil {
+		t.Fatalf("AddUserToGroup failed: %v", err)
+	}
+	time.Sleep(100 * time.Millisecond) // Wait for FSM application
+
 	// 2. Setup Group g1
-	group, err := c1.CreateGroup(ctx, "g1", false)
+	group, err := c1.createGroup(ctx, "g1", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
 
-	contactStr, err := c2.GenerateContactString()
+	contactStr, err = c2.GenerateContactString()
 	if err != nil {
 		t.Fatalf("GenerateContactString failed: %v", err)
 	}
@@ -712,7 +798,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 		t.Fatalf("Mkdir /shared failed: %v", err)
 	}
 
-	err = c1.SetAttr(ctx, "/shared", metadata.SetAttrRequest{Mode: ptr(uint32(0770)), GroupID: &group.ID})
+	err = c1.setAttr(ctx, "/shared", metadata.SetAttrRequest{Mode: ptr(uint32(0770)), GroupID: &group.ID})
 	if err != nil {
 		t.Fatalf("SetAttr /shared failed: %v", err)
 	}
@@ -724,9 +810,9 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	wc.Write([]byte("secret"))
 	wc.Close()
 
-	c1.SetAttr(ctx, "/shared/f1", metadata.SetAttrRequest{Mode: ptr(uint32(0660))})
+	c1.setAttr(ctx, "/shared/f1", metadata.SetAttrRequest{Mode: ptr(uint32(0660))})
 
-	_, _, _ = c1.ResolvePath(ctx, "/shared/f1")
+	_, _, _ = c1.resolvePath(ctx, "/shared/f1")
 
 	// 4. u2 Unlocks f1 (via Group key)
 	rc, err := c2.OpenBlobRead(ctx, "/shared/f1")
@@ -741,16 +827,36 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 
 	// 5. Create File f2 with World access
 	c1.Mkdir(ctx, "/public", 0755)
-	c1.SetAttr(ctx, "/public", metadata.SetAttrRequest{Mode: ptr(uint32(0777))})
+	c1.setAttr(ctx, "/public", metadata.SetAttrRequest{Mode: ptr(uint32(0777))})
 	c1.CreateFile(ctx, "/public/f2", bytes.NewReader([]byte("public")), 6)
-	c1.SetAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: ptr(uint32(0664))})
+	c1.setAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: ptr(uint32(0664))})
 
 	// Create u3
 	usk3, _ := crypto.GenerateIdentityKey()
 	udk3, _ := crypto.GenerateEncryptionKey()
-	c3 := NewClient(ts.URL).WithIdentity("u3", udk3).WithSignKey(usk3)
+	c3 := NewClient(ts.URL).withIdentity("u3", udk3).withSignKey(usk3).withServerKey(svKey).WithRegistry("/registry")
 	user3 := metadata.User{ID: "u3", SignKey: usk3.Public(), EncKey: udk3.EncapsulationKey().Bytes()}
-	metadata.CreateUser(t, node, user3)
+	metadata.CreateUser(t, node, user3, usk3, adminID, adminSK)
+
+	// Anchor user3
+	if err := c1.AnchorUserInRegistry(ctx, "u3", user3.ID, adminID); err != nil {
+		t.Fatalf("Failed to anchor u3: %v", err)
+	}
+
+	// Create ContactInfo for u3 using c3
+	contactStr3, err := c3.GenerateContactString()
+	if err != nil {
+		t.Fatalf("GenerateContactString failed: %v", err)
+	}
+	contact3, err := c1.ParseContactString(contactStr3)
+	if err != nil {
+		t.Fatalf("ParseContactString failed: %v", err)
+	}
+
+	// Join users group via client
+	if err := c1.AddUserToGroup(ctx, usersGID, "u3", "u3-test", contact3); err != nil {
+		t.Fatalf("AddUserToGroup failed: %v", err)
+	}
 	time.Sleep(100 * time.Millisecond)
 
 	if err := c3.Login(ctx); err != nil {
@@ -772,17 +878,13 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	if err != nil {
 		t.Errorf("RemoveUserFromGroup failed: %v", err)
 	}
-
-	// 7. GroupChown
-	err = c1.GroupChown(ctx, group.ID, "u2")
-	if err != nil {
-		t.Errorf("GroupChown failed: %v", err)
-	}
 }
 
 func TestVerifyInode_Signatures(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	u1ID := c.UserID()
@@ -790,10 +892,10 @@ func TestVerifyInode_Signatures(t *testing.T) {
 	dk := c.DecKey() // Need decryption key for VerifyInode
 
 	// 1. Missing SignerID (FAIL)
-	nonce1 := []byte("nonce-for-f1-123")
+	nonce1 := metadata.GenerateNonce()
 	f1ID := metadata.GenerateInodeID(u1ID, nonce1)
 	inode := &metadata.Inode{ID: f1ID, Nonce: nonce1, OwnerID: u1ID, Type: metadata.FileType, Version: 1}
-	err := c.VerifyInode(ctx, inode)
+	err := c.verifyInode(ctx, inode)
 	if err == nil {
 		t.Error("VerifyInode should reject inode with missing SignerID")
 	}
@@ -801,14 +903,14 @@ func TestVerifyInode_Signatures(t *testing.T) {
 	// 2. Invalid UserSig (FAIL)
 	inode.SetSignerID(u1ID)
 	inode.UserSig = []byte("garbage")
-	err = c.VerifyInode(ctx, inode)
+	err = c.verifyInode(ctx, inode)
 	if err == nil {
 		t.Error("VerifyInode should reject inode with invalid UserSig")
 	}
 
 	// 3. Valid Signature but missing Lockbox (FAIL - cannot decrypt fileKey)
 	inode.SignInodeForTest(u1ID, sk)
-	err = c.VerifyInode(ctx, inode)
+	err = c.verifyInode(ctx, inode)
 	if err == nil {
 		t.Error("VerifyInode should reject inode with missing lockbox entry")
 	}
@@ -827,7 +929,7 @@ func TestVerifyInode_Signatures(t *testing.T) {
 	inode.ClientBlob = encBlob
 
 	inode.SignInodeForTest(u1ID, sk)
-	err = c.VerifyInode(ctx, inode)
+	err = c.verifyInode(ctx, inode)
 	if err != nil {
 		t.Errorf("VerifyInode failed for valid signature and lockbox: %v", err)
 	}
@@ -835,26 +937,28 @@ func TestVerifyInode_Signatures(t *testing.T) {
 
 func TestVerifyInode_AdminBypass(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
-	adminID := c.UserID()
+	adminID = c.UserID()
 	skA := c.SignKey()
 
 	// 1. Admin creates empty directory for other user (SUCCESS)
-	nonce1 := []byte("nonce-dir1")
+	nonce1 := metadata.GenerateNonce()
 	dir1ID := metadata.GenerateInodeID("userB", nonce1)
 	inode := &metadata.Inode{ID: dir1ID, Nonce: nonce1, OwnerID: "userB", Type: metadata.DirType, Version: 1}
 	inode.SetSignerID(adminID)
 	inode.ClientBlob = nil // Admin creation doesn't provide ClientBlob
 	inode.UserSig = skA.Sign(inode.ManifestHash())
-	err := c.VerifyInode(ctx, inode)
+	err := c.verifyInode(ctx, inode)
 	if err != nil {
 		t.Errorf("VerifyInode failed for admin-created empty directory: %v", err)
 	}
 
 	// 2. Admin creates non-empty directory for other user (FAIL)
-	nonce2 := []byte("nonce-dir2")
+	nonce2 := metadata.GenerateNonce()
 	dir2ID := metadata.GenerateInodeID("userB", nonce2)
 	inode2 := &metadata.Inode{
 		ID:       dir2ID,
@@ -867,19 +971,19 @@ func TestVerifyInode_AdminBypass(t *testing.T) {
 	inode2.SetSignerID(adminID)
 	inode2.ClientBlob = nil
 	inode2.UserSig = skA.Sign(inode2.ManifestHash())
-	err = c.VerifyInode(ctx, inode2)
+	err = c.verifyInode(ctx, inode2)
 	if err == nil {
 		t.Error("VerifyInode should reject admin-created non-empty directory")
 	}
 
 	// 3. Admin creates file for other user (FAIL)
-	nonce3 := []byte("nonce-file1")
+	nonce3 := metadata.GenerateNonce()
 	file1ID := metadata.GenerateInodeID("userB", nonce3)
 	inode3 := &metadata.Inode{ID: file1ID, Nonce: nonce3, OwnerID: "userB", Type: metadata.FileType, Version: 1}
 	inode3.SetSignerID(adminID)
 	inode3.ClientBlob = nil
 	inode3.UserSig = skA.Sign(inode3.ManifestHash())
-	err = c.VerifyInode(ctx, inode3)
+	err = c.verifyInode(ctx, inode3)
 	if err == nil {
 		t.Error("VerifyInode should reject admin-created file (only empty dirs allowed)")
 	}
@@ -887,11 +991,13 @@ func TestVerifyInode_AdminBypass(t *testing.T) {
 
 func TestClient_Groups_SystemAndMembers(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. CreateSystemGroup
-	group, err := c.WithAdmin(true).CreateSystemGroup(ctx, "sysgroup", false)
+	group, err := c.WithAdmin(true).createSystemGroup(ctx, "sysgroup", false)
 	if err != nil {
 		t.Fatalf("CreateSystemGroup failed: %v", err)
 	}
@@ -900,23 +1006,24 @@ func TestClient_Groups_SystemAndMembers(t *testing.T) {
 	}
 
 	// 2. DecryptGroupName
+	found := false
 	for g, err := range c.ListGroups(ctx) {
 		if err != nil {
 			t.Fatalf("ListGroups failed: %v", err)
 		}
-		name, err := c.DecryptGroupName(ctx, g)
-		if err != nil {
-			t.Errorf("DecryptGroupName failed: %v", err)
+		name, err := c.AdminDecryptGroupName(ctx, g)
+		if err == nil && name == "sysgroup" {
+			found = true
+			break
 		}
-		if name != "sysgroup" {
-			t.Errorf("Expected sysgroup, got %s", name)
-		}
-		break // Test one is enough
+	}
+	if !found {
+		t.Error("Did not find sysgroup in group list with correct decrypted name")
 	}
 
 	// 3. GetGroupMembers
 	count := 0
-	for _, err := range c.GetGroupMembers(ctx, group.ID) {
+	for _, err := range c.getGroupMembers(ctx, group.ID) {
 		if err != nil {
 			t.Fatalf("GetGroupMembers failed: %v", err)
 		}
@@ -929,7 +1036,9 @@ func TestClient_Groups_SystemAndMembers(t *testing.T) {
 
 func TestClient_FS_Extra(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	c.Mkdir(ctx, "/fs", 0755)
@@ -969,9 +1078,11 @@ func TestClient_FS_Extra(t *testing.T) {
 	f.Close()
 
 	// 3. NewDirEntry / NewDirEntryForTest
-	inode := &metadata.Inode{ID: "00000000000000000000000000000001"}
+	nonceI := metadata.GenerateNonce()
+	inodeID := metadata.GenerateInodeID(c.userID, nonceI)
+	inode := &metadata.Inode{ID: inodeID, Nonce: nonceI, OwnerID: c.userID}
 	key := make([]byte, 32)
-	_ = c.NewDirEntry(inode, "name", key)
+	_ = c.newDirEntry(inode, "name", inode.ID, key)
 	_ = NewDirEntryForTest(inode, "name2", key)
 }
 
@@ -1001,13 +1112,15 @@ func TestClient_Onboarding_Discovery(t *testing.T) {
 
 func TestClient_SyncFile_More(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Inline Sync
 	c.CreateFile(ctx, "/inline", bytes.NewReader([]byte("init")), 4)
-	inode, _, _ := c.ResolvePath(ctx, "/inline")
-	_, err := c.SyncFile(ctx, inode.ID, strings.NewReader("new content"), 11, nil)
+	inode, _, _ := c.resolvePath(ctx, "/inline")
+	_, err := c.syncFile(ctx, inode.ID, strings.NewReader("new content"), 11, nil)
 	if err != nil {
 		t.Fatalf("Inline SyncFile failed: %v", err)
 	}
@@ -1017,7 +1130,7 @@ func TestClient_SyncFile_More(t *testing.T) {
 	if err := c.CreateFile(ctx, "/large", bytes.NewReader(large), int64(len(large))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
-	inodeL, _, err := c.ResolvePath(ctx, "/large")
+	inodeL, _, err := c.resolvePath(ctx, "/large")
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
@@ -1026,14 +1139,16 @@ func TestClient_SyncFile_More(t *testing.T) {
 	}
 
 	grown := make([]byte, 2*crypto.ChunkSize+100)
-	_, err = c.SyncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
+	_, err = c.syncFile(ctx, inodeL.ID, bytes.NewReader(grown), int64(len(grown)), nil)
 	if err != nil {
 		t.Fatalf("SyncFile failed: %v", err)
 	}
 }
 
 func TestClient_DeleteInode(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer metaNode.Shutdown()
 	defer metaServer.Shutdown()
 	defer ts.Close()
@@ -1047,10 +1162,10 @@ func TestClient_DeleteInode(t *testing.T) {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
-	inode, _, _ := c.ResolvePath(ctx, "/dir1/file1")
+	inode, _, _ := c.resolvePath(ctx, "/dir1/file1")
 
 	// Delete it
-	err = c.DeleteInode(ctx, inode.ID)
+	err = c.deleteInode(ctx, inode.ID)
 	if err != nil {
 		t.Fatalf("DeleteInode failed: %v", err)
 	}
@@ -1058,14 +1173,16 @@ func TestClient_DeleteInode(t *testing.T) {
 	c.ClearCache()
 
 	// Verify it's gone
-	_, _, err = c.ResolvePath(ctx, "/dir1/file1")
+	_, _, err = c.resolvePath(ctx, "/dir1/file1")
 	if err == nil {
 		t.Error("Expected error resolving deleted path, got nil")
 	}
 }
 
 func TestClient_SyncFile(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer metaNode.Shutdown()
 	defer metaServer.Shutdown()
 	defer ts.Close()
@@ -1097,12 +1214,12 @@ func TestClient_SyncFile(t *testing.T) {
 	content := []byte("original content")
 	c.CreateFile(ctx, path, bytes.NewReader(content), int64(len(content)))
 
-	inode, key, _ := c.ResolvePath(ctx, path)
+	inode, key, _ := c.resolvePath(ctx, path)
 
 	// Sync with updates
 	newContent := []byte("updated content and much longer to force chunking if needed")
 	dirty := map[int64]bool{0: true}
-	updatedInode, err := c.SyncFile(ctx, inode.ID, bytes.NewReader(newContent), int64(len(newContent)), dirty)
+	updatedInode, err := c.syncFile(ctx, inode.ID, bytes.NewReader(newContent), int64(len(newContent)), dirty)
 	if err != nil {
 		t.Fatalf("SyncFile failed: %v", err)
 	}
@@ -1112,7 +1229,7 @@ func TestClient_SyncFile(t *testing.T) {
 	}
 
 	// Read back and verify
-	reader, _ := c.NewReader(ctx, updatedInode.ID, key)
+	reader, _ := c.newReader(ctx, updatedInode.ID, key)
 	readBack, _ := io.ReadAll(reader)
 	if !bytes.Equal(readBack, newContent) {
 		t.Errorf("Expected %s, got %s", string(newContent), string(readBack))
@@ -1120,7 +1237,9 @@ func TestClient_SyncFile(t *testing.T) {
 }
 
 func TestClient_ChunkDataOps(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer metaNode.Shutdown()
 	defer metaServer.Shutdown()
 	defer ts.Close()
@@ -1147,19 +1266,19 @@ func TestClient_ChunkDataOps(t *testing.T) {
 	chunkData := []byte("chunk payload")
 
 	// Create file first
-	err := c.SaveDataFile(ctx, path, []byte("init"))
+	err := c.saveDataFile(ctx, path, []byte("init"))
 	if err != nil {
 		t.Fatalf("SaveDataFile failed: %v", err)
 	}
-	inode, _, _ := c.ResolvePath(ctx, path)
+	inode, _, _ := c.resolvePath(ctx, path)
 
-	entry, err := c.UploadChunkData(ctx, inode.ID, fileKey, 0, chunkData)
+	entry, err := c.uploadChunkData(ctx, inode.ID, fileKey, 0, chunkData)
 	if err != nil {
 		t.Fatalf("UploadChunkData failed: %v", err)
 	}
 
 	// 2. DownloadChunkData
-	downloaded, err := c.DownloadChunkData(ctx, inode.ID, entry.ID, entry.URLs, fileKey, 0)
+	downloaded, err := c.downloadChunkData(ctx, inode.ID, entry.ID, entry.URLs, fileKey, 0)
 	if err != nil {
 		t.Fatalf("DownloadChunkData failed: %v", err)
 	}
@@ -1175,23 +1294,14 @@ func TestClient_ChunkDataOps(t *testing.T) {
 }
 
 func TestClient_OpenBlobWrite(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer metaNode.Shutdown()
 	defer metaServer.Shutdown()
 	defer ts.Close()
 
 	ctx := context.Background()
-
-	// Data Node
-	dataDir := t.TempDir()
-	dataSt, _ := createTestStorage(t, dataDir)
-	dataStore, _ := data.NewDiskStore(dataSt)
-	csk := metadata.GetClusterSignKey(metaNode.FSM)
-	dataServer := data.NewServer(dataStore, csk.Public, metaNode.FSM, data.NoopValidator{}, true, true)
-	tsData := httptest.NewServer(dataServer)
-	defer tsData.Close()
-
-	registerNode(t, ts.URL, "testsecret", metadata.Node{ID: "data1", Address: tsData.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()})
 
 	// Open for writing
 	path := "/bigblob"
@@ -1218,20 +1328,28 @@ func TestClient_OpenBlobWrite(t *testing.T) {
 	}
 
 	// Read back and verify
-	inode, key, err := c.ResolvePath(ctx, path)
+	inode, key, err := c.resolvePath(ctx, path)
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
 
-	reader, _ := c.NewReader(ctx, inode.ID, key)
-	readBack, _ := io.ReadAll(reader)
+	reader, err := c.newReader(ctx, inode.ID, key)
+	if err != nil {
+		t.Fatalf("NewReader failed: %v", err)
+	}
+	readBack, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatalf("ReadAll failed: %v", err)
+	}
 	if !bytes.Equal(readBack, payload) {
-		t.Error("Data mismatch in big blob")
+		t.Errorf("Data mismatch in big blob. Expected len %d, got %d", len(payload), len(readBack))
 	}
 }
 
 func TestClient_ExtraDataOps(t *testing.T) {
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer metaNode.Shutdown()
 	defer metaServer.Shutdown()
 	defer ts.Close()
@@ -1241,16 +1359,16 @@ func TestClient_ExtraDataOps(t *testing.T) {
 	// 1. CommitInodeManifest
 	path := "/f1"
 	c.CreateFile(ctx, path, bytes.NewReader([]byte("init")), 4)
-	inode, _, _ := c.ResolvePath(ctx, path)
+	inode, _, _ := c.resolvePath(ctx, path)
 
 	manifest := []metadata.ChunkEntry{{ID: "c1", Nodes: []string{"n1"}}}
-	_, err := c.CommitInodeManifest(ctx, inode.ID, manifest, 100)
+	_, err := c.commitInodeManifest(ctx, inode.ID, manifest, 100)
 	if err != nil {
 		t.Fatalf("CommitInodeManifest failed: %v", err)
 	}
 
 	// 2. FetchChunk (Error case: missing chunk)
-	_, err = c.FetchChunk(ctx, inode.ID, make([]byte, 32), 0)
+	_, err = c.fetchChunk(ctx, inode.ID, make([]byte, 32), 0)
 	if err == nil {
 		// Might fail because urls are missing, but let's see.
 	}
@@ -1264,7 +1382,9 @@ func TestClient_ExtraDataOps(t *testing.T) {
 
 func TestClient_Chroot(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Create a subdirectory to be our new root
@@ -1274,7 +1394,7 @@ func TestClient_Chroot(t *testing.T) {
 		t.Fatalf("Mkdir failed: %v", err)
 	}
 
-	jailInode, _, err := c.ResolvePath(ctx, "/jail")
+	jailInode, _, err := c.resolvePath(ctx, "/jail")
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
@@ -1290,7 +1410,7 @@ func TestClient_Chroot(t *testing.T) {
 	cj := c.WithRootID(jailInode.ID)
 
 	// Verify ResolvePath("/") returns the jail inode
-	root, _, err := cj.ResolvePath(ctx, "/")
+	root, _, err := cj.resolvePath(ctx, "/")
 	if err != nil {
 		t.Fatalf("Chroot ResolvePath(/) failed: %v", err)
 	}
@@ -1299,7 +1419,7 @@ func TestClient_Chroot(t *testing.T) {
 	}
 
 	// Verify we can see secret.txt at / in the chrooted client
-	inode, _, err := cj.ResolvePath(ctx, "/secret.txt")
+	inode, _, err := cj.resolvePath(ctx, "/secret.txt")
 	if err != nil {
 		t.Fatalf("Chroot ResolvePath failed: %v", err)
 	}
@@ -1308,7 +1428,7 @@ func TestClient_Chroot(t *testing.T) {
 	}
 
 	// Verify we can't see the original root from the chrooted client
-	inode2, _, err := cj.ResolvePath(ctx, "/jail")
+	inode2, _, err := cj.resolvePath(ctx, "/jail")
 	if err == nil {
 		t.Errorf("Chrooted client should not see /jail (it is the root), but it found inode %s", inode2.ID)
 	}
@@ -1326,7 +1446,9 @@ func TestClient_Chroot(t *testing.T) {
 
 func TestClient_ConcurrentDirectoryUpdates(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	err := c.Mkdir(ctx, "/stress", 0755)

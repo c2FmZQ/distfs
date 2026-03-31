@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package metadata
 
@@ -19,14 +21,16 @@ import (
 )
 
 func TestFSMKeyRotation(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
-	defer server.Shutdown()
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
+	node := tc.Node
+	server := tc.Server
 	WaitLeader(t, node.Raft)
 
 	sk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+	CreateUser(t, tc.Node, User{ID: "u1", UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
 
 	// 1. Create Inode (Gen 1)
 	nonce1 := make([]byte, 16)
@@ -89,10 +93,12 @@ func TestFSMKeyRotation(t *testing.T) {
 }
 
 func TestFSMKeyRingSync(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
-	defer server.Shutdown()
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
+	node := tc.Node
+	server := tc.Server
 	WaitLeader(t, node.Raft)
 
 	// 1. Rotate a few times
@@ -176,8 +182,14 @@ func TestKeyRotation(t *testing.T) {
 		t.Fatal("Node did not become leader")
 	}
 
+	BootstrapClusterKeys(t, node)
+	adminID := "alice"
+	adminSK, _ := crypto.GenerateIdentityKey()
+	adminDK, _ := crypto.GenerateEncryptionKey()
+	BootstrapBackbone(t, node, adminID, adminDK, adminSK)
+
 	sk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()}, sk, adminID, adminSK)
 
 	// 2. Apply Log 1 (Gen 1)
 	nonce1 := make([]byte, 16)
@@ -249,24 +261,31 @@ func TestKeyRotation(t *testing.T) {
 	}
 	defer node2.Shutdown()
 
-	// Wait for restore
-	time.Sleep(2 * time.Second)
+	// Wait for restore and leader
+	WaitLeader(t, node2.Raft)
 
 	// 9. Verify State
-	err = node2.FSM.db.View(func(tx *bolt.Tx) error { // bolt imported
-		b := tx.Bucket([]byte("inodes"))
-		if b.Get([]byte(id1)) == nil {
-			return fmt.Errorf("inode-1 missing (lost during snapshot 1?)")
+	var errState error
+	for i := 0; i < 50; i++ {
+		errState = node2.FSM.db.View(func(tx *bolt.Tx) error { // bolt imported
+			b := tx.Bucket([]byte("inodes"))
+			if b.Get([]byte(id1)) == nil {
+				return fmt.Errorf("inode-1 missing (lost during snapshot 1?)")
+			}
+			if b.Get([]byte(id2)) == nil {
+				return fmt.Errorf("inode-2 missing (lost during snapshot 2?)")
+			}
+			if b.Get([]byte(id3)) == nil {
+				return fmt.Errorf("inode-3 missing (failed to decrypt trailing log?)")
+			}
+			return nil
+		})
+		if errState == nil {
+			break
 		}
-		if b.Get([]byte(id2)) == nil {
-			return fmt.Errorf("inode-2 missing (lost during snapshot 2?)")
-		}
-		if b.Get([]byte(id3)) == nil {
-			return fmt.Errorf("inode-3 missing (failed to decrypt trailing log?)")
-		}
-		return nil
-	})
-	if err != nil {
-		t.Error(err)
+		time.Sleep(100 * time.Millisecond)
+	}
+	if errState != nil {
+		t.Error(errState)
 	}
 }

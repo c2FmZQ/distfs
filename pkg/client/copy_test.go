@@ -11,7 +11,9 @@ import (
 
 func TestClient_CopyRecursive(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Setup source structure
@@ -31,7 +33,7 @@ func TestClient_CopyRecursive(t *testing.T) {
 	}
 
 	// 3. Verify destination structure
-	inodeF1, _, err := c.ResolvePath(ctx, "/dst/f1.txt")
+	inodeF1, _, err := c.resolvePath(ctx, "/dst/f1.txt")
 	if err != nil {
 		t.Fatalf("Resolve /dst/f1.txt failed: %v", err)
 	}
@@ -49,7 +51,7 @@ func TestClient_CopyRecursive(t *testing.T) {
 		t.Errorf("Content mismatch: expected 'file1', got '%s'", string(data))
 	}
 
-	inodeF2, _, err := c.ResolvePath(ctx, "/dst/subdir/f2.txt")
+	inodeF2, _, err := c.resolvePath(ctx, "/dst/subdir/f2.txt")
 	if err != nil {
 		t.Fatalf("Resolve /dst/subdir/f2.txt failed: %v", err)
 	}
@@ -60,7 +62,9 @@ func TestClient_CopyRecursive(t *testing.T) {
 
 func TestClient_Quota(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	quota, usage, err := c.GetQuota(ctx)
@@ -75,18 +79,20 @@ func TestClient_Quota(t *testing.T) {
 
 func TestFileReader_Seek(t *testing.T) {
 	ctx := context.Background()
-	c, _, _, ts := SetupTestClient(t)
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	content := []byte("0123456789")
 	c.CreateFile(ctx, "/seekable", bytes.NewReader(content), 10)
 
-	inode, key, err := c.ResolvePath(ctx, "/seekable")
+	inode, key, err := c.resolvePath(ctx, "/seekable")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	r, err := c.NewReader(ctx, inode.ID, key)
+	r, err := c.newReader(ctx, inode.ID, key)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,44 +7,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"net/http/httptest"
 	"testing"
 	"time"
 
-	"github.com/c2FmZQ/distfs/pkg/data"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
-	"github.com/c2FmZQ/storage"
-	storage_crypto "github.com/c2FmZQ/storage/crypto"
 	bolt "go.etcd.io/bbolt"
 )
-
-func createDataNode(t *testing.T, metaNode *metadata.RaftNode, id string) (*httptest.Server, data.Store) {
-	tmpDir := t.TempDir()
-	mk, _ := storage_crypto.CreateAESMasterKeyForTest()
-	st := storage.New(tmpDir, mk)
-	ds, _ := data.NewDiskStore(st)
-
-	metaSignPK, _ := metaNode.FSM.GetClusterSignPublicKey()
-	srv := data.NewServer(ds, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	ts := httptest.NewServer(srv)
-
-	nodeInfo := metadata.Node{
-		ID:            id,
-		Address:       ts.URL,
-		Status:        metadata.NodeStatusActive,
-		LastHeartbeat: time.Now().Unix(),
-	}
-	nb, _ := json.Marshal(nodeInfo)
-	nbb, err := metadata.LogCommand{Type: metadata.CmdRegisterNode, Data: nb}.Marshal()
-	if err != nil {
-		t.Fatalf("failed to marshal register node command: %v", err)
-	}
-	if err := metaNode.Raft.Apply(nbb, 5*time.Second).Error(); err != nil {
-		t.Fatalf("Failed to register node: %v", err)
-	}
-
-	return ts, ds
-}
 
 func markNodeOffline(t *testing.T, metaNode *metadata.RaftNode, id, address string) {
 	nodeInfo := metadata.Node{
@@ -65,7 +33,9 @@ func markNodeOffline(t *testing.T, metaNode *metadata.RaftNode, id, address stri
 
 func TestReplication_UnderReplicationRepair(t *testing.T) {
 	ctx := context.Background()
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Setup 2 EXTRA Data Nodes (Along with n1 from setup, that's 3 total)
@@ -73,6 +43,9 @@ func TestReplication_UnderReplicationRepair(t *testing.T) {
 	defer ts1.Close()
 	ts2, _ := createDataNode(t, metaNode, "repair-n2")
 	defer ts2.Close()
+
+	// Ensure client sees new nodes
+	c.ClearNodeCache()
 
 	// Small sleep to ensure Raft apply to FSM
 	time.Sleep(200 * time.Millisecond)
@@ -85,7 +58,7 @@ func TestReplication_UnderReplicationRepair(t *testing.T) {
 	}
 
 	// Verify it has 3 replicas
-	inode, _, _ := c.ResolvePath(ctx, "/repair-test")
+	inode, _, _ := c.resolvePath(ctx, "/repair-test")
 	if len(inode.ChunkManifest) == 0 {
 		t.Fatal("File was inlined, test won't work")
 	}
@@ -112,10 +85,10 @@ func TestReplication_UnderReplicationRepair(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// 5. Fresh client
-	c2 := NewClient(ts.URL).WithIdentity(c.userID, c.decKey).WithSignKey(c.signKey).WithServerKey(c.serverKey)
+	c2 := NewClient(ts.URL).withIdentity(c.userID, c.decKey).withSignKey(c.signKey).withServerKey(c.serverKey)
 	c2.Login(ctx)
 
-	inode2, _, err := c2.ResolvePath(ctx, "/repair-test")
+	inode2, _, err := c2.resolvePath(ctx, "/repair-test")
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
@@ -137,7 +110,9 @@ func TestReplication_UnderReplicationRepair(t *testing.T) {
 
 func TestReplication_OverReplicationPruning(t *testing.T) {
 	ctx := context.Background()
-	c, metaNode, metaServer, ts := SetupTestClient(t)
+	c, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Setup 2 EXTRA Data Nodes (3 total)
@@ -145,6 +120,9 @@ func TestReplication_OverReplicationPruning(t *testing.T) {
 	defer ts1.Close()
 	ts2, _ := createDataNode(t, metaNode, "prune-n2")
 	defer ts2.Close()
+
+	// Ensure client sees new nodes
+	c.ClearNodeCache()
 	time.Sleep(200 * time.Millisecond)
 
 	// 2. Write a file
@@ -154,8 +132,16 @@ func TestReplication_OverReplicationPruning(t *testing.T) {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
+	// Verify it has 3 replicas
+	inode, _, _ := c.resolvePath(ctx, "/prune-test")
+	if len(inode.ChunkManifest) == 0 {
+		t.Fatal("File was inlined")
+	}
+	if len(inode.ChunkManifest[0].Nodes) < 3 {
+		t.Fatalf("Initial replication too low: %d", len(inode.ChunkManifest[0].Nodes))
+	}
+
 	// 3. MANUALLY add a 4th replica
-	inode, _, _ := c.ResolvePath(ctx, "/prune-test")
 	if len(inode.ChunkManifest) == 0 {
 		t.Fatal("File was inlined, test won't work")
 	}
@@ -181,9 +167,9 @@ func TestReplication_OverReplicationPruning(t *testing.T) {
 
 	// Verify it now has 4 replicas
 	time.Sleep(200 * time.Millisecond)
-	c2 := NewClient(ts.URL).WithIdentity(c.userID, c.decKey).WithSignKey(c.signKey).WithServerKey(c.serverKey)
+	c2 := NewClient(ts.URL).withIdentity(c.userID, c.decKey).withSignKey(c.signKey).withServerKey(c.serverKey)
 	c2.Login(ctx)
-	inode2, _, _ := c2.ResolvePath(ctx, "/prune-test")
+	inode2, _, _ := c2.resolvePath(ctx, "/prune-test")
 	t.Logf("Nodes before pruning: %v", inode2.ChunkManifest[0].Nodes)
 	if len(inode2.ChunkManifest[0].Nodes) != 4 {
 		t.Fatalf("Expected 4 replicas, got %d", len(inode2.ChunkManifest[0].Nodes))
@@ -194,9 +180,9 @@ func TestReplication_OverReplicationPruning(t *testing.T) {
 	time.Sleep(3 * time.Second)
 
 	// 5. Verify back to 3 replicas
-	c3 := NewClient(ts.URL).WithIdentity(c.userID, c.decKey).WithSignKey(c.signKey).WithServerKey(c.serverKey)
+	c3 := NewClient(ts.URL).withIdentity(c.userID, c.decKey).withSignKey(c.signKey).withServerKey(c.serverKey)
 	c3.Login(ctx)
-	inode3, _, _ := c3.ResolvePath(ctx, "/prune-test")
+	inode3, _, _ := c3.resolvePath(ctx, "/prune-test")
 	finalNodes := inode3.ChunkManifest[0].Nodes
 	t.Logf("Nodes after pruning: %v", finalNodes)
 	if len(finalNodes) != 3 {
@@ -206,7 +192,9 @@ func TestReplication_OverReplicationPruning(t *testing.T) {
 
 func TestIntegrity_ContentSwapAttack(t *testing.T) {
 	ctx := context.Background()
-	c, metaNode, _, ts := SetupTestClient(t)
+	c, metaNode, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
 	defer ts.Close()
 
 	// 1. Setup Data Node
@@ -229,11 +217,11 @@ func TestIntegrity_ContentSwapAttack(t *testing.T) {
 	// 4. MALICIOUS SERVER ATTACK: Swap ChunkID of File A with ChunkID of File B
 	var inodeA, inodeB *metadata.Inode
 	var errA, errB error
-	inodeA, _, errA = c.ResolvePath(ctx, "/file-a")
+	inodeA, _, errA = c.resolvePath(ctx, "/file-a")
 	if errA != nil {
 		t.Fatalf("ResolvePath A failed: %v", errA)
 	}
-	inodeB, _, errB = c.ResolvePath(ctx, "/file-b")
+	inodeB, _, errB = c.resolvePath(ctx, "/file-b")
 	if errB != nil {
 		t.Fatalf("ResolvePath B failed: %v", errB)
 	}
@@ -267,11 +255,11 @@ func TestIntegrity_ContentSwapAttack(t *testing.T) {
 	}
 
 	// 5. Fresh client
-	c2 := NewClient(ts.URL).WithIdentity(c.userID, c.decKey).WithSignKey(c.signKey).WithServerKey(c.serverKey)
+	c2 := NewClient(ts.URL).withIdentity(c.userID, c.decKey).withSignKey(c.signKey).withServerKey(c.serverKey)
 	c2.Login(ctx)
 
 	// Attempt to read File A
-	_, _, err = c2.ResolvePath(ctx, "/file-a")
+	_, _, err = c2.resolvePath(ctx, "/file-a")
 	if err == nil {
 		t.Error("Expected error when reading tampered Inode (content swap), but it succeeded")
 	} else {

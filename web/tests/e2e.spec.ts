@@ -43,12 +43,12 @@ test.describe('DistFS Web Client Phase 64 E2E', () => {
     // Helper to get group ID by name
     const getGroupID = (name: string) => {
         try {
-            const out = runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} group-create ${name}`, 'testpassword');
-            return out.match(/ID:\s+([a-f0-9]+)/)?.[1] || '';
-        } catch (e: any) {
-            const errStr = e.stdout?.toString() || e.message || '';
-            const match = errStr.match(/ID:\s+([a-f0-9]+)/);
+            // Use ls on the registry to get the group ID instead of recreating it
+            const out = runCLI(`/bin/distfs -admin -allow-insecure -config ${adminConfig} ls -l /registry/${name}.group`, 'testpassword');
+            const match = out.match(/->\s+([a-f0-9]+)\.group-id/);
             if (match) return match[1];
+            return '';
+        } catch (e: any) {
             return '';
         }
     };

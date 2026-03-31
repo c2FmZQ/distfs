@@ -45,14 +45,18 @@ func (m *mockLSClient) UserID() string {
 func TestLS_ProcessAndPrint(t *testing.T) {
 	now := time.Now()
 	// MTime is in nanoseconds in Inode
+	i1 := &metadata.Inode{ID: "1", Size: 100}
+	i1.SetMTime(now.UnixNano())
+	i2 := &metadata.Inode{ID: "2", Size: 200}
+	i2.SetMTime(now.Add(time.Hour).UnixNano())
+	i3 := &metadata.Inode{ID: "3", Size: 50}
+	i3.SetMTime(now.Add(-time.Hour).UnixNano())
+
 	entries := []*client.DistDirEntry{
-		client.NewDirEntryForTest(&metadata.Inode{ID: "1", Size: 100}, "b.txt", nil),
-		client.NewDirEntryForTest(&metadata.Inode{ID: "2", Size: 200}, "a.txt", nil),
-		client.NewDirEntryForTest(&metadata.Inode{ID: "3", Size: 50}, ".hidden", nil),
+		client.NewDirEntryForTest(i1, "b.txt", nil),
+		client.NewDirEntryForTest(i2, "a.txt", nil),
+		client.NewDirEntryForTest(i3, ".hidden", nil),
 	}
-	entries[0].Inode().SetMTime(now.UnixNano())
-	entries[1].Inode().SetMTime(now.Add(time.Hour).UnixNano())
-	entries[2].Inode().SetMTime(now.Add(-time.Hour).UnixNano())
 
 	tests := []struct {
 		name    string
@@ -102,14 +106,15 @@ func TestLS_ProcessAndPrint(t *testing.T) {
 
 func TestLS_LongFormat(t *testing.T) {
 	now := time.Now()
-	entries := []*client.DistDirEntry{
-		client.NewDirEntryForTest(&metadata.Inode{
-			ID:   "inode-1234567890",
-			Size: 1024,
-			Mode: 0644,
-		}, "file.txt", nil),
+	i1 := &metadata.Inode{
+		ID:   "inode-1234567890",
+		Size: 1024,
+		Mode: 0644,
 	}
-	entries[0].Inode().SetMTime(now.UnixNano())
+	i1.SetMTime(now.UnixNano())
+	entries := []*client.DistDirEntry{
+		client.NewDirEntryForTest(i1, "file.txt", nil),
+	}
 
 	var buf bytes.Buffer
 	// w, entries, long, all, human, inode, classify, oneCol, sortByTime, sortBySize, reverse

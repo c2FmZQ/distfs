@@ -20,7 +20,10 @@ JWT=$(wget -qO- "$AUTH_URL/mint?email=hedge-user@example.com")
 # We'll use a new identity for this test to ensure clean state
 INIT_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG" init --new -server "$SERVER_URL" -jwt "$JWT")
 USER_ID=$(echo "$INIT_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$USER_ID"
+
+echo "Admin: Anchoring and unlocking $USER_ID..."
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock hedge-user "$USER_ID"
+distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add users "$USER_ID"
 
 # Admin: Provision Home
 distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$USER_ID" "/users/hedge-$USER_ID" || true

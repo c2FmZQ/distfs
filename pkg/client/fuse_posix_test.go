@@ -1,5 +1,7 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
-package fuse
+package client
 
 import (
 	"bytes"
@@ -9,15 +11,14 @@ import (
 	"testing"
 	"time"
 
+	"net/http/httptest"
+
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
-	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/hashicorp/raft"
-	"net/http/httptest"
 )
 
 func TestFUSE_POSIXCompliance(t *testing.T) {
@@ -50,12 +51,13 @@ func TestFUSE_POSIXCompliance(t *testing.T) {
 
 	dk, _ := crypto.GenerateEncryptionKey()
 	userSignKey, _ := crypto.GenerateIdentityKey()
+	adminSK, _ := crypto.GenerateIdentityKey()
 	user := metadata.User{
 		ID:      "user-fuse",
 		SignKey: userSignKey.Public(),
 		EncKey:  dk.EncapsulationKey().Bytes(),
 	}
-	createUserLocal(t, metaNode, user)
+	createUserLocal(t, metaNode, user, userSignKey, "admin", adminSK)
 
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorageLocal(t, dataDir)
@@ -70,13 +72,14 @@ func TestFUSE_POSIXCompliance(t *testing.T) {
 		Status:  metadata.NodeStatusActive,
 	})
 
-	c := client.NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-fuse", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	c := NewClient(tsMeta.URL)
+	c = c.withIdentity("user-fuse", dk)
+	c = c.withSignKey(userSignKey)
+	c = c.withServerKey(serverEK)
+	c = c.WithAdmin(true)
 
-	if _, err := c.EnsureRoot(context.Background()); err != nil {
-		t.Fatalf("EnsureRoot failed: %v", err)
+	if err := c.BootstrapFileSystem(context.Background()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
 	}
 
 	mountpoint := t.TempDir()
@@ -85,7 +88,6 @@ func TestFUSE_POSIXCompliance(t *testing.T) {
 		t.Fatalf("Mount failed: %v", err)
 	}
 	defer func() {
-		logger.Debugf("DEBUG TEST: Unmounting %s", mountpoint)
 		fuse.Unmount(mountpoint)
 		conn.Close()
 		time.Sleep(2 * time.Second) // Give kernel/background flushes time to finish

@@ -1,3 +1,5 @@
+//go:build !wasm
+
 // Copyright 2026 TTBT Enterprises LLC
 package metadata
 
@@ -16,7 +18,10 @@ import (
 )
 
 func TestReplicationMonitor_Scan(t *testing.T) {
-	node, ts, _, _, s := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	s := tc.Server
 	defer s.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -49,7 +54,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	node.Raft.Apply(n4b, 5*time.Second)
 
 	sk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+	CreateUser(t, tc.Node, User{ID: "u1", UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
 
 	// 2. Setup Inode with under-replication (n1, n3 are owners, but n3 will be "dead" soon)
 	inode := Inode{
@@ -127,7 +132,9 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 }
 
 func TestReplication_Scan_Concurrent(t *testing.T) {
-	node, _, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	WaitLeader(t, node.Raft)
@@ -139,7 +146,10 @@ func TestReplication_Scan_Concurrent(t *testing.T) {
 }
 
 func TestReplicationMonitor_Prune(t *testing.T) {
-	node, ts, _, _, s := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	s := tc.Server
 	defer s.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -172,7 +182,7 @@ func TestReplicationMonitor_Prune(t *testing.T) {
 	node.Raft.Apply(n4b, 5*time.Second)
 
 	sk, _ := crypto.GenerateIdentityKey()
-	CreateUser(t, node, User{ID: "u1", UID: 1001, SignKey: sk.Public()})
+	CreateUser(t, tc.Node, User{ID: "u1", UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
 
 	// 2. Setup Inode with over-replication (4 nodes, target is 3)
 	inode := Inode{
@@ -235,7 +245,10 @@ func mustMarshal(v interface{}) []byte {
 }
 
 func TestReplication_Misc(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -248,7 +261,10 @@ func TestReplication_Misc(t *testing.T) {
 }
 
 func TestGC_Misc(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -261,7 +277,10 @@ func TestGC_Misc(t *testing.T) {
 }
 
 func TestReplication_Scan_Types(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -285,7 +304,10 @@ func TestReplication_Scan_Types(t *testing.T) {
 }
 
 func TestReplication_Repair_Fail(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -298,7 +320,10 @@ func TestReplication_Repair_Fail(t *testing.T) {
 }
 
 func TestReplication_Repair_RaftFail(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	// Don't defer shutdown yet
 
@@ -314,7 +339,10 @@ func TestReplication_Repair_RaftFail(t *testing.T) {
 }
 
 func TestGC_DeleteFail(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -330,7 +358,10 @@ func TestGC_DeleteFail(t *testing.T) {
 }
 
 func TestKeyRotation_Misc(t *testing.T) {
-	node, ts, _, _, server := SetupCluster(t)
+	tc := SetupCluster(t)
+	node := tc.Node
+	ts := tc.TS
+	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()

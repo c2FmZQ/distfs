@@ -1,28 +1,32 @@
-package metadata_test
+//go:build !wasm
+
+package client
 
 import (
 	"sync"
 	"testing"
 
-	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
 func TestGroupUpdateConcurrency(t *testing.T) {
-	node, ts, _, serverEK, srv := metadata.SetupCluster(t)
-	defer srv.Shutdown()
-	defer node.Shutdown()
-	defer ts.Close()
+	tc := metadata.SetupCluster(t)
+	defer tc.Server.Shutdown()
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
 
-	// 1. Setup Alice (Owner) and two members to add
-	uAliceSign, _ := crypto.GenerateIdentityKey()
-	uAliceDK, _ := crypto.GenerateEncryptionKey()
-	uAlice := metadata.User{ID: "alice", SignKey: uAliceSign.Public(), EncKey: uAliceDK.EncapsulationKey().Bytes()}
-	metadata.CreateUser(t, node, uAlice)
+	// 1. Setup Alice (using existing Admin from SetupCluster)
+	clientAlice, err := NewClient(tc.TS.URL).
+		withIdentity(tc.AdminID, tc.AdminDK).
+		withSignKey(tc.AdminSK).
+		WithServerKeyBytes(tc.EpochEK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clientAlice = clientAlice.WithAdmin(true).
+		WithRegistry("") // Disable registry for pure metadata test
 
-	serverPK, _ := crypto.UnmarshalEncapsulationKey(serverEK)
-	clientAlice := client.NewClient(ts.URL).WithIdentity("alice", uAliceDK).WithSignKey(uAliceSign).WithServerKey(serverPK)
 	if err := clientAlice.Login(t.Context()); err != nil {
 		t.Fatalf("Alice login failed: %v", err)
 	}
@@ -32,11 +36,11 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 		sk, _ := crypto.GenerateIdentityKey()
 		dk, _ := crypto.GenerateEncryptionKey()
 		u := metadata.User{ID: id, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
-		metadata.CreateUser(t, node, u)
+		metadata.CreateUser(t, tc.Node, u, sk, tc.AdminID, tc.AdminSK)
 	}
 
 	// 2. Alice creates a group
-	group, err := clientAlice.CreateGroup(t.Context(), "race-test", false)
+	group, err := clientAlice.createGroup(t.Context(), "race-test", false)
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
@@ -68,24 +72,28 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 	}
 
 	// 4. Verify BOTH users are present
-	finalGroup, err := clientAlice.GetGroup(t.Context(), group.ID)
+	finalGroup, err := clientAlice.getGroup(t.Context(), group.ID)
 	if err != nil {
 		t.Fatalf("GetGroup failed: %v", err)
 	}
 
-	if !finalGroup.Members["user1"] {
+	h1 := metadata.ComputeMemberHMAC(finalGroup.SignKey, "user1")
+	h2 := metadata.ComputeMemberHMAC(finalGroup.SignKey, "user2")
+
+	if !finalGroup.MembersHMAC[h1] {
 		t.Errorf("user1 missing from group members")
 	}
-	if !finalGroup.Members["user2"] {
+	if !finalGroup.MembersHMAC[h2] {
 		t.Errorf("user2 missing from group members")
 	}
 
 	// Verify Registry (Fix #2 ensures merge)
 	found1, found2 := false, false
-	for m, err := range clientAlice.GetGroupMembers(t.Context(), group.ID) {
-		if err != nil {
-			t.Fatalf("GetGroupMembers failed: %v", err)
-		}
+	members, err := clientAlice.AdminGetGroupMembersList(t.Context(), group.ID)
+	if err != nil {
+		t.Fatalf("GetGroupMembers failed: %v", err)
+	}
+	for _, m := range members {
 		if m.UserID == "user1" {
 			found1 = true
 		}

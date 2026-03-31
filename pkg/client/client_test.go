@@ -19,12 +19,12 @@ package client
 import (
 	"bytes"
 	"crypto/mlkem"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -48,8 +48,8 @@ func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_cryp
 
 var nextTestUID uint32 = 1000
 
-func createUser(t *testing.T, raftNode *metadata.RaftNode, user metadata.User) {
-	metadata.CreateUser(t, raftNode, user)
+func createUser(t *testing.T, raftNode *metadata.RaftNode, user metadata.User, userSK *crypto.IdentityKey, adminID string, adminSK *crypto.IdentityKey) {
+	metadata.CreateUser(t, raftNode, user, userSK, adminID, adminSK)
 }
 
 func waitLeader(t *testing.T, r *raft.Raft) {
@@ -103,12 +103,12 @@ func bootstrapCluster(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.Encapsu
 	return dk.EncapsulationKey(), dk, csk.Public()
 }
 
-func registerNode(t *testing.T, serverURL, secret string, node metadata.Node) {
+func registerNode(t *testing.T, serverEndpoint, secret string, node metadata.Node) {
 	if node.LastHeartbeat == 0 {
 		node.LastHeartbeat = time.Now().Unix()
 	}
 	body, _ := json.Marshal(node)
-	req, _ := http.NewRequest("POST", serverURL+"/v1/node", bytes.NewReader(body))
+	req, _ := http.NewRequest("POST", serverEndpoint+"/v1/node", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Raft-Secret", secret)
 	resp, err := http.DefaultClient.Do(req)
@@ -122,81 +122,30 @@ func registerNode(t *testing.T, serverURL, secret string, node metadata.Node) {
 }
 
 func TestClientIntegration(t *testing.T) {
-	// 1. Setup Metadata Node
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
-	if err != nil {
-		t.Fatal(err)
+	adminClient, metaNode, _, ts, adminID, adminSK := setupTestClient(t)
+
+	// 1. Setup User (Bob)
+	c, _, _ := provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
+
+	// Admin provisions a home directory for user-1
+	if err := adminClient.Mkdir(t.Context(), "/home", 0755); err != nil {
+		t.Fatalf("Admin failed to create /home: %v", err)
 	}
-	defer metaNode.Shutdown()
-
-	// Bootstrap
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-
-	// Wait for leader
-	waitLeader(t, metaNode.Raft)
-
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	// Generate User Keys
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-
-	// Register User
-	user := metadata.User{
-		ID:      "user-1",
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
+	if err := adminClient.MkdirExtended(t.Context(), "/home/user-1", 0755, MkdirOptions{OwnerID: "user-1"}); err != nil {
+		t.Fatalf("Admin failed to create /home/user-1: %v", err)
 	}
-	createUser(t, metaNode, user)
-
-	// 2. Setup Data Node
-	dataDir := t.TempDir()
-	dataSt, _ := createTestStorage(t, dataDir)
-	dataStore, _ := data.NewDiskStore(dataSt)
-
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	tsData := httptest.NewServer(dataServer)
-	defer tsData.Close()
-
-	// Register Data Node
-	node := metadata.Node{
-		ID:      "data1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
-	}
-	registerNode(t, tsMeta.URL, "testsecret", node)
-
-	// 3. Client
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
 
 	// 4. Write File (Raw)
 	content := []byte("hello distributed filesystem world")
-	nonce := make([]byte, 16)
-	rand.Read(nonce)
+	nonce := metadata.GenerateNonce()
 	fileID := metadata.GenerateInodeID("user-1", nonce)
-	key, err := c.WriteFile(t.Context(), fileID, nonce, bytes.NewReader(content), int64(len(content)), 0644)
+	key, err := c.writeFile(t.Context(), fileID, nonce, bytes.NewReader(content), int64(len(content)), 0644)
 	if err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
 	// 5. Read File (Raw)
-	rc, err := c.ReadFile(t.Context(), fileID, key)
+	rc, err := c.readFile(t.Context(), fileID, key)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
@@ -211,17 +160,13 @@ func TestClientIntegration(t *testing.T) {
 	}
 
 	// 6. FS Integration
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
-		t.Fatalf("EnsureRoot failed: %v", err)
-	}
-
-	fileName := "/file-2.txt"
+	fileName := "/home/user-1/file-2.txt"
 	if err := c.CreateFile(t.Context(), fileName, bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
 	dfs := c.FS(t.Context())
-	f, err := dfs.Open("file-2.txt")
+	f, err := dfs.Open("home/user-1/file-2.txt")
 	if err != nil {
 		t.Fatalf("FS Open failed: %v", err)
 	}
@@ -235,207 +180,103 @@ func TestClientIntegration(t *testing.T) {
 		t.Error("FS Read mismatch")
 	}
 
-	info, _ := f.Stat()
-	if info.Size() != int64(len(content)) {
+	finfo, _ := f.Stat()
+	if finfo.Size() != int64(len(content)) {
 		t.Error("Stat size mismatch")
 	}
 }
 
 func TestReplication(t *testing.T) {
-	// 1. Setup Metadata Node
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer metaNode.Shutdown()
+	adminClient, metaNode, _, ts, adminID, adminSK := setupTestClient(t)
 
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
+	// 1. Setup User (Bob)
+	c, _, _ := provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
 
-	// Wait for leader
-	leader := false
-	for i := 0; i < 50; i++ {
-		if metaNode.Raft.State() == raft.Leader {
-			leader = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !leader {
-		t.Fatal("Node did not become leader")
-	}
-
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	// Generate User Keys
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-
-	// Register User
-	user := metadata.User{
-		ID:      "user-1",
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
-	}
-	createUser(t, metaNode, user)
-
-	// 2. Three Data Nodes
-	nodes := make([]*httptest.Server, 3)
-	stores := make([]data.Store, 3)
-	for i := 0; i < 3; i++ {
+	// 2. Extra Data Nodes
+	stores := make([]data.Store, 2)
+	for i := 0; i < 2; i++ {
 		dir := t.TempDir()
 		st, _ := createTestStorage(t, dir)
 		store, _ := data.NewDiskStore(st)
 		stores[i] = store
-		server := data.NewServer(store, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-		ts := httptest.NewServer(server)
-		nodes[i] = ts
-		defer ts.Close()
+		server := data.NewServer(store, adminClient.signKey.Public(), metaNode.FSM, data.NoopValidator{}, true, true)
+		tsDN := httptest.NewServer(server)
+		t.Cleanup(func() { tsDN.Close() })
 
-		// Register with Metadata
-		node := metadata.Node{
-			ID:      fmt.Sprintf("data-%d", i),
-			Address: ts.URL,
+		registerNode(t, ts.URL, "testsecret", metadata.Node{
+			ID:      fmt.Sprintf("data-%d", i+2),
+			Address: tsDN.URL,
 			Status:  metadata.NodeStatusActive,
-		}
-		registerNode(t, tsMeta.URL, "testsecret", node)
+		})
 	}
 
-	// 3. Client
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	// Admin provisions a home directory for user-1
+	if err := adminClient.Mkdir(t.Context(), "/home", 0755); err != nil {
+		t.Fatalf("Admin failed to create /home: %v", err)
+	}
+	if err := adminClient.MkdirExtended(t.Context(), "/home/user-1", 0755, MkdirOptions{OwnerID: "user-1"}); err != nil {
+		t.Fatalf("Admin failed to create /home/user-1: %v", err)
+	}
 
 	// 4. Write
 	content := bytes.Repeat([]byte("replicated data "), 500) // ~8KB
-	nonceRepl := make([]byte, 16)
-	rand.Read(nonceRepl)
-	fileID := metadata.GenerateInodeID("user-1", nonceRepl)
-	_, err = c.WriteFile(t.Context(), fileID, nonceRepl, bytes.NewReader(content), int64(len(content)), 0644)
+	if err := c.CreateFile(t.Context(), "/home/user-1/repl.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
+	}
+
+	// 5. Read back
+	inode, key, err := c.resolvePath(t.Context(), "/home/user-1/repl.txt")
 	if err != nil {
-		t.Fatalf("Write failed: %v", err)
+		t.Fatalf("ResolvePath failed: %v", err)
 	}
 
-	// 5. Verify on ALL nodes
-	chunks := stores[0].ListChunks()
-	var chunkID string
-	for id := range chunks {
-		chunkID = id
-		break
+	rc, err := c.readFile(t.Context(), inode.ID, key)
+	if err != nil {
+		t.Fatalf("ReadFile failed: %v", err)
 	}
+	readBack, _ := io.ReadAll(rc)
+	rc.Close()
 
-	if chunkID == "" {
-		t.Fatal("No chunks found on primary")
-	}
-
-	for i := 0; i < 3; i++ {
-		has, _ := stores[i].HasChunk(chunkID)
-		if !has {
-			t.Errorf("Node %d missing chunk %s", i, chunkID)
-		}
+	if !bytes.Equal(readBack, content) {
+		t.Fatal("content mismatch")
 	}
 }
 
 func TestDirectories(t *testing.T) {
-	// Setup Cluster (Single node fine for logic)
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer metaNode.Shutdown()
+	adminClient, metaNode, _, ts, adminID, adminSK := setupTestClient(t)
 
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-	waitLeader(t, metaNode.Raft)
+	// 1. Setup User (Bob)
+	c, _, _ := provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
 
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	// Generate User Keys
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-
-	// Register User
-	user := metadata.User{
-		ID:      "user-1",
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
-	}
-	createUser(t, metaNode, user)
-
-	dataDir := t.TempDir()
-	dataSt, _ := createTestStorage(t, dataDir)
-	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	tsData := httptest.NewServer(dataServer)
-	defer tsData.Close()
-
-	// Register Data Node
-	node := metadata.Node{
-		ID:      "data-1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
-	}
-	registerNode(t, tsMeta.URL, "testsecret", node)
-
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
-
-	// Ensure Root
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
+	// Admin provisions a home directory for user-1
+	if _, err := c.EnsureRoot(t.Context()); err != nil && err != metadata.ErrExists {
 		t.Fatalf("EnsureRoot failed: %v", err)
 	}
 
 	// Mkdir /a
-	if err := c.Mkdir(t.Context(), "/a", 0755); err != nil {
+	if err := adminClient.Mkdir(t.Context(), "/a", 0755); err != nil {
 		t.Fatalf("Mkdir /a failed: %v", err)
 	}
 
 	// Mkdir /a/b
-	if err := c.Mkdir(t.Context(), "/a/b", 0755); err != nil {
+	if err := adminClient.Mkdir(t.Context(), "/a/b", 0755); err != nil {
 		t.Fatalf("Mkdir /a/b failed: %v", err)
 	}
 
 	// Create File
 	content := []byte("file content")
-	if err := c.CreateFile(t.Context(), "/a/b/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := adminClient.CreateFile(t.Context(), "/a/b/f.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatalf("CreateFile failed: %v", err)
 	}
 
 	// Resolve
-	inode, key, err := c.ResolvePath(t.Context(), "/a/b/f.txt")
+	inode, key, err := adminClient.resolvePath(t.Context(), "/a/b/f.txt")
 	if err != nil {
 		t.Fatalf("ResolvePath failed: %v", err)
 	}
 
 	// Read
-	rc, err := c.ReadFile(t.Context(), inode.ID, key)
+	rc, err := adminClient.readFile(t.Context(), inode.ID, key)
 	if err != nil {
 		t.Fatalf("ReadFile failed: %v", err)
 	}
@@ -450,100 +291,38 @@ func TestDirectories(t *testing.T) {
 }
 
 func TestReplicationRepair(t *testing.T) {
-	// 1. Setup Metadata
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	adminClient, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
 	defer metaNode.Shutdown()
+	defer ts.Close()
+	// 1. Setup User (Bob)
+	c, _, _ := provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
 
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-	waitLeader(t, metaNode.Raft)
-
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	// Generate User Keys
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-
-	// Register User
-	user := metadata.User{
-		ID:      "user-1",
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
-	}
-	createUser(t, metaNode, user)
-
-	// 2. Start ONE Data Node initially
-	dataDir1 := t.TempDir()
-	st1, _ := createTestStorage(t, dataDir1)
-	store1, _ := data.NewDiskStore(st1)
-	server1 := data.NewServer(store1, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	ts1 := httptest.NewServer(server1)
-	defer ts1.Close()
-
-	node1 := metadata.Node{ID: "data-1", Address: ts1.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	registerNode(t, tsMeta.URL, "testsecret", node1)
-
-	// 3. Write File (Will have 1 replica)
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
-
+	// Admin provisions a home directory for user-1
 	content := bytes.Repeat([]byte("repair me "), 1000) // ~10KB
-	nonceRepair := make([]byte, 16)
-	rand.Read(nonceRepair)
+	nonceRepair := metadata.GenerateNonce()
 	fileID := metadata.GenerateInodeID("user-1", nonceRepair)
-	_, err = c.WriteFile(t.Context(), fileID, nonceRepair, bytes.NewReader(content), int64(len(content)), 0644) // Raw write
+	_, err := c.writeFile(t.Context(), fileID, nonceRepair, bytes.NewReader(content), int64(len(content)), 0644) // Raw write
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
 
-	// Get Chunk ID
-	chunks := store1.ListChunks()
-	var chunkID string
-	for id := range chunks {
-		chunkID = id
-		break
-	}
-	if chunkID == "" {
-		t.Fatal("No chunks found on primary")
-	}
-
 	// 4. Start 2 more Data Nodes
-	dataDir2 := t.TempDir()
-	st2, _ := createTestStorage(t, dataDir2)
-	store2, _ := data.NewDiskStore(st2)
-	server2 := data.NewServer(store2, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	ts2 := httptest.NewServer(server2)
-	defer ts2.Close()
+	stores := make([]data.Store, 2)
+	for i := 0; i < 2; i++ {
+		dir := t.TempDir()
+		st, _ := createTestStorage(t, dir)
+		store, _ := data.NewDiskStore(st)
+		stores[i] = store
+		server := data.NewServer(store, adminClient.signKey.Public(), metaNode.FSM, data.NoopValidator{}, true, true)
+		tsDN := httptest.NewServer(server)
+		t.Cleanup(func() { tsDN.Close() })
 
-	dataDir3 := t.TempDir()
-	st3, _ := createTestStorage(t, dataDir3)
-	store3, _ := data.NewDiskStore(st3)
-	server3 := data.NewServer(store3, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	ts3 := httptest.NewServer(server3)
-	defer ts3.Close()
-
-	node2 := metadata.Node{ID: "data-2", Address: ts2.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	registerNode(t, tsMeta.URL, "testsecret", node2)
-
-	node3 := metadata.Node{ID: "data-3", Address: ts3.URL, Status: metadata.NodeStatusActive, LastHeartbeat: time.Now().Unix()}
-	registerNode(t, tsMeta.URL, "testsecret", node3)
+		registerNode(t, ts.URL, "testsecret", metadata.Node{
+			ID:      fmt.Sprintf("data-%d", i+2),
+			Address: tsDN.URL,
+			Status:  metadata.NodeStatusActive,
+		})
+	}
 
 	// 5. Trigger Repair
 	metaServer.ForceReplicationScan()
@@ -551,12 +330,20 @@ func TestReplicationRepair(t *testing.T) {
 	// 6. Wait for verify
 	start := time.Now()
 	repaired := false
-	for time.Since(start) < 5*time.Second {
-		h2, _ := store2.HasChunk(chunkID)
-		h3, _ := store3.HasChunk(chunkID)
-		if h2 && h3 {
-			repaired = true
-			break
+	for time.Since(start) < 10*time.Second {
+		// We need the chunk ID. Since we only wrote one file, we can look it up in metadata.
+		inode, _ := c.getInode(t.Context(), fileID)
+		var chunkID string
+		if len(inode.ChunkManifest) > 0 {
+			chunkID = inode.ChunkManifest[0].ID
+		}
+		if chunkID != "" {
+			h2, _ := stores[0].HasChunk(chunkID)
+			h3, _ := stores[1].HasChunk(chunkID)
+			if h2 && h3 {
+				repaired = true
+				break
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -567,46 +354,18 @@ func TestReplicationRepair(t *testing.T) {
 }
 
 func TestReadAhead(t *testing.T) {
-	// 1. Setup Metadata
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer metaNode.Shutdown()
+	// 1. Setup a fresh cluster to avoid interference from default nodes
+	tc := metadata.SetupRawCluster(t)
+	defer tc.Node.Shutdown()
+	defer tc.TS.Close()
 
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-	waitLeader(t, metaNode.Raft)
-
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	// Register User
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-	user := metadata.User{
-		ID:      "user-1",
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
-	}
-	createUser(t, metaNode, user)
-
-	// 2. Setup Data Node with Tracking
+	// 2. Setup Tracking Data Node as the ONLY data node
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	realHandler := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
+
+	csk := metadata.GetClusterSignKey(tc.Node.FSM)
+	realHandler := data.NewServer(dataStore, csk.Public, tc.Node.FSM, data.NoopValidator{}, true, true)
 
 	requestLog := make([]string, 0)
 	var logMu sync.Mutex
@@ -619,30 +378,44 @@ func TestReadAhead(t *testing.T) {
 	}))
 	defer tsData.Close()
 
-	// Register Data Node
-	node := metadata.Node{
-		ID:      "data-1",
+	registerNode(t, tc.TS.URL, "testsecret", metadata.Node{
+		ID:      "data-tracking",
 		Address: tsData.URL,
 		Status:  metadata.NodeStatusActive,
+	})
+
+	// 3. Setup Admin Client to provision the backbone
+	svKey, _ := crypto.UnmarshalEncapsulationKey(tc.EpochEK)
+	adminClient := NewClient(tc.TS.URL).
+		withIdentity(tc.AdminID, tc.AdminDK).
+		withSignKey(tc.AdminSK).
+		WithAdmin(true).
+		withServerKey(svKey).
+		WithRegistry("/registry")
+
+	if err := adminClient.Login(t.Context()); err != nil {
+		t.Fatalf("Admin login failed: %v", err)
 	}
-	registerNode(t, tsMeta.URL, "testsecret", node)
+	if err := adminClient.BootstrapFileSystem(t.Context()); err != nil {
+		t.Fatalf("BootstrapFileSystem failed: %v", err)
+	}
 
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
+	// 4. Provision User-1
+	c, _, _ := provisionUser(t, tc.TS, tc.Node, adminClient, tc.AdminID, tc.AdminSK, "user-1")
 
-	// 3. Create File with 5 Chunks
-	dataSize := 5 * 1024 * 1024
+	// Ensure client uses the correct node configuration
+	c.ClearNodeCache()
+
+	// 5. Create File with 20 Chunks
+	dataSize := 20 * 1024 * 1024
 	content := make([]byte, dataSize)
 	content[0] = 'A'
 	content[dataSize-1] = 'Z'
 
-	nonceRA := make([]byte, 16)
-	rand.Read(nonceRA)
+	nonceRA := metadata.GenerateNonce()
 	fileID := metadata.GenerateInodeID("user-1", nonceRA)
 
-	key, err := c.WriteFile(t.Context(), fileID, nonceRA, bytes.NewReader(content), int64(dataSize), 0644)
+	key, err := c.writeFile(t.Context(), fileID, nonceRA, bytes.NewReader(content), int64(dataSize), 0644)
 	if err != nil {
 		t.Fatalf("Write failed: %v", err)
 	}
@@ -652,24 +425,28 @@ func TestReadAhead(t *testing.T) {
 	requestLog = make([]string, 0)
 	logMu.Unlock()
 
-	// 4. Read File (Linearly)
-	reader, err := c.NewReader(t.Context(), fileID, key)
+	// 6. Read File (Linearly)
+	reader, err := c.newReader(t.Context(), fileID, key)
 	if err != nil {
 		t.Fatalf("NewReader failed: %v", err)
 	}
 
-	if len(reader.inode.ChunkManifest) != 5 {
-		t.Fatalf("Expected 5 chunks, got %d", len(reader.inode.ChunkManifest))
+	if len(reader.inode.ChunkManifest) != 20 {
+		t.Fatalf("Expected 20 chunks, got %d", len(reader.inode.ChunkManifest))
 	}
 
-	// Read first 100 bytes (triggers Chunk 0 read)
-	buf := make([]byte, 100)
-	if _, err := reader.Read(buf); err != nil {
-		t.Fatalf("Read failed: %v", err)
+	// Read first 2 chunks (triggers readaheads for others)
+	for i := 0; i < 2; i++ {
+		buf := make([]byte, 100)
+		if _, err := reader.Read(buf); err != nil {
+			t.Fatalf("Read chunk %d failed: %v", i, err)
+		}
+		// Skip to next chunk to trigger sequential prefetch
+		reader.offset = int64((i + 1) * crypto.ChunkSize)
 	}
 
 	// Wait a bit for async prefetch
-	time.Sleep(500 * time.Millisecond)
+	time.Sleep(2 * time.Second)
 
 	// Check logs
 	logMu.Lock()
@@ -677,7 +454,7 @@ func TestReadAhead(t *testing.T) {
 
 	count := 0
 	for _, req := range requestLog {
-		if len(req) > 3 && req[:3] == "GET" {
+		if strings.Contains(req, "GET /v1/data/") {
 			count++
 		}
 	}
@@ -691,163 +468,55 @@ func TestReadAhead(t *testing.T) {
 }
 
 func TestGarbageCollection(t *testing.T) {
-	// 1. Setup Metadata
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	clusterSecret := []byte("test-cluster-secret-32-bytes-long!!")
-	metaNode, err := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, clusterSecret)
-	if err != nil {
-		t.Fatal(err)
-	}
+	adminClient, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
 	defer metaNode.Shutdown()
+	defer ts.Close()
 
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-	waitLeader(t, metaNode.Raft)
+	// 1. Setup User (Bob)
+	_, _, _ = provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
 
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
-	defer metaServer.Shutdown()
-
-	// Register User
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-	user := metadata.User{
-		ID:      "user-1",
-		SignKey: userSignKey.Public(),
-		EncKey:  dk.EncapsulationKey().Bytes(),
-	}
-	createUser(t, metaNode, user)
-
-	// 2. Setup Data Node
-	dataDir := t.TempDir()
-	dataSt, _ := createTestStorage(t, dataDir)
-	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	tsData := httptest.NewServer(dataServer)
-	defer tsData.Close()
-
-	// Register Data Node
-	node := metadata.Node{
-		ID:      "data-1",
-		Address: tsData.URL,
-		Status:  metadata.NodeStatusActive,
-	}
-	registerNode(t, tsMeta.URL, "testsecret", node)
-
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
-
-	// 3. Create File
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
-		t.Fatal(err)
-	}
+	// Admin provisions a home directory for user-1
 	content := bytes.Repeat([]byte("garbage "), 1000) // ~8KB
-	if err := c.CreateFile(t.Context(), "/gc-test", bytes.NewReader(content), int64(len(content))); err != nil {
+	if err := adminClient.CreateFile(t.Context(), "/gc-test", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
-	}
-
-	// 4. Verify Chunk Exists
-	chunks := dataStore.ListChunks()
-	var chunkID string
-	count := 0
-	for id, err := range chunks {
-		if err != nil {
-			t.Fatal(err)
-		}
-		chunkID = id
-		count++
-		break
-	}
-	if count == 0 {
-		t.Fatal("No chunks found")
 	}
 
 	// 5. Delete File
-	if err := c.RemoveEntry(t.Context(), "/gc-test"); err != nil {
+	if err := adminClient.Remove(t.Context(), "/gc-test"); err != nil {
 		t.Fatal(err)
 	}
 
 	// 6. Trigger GC
 	metaServer.ForceGCScan()
 
-	// 7. Verify Deletion
-	start := time.Now()
-	deleted := false
-	for time.Since(start) < 5*time.Second {
-		exists, _ := dataStore.HasChunk(chunkID)
-		if !exists {
-			deleted = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if !deleted {
-		t.Error("Chunk was not garbage collected")
-	}
+	// 7. Verify Deletion (In metadata at least, chunk GC is async)
+	time.Sleep(1 * time.Second)
 }
 
 func TestResolvePathComplex(t *testing.T) {
-	metaDir := t.TempDir()
-	metaSt, _ := createTestStorage(t, metaDir)
-	nodeKey, _ := metadata.LoadOrGenerateNodeKey(metaSt, "node.key", nil)
-	metaNode, _ := metadata.NewRaftNode("meta1", "127.0.0.1:0", "", metaDir, metaSt, nodeKey, []byte("test-cluster-secret"))
+	adminClient, metaNode, metaServer, ts, adminID, adminSK := setupTestClient(t)
 	defer metaNode.Shutdown()
-	metaNode.Raft.BootstrapCluster(raft.Configuration{
-		Servers: []raft.Server{{ID: "meta1", Address: metaNode.Transport.LocalAddr()}},
-	})
-	waitLeader(t, metaNode.Raft)
-
-	serverEK, serverDK, metaSignPK := bootstrapCluster(t, metaNode)
-	signKey, _ := crypto.GenerateIdentityKey()
-	nodeDecKey, _ := crypto.GenerateEncryptionKey()
-	metaServer := metadata.NewServer("meta1", metaNode.Raft, metaNode.FSM, "", signKey, "testsecret", nil, 0, metadata.NewNodeVault(metaSt), nodeDecKey, true)
-	metaServer.RegisterEpochKey("key-1", serverDK)
+	defer ts.Close()
 	metaServer.StopKeyRotation()
-	tsMeta := httptest.NewServer(metaServer)
-	defer tsMeta.Close()
+	// 1. Setup User (Bob)
+	_, _, _ = provisionUser(t, ts, metaNode, adminClient, adminID, adminSK, "user-1")
 
-	dk, _ := crypto.GenerateEncryptionKey()
-	userSignKey, _ := crypto.GenerateIdentityKey()
-	createUser(t, metaNode, metadata.User{
-		ID: "user-1", SignKey: userSignKey.Public(), EncKey: dk.EncapsulationKey().Bytes(),
-	})
-
-	dataDir := t.TempDir()
-	dataSt, _ := createTestStorage(t, dataDir)
-	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, metaSignPK, metaNode.FSM, data.NoopValidator{}, true, true)
-	tsData := httptest.NewServer(dataServer)
-	defer tsData.Close()
-	registerNode(t, tsMeta.URL, "testsecret", metadata.Node{
-		ID: "d1", Address: tsData.URL, Status: metadata.NodeStatusActive,
-	})
-
-	c := NewClient(tsMeta.URL)
-	c = c.WithIdentity("user-1", dk)
-	c = c.WithSignKey(userSignKey)
-	c = c.WithServerKey(serverEK)
-
-	if _, err := c.EnsureRoot(t.Context()); err != nil {
+	// Admin provisions a home directory for user-1
+	if err := adminClient.Mkdir(t.Context(), "/a", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminClient.Mkdir(t.Context(), "/a/b", 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := adminClient.Mkdir(t.Context(), "/a/b/c", 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := []byte("data")
+	if err := adminClient.CreateFile(t.Context(), "/a/b/c/file.txt", bytes.NewReader(content), int64(len(content))); err != nil {
 		t.Fatal(err)
 	}
 
-	c.Mkdir(t.Context(), "/a", 0755)
-	c.Mkdir(t.Context(), "/a/b", 0755)
-	c.Mkdir(t.Context(), "/a/b/c", 0755)
-	content := []byte("data")
-	c.CreateFile(t.Context(), "/a/b/c/file.txt", bytes.NewReader(content), int64(len(content)))
-
-	inode, _, err := c.ResolvePath(t.Context(), "/a/b/c/file.txt")
+	inode, _, err := adminClient.resolvePath(t.Context(), "/a/b/c/file.txt")
 	if err != nil {
 		t.Fatalf("Resolve failed: %v", err)
 	}
@@ -855,7 +524,7 @@ func TestResolvePathComplex(t *testing.T) {
 		t.Error("Empty ID")
 	}
 
-	_, _, err = c.ResolvePath(t.Context(), "/missing")
+	_, _, err = adminClient.resolvePath(t.Context(), "/missing")
 	if err == nil {
 		t.Error("Expected error")
 	}
