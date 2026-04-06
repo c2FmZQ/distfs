@@ -145,7 +145,7 @@ DistFS streamlines client initialization by integrating identity generation, OID
 
 **Initialize a new account (This will prompt you for an OIDC token if configured):**
 ```bash
-./distfs init --new -server http://localhost:8080
+./distfs init --new --server http://localhost:8080
 ```
 
 *Note: In a fully secured cluster, an Administrator must unlock your account before you can store data.*

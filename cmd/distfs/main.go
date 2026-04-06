@@ -20,7 +20,6 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
-	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -36,18 +35,19 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/tpm"
+	"github.com/urfave/cli/v3"
 	"golang.org/x/term"
 )
 
 var (
-	configPath    = flag.String("config", config.DefaultPath(), "Path to config file")
-	usePinentry   = flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
-	useTPM        = flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
-	adminFlag     = flag.Bool("admin", false, "Enable admin bypass mode")
-	disableDoH    = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
-	allowInsecure = flag.Bool("allow-insecure", false, "Allow insecure TLS connections (skip verification)")
-	rootID        = flag.String("root", "", "Specify target root directory ID")
-	registryDir   = flag.String("registry", "/registry", "Directory to use for identity verification")
+	appConfigPath    string
+	appUsePinentry   bool
+	appUseTPM        bool
+	appAdminFlag     bool
+	appDisableDoH    bool
+	appAllowInsecure bool
+	appRootID        string
+	appRegistryDir   string
 )
 
 func setupTPMHasher() {
@@ -58,7 +58,7 @@ func setupTPMHasher() {
 		}
 		defer tpmDev.Close()
 
-		baseDir := filepath.Dir(*configPath)
+		baseDir := filepath.Dir(appConfigPath)
 		hmacKeyPath := filepath.Join(baseDir, "tpm_hmac.key")
 		var hmacKey *tpm.Key
 
@@ -90,228 +90,687 @@ func setupTPMHasher() {
 }
 
 func main() {
-	flag.Usage = usage
-	flag.Parse()
-
-	if os.Getenv("DISTFS_ALLOW_INSECURE") == "true" {
-		*allowInsecure = true
+	app := &cli.Command{
+		Name:  "distfs",
+		Usage: "Secure Distributed File System CLI",
+		Flags: []cli.Flag{
+			&cli.StringFlag{
+				Name:        "config",
+				Value:       config.DefaultPath(),
+				Usage:       "Path to config file",
+				Destination: &appConfigPath,
+			},
+			&cli.BoolFlag{
+				Name:        "use-pinentry",
+				Value:       true,
+				Usage:       "Use pinentry for passphrase input",
+				Destination: &appUsePinentry,
+			},
+			&cli.BoolFlag{
+				Name:        "use-tpm",
+				Value:       false,
+				Usage:       "Use TPM to securely bind the master passphrase to this hardware",
+				Destination: &appUseTPM,
+			},
+			&cli.BoolFlag{
+				Name:        "admin",
+				Value:       false,
+				Usage:       "Enable admin bypass mode",
+				Destination: &appAdminFlag,
+			},
+			&cli.BoolFlag{
+				Name:        "disable-doh",
+				Value:       false,
+				Usage:       "Disable DNS-over-HTTPS and use system resolver",
+				Destination: &appDisableDoH,
+			},
+			&cli.BoolFlag{
+				Name:        "allow-insecure",
+				Value:       false,
+				Usage:       "Allow insecure TLS connections (skip verification)",
+				Destination: &appAllowInsecure,
+			},
+			&cli.StringFlag{
+				Name:        "root",
+				Value:       "",
+				Usage:       "Specify target root directory ID",
+				Destination: &appRootID,
+			},
+			&cli.StringFlag{
+				Name:        "registry",
+				Value:       "/registry",
+				Usage:       "Directory to use for identity verification",
+				Destination: &appRegistryDir,
+			},
+		},
+		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
+			if os.Getenv("DISTFS_ALLOW_INSECURE") == "true" {
+				appAllowInsecure = true
+			}
+			if appUseTPM {
+				setupTPMHasher()
+			}
+			config.UsePinentry = appUsePinentry
+			return ctx, nil
+		},
+		Commands: []*cli.Command{
+			{
+				Name:  "init",
+				Usage: "Initialize client config (pulls existing keys by default)",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "server", Value: "http://localhost:8080", Usage: "Metadata Server URL"},
+					&cli.BoolFlag{Name: "new", Value: false, Usage: "Initialize a new account"},
+					&cli.StringFlag{Name: "jwt", Value: "", Usage: "OIDC JWT for authentication"},
+					&cli.StringFlag{Name: "client-id", Value: "distfs", Usage: "The client ID"},
+					&cli.StringFlag{Name: "scopes", Value: "openid", Usage: "The scopes to request (comma separated)"},
+					&cli.StringFlag{Name: "auth-endpoint", Value: "", Usage: "The authorization endpoint"},
+					&cli.StringFlag{Name: "token-endpoint", Value: "", Usage: "The token endpoint"},
+					&cli.BoolFlag{Name: "qr", Value: false, Usage: "Show a QR code of the verification URL"},
+					&cli.StringFlag{Name: "browser", Value: os.Getenv("BROWSER"), Usage: "The command to use to open the verification URL"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					opts := client.OnboardingOptions{
+						ConfigPath:    appConfigPath,
+						ServerURL:     cmd.String("server"),
+						IsNew:         cmd.Bool("new"),
+						JWT:           cmd.String("jwt"),
+						ClientID:      cmd.String("client-id"),
+						Scopes:        strings.Split(cmd.String("scopes"), ","),
+						AuthEndpoint:  cmd.String("auth-endpoint"),
+						TokenEndpoint: cmd.String("token-endpoint"),
+						ShowQR:        cmd.Bool("qr"),
+						Browser:       cmd.String("browser"),
+						DisableDoH:    appDisableDoH,
+						AllowInsecure: appAllowInsecure,
+					}
+					return client.PerformUnifiedOnboarding(ctx, opts)
+				},
+			},
+			{
+				Name:  "ls",
+				Usage: "List directory",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "l", Aliases: []string{"long"}, Usage: "Long format"},
+					&cli.BoolFlag{Name: "a", Aliases: []string{"all"}, Usage: "Show hidden files"},
+					&cli.BoolFlag{Name: "h", Aliases: []string{"human"}, Usage: "Human readable sizes"},
+					&cli.BoolFlag{Name: "i", Aliases: []string{"inode"}, Usage: "Print inode ID"},
+					&cli.BoolFlag{Name: "R", Aliases: []string{"recursive"}, Usage: "Recursive"},
+					&cli.BoolFlag{Name: "d", Aliases: []string{"directory"}, Usage: "List directory itself"},
+					&cli.BoolFlag{Name: "t", Usage: "Sort by time"},
+					&cli.BoolFlag{Name: "S", Usage: "Sort by size"},
+					&cli.BoolFlag{Name: "r", Aliases: []string{"reverse"}, Usage: "Reverse sort order"},
+					&cli.BoolFlag{Name: "1", Usage: "One per line"},
+					&cli.BoolFlag{Name: "F", Aliases: []string{"classify"}, Usage: "Classify entries"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					return runLs(ctx, c, cmd)
+				},
+			},
+			{
+				Name:  "mkdir",
+				Usage: "Create directory",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "owner", Usage: "Specify owner ID (Admin only)"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					opts := client.MkdirOptions{}
+					if owner := cmd.String("owner"); owner != "" {
+						resolvedOwner, _, err := c.ResolveUsername(ctx, owner)
+						if err != nil {
+							return fmt.Errorf("failed to resolve owner %s: %w", owner, err)
+						}
+						opts.OwnerID = resolvedOwner
+					}
+					if err := c.MkdirExtended(ctx, path, 0700, opts); err != nil {
+						return err
+					}
+					fmt.Printf("Directory %s created.\n", path)
+					return nil
+				},
+			},
+			{
+				Name:  "put",
+				Usage: "Upload a file",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "f", Usage: "Force overwrite existing file"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("local and remote paths required")
+					}
+					local, remote := cmd.Args().Get(0), cmd.Args().Get(1)
+					return cmdPut(ctx, local, remote, cmd.Bool("f"))
+				},
+			},
+			{
+				Name:  "get",
+				Usage: "Download a file",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("remote and local paths required")
+					}
+					return cmdGet(ctx, cmd.Args().Get(0), cmd.Args().Get(1))
+				},
+			},
+			{
+				Name:  "cp",
+				Usage: "Copy a file or directory",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("source and destination paths required")
+					}
+					c := loadClient()
+					if err := c.Copy(ctx, cmd.Args().Get(0), cmd.Args().Get(1)); err != nil {
+						return err
+					}
+					fmt.Printf("Copied %s to %s\n", cmd.Args().Get(0), cmd.Args().Get(1))
+					return nil
+				},
+			},
+			{
+				Name:  "mv",
+				Usage: "Move or rename a file or directory",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("source and destination paths required")
+					}
+					c := loadClient()
+					if err := c.Rename(ctx, cmd.Args().Get(0), cmd.Args().Get(1)); err != nil {
+						return err
+					}
+					fmt.Printf("Moved %s to %s\n", cmd.Args().Get(0), cmd.Args().Get(1))
+					return nil
+				},
+			},
+			{
+				Name:  "rm",
+				Usage: "Delete file or directory",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					if err := c.Remove(ctx, path); err != nil {
+						return err
+					}
+					fmt.Printf("Removed %s\n", path)
+					return nil
+				},
+			},
+			{
+				Name:  "ln",
+				Usage: "Create a hard or symbolic link",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "s", Usage: "Create a symbolic link"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("target and link_path required")
+					}
+					target, linkPath := cmd.Args().Get(0), cmd.Args().Get(1)
+					c := loadClient()
+					var err error
+					if cmd.Bool("s") {
+						err = c.Symlink(ctx, target, linkPath)
+					} else {
+						err = c.Link(ctx, target, linkPath)
+					}
+					if err != nil {
+						return err
+					}
+					if cmd.Bool("s") {
+						fmt.Printf("Created symbolic link %s -> %s\n", linkPath, target)
+					} else {
+						fmt.Printf("Created hard link %s -> %s\n", linkPath, target)
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "cat",
+				Usage: "Display file content",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					rc, err := c.OpenBlobRead(ctx, path)
+					if err != nil {
+						return err
+					}
+					defer rc.Close()
+					_, err = io.Copy(os.Stdout, rc)
+					return err
+				},
+			},
+			{
+				Name:  "head",
+				Usage: "Display first lines of a file",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "n", Value: 10, Usage: "Number of lines to show"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					rc, err := c.OpenBlobRead(ctx, path)
+					if err != nil {
+						return err
+					}
+					defer rc.Close()
+					scanner := bufio.NewScanner(rc)
+					for i := 0; i < int(cmd.Int("n")) && scanner.Scan(); i++ {
+						fmt.Println(scanner.Text())
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "tail",
+				Usage: "Display last lines of a file",
+				Flags: []cli.Flag{
+					&cli.IntFlag{Name: "n", Value: 10, Usage: "Number of lines to show"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					rc, err := c.OpenBlobRead(ctx, path)
+					if err != nil {
+						return err
+					}
+					defer rc.Close()
+					var lastLines []string
+					scanner := bufio.NewScanner(rc)
+					for scanner.Scan() {
+						lastLines = append(lastLines, scanner.Text())
+						if len(lastLines) > int(cmd.Int("n")) {
+							lastLines = lastLines[1:]
+						}
+					}
+					for _, line := range lastLines {
+						fmt.Println(line)
+					}
+					return nil
+				},
+			},
+			{
+				Name:  "stat",
+				Usage: "Display file status",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					info, err := c.Lstat(ctx, path)
+					if err != nil {
+						return err
+					}
+					inode := info.Sys().(*client.InodeInfo)
+					fmt.Printf("  File: %s\n", info.Name())
+					fmt.Printf("  Size: %-15d Blocks: %-10d IO Block: %-10d ", info.Size(), (info.Size()+511)/512, 4096)
+					switch inode.Type {
+					case metadata.DirType:
+						fmt.Println("directory")
+					case metadata.FileType:
+						fmt.Println("regular file")
+					case metadata.SymlinkType:
+						fmt.Printf("symbolic link -> %s\n", inode.SymlinkTarget)
+					}
+					fmt.Printf("Device: %-15s Inode: %-15s Links: %-10d\n", "distfs", inode.ID[:16], inode.NLink)
+					fmt.Printf("Access: (%04o/%s)  Uid: (%-8s)   Gid: (%-8s)\n", info.Mode().Perm(), info.Mode().String(), inode.OwnerID[:8], inode.GroupID)
+					fmt.Printf("Modify: %s\n", info.ModTime().Format(time.RFC3339))
+					return nil
+				},
+			},
+			{
+				Name:  "du",
+				Usage: "Display disk usage",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "h", Aliases: []string{"human"}, Usage: "Human readable sizes"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						path = "."
+					}
+					return cmdDu(ctx, path, cmd.Bool("h"))
+				},
+			},
+			{
+				Name:  "df",
+				Usage: "Display filesystem usage",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "h", Aliases: []string{"human"}, Usage: "Human readable sizes"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return cmdDf(ctx, cmd.Bool("h"))
+				},
+			},
+			{
+				Name:  "touch",
+				Usage: "Create empty file or update timestamp",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					c := loadClient()
+					_, err := c.Stat(ctx, path)
+					if err == nil {
+						return c.SetMTime(ctx, path, time.Now().UnixNano())
+					}
+					return c.CreateFile(ctx, path, bytes.NewReader(nil), 0)
+				},
+			},
+			{
+				Name:  "getfacl",
+				Usage: "Get file access control lists",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					return cmdGetFacl(ctx, path)
+				},
+			},
+			{
+				Name:  "setfacl",
+				Usage: "Modify file access control lists",
+				Flags: []cli.Flag{
+					&cli.StringFlag{Name: "m", Usage: "Modify ACL entries (e.g. u:user:rw-)"},
+					&cli.StringFlag{Name: "x", Usage: "Remove ACL entries (e.g. u:user)"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					path := cmd.Args().First()
+					if path == "" {
+						return errors.New("path required")
+					}
+					return cmdSetFacl(ctx, path, cmd.String("m"), cmd.String("x"))
+				},
+			},
+			{
+				Name:  "chmod",
+				Usage: "Change permissions",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("mode and path required")
+					}
+					modeStr, path := cmd.Args().Get(0), cmd.Args().Get(1)
+					mode, err := strconv.ParseUint(modeStr, 8, 32)
+					if err != nil {
+						return fmt.Errorf("invalid mode: %w", err)
+					}
+					c := loadClient()
+					return c.Chmod(ctx, path, fs.FileMode(mode))
+				},
+			},
+			{
+				Name:  "chgrp",
+				Usage: "Change group",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("group_id and path required")
+					}
+					c := loadClient()
+					return c.Chgrp(ctx, cmd.Args().Get(1), cmd.Args().Get(0))
+				},
+			},
+			{
+				Name:  "group-create",
+				Usage: "Create a new group",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "quota", Usage: "Enable independent group quota"},
+					&cli.StringFlag{Name: "owner", Usage: "Initial group owner"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					name := cmd.Args().First()
+					if name == "" {
+						return errors.New("group name required")
+					}
+					return cmdGroupCreate(ctx, name, cmd.Bool("quota"), cmd.String("owner"))
+				},
+			},
+			{
+				Name:  "group-list",
+				Usage: "List groups you are member or manager of",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return cmdGroupList(ctx)
+				},
+			},
+			{
+				Name:  "group-add",
+				Usage: "Add user to group",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "f", Usage: "Force add without confirmation"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("group_id and user_id required")
+					}
+					return cmdGroupAdd(ctx, cmd.Args().Get(0), cmd.Args().Get(1), cmd.Args().Get(2), cmd.Bool("f"))
+				},
+			},
+			{
+				Name:  "group-remove",
+				Usage: "Remove user from group",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("group_id and user_id required")
+					}
+					return cmdGroupRemove(ctx, cmd.Args().Get(0), cmd.Args().Get(1))
+				},
+			},
+			{
+				Name:  "group-chown",
+				Usage: "Change group owner",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("group_id and owner required")
+					}
+					c := loadClient()
+					return c.GroupChown(ctx, cmd.Args().Get(0), cmd.Args().Get(1))
+				},
+			},
+			{
+				Name:  "group-members",
+				Usage: "List group members",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 1 {
+						return errors.New("group_id required")
+					}
+					return cmdGroupMembers(ctx, cmd.Args().First())
+				},
+			},
+			{
+				Name:  "contact-info",
+				Usage: "Display your signed contact string for sharing",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					s, err := c.GenerateContactString()
+					if err != nil {
+						return err
+					}
+					fmt.Println(s)
+					return nil
+				},
+			},
+			{
+				Name:  "whoami",
+				Usage: "Display your user ID",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					fmt.Println(c.UserID())
+					return nil
+				},
+			},
+			{
+				Name:  "quota",
+				Usage: "Display your resource usage and limits",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return cmdQuota(ctx)
+				},
+			},
+			{
+				Name:  "admin",
+				Usage: "Open interactive cluster management console",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					cmdAdmin(ctx, cmd.Args().Slice())
+					return nil
+				},
+			},
+			{
+				Name:  "admin-join",
+				Usage: "Add a node to the cluster",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 1 {
+						return errors.New("node address required")
+					}
+					return cmdAdminJoin(ctx, cmd.Args().First())
+				},
+			},
+			{
+				Name:  "admin-remove",
+				Usage: "Remove a node from the cluster",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 1 {
+						return errors.New("node ID required")
+					}
+					return cmdAdminRemove(ctx, cmd.Args().First())
+				},
+			},
+			{
+				Name:  "admin-lock-user",
+				Usage: "Lock a user account",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 1 {
+						return errors.New("userID required")
+					}
+					return cmdAdminLockUser(ctx, cmd.Args().First(), true)
+				},
+			},
+			{
+				Name:  "admin-unlock-user",
+				Usage: "Unlock a user account",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 1 {
+						return errors.New("userID required")
+					}
+					return cmdAdminLockUser(ctx, cmd.Args().First(), false)
+				},
+			},
+			{
+				Name:  "admin-user-quota",
+				Usage: "Set user quota",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 3 {
+						return errors.New("userID, max_bytes, max_inodes required")
+					}
+					return cmdAdminUserQuota(ctx, cmd.Args().Get(0), cmd.Args().Get(1), cmd.Args().Get(2))
+				},
+			},
+			{
+				Name:  "admin-group-quota",
+				Usage: "Set group quota",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 3 {
+						return errors.New("groupID, max_bytes, max_inodes required")
+					}
+					return cmdAdminGroupQuota(ctx, cmd.Args().Get(0), cmd.Args().Get(1), cmd.Args().Get(2))
+				},
+			},
+			{
+				Name:  "admin-promote",
+				Usage: "Promote user to admin",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 1 {
+						return errors.New("userID required")
+					}
+					return cmdAdminPromote(ctx, cmd.Args().First())
+				},
+			},
+			{
+				Name:  "admin-audit",
+				Usage: "Run a comprehensive system integrity audit",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return cmdAdminAudit(ctx, cmd.Args().Slice())
+				},
+			},
+			{
+				Name:  "admin-create-root",
+				Usage: "Initialize a new root inode",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "secondary", Usage: "Create secondary root"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return cmdAdminCreateRoot(ctx, cmd.Bool("secondary"))
+				},
+			},
+			{
+				Name:  "registry-add",
+				Usage: "Verify and add a user to the registry",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "unlock", Usage: "Unlock the user record"},
+					&cli.StringFlag{Name: "quota", Usage: "Initial quota limit (format: bytes,inodes)"},
+					&cli.BoolFlag{Name: "home", Usage: "Create home directory"},
+					&cli.BoolFlag{Name: "yes", Usage: "Assume yes for prompts"},
+				},
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("username and userID required")
+					}
+					return cmdRegistryAdd(ctx, cmd.Args().Get(0), cmd.Args().Get(1), cmd.Bool("unlock"), cmd.String("quota"), cmd.Bool("home"), cmd.Bool("yes"))
+				},
+			},
+			{
+				Name:  "registry-add-group",
+				Usage: "Anchor a group in the registry",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					if cmd.Args().Len() < 2 {
+						return errors.New("name and groupID required")
+					}
+					return cmdRegistryAddGroup(ctx, cmd.Args().Get(0), cmd.Args().Get(1))
+				},
+			},
+			{
+				Name:  "dump-inodes",
+				Usage: "Recursively dump inode metadata for debugging",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					return cmdDump(ctx, cmd.Args().Slice())
+				},
+			},
+		},
 	}
 
-	if *useTPM {
-		setupTPMHasher()
-	}
-
-	if flag.NArg() == 0 {
-		usage()
-	}
-
-	config.UsePinentry = *usePinentry
-
-	ctx := context.Background()
-	command := flag.Arg(0)
-	args := flag.Args()[1:]
-
-	switch command {
-	case "init":
-		cmdInit(ctx, args)
-	case "ls":
-		cmdLs(ctx, args)
-	case "mkdir":
-		cmdMkdir(ctx, args)
-	case "put":
-		cmdPut(ctx, args)
-	case "get":
-		cmdGet(ctx, args)
-	case "cp":
-		cmdCp(ctx, args)
-	case "mv":
-		cmdMv(ctx, args)
-	case "ln":
-		cmdLn(ctx, args)
-	case "rm":
-		cmdRm(ctx, args)
-	case "cat":
-		cmdCat(ctx, args)
-	case "head":
-		cmdHead(ctx, args)
-	case "tail":
-		cmdTail(ctx, args)
-	case "stat":
-		cmdStat(ctx, args)
-	case "du":
-		cmdDu(ctx, args)
-	case "df":
-		cmdDf(ctx, args)
-	case "touch":
-		cmdTouch(ctx, args)
-	case "getfacl":
-		cmdGetFacl(ctx, args)
-	case "setfacl":
-		cmdSetFacl(ctx, args)
-	case "chmod":
-		cmdChmod(ctx, args)
-	case "chgrp":
-		cmdChgrp(ctx, args)
-	case "group-create":
-		cmdGroupCreate(ctx, args)
-	case "group-list":
-		cmdGroupList(ctx, args)
-	case "group-add":
-		cmdGroupAdd(ctx, args)
-	case "group-remove":
-		cmdGroupRemove(ctx, args)
-	case "group-chown":
-		cmdGroupChown(ctx, args)
-	case "group-members":
-		cmdGroupMembers(ctx, args)
-	case "contact-info":
-		cmdContactInfo(ctx, args)
-	case "admin":
-		cmdAdmin(ctx, args)
-	case "admin-join":
-		cmdAdminJoin(ctx, args)
-	case "admin-remove":
-		cmdAdminRemove(ctx, args)
-	case "registry-add":
-		cmdRegistryAdd(ctx, args)
-	case "registry-add-group":
-		cmdRegistryAddGroup(ctx, args)
-	case "admin-lock-user":
-		cmdAdminLockUser(ctx, args, true)
-	case "admin-unlock-user":
-		cmdAdminLockUser(ctx, args, false)
-	case "admin-user-quota":
-		cmdAdminUserQuota(ctx, args)
-	case "admin-group-quota":
-		cmdAdminGroupQuota(ctx, args)
-	case "admin-promote":
-		cmdAdminPromote(ctx, args)
-	case "admin-audit":
-		cmdAdminAudit(ctx, args)
-	case "admin-create-root":
-		cmdAdminCreateRoot(ctx, args)
-	case "whoami":
-		cmdWhoami(ctx, args)
-	case "quota":
-		cmdQuota(ctx, args)
-	case "dump-inodes":
-		cmdDump(ctx, args)
-	default:
-		usage()
-	}
-}
-
-func cmdWhoami(ctx context.Context, args []string) {
-	c := loadClient()
-	fmt.Println(c.UserID())
-}
-
-func isHexID(s string) bool {
-	if len(s) != 64 {
-		return false
-	}
-	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
-		}
-	}
-	return true
-}
-
-func usage() {
-	fmt.Println("Usage: distfs [-config <path>] [-use-pinentry] [-admin] <command> [args]")
-	fmt.Println("Commands:")
-	fmt.Println("  init [--new] -server <url>      Initialize client config (pulls existing keys by default)")
-	fmt.Println("  ls <path>                       List directory")
-	fmt.Println("  mkdir [--owner=id] <path>       Create directory (Admin can specify owner)")
-	fmt.Println("  put <local> <remote>            Upload a file")
-	fmt.Println("  get <remote> <local>            Download a file")
-	fmt.Println("  cp <src> <dst>                  Copy a file or directory")
-	fmt.Println("  mv <src> <dst>                  Move or rename a file or directory")
-	fmt.Println("  rm <path>                       Delete file or directory")
-	fmt.Println("  ln [-s] <target> <link>         Create a hard or symbolic link")
-	fmt.Println("  cat <path>                      Display file content")
-	fmt.Println("  head [-n N] <path>              Display first lines of a file")
-	fmt.Println("  tail [-n N] <path>              Display last lines of a file")
-	fmt.Println("  stat <path>                     Display file status")
-	fmt.Println("  du [-h] <path>                  Display disk usage")
-	fmt.Println("  df [-h]                         Display filesystem usage")
-	fmt.Println("  touch <path>                    Create empty file or update timestamp")
-	fmt.Println("  getfacl <path>                  Get file access control lists")
-	fmt.Println("  setfacl [-m spec] [-x spec] <p> Modify file access control lists")
-	fmt.Println("  chmod <mode> <path>             Change permissions")
-	fmt.Println("  chgrp <group_id> <path>         Change group")
-	fmt.Println("  group-create <name>             Create a new group")
-	fmt.Println("  group-list                      List groups you are member or manager of")
-	fmt.Println("  group-add [-f] <group_id> <user_id|contact_string> [info] Add user to group")
-	fmt.Println("  group-remove <group_id> <user_id> Remove user from group")
-	fmt.Println("  group-chown <group_id> <owner>  Change group owner")
-	fmt.Println("  group-members <group_id>        List group members (info shown if owner)")
-	fmt.Println("  contact-info                    Display your signed contact string for sharing")
-	fmt.Println("  quota                           Display your resource usage and limits")
-	fmt.Println("  put <local> <remote>            Upload file")
-	fmt.Println("  get <remote> <local>            Download file")
-	fmt.Println("  admin                           Open interactive cluster management console")
-	fmt.Println("  admin-join <addr>               Add a node to the cluster (discovered via address)")
-	fmt.Println("  admin-remove <id>               Remove a node from the cluster (by node ID)")
-	fmt.Println("  admin-user-quota <userID> <max_bytes> <max_inodes> Set user quota (Admin only)")
-	fmt.Println("  admin-group-quota <group_id> <max_bytes> <max_inodes> Set group quota (Admin only)")
-	fmt.Println("  admin-lock-user <userID>        Lock a user account")
-	fmt.Println("  admin-unlock-user <userID>      Unlock a user account")
-	fmt.Println("  registry-add [--unlock] [--quota <limit>] [--home] <username> <userID> Verify and add a user to the registry")
-	fmt.Println("  registry-add-group <name> <groupID>  Anchor a group in the registry for discovery")
-	fmt.Println("  admin-audit                     Run a comprehensive system integrity and structural audit")
-	fmt.Println("  admin-create-root [-secondary]  Initialize a new root inode (Admin only, defaults to standard root)")
-	fmt.Println("  whoami                          Display your user ID")
-	fmt.Println("  dump-inodes [path|id]           Recursively dump inode metadata for debugging")
-	os.Exit(1)
-}
-
-func cmdInit(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("init", flag.ExitOnError)
-	serverURL := fs.String("server", "http://localhost:8080", "Metadata Server URL")
-	isNew := fs.Bool("new", false, "Initialize a new account")
-
-	// Auth flags
-	jwt := fs.String("jwt", "", "OIDC JWT for authentication")
-	clientID := fs.String("client-id", "distfs", "The client ID")
-	scopes := fs.String("scopes", "openid", "The scopes to request (comma separated)")
-	authEndpoint := fs.String("auth-endpoint", "", "The authorization endpoint")
-	tokenEndpoint := fs.String("token-endpoint", "", "The token endpoint")
-	qrCode := fs.Bool("qr", false, "Show a QR code of the verification URL")
-	browser := fs.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
-
-	fs.Parse(args)
-
-	opts := client.OnboardingOptions{
-		ConfigPath:    *configPath,
-		ServerURL:     *serverURL,
-		IsNew:         *isNew,
-		JWT:           *jwt,
-		ClientID:      *clientID,
-		Scopes:        strings.Split(*scopes, ","),
-		AuthEndpoint:  *authEndpoint,
-		TokenEndpoint: *tokenEndpoint,
-		ShowQR:        *qrCode,
-		Browser:       *browser,
-		DisableDoH:    *disableDoH,
-		AllowInsecure: *allowInsecure,
-	}
-
-	if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
-		log.Fatal(err)
+	if err := app.Run(context.Background(), os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
 	}
 }
 
 func loadClient() *client.Client {
-	conf, err := config.Load(*configPath)
+	fmt.Printf("DEBUG: loadClient called with configPath=%s, admin=%v\n", appConfigPath, appAdminFlag)
+	conf, err := config.Load(appConfigPath)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	c := client.NewClient(conf.ServerURL).
-		WithAllowInsecure(*allowInsecure).
-		WithDisableDoH(*disableDoH)
+		WithAllowInsecure(appAllowInsecure).
+		WithDisableDoH(appDisableDoH)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	skBytes, _ := hex.DecodeString(conf.SignKey)
@@ -321,8 +780,8 @@ func loadClient() *client.Client {
 	if rid == "" {
 		rid = metadata.RootID
 	}
-	if *rootID != "" {
-		rid = *rootID
+	if appRootID != "" {
+		rid = appRootID
 	}
 
 	var rowner string
@@ -350,16 +809,16 @@ func loadClient() *client.Client {
 	}
 
 	c = c.WithRootAnchorBytes(rid, rowner, rpk, rek, rver).
-		WithAdmin(*adminFlag).
-		WithDisableDoH(*disableDoH).
-		WithAllowInsecure(*allowInsecure).
-		WithRegistry(*registryDir)
+		WithAdmin(appAdminFlag).
+		WithDisableDoH(appDisableDoH).
+		WithAllowInsecure(appAllowInsecure).
+		WithRegistry(appRegistryDir)
 
 	return c
 }
 
 func saveClient(c *client.Client) {
-	conf, err := config.Load(*configPath)
+	conf, err := config.Load(appConfigPath)
 	if err != nil {
 		// If we can't load it, we can't save it (need the password for encryption)
 		return
@@ -397,7 +856,7 @@ func saveClient(c *client.Client) {
 	}
 
 	// Save the updated configuration
-	if err := config.Save(*conf, *configPath); err != nil {
+	if err := config.Save(*conf, appConfigPath); err != nil {
 		log.Printf("Warning: failed to save config: %v", err)
 	} else {
 		fmt.Println("Local configuration updated with root anchor.")
@@ -413,45 +872,38 @@ type LSClient interface {
 	UserID() string
 }
 
-func cmdLs(ctx context.Context, args []string) {
-	c := loadClient()
-	runLs(ctx, c, args)
-}
+func runLs(ctx context.Context, c LSClient, cmd *cli.Command) error {
+	long := cmd.Bool("l")
+	all := cmd.Bool("a")
+	human := cmd.Bool("h")
+	inode := cmd.Bool("i")
+	recursive := cmd.Bool("R")
+	directory := cmd.Bool("d")
+	sortByTime := cmd.Bool("t")
+	sortBySize := cmd.Bool("S")
+	reverse := cmd.Bool("r")
+	oneCol := cmd.Bool("1")
+	classify := cmd.Bool("F")
 
-func runLs(ctx context.Context, c LSClient, args []string) {
-	fs := flag.NewFlagSet("ls", flag.ExitOnError)
-	long := fs.Bool("l", false, "Long format")
-	all := fs.Bool("a", false, "Show hidden files")
-	human := fs.Bool("h", false, "Human readable sizes")
-	inode := fs.Bool("i", false, "Print inode ID")
-	recursive := fs.Bool("R", false, "Recursive")
-	directory := fs.Bool("d", false, "List directory itself")
-	sortByTime := fs.Bool("t", false, "Sort by time")
-	sortBySize := fs.Bool("S", false, "Sort by size")
-	reverse := fs.Bool("r", false, "Reverse sort order")
-	oneCol := fs.Bool("1", false, "One per line")
-	classify := fs.Bool("F", false, "Classify entries")
-
-	fs.Parse(args)
-	path := "/"
-	if fs.NArg() > 0 {
-		path = fs.Arg(0)
+	path := cmd.Args().First()
+	if path == "" {
+		path = "/"
 	}
 
-	if *directory {
+	if directory {
 		entry, err := c.LstatDirEntry(ctx, path)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 
-		processAndPrintEntries(os.Stdout, []*client.DistDirEntry{entry}, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
-		return
+		processAndPrintEntries(os.Stdout, []*client.DistDirEntry{entry}, long, all, human, inode, classify, oneCol, sortByTime, sortBySize, reverse)
+		return nil
 	}
 
-	if *recursive {
+	if recursive {
 		results, err := c.ReadDirRecursive(ctx, path)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		// Sort paths for consistent output
 		var paths []string
@@ -465,18 +917,19 @@ func runLs(ctx context.Context, c LSClient, args []string) {
 				fmt.Printf("%s:\n", p)
 			}
 			entries := results[p]
-			processAndPrintEntries(os.Stdout, entries, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
+			processAndPrintEntries(os.Stdout, entries, long, all, human, inode, classify, oneCol, sortByTime, sortBySize, reverse)
 			if i < len(paths)-1 {
 				fmt.Println()
 			}
 		}
 	} else {
-		entries, err := c.ReadDirExtended(ctx, path, *long || *classify || *sortByTime || *sortBySize)
+		entries, err := c.ReadDirExtended(ctx, path, long || classify || sortByTime || sortBySize)
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
-		processAndPrintEntries(os.Stdout, entries, *long, *all, *human, *inode, *classify, *oneCol, *sortByTime, *sortBySize, *reverse)
+		processAndPrintEntries(os.Stdout, entries, long, all, human, inode, classify, oneCol, sortByTime, sortBySize, reverse)
 	}
+	return nil
 }
 
 func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, all, human, inode, classify, oneCol, sortByTime, sortBySize, reverse bool) {
@@ -598,204 +1051,71 @@ func processAndPrintEntries(w io.Writer, entries []*client.DistDirEntry, long, a
 	}
 }
 
-func cmdMkdir(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("mkdir", flag.ExitOnError)
-	ownerID := fs.String("owner", "", "Specify owner ID (Admin only)")
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		log.Fatal("path required")
-	}
-	path := fs.Arg(0)
-	c := loadClient()
-
-	opts := client.MkdirOptions{}
-	if *ownerID != "" {
-		resolvedOwner, _, err := c.ResolveUsername(ctx, *ownerID)
-		if err != nil {
-			log.Fatalf("failed to resolve owner %s: %v", *ownerID, err)
-		}
-		opts.OwnerID = resolvedOwner
-	}
-
-	if err := c.MkdirExtended(ctx, path, 0700, opts); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Directory %s created.\n", path)
-}
-
-func cmdRm(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("path required")
-	}
-	path := args[0]
-	c := loadClient()
-	if err := c.Remove(ctx, path); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Removed %s\n", path)
-}
-
-func cmdMv(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("source and destination paths required")
-	}
-	src, dst := args[0], args[1]
-	c := loadClient()
-	if err := c.Rename(ctx, src, dst); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Moved %s to %s\n", src, dst)
-}
-
-func cmdCp(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("source and destination paths required")
-	}
-	src, dst := args[0], args[1]
-	c := loadClient()
-	if err := c.Copy(ctx, src, dst); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Copied %s to %s\n", src, dst)
-}
-
-func cmdLn(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("ln", flag.ExitOnError)
-	symbolic := fs.Bool("s", false, "Create a symbolic link")
-	fs.Parse(args)
-
-	if fs.NArg() < 2 {
-		log.Fatal("target and link_path required")
-	}
-	target, linkPath := fs.Arg(0), fs.Arg(1)
-	c := loadClient()
-
-	var err error
-	if *symbolic {
-		err = c.Symlink(ctx, target, linkPath)
-	} else {
-		err = c.Link(ctx, target, linkPath)
-	}
-
+func cmdPut(ctx context.Context, local, remote string, force bool) error {
+	f, err := os.Open(local)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	if *symbolic {
-		fmt.Printf("Created symbolic link %s -> %s\n", linkPath, target)
-	} else {
-		fmt.Printf("Created hard link %s -> %s\n", linkPath, target)
-	}
-}
+	defer f.Close()
 
-func cmdCat(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("path required")
-	}
-	path := args[0]
-	c := loadClient()
-	rc, err := c.OpenBlobRead(ctx, path)
+	info, err := f.Stat()
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
-	defer rc.Close()
 
-	io.Copy(os.Stdout, rc)
-}
-
-func cmdHead(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("head", flag.ExitOnError)
-	lines := fs.Int("n", 10, "Number of lines to show")
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		log.Fatal("path required")
-	}
-	path := fs.Arg(0)
 	c := loadClient()
-	rc, err := c.OpenBlobRead(ctx, path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rc.Close()
 
-	// Simple line-based head
-	scanner := bufio.NewScanner(rc)
-	for i := 0; i < *lines && scanner.Scan(); i++ {
-		fmt.Println(scanner.Text())
-	}
-}
+	var opts client.MkdirOptions
+	if force {
+		if fi, err := c.Lstat(ctx, remote); err == nil {
+			inode := fi.Sys().(*client.InodeInfo)
+			if err := c.EnsureFileKey(ctx, remote); err != nil {
+				log.Printf("cmdPut: EnsureFileKey warning: %v", err)
+			}
 
-func cmdTail(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("tail", flag.ExitOnError)
-	lines := fs.Int("n", 10, "Number of lines to show")
-	fs.Parse(args)
+			m := uint32(fi.Mode()) & 0777
+			opts.Mode = &m
+			opts.GroupID = inode.GroupID
+			opts.AccessACL = inode.AccessACL
+			opts.DefaultACL = inode.DefaultACL
 
-	if fs.NArg() < 1 {
-		log.Fatal("path required")
-	}
-	path := fs.Arg(0)
-	c := loadClient()
-	r, err := c.OpenBlobRead(ctx, path)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer r.Close()
-
-	// For tail, we can't easily seek lines from the end without reading backwards.
-	// But we can seek to a reasonable estimate or just read the whole file if it's small.
-	// For now, let's read the whole file and keep last N lines.
-	var lastLines []string
-	scanner := bufio.NewScanner(r)
-	for scanner.Scan() {
-		lastLines = append(lastLines, scanner.Text())
-		if len(lastLines) > *lines {
-			lastLines = lastLines[1:]
+			if err := c.RemoveEntry(ctx, remote); err != nil {
+				return fmt.Errorf("failed to remove existing file for overwrite: %w", err)
+			}
+		} else if !errors.Is(err, metadata.ErrNotFound) {
+			return fmt.Errorf("failed to check existing file: %w", err)
 		}
 	}
 
-	for _, line := range lastLines {
-		fmt.Println(line)
+	if err := c.CreateFileExtended(ctx, remote, f, info.Size(), opts); err != nil {
+		return err
 	}
+	fmt.Printf("File %s uploaded to %s.\n", local, remote)
+	return nil
 }
 
-func cmdStat(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("path required")
-	}
-	path := args[0]
+func cmdGet(ctx context.Context, remote, local string) error {
 	c := loadClient()
-	info, err := c.Lstat(ctx, path)
+	rc, err := c.OpenBlobRead(ctx, remote)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
+	defer rc.Close()
 
-	inode := info.Sys().(*client.InodeInfo)
-	fmt.Printf("  File: %s\n", info.Name())
-	fmt.Printf("  Size: %-15d Blocks: %-10d IO Block: %-10d ", info.Size(), (info.Size()+511)/512, 4096)
-	switch inode.Type {
-	case metadata.DirType:
-		fmt.Println("directory")
-	case metadata.FileType:
-		fmt.Println("regular file")
-	case metadata.SymlinkType:
-		fmt.Printf("symbolic link -> %s\n", inode.SymlinkTarget)
+	f, err := os.Create(local)
+	if err != nil {
+		return err
 	}
-	fmt.Printf("Device: %-15s Inode: %-15s Links: %-10d\n", "distfs", inode.ID[:16], inode.NLink)
-	fmt.Printf("Access: (%04o/%s)  Uid: (%-8s)   Gid: (%-8s)\n", info.Mode().Perm(), info.Mode().String(), inode.OwnerID[:8], inode.GroupID)
-	fmt.Printf("Modify: %s\n", info.ModTime().Format(time.RFC3339))
+	defer f.Close()
+
+	if _, err := io.Copy(f, rc); err != nil {
+		return err
+	}
+	fmt.Printf("File %s downloaded to %s.\n", remote, local)
+	return nil
 }
 
-func cmdDu(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("du", flag.ExitOnError)
-	human := fs.Bool("h", false, "Human readable sizes")
-	fs.Parse(args)
-
-	path := "."
-	if fs.NArg() > 0 {
-		path = fs.Arg(0)
-	}
-
+func cmdDu(ctx context.Context, path string, human bool) error {
 	c := loadClient()
 	var totalSize int64
 
@@ -823,25 +1143,22 @@ func cmdDu(ctx context.Context, args []string) {
 	}
 
 	if err := walk(path); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
-	if *human {
+	if human {
 		fmt.Printf("%s\t%s\n", client.FormatBytes(totalSize), path)
 	} else {
 		fmt.Printf("%d\t%s\n", totalSize, path)
 	}
+	return nil
 }
 
-func cmdDf(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("df", flag.ExitOnError)
-	human := fs.Bool("h", false, "Human readable sizes")
-	fs.Parse(args)
-
+func cmdDf(ctx context.Context, human bool) error {
 	c := loadClient()
 	quota, usage, err := c.GetQuota(ctx)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	fmt.Printf("%-20s %-10s %-10s %-10s %-10s\n", "Filesystem", "Size", "Used", "Avail", "Use%")
@@ -854,7 +1171,7 @@ func cmdDf(ctx context.Context, args []string) {
 		availStr = "Inf"
 	}
 
-	if *human {
+	if human {
 		sizeStr = client.FormatBytes(quota.MaxBytes)
 		if quota.MaxBytes == 0 {
 			sizeStr = "Inf"
@@ -872,44 +1189,14 @@ func cmdDf(ctx context.Context, args []string) {
 	}
 
 	fmt.Printf("%-20s %-10s %-10s %-10s %-10s\n", "distfs", sizeStr, usedStr, availStr, percent)
+	return nil
 }
 
-func cmdTouch(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("path required")
-	}
-	path := args[0]
-	c := loadClient()
-
-	// Try to resolve path
-	_, err := c.Stat(ctx, path)
-	if err == nil {
-		// File exists, update MTime
-		now := time.Now().UnixNano()
-		err = c.SetMTime(ctx, path, now)
-		if err != nil {
-			log.Fatal(err)
-		}
-		return
-	}
-
-	// File doesn't exist, create it
-	err = c.CreateFile(ctx, path, bytes.NewReader(nil), 0)
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Created empty file %s\n", path)
-}
-
-func cmdGetFacl(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("path required")
-	}
-	path := args[0]
+func cmdGetFacl(ctx context.Context, path string) error {
 	c := loadClient()
 	info, err := c.Stat(ctx, path)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	inode := info.Sys().(*client.InodeInfo)
@@ -938,6 +1225,7 @@ func cmdGetFacl(ctx context.Context, args []string) {
 	}
 
 	fmt.Printf("other::%s\n", formatPerms(inode.Mode&7))
+	return nil
 }
 
 func formatPerms(bits uint32) string {
@@ -978,20 +1266,11 @@ func parsePerms(s string) (uint32, error) {
 	return uint32(p), err
 }
 
-func cmdSetFacl(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("setfacl", flag.ExitOnError)
-	modify := fs.String("m", "", "Modify ACL entries (e.g. u:user:rw-)")
-	remove := fs.String("x", "", "Remove ACL entries (e.g. u:user)")
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		log.Fatal("path required")
-	}
-	path := fs.Arg(0)
+func cmdSetFacl(ctx context.Context, path, modify, remove string) error {
 	c := loadClient()
 	info, err := c.Stat(ctx, path)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	inode := info.Sys().(*client.InodeInfo)
 
@@ -1003,22 +1282,22 @@ func cmdSetFacl(ctx context.Context, args []string) {
 		}
 	}
 
-	if *modify != "" {
-		parts := strings.Split(*modify, ":")
+	if modify != "" {
+		parts := strings.Split(modify, ":")
 		if len(parts) < 3 {
-			log.Fatal("invalid modify spec, expected type:id:perms")
+			return errors.New("invalid modify spec, expected type:id:perms")
 		}
 		t, id, permsStr := parts[0], parts[1], parts[2]
 		bits, err := parsePerms(permsStr)
 		if err != nil {
-			log.Fatalf("invalid permissions: %v", err)
+			return fmt.Errorf("invalid permissions: %w", err)
 		}
 
 		switch t {
 		case "u", "user":
 			resolvedID, _, err := c.ResolveUsername(ctx, id)
 			if err != nil {
-				log.Fatalf("failed to resolve user %s: %v", id, err)
+				return fmt.Errorf("failed to resolve user %s: %w", id, err)
 			}
 			acl.Users[resolvedID] = bits
 		case "g", "group":
@@ -1026,14 +1305,14 @@ func cmdSetFacl(ctx context.Context, args []string) {
 		case "m", "mask":
 			acl.Mask = &bits
 		default:
-			log.Fatalf("unsupported ACL type: %s", t)
+			return fmt.Errorf("unsupported ACL type: %s", t)
 		}
 	}
 
-	if *remove != "" {
-		parts := strings.Split(*remove, ":")
+	if remove != "" {
+		parts := strings.Split(remove, ":")
 		if len(parts) < 2 {
-			log.Fatal("invalid remove spec, expected type:id")
+			return errors.New("invalid remove spec, expected type:id")
 		}
 		t, id := parts[0], parts[1]
 		switch t {
@@ -1048,92 +1327,43 @@ func cmdSetFacl(ctx context.Context, args []string) {
 	}
 
 	if err := c.Setfacl(ctx, path, *acl); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("ACL of %s updated.\n", path)
+	return nil
 }
 
-func cmdChmod(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("mode and path required")
-	}
-	modeStr, path := args[0], args[1]
-	mode, err := strconv.ParseUint(modeStr, 8, 32)
-	if err != nil {
-		log.Fatalf("invalid mode: %v", err)
-	}
-
-	c := loadClient()
-	if err := c.Chmod(ctx, path, fs.FileMode(mode)); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Mode of %s changed to %s\n", path, modeStr)
-}
-
-func cmdChgrp(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("group_id and path required")
-	}
-	groupID, path := args[0], args[1]
-
-	c := loadClient()
-	if err := c.Chgrp(ctx, path, groupID); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Group of %s changed to %s\n", path, groupID)
-}
-
-func cmdGroupCreate(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("group-create", flag.ExitOnError)
-	quota := fs.Bool("quota", false, "Enable independent group quota (charged to group, not owner)")
-	owner := fs.String("owner", "", "Initial group owner (username or UserID)")
-	fs.Parse(args)
-
-	if fs.NArg() < 1 {
-		log.Fatal("group name required")
-	}
-	name := fs.Arg(0)
+func cmdGroupCreate(ctx context.Context, name string, quota bool, owner string) error {
 	c := loadClient()
 
-	if !*adminFlag {
-		log.Fatal("group-create now requires -admin privileges to anchor in /registry")
+	if !appAdminFlag {
+		return errors.New("group-create now requires --admin privileges to anchor in /registry")
 	}
 
 	ownerID := ""
-	if *owner != "" {
+	if owner != "" {
 		var err error
-		ownerID, _, err = c.ResolveUsername(ctx, *owner)
+		ownerID, _, err = c.ResolveUsername(ctx, owner)
 		if err != nil {
-			log.Fatalf("failed to resolve owner %s: %v", *owner, err)
+			return fmt.Errorf("failed to resolve owner %s: %w", owner, err)
 		}
 	}
 
-	group, err := c.CreateGroupWithOptions(ctx, name, *quota, ownerID)
+	group, err := c.CreateGroupWithOptions(ctx, name, quota, ownerID)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	if err := c.AnchorGroupInRegistry(ctx, name, group.ID); err != nil {
-		log.Fatalf("failed to anchor group in registry: %v", err)
+		return fmt.Errorf("failed to anchor group in registry: %w", err)
 	}
 	fmt.Printf("Group %s created and anchored in /registry.\n", name)
 	fmt.Printf("ID: %s\n", group.ID)
 	fmt.Printf("Owner: %s\n", group.OwnerID)
 	fmt.Printf("QuotaEnabled: %v\n", group.QuotaEnabled)
+	return nil
 }
 
-func cmdGroupAdd(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("group-add", flag.ExitOnError)
-	force := fs.Bool("f", false, "Force add without confirmation")
-	fs.Parse(args)
-
-	if fs.NArg() < 2 {
-		log.Fatal("group_id/group_name and user_id/contact_string required")
-	}
-	groupArg, userArg := fs.Arg(0), fs.Arg(1)
-	info := ""
-	if fs.NArg() > 2 {
-		info = fs.Arg(2)
-	}
+func cmdGroupAdd(ctx context.Context, groupArg, userArg, info string, force bool) error {
 	c := loadClient()
 
 	// Resolve Group
@@ -1141,7 +1371,7 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 	if !metadata.IsInodeID(groupArg) {
 		id, _, err := c.ResolveGroupName(ctx, groupArg)
 		if err != nil {
-			log.Fatalf("Failed to resolve group %s: %v", groupArg, err)
+			return fmt.Errorf("failed to resolve group %s: %w", groupArg, err)
 		}
 		groupID = id
 	}
@@ -1152,20 +1382,20 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 		var err error
 		ci, err = c.ParseContactString(userArg)
 		if err != nil {
-			log.Fatalf("Invalid contact string: %v", err)
+			return fmt.Errorf("invalid contact string: %w", err)
 		}
 		userID = ci.UserID
 		fmt.Printf("Parsed contact string:\n")
 		fmt.Printf("  User ID:    %s\n", ci.UserID)
 		fmt.Printf("  Created At: %s\n", time.Unix(ci.Timestamp, 0).Format(time.RFC3339))
 
-		if !*force {
+		if !force {
 			fmt.Printf("Add this user to group %s? [y/N]: ", groupID)
 			var response string
 			fmt.Scanln(&response)
-			if strings.ToLower(response) != "y" {
+			if strings.ToLower(strings.TrimSpace(response)) != "y" {
 				fmt.Println("Aborted.")
-				return
+				return nil
 			}
 		}
 	} else {
@@ -1173,10 +1403,9 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 		var entry *client.DirectoryEntry
 		userID, entry, err = c.ResolveUsername(ctx, userArg)
 		if err != nil {
-			log.Fatalf("Failed to resolve user %s: %v", userArg, err)
+			return fmt.Errorf("failed to resolve user %s: %w", userArg, err)
 		}
 		if entry != nil && entry.EncKey != nil {
-			// Phase 49: Convert Registry Entry to ContactInfo for OOB pinning
 			ci = &client.ContactInfo{
 				UserID:    entry.UserID,
 				EncKey:    entry.EncKey,
@@ -1188,26 +1417,13 @@ func cmdGroupAdd(ctx context.Context, args []string) {
 	}
 
 	if err := c.AddUserToGroup(ctx, groupID, userID, info, ci); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("User %s added to group %s\n", userID, groupID)
+	return nil
 }
 
-func cmdContactInfo(ctx context.Context, args []string) {
-	c := loadClient()
-	s, err := c.GenerateContactString()
-	if err != nil {
-		log.Fatal(err)
-	}
-	fmt.Println("Your DistFS Contact String:")
-	fmt.Println(s)
-}
-
-func cmdGroupMembers(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("group_id/group_name required")
-	}
-	groupArg := args[0]
+func cmdGroupMembers(ctx context.Context, groupArg string) error {
 	c := loadClient()
 
 	// Resolve Group
@@ -1215,7 +1431,7 @@ func cmdGroupMembers(ctx context.Context, args []string) {
 	if !metadata.IsInodeID(groupArg) {
 		id, _, err := c.ResolveGroupName(ctx, groupArg)
 		if err != nil {
-			log.Fatalf("Failed to resolve group %s: %v", groupArg, err)
+			return fmt.Errorf("failed to resolve group %s: %w", groupArg, err)
 		}
 		groupID = id
 	}
@@ -1225,18 +1441,15 @@ func cmdGroupMembers(ctx context.Context, args []string) {
 	fmt.Println(strings.Repeat("-", 80))
 	members, err := c.AdminGetGroupMembers(ctx, groupID)
 	if err != nil {
-		log.Fatal(err)
+		return err
 	}
 	for userID, info := range members {
 		fmt.Printf("%-64s %s\n", userID, info)
 	}
+	return nil
 }
 
-func cmdGroupRemove(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("group_id/group_name and user_id/username required")
-	}
-	groupArg, userArg := args[0], args[1]
+func cmdGroupRemove(ctx context.Context, groupArg, userArg string) error {
 	c := loadClient()
 
 	// Resolve Group
@@ -1244,7 +1457,7 @@ func cmdGroupRemove(ctx context.Context, args []string) {
 	if !metadata.IsInodeID(groupArg) {
 		id, _, err := c.ResolveGroupName(ctx, groupArg)
 		if err != nil {
-			log.Fatalf("Failed to resolve group %s: %v", groupArg, err)
+			return fmt.Errorf("failed to resolve group %s: %w", groupArg, err)
 		}
 		groupID = id
 	}
@@ -1254,25 +1467,26 @@ func cmdGroupRemove(ctx context.Context, args []string) {
 	if !metadata.IsInodeID(userArg) && len(userArg) != 64 {
 		id, _, err := c.ResolveUsername(ctx, userArg)
 		if err != nil {
-			log.Fatalf("Failed to resolve user %s: %v", userArg, err)
+			return fmt.Errorf("failed to resolve user %s: %w", userArg, err)
 		}
 		userID = id
 	}
 
 	if err := c.RemoveUserFromGroup(ctx, groupID, userID); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("User %s removed from group %s\n", userArg, groupArg)
+	return nil
 }
 
-func cmdGroupList(ctx context.Context, args []string) {
+func cmdGroupList(ctx context.Context) error {
 	c := loadClient()
 
 	fmt.Printf("%-32s %-20s %s\n", "Group ID", "Name", "Role")
 	fmt.Println(strings.Repeat("-", 80))
 	for e, err := range c.ListGroups(ctx) {
 		if err != nil {
-			log.Fatal(err)
+			return err
 		}
 		name := "[HIDDEN]"
 		if decrypted, err := c.AdminDecryptGroupName(ctx, e); err == nil {
@@ -1280,103 +1494,14 @@ func cmdGroupList(ctx context.Context, args []string) {
 		}
 		fmt.Printf("%-32s %-20s %s\n", e.ID, name, e.Role)
 	}
+	return nil
 }
 
-func cmdPut(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("put", flag.ExitOnError)
-	force := fs.Bool("f", false, "Force overwrite existing file")
-	fs.Parse(args)
-
-	fArgs := fs.Args()
-	if len(fArgs) < 2 {
-		fmt.Println("Usage: distfs put [-f] <local> <remote>")
-		os.Exit(1)
-	}
-	local, remote := fArgs[0], fArgs[1]
-	f, err := os.Open(local)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	c := loadClient()
-
-	var opts client.MkdirOptions
-	if *force {
-		// Phase 69: Support overwrite in 'put' by preserving existing metadata
-		if fi, err := c.Lstat(ctx, remote); err == nil {
-			inode := fi.Sys().(*client.InodeInfo)
-			// Ensure we have the file key for group signature generation in RemoveEntry
-			if err := c.EnsureFileKey(ctx, remote); err != nil {
-				log.Printf("cmdPut: EnsureFileKey warning: %v", err)
-			}
-
-			m := uint32(fi.Mode()) & 0777
-			opts.Mode = &m
-			opts.GroupID = inode.GroupID
-			opts.AccessACL = inode.AccessACL
-			opts.DefaultACL = inode.DefaultACL
-
-			if err := c.RemoveEntry(ctx, remote); err != nil {
-				log.Fatalf("failed to remove existing file for overwrite: %v", err)
-			}
-		} else if !errors.Is(err, metadata.ErrNotFound) {
-			log.Fatalf("failed to check existing file: %v", err)
-		}
-	}
-
-	if err := c.CreateFileExtended(ctx, remote, f, info.Size(), opts); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("File %s uploaded to %s.\n", local, remote)
-}
-
-func cmdGet(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("remote and local paths required")
-	}
-	remote, local := args[0], args[1]
-	c := loadClient()
-	rc, err := c.OpenBlobRead(ctx, remote)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer rc.Close()
-
-	f, err := os.Create(local)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer f.Close()
-
-	if _, err := io.Copy(f, rc); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("File %s downloaded to %s.\n", remote, local)
-}
-
-func cmdGroupChown(ctx context.Context, args []string) {
-	if len(args) < 2 {
-		log.Fatal("group_id and owner required")
-	}
-	groupID, ownerID := args[0], args[1]
-	c := loadClient()
-	if err := c.GroupChown(ctx, groupID, ownerID); err != nil {
-		log.Fatal(err)
-	}
-	fmt.Printf("Owner of group %s changed to %s\n", groupID, ownerID)
-}
-
-func cmdQuota(ctx context.Context, args []string) {
+func cmdQuota(ctx context.Context) error {
 	c := loadClient()
 	quota, usage, err := c.GetQuota(ctx)
 	if err != nil {
-		log.Fatalf("Failed to fetch user info: %v", err)
+		return fmt.Errorf("failed to fetch user info: %w", err)
 	}
 
 	fmt.Printf("Personal Usage for %s:\n", c.UserID())
@@ -1386,7 +1511,7 @@ func cmdQuota(ctx context.Context, args []string) {
 	for g, err := range c.ListGroups(ctx) {
 		if err != nil {
 			fmt.Printf("\nFailed to fetch group info: %v\n", err)
-			return
+			return nil
 		}
 		if g.Role == metadata.RoleOwner || g.Role == metadata.RoleManager {
 			if managedGroups == 0 {
@@ -1402,6 +1527,7 @@ func cmdQuota(ctx context.Context, args []string) {
 			displayUsage(g.Usage, g.Quota)
 		}
 	}
+	return nil
 }
 
 func displayUsage(usage metadata.UserUsage, quota metadata.UserQuota) {
@@ -1418,4 +1544,16 @@ func displayUsage(usage metadata.UserUsage, quota metadata.UserQuota) {
 	} else {
 		fmt.Println("Unlimited")
 	}
+}
+
+func isHexID(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }

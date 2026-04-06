@@ -92,6 +92,46 @@ func (m *mockAdminClient) MkdirExtended(ctx context.Context, path string, perm o
 	return m.err
 }
 
+func (m *mockAdminClient) AdminAuditForest(ctx context.Context) ([]*metadata.RedactedInode, []*metadata.RedactedInode, []metadata.InconsistencyReport, []metadata.RedactedUser, []metadata.RedactedGroup, []metadata.Node, []string, map[string]*metadata.RedactedInode, error) {
+	return nil, nil, nil, nil, nil, nil, nil, nil, m.err
+}
+
+func (m *mockAdminClient) BootstrapFileSystem(ctx context.Context) error {
+	return m.err
+}
+
+func (m *mockAdminClient) GetRootAnchor() (string, string, []byte, []byte, uint64) {
+	return "root-123", "owner-123", nil, nil, 1
+}
+
+func (m *mockAdminClient) WithRootID(id string) *client.Client {
+	return nil
+}
+
+func (m *mockAdminClient) UserID() string {
+	return "mock-user-id"
+}
+
+func (m *mockAdminClient) GetUserVerificationCode(ctx context.Context, userID string) (string, error) {
+	return "ABCD-1234", m.err
+}
+
+func (m *mockAdminClient) AnchorUserInRegistry(ctx context.Context, username, userID, signerID string) error {
+	return m.err
+}
+
+func (m *mockAdminClient) AdminSetUserLock(ctx context.Context, userID string, lock bool) error {
+	return m.err
+}
+
+func (m *mockAdminClient) Mkdir(ctx context.Context, path string, perm os.FileMode) error {
+	return m.err
+}
+
+func (m *mockAdminClient) AnchorGroupInRegistry(ctx context.Context, name, groupID string) error {
+	return m.err
+}
+
 func TestAdminConsole_TabSwitching(t *testing.T) {
 	m := model{
 		client: &mockAdminClient{},

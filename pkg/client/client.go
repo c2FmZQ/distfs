@@ -2096,7 +2096,6 @@ func (c *Client) applyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 		}
 
 		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
 			return c.newAPIError(resp, body)
 		}
 

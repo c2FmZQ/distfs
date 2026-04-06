@@ -4,14 +4,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 )
 
-func cmdDump(ctx context.Context, args []string) {
+func cmdDump(ctx context.Context, args []string) error {
 	if len(args) < 1 {
-		log.Fatal("usage: distfs dump <path or rootID>")
+		return fmt.Errorf("usage: distfs dump <path or rootID>")
 	}
 	target := args[0]
 
@@ -52,6 +51,7 @@ func cmdDump(ctx context.Context, args []string) {
 	}
 
 	fmt.Println("--- INODE DUMP END ---")
+	return nil
 }
 
 func dumpInode(i *client.InodeDump) {

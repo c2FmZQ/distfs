@@ -1421,4 +1421,29 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Testing Strategy:**
         1. Create a self-owned group and verify its `OwnerID` is the magic string and its ID is correctly derived.
         2. Attempt to verify an inode or group with an 8-byte nonce and assert it fails.
-        3. Manually modify a group's `OwnerID` in a mock response and verify `VerifyGroup` rejects it.
+        3. Manually modify a group's OwnerID in a mock response and verify VerifyGroup rejects it.
+
+---
+
+## Phase 70: Standardized CLI Framework (urfave/cli/v3)
+**Goal:** Transition all command-line tools to use the `urfave/cli/v3` framework to improve maintainability, documentation consistency, and flag parsing robustness.
+
+*   **Step 70.1: Dependency Integration**
+    *   **Action:** Add `github.com/urfave/cli/v3` to `go.mod`.
+*   **Step 70.2: Main CLI Refactoring (`cmd/distfs`)**
+    *   **Action:** Rewrite `cmd/distfs/main.go` using `cli.App`.
+    *   **Action:** Convert all subcommands (ls, mkdir, put, get, etc.) to `cli.Command` structures.
+    *   **Action:** Map existing global and local flags to framework-managed flags.
+*   **Step 70.3: Storage Node Refactoring (`cmd/storage-node`)**
+    *   **Action:** Rewrite `cmd/storage-node/main.go` to use `cli.App`.
+    *   **Action:** Consolidate server initialization logic into the framework's `Action` handlers.
+*   **Step 70.4: FUSE Client Refactoring (`cmd/distfs-fuse`)**
+    *   **Action:** Rewrite `cmd/distfs-fuse/main.go` to use `cli.App`.
+*   **Step 70.5: Utility & Benchmarking Refactoring**
+    *   **Action:** Refactor `cmd/distfs-bench`, `cmd/distfs-fuse-load`, `cmd/test-auth`, and `cmd/web-test-server`.
+    *   **Exclusion:** Ignore `cmd/distfs-wasm` as it relies on a specialized JS bridge entry point.
+*   **Step 70.6: Verification & E2E Testing**
+    *   **Action:** Verify that all existing E2E shell scripts (`scripts/test-*.sh`) function correctly with the new flag parsing.
+    *   **Action:** Ensure help documentation (`--help`) is automatically generated and accurate for all tools.
+
+

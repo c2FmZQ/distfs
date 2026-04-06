@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"errors"
-	"flag"
 	"fmt"
 	"iter"
 	"log"
@@ -72,6 +71,24 @@ type AdminClient interface {
 	AdminRemoveNode(ctx context.Context, id string) error
 	AdminDecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error)
 	MkdirExtended(ctx context.Context, path string, perm os.FileMode, opts client.MkdirOptions) error
+	AdminAuditForest(ctx context.Context) (roots, orphans []*metadata.RedactedInode, reports []metadata.InconsistencyReport, users []metadata.RedactedUser, groups []metadata.RedactedGroup, nodes []metadata.Node, gc []string, allInodes map[string]*metadata.RedactedInode, err error)
+	BootstrapFileSystem(ctx context.Context) error
+	GetRootAnchor() (string, string, []byte, []byte, uint64)
+	WithRootID(id string) *client.Client
+	UserID() string
+	GetUserVerificationCode(ctx context.Context, userID string) (string, error)
+	AnchorUserInRegistry(ctx context.Context, username, userID, signerID string) error
+	AdminSetUserLock(ctx context.Context, userID string, lock bool) error
+	Mkdir(ctx context.Context, path string, perm os.FileMode) error
+	AnchorGroupInRegistry(ctx context.Context, name, groupID string) error
+}
+
+func newInput(placeholder string) textinput.Model {
+	ti := textinput.New()
+	ti.Placeholder = placeholder
+	ti.CharLimit = 156
+	ti.Width = 50
+	return ti
 }
 
 type model struct {
@@ -85,6 +102,11 @@ type model struct {
 	groups []*metadata.Group
 	leases []*metadata.LeaseInfo
 	nodes  []*metadata.Node
+
+	// Audit Data
+	auditUsers  []metadata.RedactedUser
+	auditGroups []metadata.RedactedGroup
+	auditNodes  []metadata.Node
 
 	// Tables
 	userTable  table.Model
@@ -391,7 +413,6 @@ func (m *model) updateGroupTable() {
 
 		name := "[HIDDEN]"
 		// Attempt to decrypt if admin has access
-		// We can reuse the group list logic from the client
 		if decrypted, err := m.client.AdminDecryptGroupName(m.ctx, metadata.GroupListEntry{
 			ID:         g.ID,
 			ClientBlob: g.ClientBlob,
@@ -668,14 +689,6 @@ func (m model) modalView() string {
 	return windowStyle.Render(b.String())
 }
 
-func newInput(placeholder string) textinput.Model {
-	ti := textinput.New()
-	ti.Placeholder = placeholder
-	ti.CharLimit = 156
-	ti.Width = 50
-	return ti
-}
-
 func cmdAdmin(ctx context.Context, args []string) {
 	c := loadClient()
 
@@ -697,35 +710,25 @@ func cmdAdmin(ctx context.Context, args []string) {
 	}
 }
 
-func cmdAdminJoin(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("node address required (e.g. http://node-2:8080)")
-	}
-	address := args[0]
+func cmdAdminJoin(ctx context.Context, address string) error {
 	c := loadClient()
 	if err := c.AdminJoinNode(ctx, address); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("Join request for %s submitted to cluster.\n", address)
+	return nil
 }
 
-func cmdAdminRemove(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("node ID required")
-	}
-	id := args[0]
+func cmdAdminRemove(ctx context.Context, id string) error {
 	c := loadClient()
 	if err := c.AdminRemoveNode(ctx, id); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("Node %s removed from cluster.\n", id)
+	return nil
 }
 
-func cmdAdminPromote(ctx context.Context, args []string) {
-	if len(args) < 1 {
-		log.Fatal("usage: admin-promote <username|userID>")
-	}
-	identifier := args[0]
+func cmdAdminPromote(ctx context.Context, identifier string) error {
 	c := loadClient()
 
 	// Resolve username to UserID
@@ -733,29 +736,26 @@ func cmdAdminPromote(ctx context.Context, args []string) {
 	if !isHexID(identifier) {
 		id, _, err := c.ResolveUsername(ctx, identifier)
 		if err != nil {
-			log.Fatalf("failed to resolve user %s: %v", identifier, err)
+			return fmt.Errorf("failed to resolve user %s: %w", identifier, err)
 		}
 		userID = id
 	}
 
 	if err := c.AdminPromote(ctx, userID); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("User %s promoted to Admin successfully.\n", identifier)
+	return nil
 }
 
-func cmdAdminUserQuota(ctx context.Context, args []string) {
-	if len(args) < 3 {
-		log.Fatal("usage: admin-user-quota <username|userID> <max_bytes> <max_inodes>")
-	}
-	identifier, bytesStr, inodesStr := args[0], args[1], args[2]
+func cmdAdminUserQuota(ctx context.Context, identifier, bytesStr, inodesStr string) error {
 	c := loadClient()
 
 	userID := identifier
 	if !isHexID(identifier) {
 		id, _, err := c.ResolveUsername(ctx, identifier)
 		if err != nil {
-			log.Fatalf("failed to resolve user %s: %v", identifier, err)
+			return fmt.Errorf("failed to resolve user %s: %w", identifier, err)
 		}
 		userID = id
 	}
@@ -770,16 +770,13 @@ func cmdAdminUserQuota(ctx context.Context, args []string) {
 	}
 
 	if err := c.AdminSetUserQuota(ctx, req); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("User %s quota updated: %d bytes, %d inodes\n", identifier, maxBytes, maxInodes)
+	return nil
 }
 
-func cmdAdminGroupQuota(ctx context.Context, args []string) {
-	if len(args) < 3 {
-		log.Fatal("usage: admin-group-quota <group_id> <max_bytes> <max_inodes>")
-	}
-	groupID, bytesStr, inodesStr := args[0], args[1], args[2]
+func cmdAdminGroupQuota(ctx context.Context, groupID, bytesStr, inodesStr string) error {
 	c := loadClient()
 
 	maxBytes, _ := strconv.ParseUint(bytesStr, 10, 64)
@@ -792,21 +789,17 @@ func cmdAdminGroupQuota(ctx context.Context, args []string) {
 	}
 
 	if err := c.AdminSetGroupQuota(ctx, req); err != nil {
-		log.Fatal(err)
+		return err
 	}
 	fmt.Printf("Group %s quota updated: %d bytes, %d inodes\n", groupID, maxBytes, maxInodes)
+	return nil
 }
 
-func cmdAdminCreateRoot(ctx context.Context, args []string) {
-	fmt.Printf("DEBUG: cmdAdminCreateRoot called with args: %v\n", args)
-	fs := flag.NewFlagSet("admin-create-root", flag.ExitOnError)
-	secondary := fs.Bool("secondary", false, "Generate a secondary root inode instead of the canonical system root")
-	fs.Parse(args)
-
+func cmdAdminCreateRoot(ctx context.Context, secondary bool) error {
 	c := loadClient()
 
 	id := metadata.RootID
-	if *secondary {
+	if secondary {
 		// Provide a non-canonical placeholder to trigger client's generation logic.
 		id = "secondary-placeholder-id-0000000"
 	}
@@ -814,7 +807,7 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 
 	fmt.Println("Bootstrapping system backbone...")
 	if err := c.BootstrapFileSystem(ctx); err != nil {
-		log.Fatalf("BootstrapFileSystem failed: %v", err)
+		return fmt.Errorf("BootstrapFileSystem failed: %w", err)
 	}
 
 	finalID, _, _, _, _ := c.GetRootAnchor()
@@ -822,8 +815,10 @@ func cmdAdminCreateRoot(ctx context.Context, args []string) {
 	fmt.Println("Backbone provisioned successfully.")
 
 	saveClient(c)
+	return nil
 }
-func cmdAdminAudit(ctx context.Context, args []string) {
+
+func cmdAdminAudit(ctx context.Context, args []string) error {
 	c := loadClient()
 
 	fmt.Println("=== DISTFS SYSTEM AUDIT & STRUCTURAL INTEGRITY ===")
@@ -832,7 +827,7 @@ func cmdAdminAudit(ctx context.Context, args []string) {
 
 	roots, orphans, reports, users, groups, nodes, gc, allInodes, err := c.AdminAuditForest(ctx)
 	if err != nil {
-		log.Fatalf("Audit failed: %v", err)
+		return fmt.Errorf("Audit failed: %w", err)
 	}
 
 	fmt.Println("TREE FOREST:")
@@ -941,45 +936,19 @@ func cmdAdminAudit(ctx context.Context, args []string) {
 		fmt.Println("INTEGRITY CHECK: PASS")
 	}
 	fmt.Println("")
+	return nil
 }
 
-func findRedactedInode(roots, orphans []*metadata.RedactedInode, id string) (*metadata.RedactedInode, bool) {
-	for _, r := range roots {
-		if r.ID == id {
-			return r, true
-		}
-	}
-	for _, o := range orphans {
-		if o.ID == id {
-			return o, true
-		}
-	}
-	return nil, false
-}
-
-func cmdRegistryAdd(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("registry-add", flag.ExitOnError)
-	unlock := fs.Bool("unlock", false, "Unlock the user account after verification")
-	quota := fs.String("quota", "", "Set user quota (format: bytes,inodes e.g. 1000000,5000)")
-	home := fs.Bool("home", false, "Provision a home directory in /users/<username>")
-	assumeYes := fs.Bool("yes", false, "Assume 'yes' for the verification prompt")
-	fs.Parse(args)
-
-	if fs.NArg() < 2 {
-		log.Fatal("usage: registry-add [--unlock] [--quota <bytes,inodes>] [--home] [--yes] <username> <userID>")
-	}
-	username := fs.Arg(0)
-	userID := fs.Arg(1)
-
+func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, quota string, home, assumeYes bool) error {
 	c := loadClient()
 
 	if !isHexID(userID) {
-		log.Fatalf("Invalid UserID format: must be a 64-character hex string")
+		return fmt.Errorf("Invalid UserID format: must be a 64-character hex string")
 	}
 
 	codeStr, err := c.GetUserVerificationCode(ctx, userID)
 	if err != nil {
-		log.Fatalf("Failed to fetch user verification code: %v", err)
+		return fmt.Errorf("Failed to fetch user verification code: %w", err)
 	}
 
 	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
@@ -988,12 +957,12 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 	fmt.Printf("Ask them to verify their security code matches: %s\n", codeStr)
 	fmt.Printf("-----------------------------------------\n")
 
-	if !*assumeYes {
+	if !assumeYes {
 		fmt.Printf("Does the code match? [y/N]: ")
 		var response string
 		fmt.Scanln(&response)
 		if strings.ToLower(strings.TrimSpace(response)) != "y" {
-			log.Fatal("Verification aborted.")
+			return errors.New("Verification aborted.")
 		}
 	} else {
 		fmt.Println("Verification auto-confirmed via --yes flag.")
@@ -1001,77 +970,73 @@ func cmdRegistryAdd(ctx context.Context, args []string) {
 
 	// 3. Attestation & Registry Update
 	if err := c.AnchorUserInRegistry(ctx, username, userID, c.UserID()); err != nil {
-		log.Fatalf("Failed to anchor user in registry: %v", err)
+		return fmt.Errorf("Failed to anchor user in registry: %w", err)
 	}
 
 	fmt.Printf("Successfully added %s to the registry.\n", username)
 
 	// 4. Handle Flags
-	if *unlock {
+	if unlock {
 		err := c.AdminSetUserLock(ctx, userID, false)
 		if err != nil {
-			log.Fatalf("Failed to unlock user: %v", err)
+			return fmt.Errorf("Failed to unlock user: %w", err)
 		}
 		fmt.Println("User unlocked.")
 	}
 
-	if *quota != "" {
-		parts := strings.Split(*quota, ",")
+	if quota != "" {
+		parts := strings.Split(quota, ",")
 		if len(parts) != 2 {
-			log.Fatalf("Invalid quota format. Expected bytes,inodes")
+			return errors.New("Invalid quota format. Expected bytes,inodes")
 		}
-		bytesLim, _ := strconv.ParseUint(parts[0], 10, 64)
-		inodesLim, _ := strconv.ParseUint(parts[1], 10, 64)
+		bytesLim, errBytes := strconv.ParseUint(parts[0], 10, 64)
+		inodesLim, errInodes := strconv.ParseUint(parts[1], 10, 64)
+		if errBytes != nil || errInodes != nil {
+			return fmt.Errorf("invalid numeric input: bytes=%v, inodes=%v", errBytes, errInodes)
+		}
 		err := c.AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
 			UserID:    userID,
 			MaxBytes:  &bytesLim,
 			MaxInodes: &inodesLim,
 		})
 		if err != nil {
-			log.Fatalf("Failed to set quota: %v", err)
+			return fmt.Errorf("Failed to set quota: %w", err)
 		}
 		fmt.Printf("User quota set: %d bytes, %d inodes.\n", bytesLim, inodesLim)
 	}
 
-	if *home {
+	if home {
 		homePath := "/users/" + username
 		// Ensure /users exists
 		err = c.Mkdir(ctx, "/users", 0755)
 		if err != nil && !isConflict(err) {
-			log.Fatalf("Failed to access /users directory: %v", err)
+			return fmt.Errorf("Failed to access /users directory: %w", err)
 		}
 
 		opts := client.MkdirOptions{OwnerID: userID}
 		err = c.MkdirExtended(ctx, homePath, 0700, opts)
 		if err != nil && !isConflict(err) {
-			log.Fatalf("Failed to provision home directory: %v", err)
+			return fmt.Errorf("Failed to provision home directory: %w", err)
 		}
 		fmt.Printf("Provisioned home directory: %s\n", homePath)
 	}
+	return nil
 }
 
-func cmdRegistryAddGroup(ctx context.Context, args []string) {
-	fs := flag.NewFlagSet("registry-add-group", flag.ExitOnError)
-	fs.Parse(args)
-
-	if fs.NArg() < 2 {
-		log.Fatal("usage: registry-add-group <name> <groupID>")
-	}
-	name := fs.Arg(0)
-	groupID := fs.Arg(1)
-
+func cmdRegistryAddGroup(ctx context.Context, name, groupID string) error {
 	c := loadClient()
 
 	if !isHexID(groupID) {
-		log.Fatalf("Invalid GroupID format: must be a 64-character hex string")
+		return fmt.Errorf("Invalid GroupID format: must be a 64-character hex string")
 	}
 
 	fmt.Printf("Anchoring group '%s' in the registry...\n", name)
 	if err := c.AnchorGroupInRegistry(ctx, name, groupID); err != nil {
-		log.Fatalf("Failed to anchor group in registry: %v", err)
+		return fmt.Errorf("Failed to anchor group in registry: %w", err)
 	}
 
 	fmt.Printf("SUCCESS: Group %s successfully added to registry.\n", name)
+	return nil
 }
 
 func isConflict(err error) bool {
@@ -1090,28 +1055,20 @@ func isConflict(err error) bool {
 	return false
 }
 
-func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
-	if len(args) < 1 {
-		if lock {
-			log.Fatal("usage: admin-lock-user <username|userID>")
-		} else {
-			log.Fatal("usage: admin-unlock-user <username|userID>")
-		}
-	}
-	identifier := args[0]
+func cmdAdminLockUser(ctx context.Context, identifier string, lock bool) error {
 	c := loadClient()
 
 	userID := identifier
 	if !isHexID(identifier) {
 		id, _, err := c.ResolveUsername(ctx, identifier)
 		if err != nil {
-			log.Fatalf("failed to resolve user %s: %v", identifier, err)
+			return fmt.Errorf("failed to resolve user %s: %w", identifier, err)
 		}
 		userID = id
 	}
 
 	if err := c.AdminSetUserLock(ctx, userID, lock); err != nil {
-		log.Fatal(err)
+		return err
 	}
 
 	if lock {
@@ -1119,4 +1076,5 @@ func cmdAdminLockUser(ctx context.Context, args []string, lock bool) {
 	} else {
 		fmt.Printf("User %s has been unlocked.\n", identifier)
 	}
+	return nil
 }

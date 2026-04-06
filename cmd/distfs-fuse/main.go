@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"encoding/hex"
-	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +19,7 @@ import (
 	"github.com/c2FmZQ/distfs/pkg/config"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/tpm"
+	"github.com/urfave/cli/v3"
 )
 
 func setupTPMHasher(configPath string) {
@@ -62,94 +62,114 @@ func setupTPMHasher(configPath string) {
 }
 
 func main() {
-	mountpoint := flag.String("mount", "", "Mount point")
-	configPath := flag.String("config", config.DefaultPath(), "Path to config file")
-	usePinentry := flag.Bool("use-pinentry", true, "Use pinentry for passphrase input")
-	useTPM := flag.Bool("use-tpm", false, "Use TPM to securely bind the master passphrase to this hardware")
-	disableDoH := flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
+	cmd := &cli.Command{
+		Name:  "distfs-fuse",
+		Usage: "DistFS FUSE Mount Client",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "mount", Usage: "Mount point", Required: true},
+			&cli.StringFlag{Name: "config", Value: config.DefaultPath(), Usage: "Path to config file"},
+			&cli.BoolFlag{Name: "use-pinentry", Value: true, Usage: "Use pinentry for passphrase input"},
+			&cli.BoolFlag{Name: "use-tpm", Value: false, Usage: "Use TPM to securely bind the master passphrase to this hardware"},
+			&cli.BoolFlag{Name: "disable-doh", Value: false, Usage: "Disable DNS-over-HTTPS and use system resolver"},
+			&cli.StringFlag{Name: "server", Value: "http://localhost:8080", Usage: "Metadata Server URL (only used if config is missing)"},
+			&cli.BoolFlag{Name: "new", Value: false, Usage: "Initialize a new account if config is missing"},
+			&cli.StringFlag{Name: "jwt", Value: "", Usage: "OIDC JWT for registration"},
+			&cli.StringFlag{Name: "client-id", Value: "distfs", Usage: "The client ID"},
+			&cli.StringFlag{Name: "scopes", Value: "openid", Usage: "The scopes to request (comma separated)"},
+			&cli.StringFlag{Name: "auth-endpoint", Value: "", Usage: "The authorization endpoint"},
+			&cli.StringFlag{Name: "token-endpoint", Value: "", Usage: "The token endpoint"},
+			&cli.BoolFlag{Name: "qr", Value: false, Usage: "Show a QR code of the verification URL"},
+			&cli.StringFlag{Name: "browser", Value: os.Getenv("BROWSER"), Usage: "The command to use to open the verification URL"},
+			&cli.StringFlag{Name: "root-id", Value: "", Usage: "Root inode ID to mount (chroot)"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			mountpoint := cmd.String("mount")
+			configPath := cmd.String("config")
+			usePinentry := cmd.Bool("use-pinentry")
+			useTPM := cmd.Bool("use-tpm")
+			disableDoH := cmd.Bool("disable-doh")
+			serverURL := cmd.String("server")
+			isNew := cmd.Bool("new")
+			jwt := cmd.String("jwt")
+			clientID := cmd.String("client-id")
+			scopes := cmd.String("scopes")
+			authEndpoint := cmd.String("auth-endpoint")
+			tokenEndpoint := cmd.String("token-endpoint")
+			qrCode := cmd.Bool("qr")
+			browser := cmd.String("browser")
+			rootID := cmd.String("root-id")
 
-	serverURL := flag.String("server", "http://localhost:8080", "Metadata Server URL (only used if config is missing)")
-	isNew := flag.Bool("new", false, "Initialize a new account if config is missing")
+			startPprofServer()
 
-	// Auth flags
-	jwt := flag.String("jwt", "", "OIDC JWT for registration")
-	clientID := flag.String("client-id", "distfs", "The client ID")
-	scopes := flag.String("scopes", "openid", "The scopes to request (comma separated)")
-	authEndpoint := flag.String("auth-endpoint", "", "The authorization endpoint")
-	tokenEndpoint := flag.String("token-endpoint", "", "The token endpoint")
-	qrCode := flag.Bool("qr", false, "Show a QR code of the verification URL")
-	browser := flag.String("browser", os.Getenv("BROWSER"), "The command to use to open the verification URL")
-	rootID := flag.String("root-id", "", "Root inode ID to mount (chroot)")
-	flag.Parse()
+			config.UsePinentry = usePinentry
 
-	startPprofServer()
+			if useTPM {
+				setupTPMHasher(configPath)
+			}
 
-	config.UsePinentry = *usePinentry
+			if _, err := os.Stat(configPath); os.IsNotExist(err) {
+				fmt.Println("Configuration missing. Starting unified onboarding...")
+				opts := client.OnboardingOptions{
+					ConfigPath:    configPath,
+					ServerURL:     serverURL,
+					IsNew:         isNew,
+					JWT:           jwt,
+					ClientID:      clientID,
+					Scopes:        strings.Split(scopes, ","),
+					AuthEndpoint:  authEndpoint,
+					TokenEndpoint: tokenEndpoint,
+					ShowQR:        qrCode,
+					Browser:       browser,
+					DisableDoH:    disableDoH,
+				}
+				if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
+					return err
+				}
+				// Small delay for Raft propagation
+				time.Sleep(2 * time.Second)
+			}
 
-	if *useTPM {
-		setupTPMHasher(*configPath)
+			conf, err := config.Load(configPath)
+			if err != nil {
+				return err
+			}
+			c := loadClient(conf, rootID, disableDoH)
+
+			conn, err := fuse.Mount(
+				mountpoint,
+				fuse.FSName("distfs"),
+				fuse.Subtype("distfs"),
+				fuse.DefaultPermissions(),
+			)
+			if err != nil {
+				return err
+			}
+			defer conn.Close()
+
+			// Handle interrupts to unmount
+			sigChan := make(chan os.Signal, 1)
+			signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+			go func() {
+				<-sigChan
+				log.Println("Unmounting...")
+				fuse.Unmount(mountpoint)
+				os.Exit(0)
+			}()
+
+			filesys := client.NewFS(c)
+
+			if err := fs.Serve(conn, filesys); err != nil {
+				return err
+			}
+			return nil
+		},
 	}
 
-	ctx := context.Background()
-	if _, err := os.Stat(*configPath); os.IsNotExist(err) {
-		fmt.Println("Configuration missing. Starting unified onboarding...")
-		opts := client.OnboardingOptions{
-			ConfigPath:    *configPath,
-			ServerURL:     *serverURL,
-			IsNew:         *isNew,
-			JWT:           *jwt,
-			ClientID:      *clientID,
-			Scopes:        strings.Split(*scopes, ","),
-			AuthEndpoint:  *authEndpoint,
-			TokenEndpoint: *tokenEndpoint,
-			ShowQR:        *qrCode,
-			Browser:       *browser,
-			DisableDoH:    *disableDoH,
-		}
-		if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
-			log.Fatal(err)
-		}
-		// Small delay for Raft propagation
-		time.Sleep(2 * time.Second)
-	}
-
-	if *mountpoint == "" {
-		log.Fatal("-mount is required")
-	}
-
-	conf, err := config.Load(*configPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	c := loadClient(conf, *rootID, *disableDoH)
-
-	conn, err := fuse.Mount(
-		*mountpoint,
-		fuse.FSName("distfs"),
-		fuse.Subtype("distfs"),
-		fuse.DefaultPermissions(),
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer conn.Close()
-
-	// Handle interrupts to unmount
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigChan
-		log.Println("Unmounting...")
-		fuse.Unmount(*mountpoint)
-		os.Exit(0)
-	}()
-
-	filesys := client.NewFS(c)
-
-	if err := fs.Serve(conn, filesys); err != nil {
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
 		log.Fatal(err)
 	}
 }
+
 func loadClient(conf *config.Config, rootID string, disableDoH bool) *client.Client {
 	c := client.NewClient(conf.ServerURL).
 		WithDisableDoH(disableDoH)

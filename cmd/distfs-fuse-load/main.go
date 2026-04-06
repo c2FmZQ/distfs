@@ -2,23 +2,18 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
-	"flag"
 	"fmt"
+	"log"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"time"
-)
 
-var (
-	mountPath = flag.String("mount", "", "FUSE mount point")
-	workDir   = flag.String("workdir", "", "Subdirectory within mount point to perform operations")
-	duration  = flag.Duration("duration", 15*time.Minute, "Test duration")
-	workers   = flag.Int("workers", 8, "Number of concurrent workers")
-	maxSize   = flag.Int64("max-total-size", 1024*1024*1024, "Max total data size (1GB)")
+	"github.com/urfave/cli/v3"
 )
 
 type FileType int
@@ -110,55 +105,72 @@ type metrics struct {
 }
 
 func main() {
-	flag.Parse()
+	cmd := &cli.Command{
+		Name:  "distfs-fuse-load",
+		Usage: "DistFS FUSE Stress Testing Tool",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "mount", Usage: "FUSE mount point", Required: true},
+			&cli.StringFlag{Name: "workdir", Value: "", Usage: "Subdirectory within mount point to perform operations"},
+			&cli.DurationFlag{Name: "duration", Value: 15 * time.Minute, Usage: "Test duration"},
+			&cli.IntFlag{Name: "workers", Value: 8, Usage: "Number of concurrent workers"},
+			&cli.IntFlag{Name: "max-total-size", Value: 1024 * 1024 * 1024, Usage: "Max total data size (bytes)"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			mountPath := cmd.String("mount")
+			workDir := cmd.String("workdir")
+			duration := cmd.Duration("duration")
+			workers := int(cmd.Int("workers"))
+			maxSize := cmd.Int("max-total-size")
 
-	startPprofServer()
+			startPprofServer()
 
-	if *mountPath == "" {
-		fmt.Println("-mount is required")
-		os.Exit(1)
-	}
+			state := NewState()
+			m := &metrics{}
+			start := time.Now()
+			ctx_done := make(chan struct{})
+			time.AfterFunc(duration, func() { close(ctx_done) })
 
-	state := NewState()
-	m := &metrics{}
-	start := time.Now()
-	ctx_done := make(chan struct{})
-	time.AfterFunc(*duration, func() { close(ctx_done) })
-
-	var wg sync.WaitGroup
-	for i := 0; i < *workers; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			worker(id, filepath.Join(*mountPath, *workDir), ctx_done, m, state)
-		}(i)
-	}
-
-	// Status reporter
-	go func() {
-		ticker := time.NewTicker(5 * time.Second)
-		for {
-			select {
-			case <-ticker.C:
-				elapsed := time.Since(start)
-				ops := atomic.LoadUint64(&m.ops)
-				throughput := float64(atomic.LoadInt64(&m.transferred)) / 1024 / 1024 / elapsed.Seconds()
-				fmt.Printf("[%v] Ops: %d, Failures: %d, Speed: %.2f MB/s\n", elapsed.Truncate(time.Second), ops, atomic.LoadUint64(&m.failures), throughput)
-			case <-ctx_done:
-				return
+			var wg sync.WaitGroup
+			for i := 0; i < workers; i++ {
+				wg.Add(1)
+				go func(id int) {
+					defer wg.Done()
+					worker(id, filepath.Join(mountPath, workDir), ctx_done, m, state, int64(maxSize))
+				}(i)
 			}
-		}
-	}()
 
-	wg.Wait()
-	fmt.Printf("\n--- Final Report ---\n")
-	fmt.Printf("Total Time: %v\n", time.Since(start))
-	fmt.Printf("Total Ops:  %d\n", atomic.LoadUint64(&m.ops))
-	fmt.Printf("Failures:   %d\n", atomic.LoadUint64(&m.failures))
-	fmt.Printf("Avg Speed:  %.2f MB/s\n", float64(atomic.LoadInt64(&m.transferred))/1024/1024/time.Since(start).Seconds())
+			// Status reporter
+			go func() {
+				ticker := time.NewTicker(5 * time.Second)
+				for {
+					select {
+					case <-ticker.C:
+						elapsed := time.Since(start)
+						ops := atomic.LoadUint64(&m.ops)
+						throughput := float64(atomic.LoadInt64(&m.transferred)) / 1024 / 1024 / elapsed.Seconds()
+						fmt.Printf("[%v] Ops: %d, Failures: %d, Speed: %.2f MB/s\n", elapsed.Truncate(time.Second), ops, atomic.LoadUint64(&m.failures), throughput)
+					case <-ctx_done:
+						return
+					}
+				}
+			}()
+
+			wg.Wait()
+			fmt.Printf("\n--- Final Report ---\n")
+			fmt.Printf("Total Time: %v\n", time.Since(start))
+			fmt.Printf("Total Ops:  %d\n", atomic.LoadUint64(&m.ops))
+			fmt.Printf("Failures:   %d\n", atomic.LoadUint64(&m.failures))
+			fmt.Printf("Avg Speed:  %.2f MB/s\n", float64(atomic.LoadInt64(&m.transferred))/1024/1024/time.Since(start).Seconds())
+			return nil
+		},
+	}
+
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		log.Fatal(err)
+	}
 }
 
-func worker(id int, base string, done chan struct{}, m *metrics, state *State) {
+func worker(id int, base string, done chan struct{}, m *metrics, state *State, maxSize int64) {
 	rng := rand.New(rand.NewSource(time.Now().UnixNano() + int64(id)))
 	workerDir := filepath.Join(base, fmt.Sprintf("worker-%d", id))
 	// Create deep hierarchy
@@ -180,7 +192,7 @@ func worker(id int, base string, done chan struct{}, m *metrics, state *State) {
 
 			switch {
 			case op < 40: // Write (Create)
-				if atomic.LoadInt64(&m.bytes) < *maxSize {
+				if atomic.LoadInt64(&m.bytes) < maxSize {
 					subDir := subDirs[rng.Intn(len(subDirs))]
 					targetDir := filepath.Join(workerDir, subDir)
 					doWrite(rng, targetDir, m, state)

@@ -56,18 +56,18 @@ echo "Using config directory: $DISTFS_CONFIG_DIR"
 # GLOBAL SETUP: Create Admin
 echo "PERFORMING GLOBAL SETUP..."
 JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-if ! distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" init --new -server http://storage-node-1:8080 -jwt "$JWT"; then
+if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" init --new --server http://storage-node-1:8080 --jwt "$JWT"; then
     echo "GLOBAL SETUP FAILED: Admin initialization failed"
     exit 1
 fi
 
-ADMIN_ID=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" whoami)
+ADMIN_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" whoami)
 echo "Global Admin ID: $ADMIN_ID"
 
 # Phase 69: System Backbone Bootstrapping
 # Initializing canonical root now correctly provisions backbone directories and groups.
 echo "Initializing canonical root and system backbone..."
-if ! distfs -disable-doh -allow-insecure -use-pinentry=false -config "$DISTFS_CONFIG_DIR/config.json" admin-create-root; then
+if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" admin-create-root; then
     echo "GLOBAL SETUP FAILED: admin-create-root failed"
     exit 1
 fi
@@ -76,7 +76,7 @@ fi
 # The 'admin' group already exists from admin-create-root, but we create an 'administrators' one
 # for the test to verify that anchoring works for newly created groups.
 echo "Creating Administrators group..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
 ADMIN_GID=$(grep "^ID:" /tmp/admin-group.txt | awk '{print $2}')
 echo "Administrators GID: $ADMIN_GID"
 
@@ -91,14 +91,14 @@ provision_user() {
     echo "Provisioning ${name} ($email) at ${path}..."
     
     U_JWT=$(wget -qO- "http://test-auth:8080/mint?email=$email")
-    U_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$conf" init --new -server http://storage-node-1:8080 -jwt "$U_JWT")
+    U_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$conf" init --new --server http://storage-node-1:8080 --jwt "$U_JWT")
     U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
     
     # Provision directory and unlock via Global Admin
-    distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$U_ID"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$U_ID"
     
     # Add to users group to allow traversal
-    distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
 }
 
 provision_user "fuse-user" "fuse-user@example.com"
@@ -115,22 +115,22 @@ echo "Provisioning benchmark workspace..."
 BENCH_JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
 # Benchmark uses a persistent config at /tmp/bench-dir/config.json
 mkdir -p /tmp/bench-dir
-BENCH_OUT=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "/tmp/bench-dir/config.json" init --new -server http://storage-node-1:8080 -jwt "$BENCH_JWT")
+BENCH_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "/tmp/bench-dir/config.json" init --new --server http://storage-node-1:8080 --jwt "$BENCH_JWT")
 BENCH_ID=$(echo "$BENCH_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 # Provision, unlock, and assign to admin group
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user "$BENCH_ID"
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user "$BENCH_ID"
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
 
 # Promote and add to Administrators group
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" bench-user
 
 # Provision HA directory (world-writable for test flexibility)
 echo "Provisioning /ha..."
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
-distfs -disable-doh -allow-insecure -use-pinentry=false -admin -config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
 
 FAILED=0
 
@@ -170,7 +170,7 @@ run_test "High Availability Failover" "/bin/test-ha.sh" || FAILED=1
 echo "--- FINAL SUMMARY ---"
 cat $REPORT_FILE
 
-if [ $FAILED -ne 0 ]; then
+if [ $FAILED --ne 0 ]; then
     echo "One or more tests failed."
     exit 1
 fi

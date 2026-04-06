@@ -15,12 +15,12 @@ until wget -qO- --timeout=2 http://storage-node-1:8080/v1/meta/key > /dev/null 2
 done
 
 # User ID was provisioned by test-all-e2e.sh
-FUSE_USER_ID=$(distfs -disable-doh -allow-insecure -use-pinentry=false -config "$CONFIG" whoami)
+FUSE_USER_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" whoami)
 echo "FUSE User ID: $FUSE_USER_ID"
 
 echo "Mounting FUSE..."
 mkdir -p /mnt/distfs
-/bin/distfs-fuse -disable-doh -use-pinentry=false -config "$CONFIG" -mount /mnt/distfs > /tmp/fuse.log 2>&1 &
+/bin/distfs-fuse --disable-doh --use-pinentry=false --config "$CONFIG" --mount /mnt/distfs > /tmp/fuse.log 2>&1 &
 FUSE_PID=$!
 
 # Wait for mount
@@ -78,7 +78,7 @@ else
 fi
 
 echo "TEST 5: Symlinks"
-ln -s f1 $MNT/s1
+ln --s f1 $MNT/s1
 RL=$(readlink $MNT/s1)
 if [ "$RL" = "f1" ]; then
     echo "PASS: TEST 5"
@@ -123,7 +123,7 @@ touch $MNT/f4
 chmod 0600 $MNT/f4
 STAT_MODE=$(stat -c %a $MNT/f4)
 if [ "$STAT_MODE" = "600" ]; then
-    truncate -s 4 $MNT/f4
+    truncate --s 4 $MNT/f4
     STAT_SIZE=$(stat -c %s $MNT/f4)
     if [ "$STAT_SIZE" -eq 4 ]; then
         echo "PASS: TEST 8"

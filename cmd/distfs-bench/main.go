@@ -15,251 +15,235 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
-	"flag"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
-	"sort"
-	"strings"
+	"path/filepath"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
-)
-
-var (
-	serverURL  = flag.String("server", "http://localhost:8080", "Metadata Server URL")
-	jwt        = flag.String("jwt", "", "OIDC JWT for authentication")
-	mode       = flag.String("mode", "put", "Bench mode: put, get, mkdir")
-	workers    = flag.Int("workers", 10, "Number of concurrent workers")
-	count      = flag.Int("count", 100, "Total number of operations to perform")
-	size       = flag.Int64("size", 1024, "Size of files for put mode (in bytes)")
-	adminFlag  = flag.Bool("admin", false, "Enable admin bypass mode")
-	disableDoH = flag.Bool("disable-doh", false, "Disable DNS-over-HTTPS and use system resolver")
-	benchPath  = flag.String("path", "", "Base path for benchmark operations (default: root)")
+	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"github.com/urfave/cli/v3"
 )
 
 type stats struct {
-	durations []time.Duration
-	mu        sync.Mutex
-	failures  uint64
-	bytes     uint64
+	mu                sync.Mutex
+	ops               int
+	bytes             int64
+	failures          int
+	latencies         []time.Duration
+	operationCounts   map[string]int
+	operationFailures map[string]int
 }
 
-func (s *stats) record(d time.Duration, bytes uint64, success bool) {
-	if !success {
-		atomic.AddUint64(&s.failures, 1)
-		return
-	}
+func (s *stats) record(d time.Duration, bytes int64, success bool) {
 	s.mu.Lock()
-	s.durations = append(s.durations, d)
-	s.mu.Unlock()
-	atomic.AddUint64(&s.bytes, bytes)
+	defer s.mu.Unlock()
+	s.ops++
+	s.bytes += bytes
+	if !success {
+		s.failures++
+	}
+	s.latencies = append(s.latencies, d)
 }
 
-func (s *stats) report(totalDuration time.Duration) {
+func (s *stats) report(totalDuration time.Duration, mode string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if len(s.durations) == 0 {
-		fmt.Printf("No successful operations.\nFailures: %d\n", s.failures)
+	if len(s.latencies) == 0 {
+		fmt.Println("No operations recorded.")
 		return
 	}
 
-	sort.Slice(s.durations, func(i, j int) bool {
-		return s.durations[i] < s.durations[j]
-	})
+	sortLatencies(s.latencies)
+	avg := totalDuration / time.Duration(s.ops)
+	p50 := s.latencies[len(s.latencies)*50/100]
+	p95 := s.latencies[len(s.latencies)*95/100]
+	p99 := s.latencies[len(s.latencies)*99/100]
 
-	n := len(s.durations)
-	p50 := s.durations[n*50/100]
-	p95 := s.durations[n*95/100]
-	p99 := s.durations[n*99/100]
-
-	fmt.Printf("\n--- Benchmark Results (%s) ---\n", *mode)
-	fmt.Printf("Total Ops:    %d\n", n+int(s.failures))
-	fmt.Printf("Success:      %d\n", n)
+	fmt.Printf("\n--- Benchmark Report (%s) ---\n", mode)
+	fmt.Printf("Total Ops:    %d\n", s.ops)
+	fmt.Printf("Total Bytes:  %s\n", client.FormatBytes(s.bytes))
 	fmt.Printf("Failures:     %d\n", s.failures)
-	fmt.Printf("P50 (Median): %v\n", p50)
-	fmt.Printf("P95:          %v\n", p95)
-	fmt.Printf("P99:          %v\n", p99)
-	fmt.Printf("Max:          %v\n", s.durations[n-1])
+	fmt.Printf("Duration:     %v\n", totalDuration)
+	fmt.Printf("Latency (avg): %v\n", avg)
+	fmt.Printf("Latency (p50): %v\n", p50)
+	fmt.Printf("Latency (p95): %v\n", p95)
+	fmt.Printf("Latency (p99): %v\n", p99)
 
-	opsSec := float64(n) / totalDuration.Seconds()
+	opsSec := float64(s.ops) / totalDuration.Seconds()
 	fmt.Printf("Throughput:   %.2f ops/s\n", opsSec)
 
-	if *mode == "put" || *mode == "get" {
+	if mode == "put" || mode == "get" {
 		throughput := float64(s.bytes) / 1024 / 1024 / totalDuration.Seconds()
 		fmt.Printf("Data Rate:    %.2f MB/s (aggregate)\n", throughput)
 	}
 }
 
+func sortLatencies(l []time.Duration) {
+	for i := 0; i < len(l); i++ {
+		for j := i + 1; j < len(l); j++ {
+			if l[i] > l[j] {
+				l[i], l[j] = l[j], l[i]
+			}
+		}
+	}
+}
+
+func loadConfigWithPassword(path string, password string) (*config.Config, error) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var blob metadata.KeySyncBlob
+	if err := json.Unmarshal(b, &blob); err != nil {
+		return nil, err
+	}
+	return config.Decrypt(blob, []byte(password))
+}
+
 func main() {
-	flag.Parse()
+	cmd := &cli.Command{
+		Name:  "distfs-bench",
+		Usage: "DistFS Performance Benchmarking Tool",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "config", Value: config.DefaultPath(), Usage: "Path to client config"},
+			&cli.StringFlag{Name: "mode", Value: "put", Usage: "Benchmark mode: put, get, ls, mkdir"},
+			&cli.IntFlag{Name: "concurrency", Value: 1, Usage: "Number of concurrent workers"},
+			&cli.IntFlag{Name: "count", Value: 100, Usage: "Total number of operations to perform"},
+			&cli.IntFlag{Name: "size", Value: 1024 * 1024, Usage: "Size of file for put/get modes (bytes)"},
+			&cli.StringFlag{Name: "path", Value: "/bench", Usage: "Target directory in DistFS"},
+		},
+		Action: func(ctx context.Context, cmd *cli.Command) error {
+			configPath := cmd.String("config")
+			mode := cmd.String("mode")
+			concurrency := int(cmd.Int("concurrency"))
+			count := int(cmd.Int("count"))
+			size := cmd.Int("size")
+			targetPath := cmd.String("path")
 
-	if *jwt == "" {
-		log.Fatal("-jwt flag is required for benchmark")
-	}
-
-	configPath := "/root/.distfs/config.json"
-	if dir := os.Getenv("DISTFS_CONFIG_DIR"); dir != "" {
-		configPath = dir + "/config.json"
-	}
-
-	if os.Getenv("DISTFS_PASSWORD") == "" {
-		os.Setenv("DISTFS_PASSWORD", "benchpass")
-		defer os.Unsetenv("DISTFS_PASSWORD")
-	}
-
-	ctx := context.Background()
-	_, statErr := os.Stat(configPath)
-	isNew := os.IsNotExist(statErr)
-
-	opts := client.OnboardingOptions{
-		ConfigPath: configPath,
-		ServerURL:  *serverURL,
-		JWT:        *jwt,
-		IsNew:      isNew,
-		DisableDoH: *disableDoH,
-	}
-
-	if isNew {
-		fmt.Printf("Initializing identity...")
-		if err := client.PerformUnifiedOnboarding(ctx, opts); err != nil {
-			log.Fatalf("onboarding failed: %v", err)
-		}
-		fmt.Println(" OK")
-	}
-
-	// Load Client
-	conf, err := config.Load(configPath)
-	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
-	}
-
-	c := client.NewClient(conf.ServerURL)
-	dkBytes, err := hex.DecodeString(conf.EncKey)
-	if err != nil {
-		log.Fatalf("invalid EncKey: %v", err)
-	}
-	skBytes, err := hex.DecodeString(conf.SignKey)
-	if err != nil {
-		log.Fatalf("invalid SignKey: %v", err)
-	}
-	svKeyBytes, err := hex.DecodeString(conf.ServerKey)
-	if err != nil {
-		log.Fatalf("invalid ServerKey: %v", err)
-	}
-
-	c, err = c.WithIdentityBytes(conf.UserID, dkBytes)
-	if err != nil {
-		log.Fatalf("failed to set identity: %v", err)
-	}
-	c, err = c.WithSignKeyBytes(skBytes)
-	if err != nil {
-		log.Fatalf("failed to set sign key: %v", err)
-	}
-	c, err = c.WithServerKeyBytes(svKeyBytes)
-	if err != nil {
-		log.Fatalf("failed to set server key: %v", err)
-	}
-	c = c.WithAdmin(*adminFlag).WithDisableDoH(*disableDoH)
-
-	// Ensure we are logged in
-	if err := c.Login(ctx); err != nil {
-		log.Fatalf("initial login failed: %v", err)
-	}
-
-	// Create bench root
-	base := ""
-	if *benchPath != "" {
-		base = strings.TrimRight(*benchPath, "/")
-	}
-	benchDir := fmt.Sprintf("%s/bench-%d", base, time.Now().UnixNano())
-	if err := c.Mkdir(ctx, benchDir, 0700); err != nil {
-		log.Fatalf("failed to create bench dir: %v", err)
-	}
-	defer func() {
-		if err := c.RemoveAll(ctx, benchDir); err != nil {
-			log.Printf("failed to cleanup bench dir: %v", err)
-		}
-	}()
-
-	// Pre-create file for GET mode
-	if *mode == "get" {
-		fmt.Printf("Pre-creating %s/bench-target for READ test...", benchDir)
-		if err := c.CreateFile(ctx, benchDir+"/bench-target", io.LimitReader(rand.Reader, *size), *size); err != nil {
-			log.Fatalf("failed to pre-create target: %v", err)
-		}
-		fmt.Println(" OK")
-	}
-
-	s := &stats{durations: make([]time.Duration, 0, *count)}
-	var wg sync.WaitGroup
-
-	opChan := make(chan int, *count)
-	for i := 0; i < *count; i++ {
-		opChan <- i
-	}
-	close(opChan)
-
-	fmt.Printf("Running benchmark with %d workers and %d total ops...\n", *workers, *count)
-	start := time.Now()
-	for i := 0; i < *workers; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
-
-			// Create worker sub-directory to avoid parent contention
-			workerDir := fmt.Sprintf("%s/worker-%d", benchDir, workerID)
-			if err := c.Mkdir(ctx, workerDir, 0700); err != nil {
-				log.Printf("Worker %d failed to create subdir: %v", workerID, err)
-				return
+			passphrase := os.Getenv("DISTFS_PASSWORD")
+			if passphrase == "" {
+				passphrase = "benchpass" // Default for testing
 			}
 
-			for range opChan {
-				opStart := time.Now()
-				var err error
-				var bytesTransferred uint64 = 0
+			if _, err := os.Stat(configPath); os.IsNotExist(err) {
+				log.Fatalf("Config file %s not found. Run 'distfs init' first.", configPath)
+			}
 
-				switch *mode {
-				case "mkdir":
-					path := fmt.Sprintf("%s/dir-%d-%d", workerDir, workerID, time.Now().UnixNano())
-					err = c.Mkdir(ctx, path, 0700)
-				case "put":
-					path := fmt.Sprintf("%s/file-%d-%d", workerDir, workerID, time.Now().UnixNano())
-					// Stream data to avoid OOM
-					err = c.CreateFile(ctx, path, io.LimitReader(rand.Reader, *size), *size)
-					bytesTransferred = uint64(*size)
-				case "get":
-					// High level Open uses io.fs interface
-					// Strip leading slash for fs.FS compatibility
-					targetPath := strings.TrimPrefix(benchDir+"/bench-target", "/")
-					f, ferr := c.FS(ctx).Open(targetPath)
-					if ferr != nil {
-						err = ferr
-					} else {
-						n, _ := io.Copy(io.Discard, f)
-						f.Close()
-						bytesTransferred = uint64(n)
+			conf, err := loadConfigWithPassword(configPath, passphrase)
+			if err != nil {
+				log.Fatalf("failed to load config: %v", err)
+			}
+
+			c := client.NewClient(conf.ServerURL)
+			dkBytes, _ := hex.DecodeString(conf.EncKey)
+			skBytes, _ := hex.DecodeString(conf.SignKey)
+			svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
+
+			rid := conf.DefaultRootID
+			if rid == "" {
+				rid = metadata.RootID
+			}
+			var rowner string
+			var rpk, rek []byte
+			var rver uint64
+			if anchor, ok := conf.Roots[rid]; ok {
+				rowner = anchor.RootOwner
+				rpk = anchor.RootOwnerPublicKey
+				rek = anchor.RootOwnerEncryptionKey
+				rver = anchor.RootVersion
+			}
+
+			c, err = c.WithIdentityBytes(conf.UserID, dkBytes)
+			if err != nil {
+				log.Fatalf("failed to set identity: %v", err)
+			}
+			c, err = c.WithSignKeyBytes(skBytes)
+			if err != nil {
+				log.Fatalf("failed to set sign key: %v", err)
+			}
+			c, err = c.WithServerKeyBytes(svKeyBytes)
+			if err != nil {
+				log.Fatalf("failed to set server key: %v", err)
+			}
+			c = c.WithRootAnchorBytes(rid, rowner, rpk, rek, rver)
+
+			s := &stats{
+				operationCounts:   make(map[string]int),
+				operationFailures: make(map[string]int),
+			}
+
+			fmt.Printf("Starting benchmark: mode=%s, concurrency=%d, count=%d, size=%s\n", mode, concurrency, count, client.FormatBytes(int64(size)))
+
+			start := time.Now()
+			var wg sync.WaitGroup
+			opsPerWorker := count / concurrency
+
+			// Ensure target path exists
+			if mode == "put" || mode == "mkdir" {
+				c.MkdirAll(ctx, targetPath)
+			}
+
+			for i := 0; i < concurrency; i++ {
+				wg.Add(1)
+				go func(workerID int) {
+					defer wg.Done()
+					for j := 0; j < opsPerWorker; j++ {
+						opStart := time.Now()
+						var err error
+						var bytesTransferred int64
+
+						name := fmt.Sprintf("bench-%d-%d", workerID, j)
+						path := filepath.Join(targetPath, name)
+
+						switch mode {
+						case "put":
+							data := make([]byte, size)
+							rand.Read(data)
+							err = c.CreateFile(ctx, path, bytes.NewReader(data), int64(size))
+							bytesTransferred = int64(size)
+						case "get":
+							rc, getErr := c.OpenBlobRead(ctx, path)
+							if getErr == nil {
+								n, _ := io.Copy(io.Discard, rc)
+								bytesTransferred = n
+								rc.Close()
+							} else {
+								err = getErr
+							}
+						case "ls":
+							_, err = c.ReadDir(ctx, targetPath)
+						case "mkdir":
+							err = c.Mkdir(ctx, path, 0700)
+						}
+
+						s.record(time.Since(opStart), bytesTransferred, err == nil)
+						if err != nil {
+							log.Printf("Operation failed: %v", err)
+						}
 					}
-				}
-
-				s.record(time.Since(opStart), bytesTransferred, err == nil)
-				if err != nil {
-					log.Printf("Operation failed: %v", err)
-				}
+				}(i)
 			}
-		}(i)
+
+			wg.Wait()
+			totalTime := time.Since(start)
+
+			s.report(totalTime, mode)
+			return nil
+		},
 	}
 
-	wg.Wait()
-	totalTime := time.Since(start)
-
-	s.report(totalTime)
+	if err := cmd.Run(context.Background(), os.Args); err != nil {
+		log.Fatal(err)
+	}
 }
