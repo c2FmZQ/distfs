@@ -146,8 +146,8 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 			d.key = key
 		}
 		if d.inode == nil {
-			a.Mode = os.ModeDir | 0000 // Unreachable
-			a.Inode = 1                // Root hint
+			a.Mode = os.ModeDir // Unreachable
+			a.Inode = 1         // Root hint
 			return nil
 		}
 	}
@@ -346,7 +346,7 @@ func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 
 	acl, err := DecodeACL(req.Xattr)
 	if err != nil {
-		return fuse.EPERM
+		return syscall.EPERM
 	}
 
 	d.mu.Lock()
@@ -402,7 +402,7 @@ func (d *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fus
 	isDefault := req.Name == "system.posix_acl_default"
 	data, err := EncodeACL(inode, isDefault)
 	if err != nil {
-		return fuse.EIO
+		return syscall.EIO
 	}
 	if data == nil {
 		return fuse.ErrNoXattr
@@ -414,7 +414,7 @@ func (d *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fus
 	}
 
 	if uint32(len(data)) > req.Size {
-		return fuse.ERANGE
+		return syscall.ERANGE
 	}
 	resp.Xattr = data
 	return nil
@@ -712,7 +712,7 @@ func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 
 	acl, err := DecodeACL(req.Xattr)
 	if err != nil {
-		return fuse.EPERM
+		return syscall.EPERM
 	}
 
 	f.mu.Lock()
@@ -766,7 +766,7 @@ func (f *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fu
 
 	data, err := EncodeACL(inode, false)
 	if err != nil {
-		return fuse.EIO
+		return syscall.EIO
 	}
 	if data == nil {
 		return fuse.ErrNoXattr
@@ -778,7 +778,7 @@ func (f *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fu
 	}
 
 	if uint32(len(data)) > req.Size {
-		return fuse.ERANGE
+		return syscall.ERANGE
 	}
 	resp.Xattr = data
 	return nil

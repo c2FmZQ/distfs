@@ -46,8 +46,6 @@ func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_cryp
 	return st, mk
 }
 
-var nextTestUID uint32 = 1000
-
 func createUser(t *testing.T, raftNode *metadata.RaftNode, user metadata.User, userSK *crypto.IdentityKey, adminID string, adminSK *crypto.IdentityKey) {
 	metadata.CreateUser(t, raftNode, user, userSK, adminID, adminSK)
 }

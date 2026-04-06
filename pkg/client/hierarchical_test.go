@@ -244,7 +244,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 	}
 
 	// Charlie can now read and overwrite
-	content, err = getFile(charlieClient, "/bob-home/acl-test.txt")
+	_, err = getFile(charlieClient, "/bob-home/acl-test.txt")
 	if err != nil {
 		t.Fatalf("Charlie failed to read after ACL grant: %v", err)
 	}

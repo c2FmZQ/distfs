@@ -691,7 +691,7 @@ func TestFSM_GroupSecurity_Full(t *testing.T) {
 	gb1, _ := json.Marshal(g1)
 
 	// Create group via an admin context
-	cmd1, _ := LogCommand{Type: CmdCreateGroup, Data: gb1, UserID: "admin"}.Marshal()
+	_, _ = LogCommand{Type: CmdCreateGroup, Data: gb1, UserID: "admin"}.Marshal()
 
 	// Admin bypass context key logic is applied in Server.handleBatch, not FSM.
 	// FSM logic `checkGroupManagementPermission` was updated to NOT automatically allow admins to manage any group.
@@ -701,7 +701,7 @@ func TestFSM_GroupSecurity_Full(t *testing.T) {
 	// To fix the test which bypasses the server layer: Let user1 create their own group.
 	g1.SignGroupForTest("user1", userSK)
 	gb1, _ = json.Marshal(g1)
-	cmd1, _ = LogCommand{Type: CmdCreateGroup, Data: gb1, UserID: "user1"}.Marshal()
+	cmd1, _ := LogCommand{Type: CmdCreateGroup, Data: gb1, UserID: "user1"}.Marshal()
 
 	res := fsm.Apply(&raft.Log{Data: cmd1})
 	if fsm.containsError(res) {

@@ -103,11 +103,6 @@ type model struct {
 	leases []*metadata.LeaseInfo
 	nodes  []*metadata.Node
 
-	// Audit Data
-	auditUsers  []metadata.RedactedUser
-	auditGroups []metadata.RedactedGroup
-	auditNodes  []metadata.Node
-
 	// Tables
 	userTable  table.Model
 	groupTable table.Model
@@ -827,7 +822,7 @@ func cmdAdminAudit(ctx context.Context, args []string) error {
 
 	roots, orphans, reports, users, groups, nodes, gc, allInodes, err := c.AdminAuditForest(ctx)
 	if err != nil {
-		return fmt.Errorf("Audit failed: %w", err)
+		return fmt.Errorf("audit failed: %w", err)
 	}
 
 	fmt.Println("TREE FOREST:")
@@ -943,12 +938,12 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 	c := loadClient()
 
 	if !isHexID(userID) {
-		return fmt.Errorf("Invalid UserID format: must be a 64-character hex string")
+		return fmt.Errorf("invalid UserID format: must be a 64-character hex string")
 	}
 
 	codeStr, err := c.GetUserVerificationCode(ctx, userID)
 	if err != nil {
-		return fmt.Errorf("Failed to fetch user verification code: %w", err)
+		return fmt.Errorf("failed to fetch user verification code: %w", err)
 	}
 
 	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
@@ -962,7 +957,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 		var response string
 		fmt.Scanln(&response)
 		if strings.ToLower(strings.TrimSpace(response)) != "y" {
-			return errors.New("Verification aborted.")
+			return errors.New("verification aborted")
 		}
 	} else {
 		fmt.Println("Verification auto-confirmed via --yes flag.")
@@ -970,7 +965,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 
 	// 3. Attestation & Registry Update
 	if err := c.AnchorUserInRegistry(ctx, username, userID, c.UserID()); err != nil {
-		return fmt.Errorf("Failed to anchor user in registry: %w", err)
+		return fmt.Errorf("failed to anchor user in registry: %w", err)
 	}
 
 	fmt.Printf("Successfully added %s to the registry.\n", username)
@@ -979,7 +974,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 	if unlock {
 		err := c.AdminSetUserLock(ctx, userID, false)
 		if err != nil {
-			return fmt.Errorf("Failed to unlock user: %w", err)
+			return fmt.Errorf("failed to unlock user: %w", err)
 		}
 		fmt.Println("User unlocked.")
 	}
@@ -987,7 +982,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 	if quota != "" {
 		parts := strings.Split(quota, ",")
 		if len(parts) != 2 {
-			return errors.New("Invalid quota format. Expected bytes,inodes")
+			return errors.New("invalid quota format, expected bytes,inodes")
 		}
 		bytesLim, errBytes := strconv.ParseUint(parts[0], 10, 64)
 		inodesLim, errInodes := strconv.ParseUint(parts[1], 10, 64)
@@ -1000,7 +995,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 			MaxInodes: &inodesLim,
 		})
 		if err != nil {
-			return fmt.Errorf("Failed to set quota: %w", err)
+			return fmt.Errorf("failed to set quota: %w", err)
 		}
 		fmt.Printf("User quota set: %d bytes, %d inodes.\n", bytesLim, inodesLim)
 	}
@@ -1010,13 +1005,13 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 		// Ensure /users exists
 		err = c.Mkdir(ctx, "/users", 0755)
 		if err != nil && !isConflict(err) {
-			return fmt.Errorf("Failed to access /users directory: %w", err)
+			return fmt.Errorf("failed to access /users directory: %w", err)
 		}
 
 		opts := client.MkdirOptions{OwnerID: userID}
 		err = c.MkdirExtended(ctx, homePath, 0700, opts)
 		if err != nil && !isConflict(err) {
-			return fmt.Errorf("Failed to provision home directory: %w", err)
+			return fmt.Errorf("failed to provision home directory: %w", err)
 		}
 		fmt.Printf("Provisioned home directory: %s\n", homePath)
 	}
@@ -1027,12 +1022,12 @@ func cmdRegistryAddGroup(ctx context.Context, name, groupID string) error {
 	c := loadClient()
 
 	if !isHexID(groupID) {
-		return fmt.Errorf("Invalid GroupID format: must be a 64-character hex string")
+		return fmt.Errorf("invalid GroupID format: must be a 64-character hex string")
 	}
 
 	fmt.Printf("Anchoring group '%s' in the registry...\n", name)
 	if err := c.AnchorGroupInRegistry(ctx, name, groupID); err != nil {
-		return fmt.Errorf("Failed to anchor group in registry: %w", err)
+		return fmt.Errorf("failed to anchor group in registry: %w", err)
 	}
 
 	fmt.Printf("SUCCESS: Group %s successfully added to registry.\n", name)

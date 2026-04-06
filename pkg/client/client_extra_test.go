@@ -611,9 +611,7 @@ func TestClient_CreateLockboxExtra(t *testing.T) {
 
 	// 1. World access (0004)
 	lb, _ := c.createLockbox(ctx, fileKey, 0644, c.userID, "", nil)
-	if _, ok := lb[metadata.WorldID]; !ok {
-		// WorldID might be missing if world public key not available, but should be hit
-	}
+	_ = lb[metadata.WorldID] // WorldID might be missing if world public key not available, but should be hit
 
 	// 2. Group access (0040)
 	group, err := c.createGroup(ctx, "g1", false)

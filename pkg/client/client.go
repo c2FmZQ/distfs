@@ -880,23 +880,6 @@ func (c *Client) clearPathCache() {
 	clear(c.pathCache)
 }
 
-func (c *Client) ensureSession(ctx context.Context) error {
-	if c.userID == "" || c.signKey == nil || c.decKey == nil {
-		return nil
-	}
-	c.sessionMu.RLock()
-	token := c.sessionToken
-	expiry := c.sessionExpiry
-	c.sessionMu.RUnlock()
-
-	if token == "" || time.Now().Add(5*time.Minute).After(expiry) {
-		if err := c.Login(ctx); err != nil {
-			return fmt.Errorf("session login failed: %w", err)
-		}
-	}
-	return nil
-}
-
 func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) error {
 	// 1. Special cases: registration, login, and keys don't need session auth.
 	if strings.HasSuffix(req.URL.Path, "/v1/user/register") ||
@@ -1927,11 +1910,6 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 	}
 
 	return nil
-}
-
-func mustMarshal(v interface{}) []byte {
-	b, _ := json.Marshal(v)
-	return b
 }
 
 // createInode initializes a new inode.
@@ -4916,14 +4894,6 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 
 // getGroupUnverified fetches the group metadata skipping cache and VERIFICATION.
 // Useful for integrity verification tests or initial bootstrap anchoring.
-func (c *Client) getGroupUnverified(ctx context.Context, id string) (*metadata.Group, error) {
-	group, err := c.getGroupRaw(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	// We do not cache raw requests from GetGroupUnverified to avoid polluting caches during tests
-	return group, nil
-}
 
 // getGroupDecryptionKey safely extracts a decryption key from a group's lockbox.
 // It uses the unverifiedGroupCache to avoid circular registry dependencies during reads.
@@ -5152,10 +5122,6 @@ func (c *Client) AdminDecryptGroupName(ctx context.Context, entry metadata.Group
 		// 2a. Try personal access
 		gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
 		if err != nil {
-			recipients := []string{}
-			for r := range entry.Lockbox {
-				recipients = append(recipients, r)
-			}
 		}
 		if err != nil && entry.OwnerID != "" && entry.OwnerID != c.userID {
 			// 2b. Try delegated access (requires owner group key)
@@ -5646,209 +5612,10 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 	return group, nil
 }
 
-func (c *Client) prepareLinkDirect(ctx context.Context, sourceID string, targetPath string) (metadata.LogCommand, error) {
-	// 1. Resolve target parent
-	targetDir := filepath.Dir(targetPath)
-	targetName := filepath.Base(targetPath)
-	parentInode, parentKey, err := c.resolvePath(ctx, targetDir)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-	parentID := parentInode.ID
-
-	// 2. Prepare Parent Update
-	parent, err := c.getInode(ctx, parentID)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-
-	parent.SetFileKey(parentKey)
-
-	encNameBlob, nameNonce, err := c.encryptEntryName(parentKey, targetName)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-
-	mac := hmac.New(sha256.New, parentKey)
-	mac.Write([]byte(targetName))
-	encName := hex.EncodeToString(mac.Sum(nil))
-
-	if parent.Children == nil {
-		parent.Children = make(map[string]metadata.ChildEntry)
-	}
-
-	if _, exists := parent.Children[encName]; exists {
-		return metadata.LogCommand{}, metadata.ErrExists
-	}
-
-	parent.Children[encName] = metadata.ChildEntry{
-		ID:            sourceID,
-		EncryptedName: encNameBlob,
-		Nonce:         nameNonce,
-	}
-
-	parent.Version++
-	parentNonce := make([]byte, 16)
-	io.ReadFull(rand.Reader, parentNonce)
-	parent.Nonce = parentNonce
-	parent.SignerID = c.userID
-
-	if err := c.signInode(ctx, parent); err != nil {
-		return metadata.LogCommand{}, err
-	}
-
-	data, _ := json.Marshal(parent)
-	return metadata.LogCommand{Type: metadata.CmdUpdateInode, Data: data, UserID: c.userID}, nil
-}
-
-func (c *Client) prepareLink(ctx context.Context, sourcePath, targetPath string) (metadata.LogCommand, error) {
-	// 1. Resolve source
-	sourceInode, _, err := c.resolvePath(ctx, sourcePath)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-	sourceID := sourceInode.ID
-
-	// 2. Resolve target parent
-	targetDir := filepath.Dir(targetPath)
-	targetName := filepath.Base(targetPath)
-	parentInode, parentKey, err := c.resolvePath(ctx, targetDir)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-	parentID := parentInode.ID
-
-	// 3. Prepare Parent Update
-	// We need to fetch the current parent inode
-	parent, err := c.getInode(ctx, parentID)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-
-	parent.SetFileKey(parentKey)
-	encName := metadata.ComputeNameHMAC(parentKey, targetName)
-	encNameBlob, nameNonce, err := c.encryptEntryName(parentKey, targetName)
-	if err != nil {
-		return metadata.LogCommand{}, err
-	}
-
-	if parent.Children == nil {
-		parent.Children = make(map[string]metadata.ChildEntry)
-	}
-	parent.Children[encName] = metadata.ChildEntry{
-		ID:            sourceID,
-		EncryptedName: encNameBlob,
-		Nonce:         nameNonce,
-	}
-
-	return c.prepareUpdate(ctx, parent)
-}
-
 func (c *Client) computeMemberHMAC(signKey []byte, userID string) string {
 	mac := hmac.New(sha256.New, signKey)
 	mac.Write([]byte(userID))
 	return hex.EncodeToString(mac.Sum(nil))
-}
-
-func (c *Client) prepareCreateRegistryFile(ctx context.Context, path string, data []byte, ownerID string, groupID string) (string, []metadata.LogCommand, error) {
-	// 1. Generate Nonce for ID derivation
-	nonce := metadata.GenerateNonce()
-	inodeID := metadata.GenerateInodeID(ownerID, nonce)
-
-	// 2. Encrypt data for the target group (or owner if no group yet)
-	// Actually, registry files are for discovery, so they are encrypted for
-	// the 'users' group so all registered users can read them.
-	usersGID, _, err := c.ResolveGroupName(ctx, "users")
-	var usersGroup *metadata.Group
-	if err == nil {
-		usersGroup, err = c.getGroup(ctx, usersGID)
-	}
-
-	var dk *mlkem.EncapsulationKey768
-	recipientID := usersGID
-
-	if err != nil {
-		// During bootstrap, we might not have 'users' group yet.
-		// Encrypt using the well-known BootstrapWorldDK so it's discoverable.
-		bootstrapDK, _ := crypto.UnmarshalDecapsulationKey(metadata.BootstrapWorldDK)
-		dk = bootstrapDK.EncapsulationKey()
-		recipientID = "distfs:world"
-	} else {
-		dk, err = crypto.UnmarshalEncapsulationKey(usersGroup.EncKey)
-		if err != nil {
-			return "", nil, err
-		}
-	}
-
-	fileKey := make([]byte, 32)
-	io.ReadFull(rand.Reader, fileKey)
-
-	lb := crypto.NewLockbox()
-	lb.AddRecipient(recipientID, dk, fileKey)
-
-	// Encrypt and upload the chunk
-	entry, err := c.uploadChunkData(ctx, inodeID, fileKey, 0, data)
-	if err != nil {
-		return "", nil, err
-	}
-
-	// Prepare Inode
-	inode := &metadata.Inode{
-		ID:      inodeID,
-		Type:    metadata.FileType,
-		OwnerID: ownerID,
-		GroupID: usersGID, // Accessible by all users
-		Mode:    0640,     // Owner: rw, Group: r, World: nothing
-		Size:    uint64(len(data)),
-		CTime:   time.Now().UnixNano(),
-		NLink:   1,
-		ChunkManifest: []metadata.ChunkEntry{
-			entry,
-		},
-		Lockbox: lb,
-		Nonce:   nonce,
-		Version: 1,
-	}
-
-	createCmd, err := c.prepareCreate(ctx, inode)
-	if err != nil {
-		return "", nil, err
-	}
-
-	// Update Parent (/registry)
-	parentInode, parentKey, err := c.resolvePath(ctx, c.registryDir)
-	if err != nil {
-		return "", nil, err
-	}
-	parentID := parentInode.ID
-	parent, err := c.getInode(ctx, parentID)
-	if err != nil {
-		return "", nil, err
-	}
-	parent.SetFileKey(parentKey)
-
-	name := filepath.Base(path)
-	encName := metadata.ComputeNameHMAC(parentKey, name)
-	encNameBlob, nameNonce, err := c.encryptEntryName(parentKey, name)
-	if err != nil {
-		return "", nil, err
-	}
-
-	if parent.Children == nil {
-		parent.Children = make(map[string]metadata.ChildEntry)
-	}
-	parent.Children[encName] = metadata.ChildEntry{
-		ID:            inodeID,
-		EncryptedName: encNameBlob,
-		Nonce:         nameNonce,
-	}
-
-	addEntryCmd, err := c.prepareUpdate(ctx, parent)
-	if err != nil {
-		return "", nil, err
-	}
-
-	return inodeID, []metadata.LogCommand{createCmd, addEntryCmd}, nil
 }
 
 // AddUserToGroup adds a new member to an existing group.
@@ -6199,35 +5966,6 @@ func (c *Client) acquireControl(ctx context.Context) error {
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
-	}
-}
-
-func (c *Client) leaseRenewalLoop(ctx context.Context, wg *sync.WaitGroup, ids []string, lType metadata.LeaseType, nonce string) {
-	defer wg.Done()
-	ticker := time.NewTicker(60 * time.Second)
-	defer ticker.Stop()
-
-	lastSuccess := time.Now()
-	leaseDuration := 2 * time.Minute
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			rctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			err := c.acquireLeases(rctx, ids, leaseDuration, LeaseOptions{Type: lType, Nonce: nonce})
-			cancel()
-
-			if err == nil {
-				lastSuccess = time.Now()
-			} else {
-				if time.Since(lastSuccess) > leaseDuration {
-					log.Printf("LEASE EXPIRED: failed to renew %v: %v", ids, err)
-					return
-				}
-			}
-		}
 	}
 }
 

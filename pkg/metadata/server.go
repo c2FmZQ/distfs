@@ -152,18 +152,6 @@ type challengeEntry struct {
 	CreatedAt time.Time
 }
 
-type schemeSwitchingTransport struct {
-	standard  http.RoundTripper
-	protected http.RoundTripper
-}
-
-func (t *schemeSwitchingTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if req.URL.Scheme == "https" {
-		return t.protected.RoundTrip(req)
-	}
-	return t.standard.RoundTrip(req)
-}
-
 // NewServer creates a new Metadata Server.
 func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL string, signKey *crypto.IdentityKey, raftSecret string, clientTLSConfig *tls.Config, keyRotationInterval time.Duration, vault *NodeVault, decKey *mlkem.DecapsulationKey768, disableDoH bool) *Server {
 	retryClient := retryablehttp.NewClient()
@@ -1077,10 +1065,6 @@ func (s *Server) handleClusterStatus(w http.ResponseWriter, r *http.Request) {
 		"stats":  s.raft.Stats(),
 	}
 	s.writeJSON(w, r, status, http.StatusOK)
-}
-
-func (s *Server) getUser(id string) (*User, error) {
-	return s.fsm.GetUser(id)
 }
 
 func (s *Server) authenticate(r *http.Request) (*User, error) {
@@ -2414,7 +2398,7 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 		}
 
 		if hook != nil {
-			resp = hook(nil)
+			hook(nil)
 		}
 
 		w.WriteHeader(successCode)

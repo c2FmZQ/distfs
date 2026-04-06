@@ -21,7 +21,6 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
-	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
@@ -286,23 +285,6 @@ func extractError(res interface{}) error {
 	return nil
 }
 
-func extractErrorString(res interface{}) string {
-	if err, ok := res.(error); ok && err != nil {
-		return err.Error()
-	}
-	if s, ok := res.(string); ok && strings.HasPrefix(s, "api error:") {
-		return s
-	}
-	if slice, ok := res.([]interface{}); ok {
-		for _, item := range slice {
-			if str := extractErrorString(item); str != "" {
-				return str
-			}
-		}
-	}
-	return ""
-}
-
 // Apply applies a Raft log entry to the state machine.
 func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 	var cmd LogCommand
@@ -477,26 +459,9 @@ func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs m
 
 	for id, delta := range expectedDeltas {
 		if delta != 0 && !modifiedIDs[id] {
-			pre := preInodes[id]
-			preNames := []string{}
-			if pre != nil {
-				for n := range pre.Children {
-					preNames = append(preNames, n)
-				}
-			}
-			plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))
-			var post Inode
-			if plain != nil {
-				json.Unmarshal(plain, &post)
-			}
-			postNames := []string{}
-			for n := range post.Children {
-				postNames = append(postNames, n)
-			}
 			return fmt.Errorf("%w: inode %s expected nlink delta %d but was not modified in batch", ErrStructuralInconsistency, id, delta)
 		}
 	}
-
 	for id := range modifiedIDs {
 		pre := preInodes[id]
 		plain, _ := fsm.Get(tx, []byte("inodes"), []byte(id))
@@ -603,21 +568,6 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 		return fsm.executeBatchCommands(tx, subCmds, depth+1, cmd.Atomic)
 	}
 	return fmt.Errorf("unknown command")
-}
-
-func (fsm *MetadataFSM) resolveSessionUser(sessionID string) (string, error) {
-	if sessionID == "" {
-		return "", fmt.Errorf("missing session ID")
-	}
-	b, err := base64.StdEncoding.DecodeString(sessionID)
-	if err != nil {
-		return "", fmt.Errorf("invalid session encoding")
-	}
-	var st SignedSessionToken
-	if err := json.Unmarshal(b, &st); err != nil {
-		return "", fmt.Errorf("failed to unmarshal session: %w", err)
-	}
-	return st.Token.UserID, nil
 }
 
 func (fsm *MetadataFSM) checkLease(inode *Inode, sessionNonce string) error {

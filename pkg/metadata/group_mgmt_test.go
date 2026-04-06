@@ -254,11 +254,3 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 		t.Errorf("Expected ErrQuotaExceeded, got %v", f.Response())
 	}
 }
-
-func marshalInode(t *testing.T, i Inode) []byte {
-	b, err := json.Marshal(i)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return b
-}

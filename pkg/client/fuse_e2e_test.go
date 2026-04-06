@@ -36,8 +36,6 @@ func createTestStorageLocal(t *testing.T, dir string) (*storage.Storage, storage
 	return st, mk
 }
 
-var nextFuseTestUID uint32 = 1000
-
 func createUserLocal(t *testing.T, raftNode *metadata.RaftNode, user metadata.User, userSK *crypto.IdentityKey, adminID string, adminSK *crypto.IdentityKey) {
 	metadata.CreateUser(t, raftNode, user, userSK, adminID, adminSK)
 }
