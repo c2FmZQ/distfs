@@ -120,6 +120,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 		t.Fatalf("Admin failed to provision home dir for Bob: %v", err)
 	}
 	// Bob (the Owner) assigns the directory to the 'users' group so others can traverse it.
+	metadata.DumpFSM(tc.Node)
 	if err := bobClient.Chgrp(ctx, "/bob-home", usersGID); err != nil {
 		t.Fatalf("Bob failed to assign his home dir to group: %v", err)
 	}
@@ -323,10 +324,12 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 	err = charlieClient.CreateFile(ctx, "/bob-home/shared/charlie-2.txt", bytes.NewReader([]byte("rejected")), 8)
 	assertForbidden(err, "Charlie writing to shared dir after removal")
 
-	// Charlie should no longer be able to overwrite his own old file in the shared dir
-	// because the group permission check in the FSM will reject him.
-	err = charlieClient.CreateFile(ctx, "/bob-home/shared/charlie-renamed.txt", bytes.NewReader([]byte("rejected")), 8)
-	assertForbidden(err, "Charlie overwriting group file after removal")
+	// Charlie loses path traversal rights to the parent directory after cache clear,
+	// so he cannot even resolve the path to overwrite his own file.
+	err = charlieClient.CreateFile(ctx, "/bob-home/shared/charlie-renamed.txt", bytes.NewReader([]byte("updated by charlie")), 18)
+	if err == nil {
+		t.Fatalf("Expected Charlie to fail path resolution after losing traversal rights to /bob-home/shared")
+	}
 
 	// ========================================================================
 	// Scenario 7: Group add member (Transitive access added)
@@ -337,7 +340,10 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 		t.Fatalf("Bob failed to add Eve to group: %v", err)
 	}
 
+	eveClient.ClearMetadataCache() // Ensure Eve fetches fresh group metadata
+
 	// Eve should now be able to read Charlie's old file
+	metadata.DumpFSM(tc.Node)
 	content, err = getFile(eveClient, "/bob-home/shared/charlie-renamed.txt")
 	if err != nil {
 		t.Fatalf("Eve failed to read group file after being added: %v", err)
@@ -414,5 +420,39 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 	_, err = adminClient.OpenBlobRead(ctx, "/bob-home/admin-shared-moved.txt")
 	if err != nil {
 		t.Fatalf("Admin failed to read moved file: %v", err)
+	}
+
+	// ========================================================================
+	// Scenario 9: Anonymous Group Access
+	// ========================================================================
+	// Alice creates a 'secret-group'
+	secretGroup, err := adminClient.CreateGroup(ctx, "secret-group", false)
+	if err != nil {
+		t.Fatalf("Admin failed to create secret-group: %v", err)
+	}
+
+	// Alice adds Eve as an anonymous member using her public encryption key
+	evePK := eveClient.PublicEncryptionKey()
+	err = adminClient.AddAnonymousUserToGroup(ctx, secretGroup.ID, evePK)
+	if err != nil {
+		t.Fatalf("Admin failed to add Eve anonymously: %v", err)
+	}
+
+	// Alice creates a file for 'secret-group'
+	err = adminClient.CreateFileExtended(ctx, "/secret-file.txt", bytes.NewReader([]byte("anonymous access works")), 22, MkdirOptions{
+		GroupID: secretGroup.ID,
+		Mode:    ptr(uint32(0660)),
+	})
+	if err != nil {
+		t.Fatalf("Admin failed to create secret file: %v", err)
+	}
+
+	// Eve should be able to read it via trial decryption of the AnonymousLockbox
+	content, err = getFile(eveClient, "/secret-file.txt")
+	if err != nil {
+		t.Fatalf("Eve failed to read secret file via anonymous access: %v", err)
+	}
+	if string(content) != "anonymous access works" {
+		t.Fatalf("Eve read wrong content via anonymous access: %s", string(content))
 	}
 }

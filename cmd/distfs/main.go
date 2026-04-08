@@ -440,24 +440,24 @@ func main() {
 				Name:  "du",
 				Usage: "Display disk usage",
 				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "h", Aliases: []string{"human"}, Usage: "Human readable sizes"},
+					&cli.BoolFlag{Name: "human", Aliases: []string{"H"}, Usage: "Human readable sizes"},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					path := cmd.Args().First()
 					if path == "" {
 						path = "."
 					}
-					return cmdDu(ctx, path, cmd.Bool("h"))
+					return cmdDu(ctx, path, cmd.Bool("human"))
 				},
 			},
 			{
 				Name:  "df",
 				Usage: "Display filesystem usage",
 				Flags: []cli.Flag{
-					&cli.BoolFlag{Name: "h", Aliases: []string{"human"}, Usage: "Human readable sizes"},
+					&cli.BoolFlag{Name: "human", Aliases: []string{"H"}, Usage: "Human readable sizes"},
 				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
-					return cmdDf(ctx, cmd.Bool("h"))
+					return cmdDf(ctx, cmd.Bool("human"))
 				},
 			},
 			{
@@ -762,7 +762,6 @@ func main() {
 }
 
 func loadClient() *client.Client {
-	fmt.Printf("DEBUG: loadClient called with configPath=%s, admin=%v\n", appConfigPath, appAdminFlag)
 	conf, err := config.Load(appConfigPath)
 	if err != nil {
 		log.Fatal(err)

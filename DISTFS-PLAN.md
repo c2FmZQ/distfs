@@ -1446,4 +1446,36 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Verify that all existing E2E shell scripts (`scripts/test-*.sh`) function correctly with the new flag parsing.
     *   **Action:** Ensure help documentation (`--help`) is automatically generated and accurate for all tools.
 
+---
+
+## Phase 71: Anonymous Group Membership & Refactored Cryptographic Authorization
+**Goal:** Implement Anonymous Group Membership and refactor the cryptographic access control layer into a high-level "Access Provisioner" to ensure consistency, O(1) revocation via Unified Seed Ratchet, and secure member privacy.
+
+*   **Step 71.1: The "Access Provisioner" Abstraction**
+    *   **Action:** Refactor `pkg/client/client.go` to centralize all lockbox logic into two identity-aware methods:
+        *   `provisionRecipient(ctx, lb, recipientID, fileKey)`: Automatically detects recipient type (User/Group/World), fetches keys/seeds, and handles HMAC privacy calculation.
+        *   `unlockInode(ctx, inode)`: Standardizes trial decryption (Personal -> Group -> World) including seed-based ratchet derivation.
+    *   **Action:** Replace all manual `lb.AddRecipient` and `lb.GetFileKey` calls in `client.go`, `directory.go`, and `fuse_fs.go` with these abstractions.
+*   **Step 71.2: Member Privacy & HMAC Consistency**
+    *   **Action:** Remove `MembersHMAC` check from the server's authorization path in `fsm.go`.
+    *   **Action:** Enforce that **all** user entries in a `Group.Lockbox` are keyed by `HMAC-SHA256(GroupPublicSignKey, UserID)`.
+    *   **Action:** Update `GET /v1/user/groups` server logic to resolve memberships based on HMAC-keyed `Lockbox` entries.
+*   **Step 71.3: Unified Seed Ratchet for Forward Secrecy**
+    *   **Action:** Add `Epoch` (uint32) and `EncryptedEpochSeed` ([]byte) to the `Group` struct.
+    *   **Action:** Implement `DeriveEpochSeed(masterSeed []byte, epoch uint32)` via hash chain and `DeriveGroupKeys(epochSeed []byte)` via HKDF in `pkg/crypto`.
+    *   **Action:** Update `Group` creation to generate a random 64-byte `MasterSeed`, encrypt it with the `RegistryKey`, and initialize `Epoch` to 0.
+*   **Step 71.4: O(1) Revocation & Historical Verification**
+    *   **Action:** Implement `RevokeGroupMember` in `pkg/client/client.go`.
+    *   **Action:** Decrypt `EncryptedEpochSeed`, increment `Epoch`, and derive new keys.
+    *   **Action:** Store the old `SignKey` in `Group.HistoricalSignKeys` to allow historical `GroupSig` verification.
+    *   **Action:** **Server Notarization (Option A):** In the Raft FSM, apply a `ClusterSig` over updated Inodes to bind them to the Raft timeline, neutralizing backdated forgeries by revoked users.
+*   **Step 71.5: POSIX Inheritance & Registry Automation**
+    *   **Action:** Update `BootstrapFileSystem` to set a `DefaultACL` on `/registry` granting `read` access to the `users` group.
+    *   **Action:** Update `addEntryInternal` in `directory.go` to automatically inherit the parent directory's `DefaultACL` as the new file's `AccessACL`.
+    *   **Action:** Update `AnchorGroupInRegistry` and `AnchorUserInRegistry` to update files in place and leverage inherited permissions, removing the requirement for the anchorer to possess group seeds.
+*   **Step 71.6: Testing & Verification**
+    *   **Action:** **Security Test:** Verify a revoked user cannot read newly created files or decrypt files shared after revocation.
+    *   **Action:** **Security Test:** Verify a revoked user cannot mutate group files (backdated forgery check).
+    *   **Action:** **Integration Test:** Verify an anonymous user can successfully trial-decrypt the `AnonymousLockbox` and read files from previous epochs.
+
 

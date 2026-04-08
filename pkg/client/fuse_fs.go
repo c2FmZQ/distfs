@@ -19,7 +19,7 @@ import (
 
 	"bazil.org/fuse"
 	"bazil.org/fuse/fs"
-	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
@@ -360,19 +360,15 @@ func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 			if acl != nil {
 				for uid, bits := range acl.Users {
 					if (bits & 4) != 0 {
-						if user, err := d.fs.client.getUser(ctx, uid); err == nil {
-							if upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey); err == nil {
-								i.Lockbox.AddRecipient(uid, upk, key)
-							}
+						if err := d.fs.client.provisionRecipient(ctx, i.Lockbox, uid, key, nil); err != nil {
+							logger.Debugf("FUSE: failed to provision ACL user %s: %v", uid, err)
 						}
 					}
 				}
 				for gid, bits := range acl.Groups {
 					if (bits & 4) != 0 {
-						if group, err := d.fs.client.getGroup(ctx, gid); err == nil {
-							if gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey); err == nil {
-								i.Lockbox.AddRecipient(gid, gpk, key)
-							}
+						if err := d.fs.client.provisionRecipient(ctx, i.Lockbox, gid, key, nil); err != nil {
+							logger.Debugf("FUSE: failed to provision ACL group %s: %v", gid, err)
 						}
 					}
 				}
@@ -725,19 +721,15 @@ func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 		if acl != nil {
 			for uid, bits := range acl.Users {
 				if (bits & 4) != 0 {
-					if user, err := f.fs.client.getUser(ctx, uid); err == nil {
-						if upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey); err == nil {
-							i.Lockbox.AddRecipient(uid, upk, key)
-						}
+					if err := f.fs.client.provisionRecipient(ctx, i.Lockbox, uid, key, nil); err != nil {
+						logger.Debugf("FUSE: failed to provision ACL user %s: %v", uid, err)
 					}
 				}
 			}
 			for gid, bits := range acl.Groups {
 				if (bits & 4) != 0 {
-					if group, err := f.fs.client.getGroup(ctx, gid); err == nil {
-						if gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey); err == nil {
-							i.Lockbox.AddRecipient(gid, gpk, key)
-						}
+					if err := f.fs.client.provisionRecipient(ctx, i.Lockbox, gid, key, nil); err != nil {
+						logger.Debugf("FUSE: failed to provision ACL group %s: %v", gid, err)
 					}
 				}
 			}

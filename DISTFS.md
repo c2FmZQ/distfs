@@ -57,11 +57,12 @@ Users control their identity via an asymmetric key pair using **Post-Quantum Cry
 2.  **Cluster Identity (Epoch Keys):** The cluster maintains a rotating set of shared PQC KEM keys ("Epoch Keys") stored in the Raft FSM.
     *   **Shared:** All nodes use the same keys to decrypt client requests, enabling stateless load balancing.
     *   **Rotating:** Keys rotate periodically (e.g., daily) to provide **Forward Secrecy**. Old keys are securely erased from memory and disk.
-3.  **Group Identity Key:** A persistent Public/Private key pair representing a Group. The Group Private Key is shared among group members via the Group Lockbox.
+3.  **Group Identity Key:** A rotating Public/Private signing key pair (ML-DSA) representing a Group. The Private Signing Key, along with a symmetric **Epoch Key** (for file encryption), is shared among group members via the Group Lockbox.
 4.  **File Key (FK):** A random symmetric key generated for *each* file. Encrypts the file content.
 5.  **Lockbox:**
-    *   **File Lockbox:** Stores the `File Key` encrypted for the Owner and/or the assigned Group.
-    *   **Group Lockbox:** Stores the `Group Private Key` encrypted for each member's Public Key.
+    *   **File Lockbox:** Stores the `File Key` encrypted for the Owner and/or the assigned Group (using the Group's current Epoch Key).
+    *   **Group Lockbox:** Stores the `Group Private Signing Key` and current `Epoch Key` encrypted for each named member's Public Key.
+    *   **Anonymous Lockbox:** An unordered array of ciphertexts containing the group keys, encrypted for anonymous members.
     *   **World Lockbox:** Special entry for ID `world`. Allows all registered users to retrieve the World Private Key (encrypted for them) to decrypt or modify "world-accessible" files.
 
 ### 3.3 Privacy & Identity (The "Dark Registry")
@@ -109,6 +110,20 @@ To enhance security during passphrase entry, DistFS supports the **Assuan protoc
 3.  **Opt-in Usage:** Enabled via the `--use-pinentry` flag in CLI and FUSE tools.
 4.  **Hardened Implementation:** Validates input environments and avoids insecure logging of captured passphrases.
 
+### 3.8 The Trial Decryption Algorithm
+To obtain an inode's file key, a client performs a uniform asymmetric trial decryption. Every entry in an Inode Lockbox is encrypted using an asymmetric Post-Quantum algorithm (ML-KEM) for a specific User, Group, or the World.
+
+1.  **Iterate Recipients:** The client iterates through all `recipientID` keys in the inode's `Lockbox` map.
+2.  **Personal Access:** If `recipientID` matches the client's `UserID`, the client decapsulates the entry using its personal private `DecKey`.
+3.  **World Access:** If `recipientID` is `world`, the client fetches the cluster's `WorldPrivateKey` (authorized by its user identity) and decapsulates the entry.
+4.  **Group Access (Hierarchical):** If the `recipientID` is a `GroupID`, the client attempts to derive the Group's private key:
+    *   **Membership Lookup:** The client fetches the Group metadata and computes its stable privacy-preserving identifier: `target = HMAC(GroupID, UserID)`.
+    *   **Named Membership:** If `target` exists in the **Group's** lockbox, the client decapsulates it using its personal `DecKey` to retrieve the `EpochSeed`.
+    *   **Anonymous Membership:** If not found, the client performs trial decryption against the Group's `AnonymousLockbox` (an unordered array of ciphertexts) using its personal `DecKey`.
+    *   **Key Derivation:** Once the `EpochSeed` is retrieved, the client derives the Group's private key for the requested epoch.
+    *   **Inode Unlocking:** The client uses the derived Group private key to decapsulate the entry in the **Inode's** lockbox for that `recipientID` (the GroupID).
+5.  **Verification:** Once a potential file key is obtained, it is used to decrypt the `ClientBlob`. Decryption success and a valid signature check confirm the key is correct.
+
 ---
 
 ## 4. Metadata Layer (MetaNodes)
@@ -120,14 +135,15 @@ The Raft FSM stores the "Inode" table and Directory Structure.
 *   **User Structure:**
     *   `HMAC(sub) -> {UID, ML-KEM PK, ML-DSA PK, Usage, Quota}`.
 *   **Group Structure:**
-    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, ClientBlob, Members (HMAC), Lockbox, RegistryLockbox, EncryptedRegistry, Usage, Quota, Version, SignerID, Signature, QuotaEnabled, Nonce}`.
+    *   `UUID -> {ID, OwnerID, GID, ML-KEM PK, ML-DSA PK, ClientBlob, Lockbox, AnonymousLockbox, RegistryLockbox, EncryptedRegistry, AnonymousRegistry, Usage, Quota, Version, SignerID, Signature, QuotaEnabled, Nonce}`.
         *   **OwnerID:** The immutable identity authorized to manage the group. Can be a `UserID` or another `GroupID`.
         *   **Nonce:** A mandatory 16-byte random value. The Group ID is cryptographically bound to the OwnerID and this Nonce during creation (`GenerateGroupID`).
-        *   **Members (HMAC):** A map of `HMAC-SHA256(GroupSignKey, UserID) -> true`. This provides the server with a way to enforce membership permissions without exposing a plaintext list of users.
         *   **ClientBlob:** AES-GCM encrypted metadata (e.g., Group Name).
-        *   **Lockbox:** Shares Group Private Keys among all members.
+        *   **Lockbox:** Shares Group Private Signing Keys and Epoch Keys among all named members.
+        *   **AnonymousLockbox:** An unordered array of ciphertexts containing the Group keys, encrypted for anonymous members.
         *   **RegistryLockbox:** Shares a symmetric **Registry Key** only among authorized managers (`OwnerID`).
-        *   **EncryptedRegistry:** An opaque blob containing member UserIDs, encrypted with the Registry Key.
+        *   **EncryptedRegistry:** An opaque blob containing named member UserIDs, encrypted with the Registry Key.
+        *   **AnonymousRegistry:** An opaque blob containing anonymous member Public Keys, encrypted with the Registry Key.
         *   **Usage:** Tracks inodes and bytes used by files assigned to this group.
         *   **Quota:** Resource limits for the group (Effective only if `QuotaEnabled` is true).
         *   **QuotaEnabled:** An immutable boolean decided at group creation. If true, the group is the primary debtor for all its files. If false, the individual file owners are charged.
@@ -197,7 +213,7 @@ DistFS employs a "Registry-Backed" model where the definitive source of truth fo
     *   **Content:** A signed `GroupDirectoryEntry` containing the GroupID and its public keys.
     *   **Permissions:** Visibility is granted to the `users` group via POSIX ACLs (`r-x` on directory, `r--` on file).
     *   **Trust Anchor:** Clients verify that the keys and OwnerID stored in the FSM match the signed attestation in the Registry.
-3.  **Privacy (HMAC Membership):** To prevent membership leaks, the FSM stores memberships as `HMAC-SHA256(GroupSignKey, UserID)`. The server can verify membership for the current requester but cannot "dump" the member list.
+3.  **Privacy (Cryptographic Capabilities):** To prevent membership leaks, the FSM no longer stores membership lists for authorization. The server simply verifies the `GroupSig` on the request against the Group's Public Signing Key. The server knows the requester is an authorized member (because they possess the signing capability), but it does not know *which* member.
 4.  **Management Authorization (The One-Hop Rule):** Management checks are limited to a single level. If Group A is owned by Group B, and Group B is owned by Group C, a member of Group C **cannot** manage Group A unless they are also an explicit member of Group B.
 5.  **Signature Requirement:** All group updates must be signed by the requester's ML-DSA Identity Key. The server verifies this signature and confirms the signer is an authorized manager based on the ownership model.
 6.  **Decoupled Registry Anchoring:** Groups are created in the FSM by any user. However, for a group to be widely discoverable and verifiable via the Sovereign Chain of Trust, an Administrator must explicitly "anchor" it by creating the `/registry/<name>.group` attestation file using the standard filesystem API.
@@ -212,7 +228,7 @@ To support collaboration without a central directory, the metadata layer provide
 2.  **Role Resolution:** The server identifies the user's role for each group:
     *   **Owner:** The user is the direct `OwnerID`.
     *   **Manager:** The user is a member of a group that is the `OwnerID`.
-    *   **Member:** The user is a direct member of the group.
+    *   **Member:** The user is explicitly listed in the named `Lockbox` or `EncryptedRegistry` (Anonymous members cannot use server-side discovery).
 3.  **Privacy Preservation:** The server returns only the `GroupID`, the encrypted `ClientBlob`, and the resolved `Role`. The MetaNode does not know the plaintext names; the client must use its local keys to decrypt and display the group names to the user.
 
 ### 4.8 Resource Quotas

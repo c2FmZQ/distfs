@@ -21,8 +21,9 @@ import (
 
 // LockboxEntry contains the cryptographic material for a single recipient to retrieve the file key.
 type LockboxEntry struct {
-	KEMCiphertext []byte `json:"kem"` // Output of mlkem.Encapsulate
-	DEMCiphertext []byte `json:"dem"` // Encrypted File Key (using shared secret)
+	KEMCiphertext []byte `json:"kem,omitempty"` // Output of mlkem.Encapsulate
+	DEMCiphertext []byte `json:"dem"`           // Encrypted File Key (using shared secret)
+	Epoch         uint32 `json:"epoch"`         // Ratchet epoch used for this entry (0 for asymmetric)
 }
 
 // Lockbox stores access keys for users. Map UserID -> Entry.
@@ -33,8 +34,8 @@ func NewLockbox() Lockbox {
 	return make(Lockbox)
 }
 
-// AddRecipient adds a user to the lockbox.
-func (l Lockbox) AddRecipient(userID string, pubKey *mlkem.EncapsulationKey768, fileKey []byte) error {
+// AddRecipient adds a user to the lockbox using ML-KEM.
+func (l Lockbox) AddRecipient(userID string, pubKey *mlkem.EncapsulationKey768, fileKey []byte, epoch uint32) error {
 	secret, kemCT := Encapsulate(pubKey)
 
 	demCT, err := EncryptDEM(secret, fileKey)
@@ -45,22 +46,27 @@ func (l Lockbox) AddRecipient(userID string, pubKey *mlkem.EncapsulationKey768, 
 	l[userID] = LockboxEntry{
 		KEMCiphertext: kemCT,
 		DEMCiphertext: demCT,
+		Epoch:         epoch,
 	}
 	return nil
 }
 
 var ErrRecipientNotFound = fmt.Errorf("recipient not in lockbox")
 
-// GetFileKey retrieves the file key for a user.
+// GetFileKey retrieves the file key for a user using their ML-KEM Decapsulation Key.
 func (l Lockbox) GetFileKey(userID string, privKey *mlkem.DecapsulationKey768) ([]byte, error) {
 	entry, ok := l[userID]
 	if !ok {
 		return nil, ErrRecipientNotFound
 	}
 
+	if len(entry.KEMCiphertext) == 0 {
+		return nil, fmt.Errorf("recipient %s has no KEM ciphertext (entry is possibly corrupted or legacy symmetric)", userID)
+	}
+
 	secret, err := Decapsulate(privKey, entry.KEMCiphertext)
 	if err != nil {
-		return nil, fmt.Errorf("kem decapsulate failed: %w", err)
+		return nil, fmt.Errorf("kem decapsulate failed for recipient %s: %w", userID, err)
 	}
 
 	return DecryptDEM(secret, entry.DEMCiphertext)

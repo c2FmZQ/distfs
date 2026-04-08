@@ -3,40 +3,80 @@
 package client
 
 import (
-	"context"
+	"encoding/json"
+	"fmt"
 	"testing"
 
-	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	"go.etcd.io/bbolt"
 )
 
-func TestDebugLockedKeysync(t *testing.T) {
-	tc := metadata.SetupCluster(t)
-	defer tc.Node.Shutdown()
-	defer tc.TS.Close()
-	metadata.WaitLeader(t, tc.Node.Raft)
+// DumpFSMState dumps the inodes and groups buckets to stdout for debugging test failures.
+func DumpFSMState(t *testing.T, fsm *metadata.MetadataFSM) {
+	fmt.Println("================================================================")
+	fmt.Println("====================== FSM STATE DUMP ==========================")
+	fmt.Println("================================================================")
 
-	// Admin
-	u1 := "admin"
-	usk, _ := crypto.GenerateIdentityKey()
-	metadata.CreateUser(t, tc.Node, metadata.User{ID: u1, UID: 1001, SignKey: usk.Public(), Locked: false}, usk, tc.AdminID, tc.AdminSK)
+	err := fsm.DB().View(func(tx *bbolt.Tx) error {
+		fmt.Println("--- INODES ---")
+		ibName := []byte("inodes")
+		b := tx.Bucket(ibName)
+		if b != nil {
+			b.ForEach(func(k, v []byte) error {
+				plain, err := fsm.DecryptValue(ibName, v)
+				if err != nil {
+					return nil
+				}
+				var inode metadata.Inode
+				if err := json.Unmarshal(plain, &inode); err == nil {
+					j, _ := json.MarshalIndent(inode, "", "  ")
+					fmt.Printf("Inode %s:\n%s\n", k, string(j))
+				}
+				return nil
+			})
+		}
 
-	// Locked user
-	u2 := "locked"
-	usk2, _ := crypto.GenerateIdentityKey()
-	udk2, _ := crypto.GenerateEncryptionKey()
-	// CreateUser forces locked=true for second user.
-	metadata.CreateUser(t, tc.Node, metadata.User{ID: u2, UID: 1002, SignKey: usk2.Public(), EncKey: udk2.EncapsulationKey().Bytes(), Locked: true}, usk2, tc.AdminID, tc.AdminSK)
+		fmt.Println("\n--- GROUPS ---")
+		gbName := []byte("groups")
+		gb := tx.Bucket(gbName)
+		if gb != nil {
+			gb.ForEach(func(k, v []byte) error {
+				plain, err := fsm.DecryptValue(gbName, v)
+				if err != nil {
+					return nil
+				}
+				var group metadata.Group
+				if err := json.Unmarshal(plain, &group); err == nil {
+					j, _ := json.MarshalIndent(group, "", "  ")
+					fmt.Printf("Group %s:\n%s\n", k, string(j))
+				}
+				return nil
+			})
+		}
 
-	c := NewClient(tc.TS.URL).withIdentity(u2, udk2).withSignKey(usk2)
+		fmt.Println("\n--- USERS ---")
+		ubName := []byte("users")
+		ub := tx.Bucket(ubName)
+		if ub != nil {
+			ub.ForEach(func(k, v []byte) error {
+				plain, err := fsm.DecryptValue(ubName, v)
+				if err != nil {
+					return nil
+				}
 
-	svKey, _ := crypto.UnmarshalEncapsulationKey(tc.EpochEK)
-	c = c.withServerKey(svKey)
-
-	_, _ = c.EnsureRoot(context.Background())
-
-	err := c.pushKeySync(context.Background(), &metadata.KeySyncBlob{Ciphertext: []byte("test")})
+				var u metadata.User
+				if err := json.Unmarshal(plain, &u); err == nil {
+					j, _ := json.MarshalIndent(u, "", "  ")
+					fmt.Printf("User %s:\n%s\n", k, string(j))
+				}
+				return nil
+			})
+		}
+		return nil
+	})
 	if err != nil {
-		t.Fatalf("PushKeySync failed: %v", err)
+		t.Fatalf("DumpFSMState failed: %v", err)
 	}
+
+	fmt.Println("================================================================")
 }

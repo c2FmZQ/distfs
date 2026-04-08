@@ -159,9 +159,9 @@ func ComputeNameHMAC(parentKey []byte, name string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// ComputeMemberHMAC calculates the HMAC-SHA256 of a UserID using the group's sign key.
-func ComputeMemberHMAC(signKey []byte, userID string) string {
-	mac := hmac.New(sha256.New, signKey)
+// ComputeMemberHMAC calculates the HMAC-SHA256 of a UserID using a static group key (Group ID).
+func ComputeMemberHMAC(hmacKey string, userID string) string {
+	mac := hmac.New(sha256.New, []byte(hmacKey))
 	mac.Write([]byte(userID))
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -215,28 +215,35 @@ type GroupClientBlob struct {
 	Name string `json:"name"`
 }
 
+// MaxEpochs defines the maximum length of the epoch key hash chain
+const MaxEpochs = 4096
+
 // Group represents a user group for sharing access.
 // Group represents a security group in DistFS, including membership and keys.
 type Group struct {
-	ID                string          `json:"id"`
-	GID               uint32          `json:"gid"`
-	OwnerID           string          `json:"owner_id"` // User ID or Group ID
-	MembersHMAC       map[string]bool `json:"members_hmac"`
-	Nonce             []byte          `json:"nonce"`                  // Mutation nonce for replay protection
-	EncKey            []byte          `json:"enc_key"`                // ML-KEM Public Key
-	SignKey           []byte          `json:"sign_key"`               // ML-DSA Public Key
-	EncryptedSignKey  []byte          `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
-	Lockbox           crypto.Lockbox  `json:"lockbox"`
-	RegistryLockbox   crypto.Lockbox  `json:"registry_lockbox"` // Only for authorized managers
-	EncryptedRegistry []byte          `json:"enc_registry"`     // Member list encrypted with Registry Key
-	ClientBlob        []byte          `json:"client_blob,omitempty"`
-	Usage             UserUsage       `json:"usage"` // Resource usage
-	Quota             UserQuota       `json:"quota"` // Resource limits
-	Version           uint64          `json:"version"`
-	IsSystem          bool            `json:"is_system"` // Only settable by Admin
-	SignerID          string          `json:"signer_id,omitempty"`
-	Signature         []byte          `json:"signature,omitempty"`
-	QuotaEnabled      bool            `json:"quota_enabled"` // Immutable, decided at creation
+	ID                 string            `json:"id"`
+	GID                uint32            `json:"gid"`
+	OwnerID            string            `json:"owner_id"`               // User ID or Group ID
+	Nonce              []byte            `json:"nonce"`                  // Mutation nonce for replay protection
+	EncKey             []byte            `json:"enc_key"`                // ML-KEM Public Key
+	SignKey            []byte            `json:"sign_key"`               // ML-DSA Public Key
+	HistoricalSignKeys map[uint32][]byte `json:"hsk,omitempty"`          // Epoch -> ML-DSA Public Key
+	EncryptedSignKey   []byte            `json:"enc_sign_key,omitempty"` // Wrapped Group Private Sign Key
+	Lockbox            crypto.Lockbox    `json:"lockbox"`
+	AnonymousLockbox   [][]byte          `json:"anonymous_lockbox,omitempty"`  // Unordered array of ciphertexts for anonymous members
+	RegistryLockbox    crypto.Lockbox    `json:"registry_lockbox"`             // Only for authorized managers
+	EncryptedRegistry  []byte            `json:"enc_registry"`                 // Member list encrypted with Registry Key
+	AnonymousRegistry  []byte            `json:"anonymous_registry,omitempty"` // Anonymous member list encrypted with Registry Key
+	Epoch              uint32            `json:"epoch"`                        // Current ratchet epoch
+	EncryptedEpochSeed []byte            `json:"enc_epoch_seed,omitempty"`     // Hash chain seed encrypted with Registry Key
+	ClientBlob         []byte            `json:"client_blob,omitempty"`
+	Usage              UserUsage         `json:"usage"` // Resource usage
+	Quota              UserQuota         `json:"quota"` // Resource limits
+	Version            uint64            `json:"version"`
+	IsSystem           bool              `json:"is_system"` // Only settable by Admin
+	SignerID           string            `json:"signer_id,omitempty"`
+	Signature          []byte            `json:"signature,omitempty"`
+	QuotaEnabled       bool              `json:"quota_enabled"` // Immutable, decided at creation
 
 	// Client-side transient state
 	name string
@@ -254,16 +261,18 @@ const (
 )
 
 type GroupListEntry struct {
-	ID           string         `json:"id"`
-	OwnerID      string         `json:"owner_id"`
-	Role         GroupRole      `json:"role"`
-	EncKey       []byte         `json:"enc_key"` // Group Public Key
-	Lockbox      crypto.Lockbox `json:"lockbox"` // For name decryption
-	IsSystem     bool           `json:"is_system"`
-	ClientBlob   []byte         `json:"client_blob,omitempty"`
-	Usage        UserUsage      `json:"usage"`
-	Quota        UserQuota      `json:"quota"`
-	QuotaEnabled bool           `json:"quota_enabled"`
+	ID               string         `json:"id"`
+	OwnerID          string         `json:"owner_id"`
+	Role             GroupRole      `json:"role"`
+	EncKey           []byte         `json:"enc_key"` // Group Public Key
+	Lockbox          crypto.Lockbox `json:"lockbox"` // For name decryption
+	AnonymousLockbox [][]byte       `json:"anonymous_lockbox,omitempty"`
+	Epoch            uint32         `json:"epoch"`
+	IsSystem         bool           `json:"is_system"`
+	ClientBlob       []byte         `json:"client_blob,omitempty"`
+	Usage            UserUsage      `json:"usage"`
+	Quota            UserQuota      `json:"quota"`
+	QuotaEnabled     bool           `json:"quota_enabled"`
 }
 
 type GroupListResponse struct {
@@ -298,6 +307,14 @@ func (g *Group) Hash() []byte {
 		h.Write([]byte("sys:0|"))
 	}
 
+	h.Write([]byte("epoch:"))
+	binary.Write(h, binary.BigEndian, g.Epoch)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("enc_epoch_seed:"))
+	h.Write(g.EncryptedEpochSeed)
+	h.Write([]byte("|"))
+
 	h.Write([]byte("client_blob:"))
 	h.Write(g.ClientBlob)
 	h.Write([]byte("|"))
@@ -305,22 +322,15 @@ func (g *Group) Hash() []byte {
 	h.Write([]byte("owner:" + g.OwnerID + "|"))
 	h.Write([]byte("signer:" + g.SignerID + "|"))
 
-	// Write MembersHMAC (sorted for canonicality)
-	h.Write([]byte("members_hmac:"))
-	keys := make([]string, 0, len(g.MembersHMAC))
-	for k := range g.MembersHMAC {
-		keys = append(keys, k)
+	h.Write([]byte("anonymous_lockbox:"))
+	for _, b := range g.AnonymousLockbox {
+		h.Write(b)
+		h.Write([]byte(","))
 	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		h.Write([]byte(k))
-		h.Write([]byte(":"))
-		if g.MembersHMAC[k] {
-			h.Write([]byte("1,"))
-		} else {
-			h.Write([]byte("0,"))
-		}
-	}
+	h.Write([]byte("|"))
+
+	h.Write([]byte("anonymous_registry:"))
+	h.Write(g.AnonymousRegistry)
 	h.Write([]byte("|"))
 
 	h.Write([]byte("enc_key:"))
@@ -329,6 +339,21 @@ func (g *Group) Hash() []byte {
 
 	h.Write([]byte("sign_key:"))
 	h.Write(g.SignKey)
+	h.Write([]byte("|"))
+
+	h.Write([]byte("hsk:"))
+	if len(g.HistoricalSignKeys) > 0 {
+		epochs := make([]int, 0, len(g.HistoricalSignKeys))
+		for epoch := range g.HistoricalSignKeys {
+			epochs = append(epochs, int(epoch))
+		}
+		sort.Ints(epochs)
+		for _, epoch := range epochs {
+			h.Write([]byte(strconv.Itoa(epoch) + ":"))
+			h.Write(g.HistoricalSignKeys[uint32(epoch)])
+			h.Write([]byte(","))
+		}
+	}
 	h.Write([]byte("|"))
 
 	h.Write([]byte("enc_sign_key:"))
@@ -519,6 +544,7 @@ type Inode struct {
 	GroupSig           []byte `json:"group_sig,omitempty"`
 	GroupSignerID      string `json:"group_signer_id,omitempty"`      // ID of the group whose key was used for GroupSig
 	OwnerDelegationSig []byte `json:"owner_delegation_sig,omitempty"` // Phase 50: Owner's signature over (ID + GroupID)
+	ClusterSig         []byte `json:"cluster_sig,omitempty"`          // Phase 71: Server signature notarizing the timeline
 
 	// Client-side transient state (unexported, not in JSON)
 	symlinkTarget string

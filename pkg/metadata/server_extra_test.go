@@ -929,31 +929,7 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 		t.Errorf("expected entry dummy -> %s, got %v", idFile, updatedDir.Children)
 	}
 
-	// 3. handleGetGroupSignKey (Success)
-	gMore := Group{
-		ID:               "g_more",
-		OwnerID:          u1,
-		GID:              5001,
-		EncryptedSignKey: []byte("fake-sign-key"),
-		Lockbox: crypto.Lockbox{
-			u1 + ":sign": crypto.LockboxEntry{KEMCiphertext: []byte("fake"), DEMCiphertext: []byte("fake")},
-		},
-		SignerID: u1,
-	}
-	gMore.Signature = usk.Sign(gMore.Hash())
-	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, MustMarshalJSON(gMore), u1)
-
-	time.Sleep(500 * time.Millisecond) // Long sleep for group appear
-
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/group/g_more/sign/private", nil)
-	req.Header.Set("Session-Token", token)
-	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		t.Errorf("handleGetGroupSignKey failed: %d %s", resp.StatusCode, string(b))
-	}
-
-	// 4. handleListGroups (Sealed)
+	// 3. handleListGroups (Sealed)
 	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/groups", nil)
 	req.Header.Set("Session-Token", token)
 	req.Header.Set("X-DistFS-Sealed", "true")
@@ -1060,15 +1036,14 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 
 	// 1. Group Readable
 	g1SK, _ := crypto.GenerateIdentityKey()
-	g1HMAC := computeTestHMAC(g1SK.Public(), u2)
 	g1 := Group{
-		ID:          "g1",
-		GID:         5001,
-		OwnerID:     u1,
-		MembersHMAC: map[string]bool{g1HMAC: true},
-		SignKey:     g1SK.Public(),
-		SignerID:    u1,
-		Version:     1,
+		ID:       "g1",
+		GID:      5001,
+		OwnerID:  u1,
+		Lockbox:  map[string]crypto.LockboxEntry{ComputeMemberHMAC("g1", u2): {}},
+		SignKey:  g1SK.Public(),
+		SignerID: u1,
+		Version:  1,
 	}
 	g1.Signature = usk.Sign(g1.Hash())
 	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, MustMarshalJSON(g1), "u1")

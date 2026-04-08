@@ -36,6 +36,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -237,7 +238,7 @@ func (c *Client) getServerKeys() (*mlkem.EncapsulationKey768, []byte) {
 	return c.serverKey, c.serverSignPK
 }
 
-// getServerSignKey fetches the cluster's public signing key (ML-DSA).
+// getServerSignKey fetches the server's public signing key (ML-DSA).
 func (c *Client) getServerSignKey(ctx context.Context) ([]byte, error) {
 	c.keyMu.RLock()
 	sk := c.serverSignPK
@@ -270,6 +271,115 @@ func (c *Client) getServerSignKey(ctx context.Context) ([]byte, error) {
 	c.serverSignPK = b
 	c.keyMu.Unlock()
 	return b, nil
+}
+
+// getClusterSignKey fetches the cluster's public signing key (ML-DSA).
+func (c *Client) getClusterSignKey(ctx context.Context) ([]byte, error) {
+	c.keyMu.RLock()
+	sk := c.clusterSignPK
+	c.keyMu.RUnlock()
+	if sk != nil {
+		return sk, nil
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/key/cluster/sign", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpCli.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := c.unsealResponse(ctx, resp)
+		return nil, c.newAPIError(resp, body)
+	}
+
+	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	c.keyMu.Lock()
+	c.clusterSignPK = b
+	c.keyMu.Unlock()
+	return b, nil
+}
+
+// getGroupEpochSeed fetches the current epoch seed for a group.
+func (c *Client) getGroupEpochSeed(ctx context.Context, groupID string) ([]byte, error) {
+	group, err := c.getGroup(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	return c.getGroupEpochSeedFromGroup(ctx, group)
+}
+
+// getGroupEpochSeedUnverified fetches the current epoch seed for a group (unverified).
+func (c *Client) getGroupEpochSeedUnverified(ctx context.Context, groupID string) ([]byte, error) {
+	group, err := c.getGroupUnverifiedCached(ctx, groupID)
+	if err != nil {
+		return nil, err
+	}
+	return c.getGroupEpochSeedFromGroup(ctx, group)
+}
+
+func (c *Client) getGroupEpochSeedFromGroup(ctx context.Context, group *metadata.Group) ([]byte, error) {
+	// In Phase 71, every member has the Epoch Seed in their lockbox entry.
+	// 1. Try Personal Access (HMAC for Phase 71 privacy)
+	target := c.computeMemberHMAC(group.ID, c.userID)
+
+	if entry, ok := group.Lockbox[target]; ok {
+		if len(entry.KEMCiphertext) > 0 {
+			secret, err := c.decKey.Decapsulate(entry.KEMCiphertext)
+			if err != nil {
+				return nil, fmt.Errorf("failed to decapsulate group lockbox entry: %w", err)
+			}
+			return crypto.DecryptDEM(secret, entry.DEMCiphertext)
+		}
+	}
+
+	// 2. Try Anonymous Access (Trial Decryption of AnonymousLockbox)
+	if len(group.AnonymousLockbox) > 0 {
+		for _, blob := range group.AnonymousLockbox {
+			var lb crypto.Lockbox
+			if err := json.Unmarshal(blob, &lb); err != nil {
+				continue
+			}
+			// Anonymous entries use the key "seed" as established in AddAnonymousUserToGroup
+			seed, err := lb.GetFileKey("seed", c.decKey)
+			if err == nil {
+				return seed, nil
+			}
+		}
+	}
+
+	// 3. Try Group-based Access (Nested Groups)
+	// If the group is owned by another group, we might have access via the owning group ID
+	if group.OwnerID != "" && group.OwnerID != metadata.SelfOwnedGroup {
+		if entry, ok := group.Lockbox[group.OwnerID]; ok {
+			gk, gerr := c.getGroupPrivateKey(ctx, group.OwnerID, entry.Epoch)
+			if gerr == nil {
+				key, err := group.Lockbox.GetFileKey(group.OwnerID, gk)
+				if err == nil {
+					return key, nil
+				}
+			}
+		}
+	}
+
+	// 3. Fallback for Managers: Try the Registry Lockbox
+	rk, err := c.getGroupRegistryKey(ctx, group)
+	if err == nil {
+		masterSeed, err := crypto.DecryptDEM(rk, group.EncryptedEpochSeed)
+		if err == nil {
+			return crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, group.Epoch), nil
+		}
+	}
+
+	return nil, fmt.Errorf("user %s is not a member or manager of group %s", c.userID, group.ID)
 }
 
 // GetServerKey fetches the cluster's current world public encryption key (ML-KEM).
@@ -483,15 +593,16 @@ type GroupUpdateFunc func(*metadata.Group) error
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
-	serverAddr   string
-	httpCli      *http.Client
-	userID       string
-	decKey       *mlkem.DecapsulationKey768
-	signKey      *crypto.IdentityKey
-	serverKey    *mlkem.EncapsulationKey768
-	serverSignPK []byte
-	keyCache     map[string]fileMetadata
-	keyMu        *sync.RWMutex
+	serverAddr    string
+	httpCli       *http.Client
+	userID        string
+	decKey        *mlkem.DecapsulationKey768
+	signKey       *crypto.IdentityKey
+	serverKey     *mlkem.EncapsulationKey768
+	serverSignPK  []byte
+	clusterSignPK []byte
+	keyCache      map[string]fileMetadata
+	keyMu         *sync.RWMutex
 
 	pathCache map[string]pathCacheEntry
 	pathMu    *sync.RWMutex
@@ -586,7 +697,11 @@ func (c *Client) WithIdentityBytes(userID string, decKey []byte) (*Client, error
 	return c.withIdentity(userID, key), nil
 }
 
-// withIdentity returns a new client with the specified user identity.
+// PublicEncryptionKey returns the client's public encryption key (ML-KEM).
+func (c *Client) PublicEncryptionKey() *mlkem.EncapsulationKey768 {
+	return c.decKey.EncapsulationKey()
+}
+
 func (c *Client) withIdentity(userID string, key *mlkem.DecapsulationKey768) *Client {
 	c2 := *c
 	c2.userID = userID
@@ -1028,10 +1143,11 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 }
 func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.ReadCloser, error) {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
-		// If the server rejected our request before unsealing it (e.g. 403 Forbidden),
+		// If the server rejected our sealed request before unsealing it (e.g. 403 Forbidden),
 		// it did not cache our session key. We must invalidate our local cache to
 		// ensure the next request falls back to Full KEM.
-		if resp.StatusCode >= 400 {
+		// Only apply this to requests that were actually sealed (mutations).
+		if resp.StatusCode >= 400 && resp.Request != nil && resp.Request.Method != http.MethodGet {
 			c.sessionMu.Lock()
 			c.sessionKey = nil
 			c.sessionMu.Unlock()
@@ -1095,10 +1211,16 @@ func (c *Client) ClearNodeCache() {
 // ClearMetadataCache clears the internal cache of verified and unverified users and groups.
 func (c *Client) ClearMetadataCache() {
 	c.cacheMu.Lock()
-	defer c.cacheMu.Unlock()
 	clear(c.userCache)
 	clear(c.verifiedGroupCache)
 	clear(c.unverifiedGroupCache)
+	clear(c.pathCache)
+	c.cacheMu.Unlock()
+
+	c.keyMu.Lock()
+	clear(c.keyCache)
+	clear(c.groupKeys)
+	c.keyMu.Unlock()
 }
 
 func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
@@ -1860,22 +1982,30 @@ func (c *Client) signInode(ctx context.Context, inode *metadata.Inode) error {
 		}
 
 		for _, gid := range groups {
-			gsk, err := c.getGroupSignKey(ctx, gid)
+			group, err := c.getGroupUnverifiedCached(ctx, gid)
+			if err != nil {
+				continue
+			}
+			gsk, err := c.getGroupSignKey(ctx, gid, group.Epoch)
 			if err == nil {
 				groupKey = gsk
 				inode.GroupSignerID = gid
 				break
 			}
 		}
-	} else if inode.GroupID != "" {
+	} else {
 		// Owner can still sign with primary group if available
-		gsk, err := c.getGroupSignKey(ctx, inode.GroupID)
-		if err == nil {
-			groupKey = gsk
-			inode.GroupSignerID = inode.GroupID
+		if inode.GroupID != "" {
+			group, err := c.getGroupUnverifiedCached(ctx, inode.GroupID)
+			if err == nil {
+				gsk, err := c.getGroupSignKey(ctx, inode.GroupID, group.Epoch)
+				if err == nil {
+					groupKey = gsk
+					inode.GroupSignerID = inode.GroupID
+				}
+			}
 		}
 	}
-
 	// 4. Prepare and Encrypt ClientBlob (Only once per update)
 	// We check if it's already set to avoid re-encrypting with a new random nonce
 	// which would invalidate the hash.
@@ -2015,7 +2145,16 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 				c.rootMu.Unlock()
 			}
 
-			c.invalidatePathCacheByID(id)
+			// Update Path Cache with the notarized inode from the server
+			c.pathMu.Lock()
+			for path, entry := range c.pathCache {
+				if entry.inodeID == id {
+					entry.inode = &updated
+					c.pathCache[path] = entry
+				}
+			}
+			c.pathMu.Unlock()
+
 			return &updated, nil
 		}
 
@@ -2332,45 +2471,46 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 	existing, err := c.getInode(ctx, id)
 	if err == nil {
 		inode = *existing
-		// Preserve existing Lockbox entries if possible
+		// 2. Initialize Inode Lockbox
+		// Phase 71: Use provisionRecipient for all entries.
 		if inode.Lockbox == nil {
 			inode.Lockbox = crypto.NewLockbox()
 		}
-		if c.decKey != nil {
-			if err := inode.Lockbox.AddRecipient(c.userID, c.decKey.EncapsulationKey(), fileKey); err != nil {
-				return err
-			}
+
+		// A. Owner Access
+		if err := c.provisionRecipient(ctx, inode.Lockbox, inode.OwnerID, fileKey, nil); err != nil {
+			return err
 		}
+
+		// B. World Access
 		if (mode & 0004) != 0 {
-			wpk, err := c.getWorldPublicKey(ctx)
-			if err == nil {
-				inode.Lockbox.AddRecipient(metadata.WorldID, wpk, fileKey)
+			if err := c.provisionRecipient(ctx, inode.Lockbox, metadata.WorldID, fileKey, nil); err != nil {
+				// Non-fatal warning
+				logger.Debugf("createInodeInternal: failed to provision world: %v", err)
 			}
 		}
+
+		// C. Primary Group Access
 		if groupID != "" && (mode&0060) != 0 {
-			group, err := c.getGroup(ctx, groupID)
-			if err == nil {
-				gpk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				inode.Lockbox.AddRecipient(groupID, gpk, fileKey)
+			if err := c.provisionRecipient(ctx, inode.Lockbox, groupID, fileKey, nil); err != nil {
+				// Non-fatal warning
+				logger.Debugf("createInodeInternal: failed to provision primary group %s: %v", groupID, err)
 			}
 		}
-		// Expand lockbox for ACL recipients
+
+		// D. ACL Access
 		if inode.AccessACL != nil {
 			for uid, bits := range inode.AccessACL.Users {
 				if (bits & 4) != 0 {
-					user, err := c.getUser(ctx, uid)
-					if err == nil {
-						upk, _ := crypto.UnmarshalEncapsulationKey(user.EncKey)
-						inode.Lockbox.AddRecipient(uid, upk, fileKey)
+					if err := c.provisionRecipient(ctx, inode.Lockbox, uid, fileKey, nil); err != nil {
+						logger.Debugf("createInodeInternal: failed to provision ACL user %s: %v", uid, err)
 					}
 				}
 			}
 			for gid, bits := range inode.AccessACL.Groups {
 				if (bits & 4) != 0 {
-					group, err := c.getGroup(ctx, gid)
-					if err == nil {
-						gpk, _ := crypto.UnmarshalEncapsulationKey(group.EncKey)
-						inode.Lockbox.AddRecipient(gid, gpk, fileKey)
+					if err := c.provisionRecipient(ctx, inode.Lockbox, gid, fileKey, nil); err != nil {
+						logger.Debugf("createInodeInternal: failed to provision ACL group %s: %v", gid, err)
 					}
 				}
 			}
@@ -4277,7 +4417,8 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 	}
 
 	if len(fileKey) == 0 {
-		// Try to unlock file key from lockbox
+		// 1. Try to unlock file key from lockbox (Personal Access)
+		// We try this FIRST because it's the most common and fastest path.
 		if c.decKey != nil {
 			key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 			if err == nil {
@@ -4285,27 +4426,33 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 				inode.SetFileKey(key)
 			}
 		}
+
 		if len(fileKey) == 0 {
-			// Try all recipients in the lockbox that might be groups
+			// 2. Trial Decryption via all recipients in the lockbox
 			for recipientID := range inode.Lockbox {
 				if recipientID == c.userID || recipientID == metadata.WorldID {
 					continue
 				}
-				// Try as a group (Read-Only: Safe to use unverified cache)
-				gk, err := c.getGroupDecryptionKey(ctx, recipientID)
+
+				entry := inode.Lockbox[recipientID]
+
+				// Try as a Group Recipient (Asymmetric)
+				// Any recipient in an Inode Lockbox that isn't a User ID or World ID is likely a Group ID.
+				// We check if we have access to this group.
+				// getGroupPrivateKey internally handles checking if we are a member (via stable HMAC in the Group's lockbox).
+				gdk, err := c.getGroupPrivateKey(ctx, recipientID, entry.Epoch)
 				if err == nil {
-					key, err := inode.Lockbox.GetFileKey(recipientID, gk)
+					key, err := inode.Lockbox.GetFileKey(recipientID, gdk)
 					if err == nil {
 						fileKey = key
 						inode.SetFileKey(key)
 						break
-					} else {
 					}
-				} else {
 				}
 			}
 		}
-		// Try World Access
+
+		// 3. Try World Access
 		if len(fileKey) == 0 {
 			if _, exists := inode.Lockbox[metadata.WorldID]; exists {
 				gk, gerr := c.GetWorldPrivateKey(ctx)
@@ -4392,6 +4539,7 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 		s.add(signerID)
 	}
 
+	groupSigValid := false
 	if len(inode.GroupSig) > 0 {
 		signerGID := inode.GroupSignerID
 		if signerGID == "" {
@@ -4402,9 +4550,33 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 			if err != nil {
 				return fmt.Errorf("failed to fetch optimistic group %s for inode %s: %w", signerGID, inode.ID, err)
 			}
-			if !crypto.VerifySignature(group.SignKey, hash, inode.GroupSig) {
-				return fmt.Errorf("invalid group manifest signature by %s", signerGID)
+
+			if crypto.VerifySignature(group.SignKey, hash, inode.GroupSig) {
+				groupSigValid = true
+			} else {
+				// The group key may have rotated since this inode was signed.
+				// Check historical signing keys.
+				usedHistorical := false
+				for _, oldSignKey := range group.HistoricalSignKeys {
+					if crypto.VerifySignature(oldSignKey, hash, inode.GroupSig) {
+						usedHistorical = true
+						break
+					}
+				}
+
+				if usedHistorical {
+					// Option A: Trust the Server for Timeline Notarization
+					// If the GroupSig used a historical key, it MUST be notarized by the server
+					// via ClusterSig to prove it was submitted before the key was revoked.
+					if len(inode.ClusterSig) > 0 {
+						csk, err := c.getClusterSignKey(ctx)
+						if err == nil && csk != nil && crypto.VerifySignature(csk, hash, inode.ClusterSig) {
+							groupSigValid = true
+						}
+					}
+				}
 			}
+
 			// Queue group for deferred registry verification
 			if s, ok := ctx.Value(verificationStateKey).(*verificationState); ok {
 				s.add(signerGID)
@@ -4419,7 +4591,7 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 	} else {
 		// Non-Owner Authorization
 		// Check A: Valid Group Signature
-		if len(inode.GroupSig) > 0 {
+		if groupSigValid {
 			// We already verified the signature against the group's sign key above.
 			// This proves someone with the group key (member/manager) authorized this.
 			authorized = true
@@ -4494,29 +4666,96 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 	return nil
 }
 
+// provisionRecipient adds a recipient to a lockbox, automatically handling
+// identity types, key fetching, and Phase 71 HMAC privacy.
+// If groupContext is provided, it assumes the lockbox is for Group Membership (Phase 71 anonymity).
+// If groupContext is nil, it assumes an Inode Lockbox (standard POSIX access).
+func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, recipientID string, payload []byte, groupContext *metadata.Group) error {
+	// 1. World Access
+	if recipientID == metadata.WorldID {
+		wpk, err := c.getWorldPublicKey(ctx)
+		if err != nil {
+			return fmt.Errorf("failed to fetch world public key: %w", err)
+		}
+		return lb.AddRecipient(metadata.WorldID, wpk, payload, 0)
+	}
+
+	// 2. Group Membership Context (Phase 71 Anonymity)
+	if groupContext != nil {
+		// Use HMAC for the recipient key
+		target := c.computeMemberHMAC(groupContext.ID, recipientID)
+
+		// For Group Lockboxes, the payload is usually the Epoch Seed
+		user, err := c.getUserUnverified(ctx, recipientID)
+		if err == nil {
+			upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+			if err != nil {
+				return err
+			}
+			return lb.AddRecipient(target, upk, payload, groupContext.Epoch)
+		}
+
+		// Recipient might be a Group (Hierarchical Ownership)
+		group, err := c.getGroupUnverifiedCached(ctx, recipientID)
+		if err == nil {
+			upk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+			if err != nil {
+				return err
+			}
+			return lb.AddRecipient(target, upk, payload, groupContext.Epoch)
+		}
+
+		return fmt.Errorf("failed to fetch member %s for group lockbox: %w", recipientID, err)
+	}
+	// 3. Inode Access Context (Standard POSIX)
+	// In an Inode lockbox, we use the literal UserID or GroupID as the recipient key
+	// so that they are discoverable during trial decryption.
+
+	// 2a. Special: World Access
+	if recipientID == metadata.WorldID {
+		wpk, err := c.getWorldPublicKey(ctx)
+		if err != nil {
+			return err
+		}
+		return lb.AddRecipient(metadata.WorldID, wpk, payload, 0)
+	}
+
+	// 3b. Try as User
+	user, err := c.getUserUnverified(ctx, recipientID)
+	if err == nil {
+		upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+		if err != nil {
+			return fmt.Errorf("invalid user encryption key for %s: %w", recipientID, err)
+		}
+		return lb.AddRecipient(recipientID, upk, payload, 0)
+	}
+
+	// 3c. Try as Group (Asymmetric Encryption using Group Public Key)
+	group, err := c.getGroupUnverifiedCached(ctx, recipientID)
+	if err == nil {
+		gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
+		if err != nil {
+			return fmt.Errorf("invalid group encryption key for %s: %w", recipientID, err)
+		}
+		// We encrypt against the group's public key.
+		// We store the group's current Epoch so members know which key to derive to decrypt it.
+		return lb.AddRecipient(recipientID, gpk, payload, group.Epoch)
+	}
+
+	return fmt.Errorf("failed to provision recipient %s: not found as user or group", recipientID)
+}
+
 // unlockInode attempts to decrypt the file key for the inode using the client's identity.
+// It performs a trial decryption across Personal, Group, and World access entries.
 func (c *Client) unlockInode(ctx context.Context, inode *metadata.Inode) ([]byte, error) {
-	// Phase 31: Verification
-	// This also decrypts ClientBlob and populates transient fields (including fileKey if unlocked)
+	// 1. Integrity Check & Signature Verification
 	if err := c.verifyInode(ctx, inode); err != nil {
 		return nil, fmt.Errorf("integrity check failed: %w", err)
 	}
 
+	// 2. Check if already unlocked (populated by verifyInode/ClientBlob decryption)
 	if key := inode.GetFileKey(); len(key) > 0 {
-		// Update Cache
-		var linkTag string
-		for tag := range inode.Links {
-			linkTag = tag
-			break
-		}
-		c.keyMu.Lock()
-		c.keyCache[inode.ID] = fileMetadata{
-			key:     key,
-			groupID: inode.GroupID,
-			linkTag: linkTag,
-			inlined: inode.GetInlineData() != nil,
-		}
-		c.keyMu.Unlock()
+		c.updateKeyCache(inode, key)
 		return key, nil
 	}
 
@@ -4526,53 +4765,68 @@ func (c *Client) unlockInode(ctx context.Context, inode *metadata.Inode) ([]byte
 
 	var lastErr error
 
-	// 1. Try personal access
+	// A. Try Personal Access (Asymmetric)
 	key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 	if err == nil {
-		// Update Cache
-		var linkTag string
-		for tag := range inode.Links {
-			linkTag = tag
-			break
-		}
-		c.keyMu.Lock()
-		c.keyCache[inode.ID] = fileMetadata{
-			key:     key,
-			groupID: inode.GroupID,
-			linkTag: linkTag,
-			inlined: inode.GetInlineData() != nil,
-		}
-		c.keyMu.Unlock()
+		c.updateKeyCache(inode, key)
 		return key, nil
 	}
 	lastErr = err
 
-	// 2. Try group access if personal failed
+	// B. Try Group Access
+	// Build unique list of groups to try from GroupID and ACLs
+	gids := make(map[string]bool)
 	if inode.GroupID != "" {
-		if _, exists := inode.Lockbox[inode.GroupID]; exists {
-			gk, gerr := c.getGroupPrivateKey(ctx, inode.GroupID)
-			if gerr == nil {
-				key, err = inode.Lockbox.GetFileKey(inode.GroupID, gk)
+		gids[inode.GroupID] = true
+	}
+	if inode.AccessACL != nil {
+		for gid := range inode.AccessACL.Groups {
+			gids[gid] = true
+		}
+	}
+
+	for gid := range gids {
+		// 1. Try via Group ID (Asymmetric - provisioned by Admin or other non-members)
+		if entry, exists := inode.Lockbox[gid]; exists {
+			gdk, err := c.getGroupPrivateKey(ctx, gid, entry.Epoch)
+			if err == nil {
+				key, err = inode.Lockbox.GetFileKey(gid, gdk)
 				if err == nil {
+					c.updateKeyCache(inode, key)
 					return key, nil
 				}
 				lastErr = err
-			} else {
-				lastErr = gerr
+			}
+		}
+
+		// 2. Try via Member HMAC (Phase 71 - provisioned by a group manager)
+		// MUST fetch fresh group metadata to avoid stale SignKey
+		group, err := c.getGroup(ctx, gid)
+		if err == nil {
+			target := c.computeMemberHMAC(group.ID, c.userID)
+			if entry, exists := inode.Lockbox[target]; exists {
+				gdk, err := c.getGroupPrivateKey(ctx, gid, entry.Epoch)
+				if err == nil {
+					key, err = inode.Lockbox.GetFileKey(target, gdk)
+					if err == nil {
+						c.updateKeyCache(inode, key)
+						return key, nil
+					}
+					lastErr = err
+				}
 			}
 		}
 	}
 
-	// 3. Try world access if group failed
+	// C. Try World Access
 	if _, exists := inode.Lockbox[metadata.WorldID]; exists {
 		wk, err := c.GetWorldPrivateKey(ctx)
 		if err == nil {
 			key, err = inode.Lockbox.GetFileKey(metadata.WorldID, wk)
 			if err == nil {
+				c.updateKeyCache(inode, key)
 				return key, nil
 			}
-			lastErr = err
-		} else {
 			lastErr = err
 		}
 	}
@@ -4583,119 +4837,83 @@ func (c *Client) unlockInode(ctx context.Context, inode *metadata.Inode) ([]byte
 	return nil, lastErr
 }
 
-// getGroupPrivateKey retrieves and decrypts the group private key.
-func (c *Client) getGroupPrivateKey(ctx context.Context, groupID string) (*mlkem.DecapsulationKey768, error) {
-	c.keyMu.RLock()
-	gk, ok := c.groupKeys[groupID]
-	c.keyMu.RUnlock()
-	if ok {
-		return gk, nil
+func (c *Client) updateKeyCache(inode *metadata.Inode, key []byte) {
+	var linkTag string
+	for tag := range inode.Links {
+		linkTag = tag
+		break
 	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/group/"+groupID+"/private", nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(ctx, req); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := c.unsealResponse(ctx, resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, fmt.Errorf("failed to fetch group private key: %d %s", resp.StatusCode, string(b))
-	}
-
-	var entry crypto.LockboxEntry
-	if err := json.NewDecoder(body).Decode(&entry); err != nil {
-		return nil, err
-	}
-
-	// Group Private Key is encrypted for Client's identity
-	secret, err := crypto.Decapsulate(c.decKey, entry.KEMCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("group key decapsulate failed: %w", err)
-	}
-	privBytes, err := crypto.DecryptDEM(secret, entry.DEMCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("group key decrypt failed: %w", err)
-	}
-
-	gk, err = crypto.UnmarshalDecapsulationKey(privBytes)
-	if err != nil {
-		return nil, err
-	}
-
 	c.keyMu.Lock()
-	c.groupKeys[groupID] = gk
+	c.keyCache[inode.ID] = fileMetadata{
+		key:     key,
+		groupID: inode.GroupID,
+		linkTag: linkTag,
+		inlined: inode.GetInlineData() != nil,
+	}
 	c.keyMu.Unlock()
-	return gk, nil
 }
 
-// getGroupSignKey retrieves and decrypts the group signing key.
-func (c *Client) getGroupSignKey(ctx context.Context, groupID string) (*crypto.IdentityKey, error) {
+// getGroupPrivateKey retrieves the group private key by deriving it from the epoch seed.
+func (c *Client) getGroupPrivateKey(ctx context.Context, groupID string, epoch uint32) (*mlkem.DecapsulationKey768, error) {
+	cacheKey := groupID + ":" + strconv.Itoa(int(epoch))
 	c.keyMu.RLock()
-	gk, ok := c.groupSignKeys[groupID]
+	gk, ok := c.groupKeys[cacheKey]
 	c.keyMu.RUnlock()
 	if ok {
 		return gk, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/group/"+groupID+"/sign/private", nil)
-	if err != nil {
-		return nil, err
-	}
-	if err := c.authenticateRequest(ctx, req); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpCli.Do(req)
+	group, err := c.getGroupUnverifiedCached(ctx, groupID)
 	if err != nil {
 		return nil, err
 	}
 
-	body, err := c.unsealResponse(ctx, resp)
+	epochSeed, err := c.getGroupEpochSeedFromGroup(ctx, group)
 	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, fmt.Errorf("failed to fetch group signing key: %d %s", resp.StatusCode, string(b))
+		return nil, fmt.Errorf("failed to fetch current epoch seed for group %s: %w", groupID, err)
 	}
 
-	var entry crypto.LockboxEntry
-	if err := json.NewDecoder(body).Decode(&entry); err != nil {
-		return nil, err
+	if epoch > group.Epoch {
+		return nil, fmt.Errorf("requested epoch %d is in the future (current: %d)", epoch, group.Epoch)
 	}
 
-	// Group Signing Key is encrypted for Client's identity
-	secret, err := crypto.Decapsulate(c.decKey, entry.KEMCiphertext)
+	// 2. Ratchet backwards if necessary
+	targetSeed := epochSeed
+	for i := group.Epoch; i > epoch; i-- {
+		targetSeed = crypto.DerivePreviousEpochKey(targetSeed)
+	}
+
+	keys, err := crypto.DeriveGroupKeys(targetSeed)
 	if err != nil {
-		return nil, fmt.Errorf("group sign key decapsulate failed: %w", err)
+		return nil, fmt.Errorf("failed to derive keys from ratcheted seed: %w", err)
 	}
-	privBytes, err := crypto.DecryptDEM(secret, entry.DEMCiphertext)
-	if err != nil {
-		return nil, fmt.Errorf("group sign key decrypt failed: %w", err)
-	}
-
-	gsk := crypto.UnmarshalIdentityKey(privBytes)
 
 	c.keyMu.Lock()
-	c.groupSignKeys[groupID] = gsk
+	c.groupKeys[cacheKey] = keys.EncKey
+	c.groupSignKeys[cacheKey] = keys.SignKey
 	c.keyMu.Unlock()
-	return gsk, nil
+	return keys.EncKey, nil
+}
+
+// getGroupSignKey retrieves the group signing key by deriving it from the epoch seed.
+func (c *Client) getGroupSignKey(ctx context.Context, groupID string, epoch uint32) (*crypto.IdentityKey, error) {
+	cacheKey := groupID + ":" + strconv.Itoa(int(epoch))
+	c.keyMu.RLock()
+	gk, ok := c.groupSignKeys[cacheKey]
+	c.keyMu.RUnlock()
+	if ok {
+		return gk, nil
+	}
+
+	_, err := c.getGroupPrivateKey(ctx, groupID, epoch)
+	if err != nil {
+		return nil, err
+	}
+
+	c.keyMu.RLock()
+	gk = c.groupSignKeys[cacheKey]
+	c.keyMu.RUnlock()
+	return gk, nil
 }
 
 // getWorldPublicKey fetches the cluster's world public key.
@@ -4826,8 +5044,7 @@ func (c *Client) IsUserInGroup(ctx context.Context, userID, groupID string) (boo
 		return true, nil
 	}
 
-	target := c.computeMemberHMAC(group.SignKey, userID)
-	if group.MembersHMAC != nil && group.MembersHMAC[target] {
+	if _, ok := group.Lockbox[userID]; ok {
 		return true, nil
 	}
 
@@ -5092,7 +5309,7 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 
 // getGroupName retrieves and decrypts the human-readable name of a group.
 func (c *Client) getGroupName(ctx context.Context, group *metadata.Group) (string, error) {
-	gk, err := c.getGroupPrivateKey(ctx, group.ID)
+	gk, err := c.getGroupPrivateKey(ctx, group.ID, group.Epoch)
 	if err != nil {
 		return "", err
 	}
@@ -5109,61 +5326,43 @@ func (c *Client) getGroupName(ctx context.Context, group *metadata.Group) (strin
 
 // DecryptGroupName decrypts a group name from a list entry using cached or provided keys.
 func (c *Client) AdminDecryptGroupName(ctx context.Context, entry metadata.GroupListEntry) (string, error) {
-	// 1. Try Cache
-	c.keyMu.RLock()
-	gdk, ok := c.groupKeys[entry.ID]
-	c.keyMu.RUnlock()
-
-	if !ok {
-		// 2. Try to unlock group key from entry's lockbox
-		if c.decKey == nil {
-			return "", fmt.Errorf("client has no identity to unlock group")
+	// 1. Get Group Private Key (asymmetric)
+	gdk, err := c.getGroupPrivateKey(ctx, entry.ID, entry.Epoch)
+	if err != nil {
+		// If we can't get the group key directly from cache/server,
+		// try to bootstrap it from the list entry itself if we have access.
+		g := &metadata.Group{
+			ID:               entry.ID,
+			Lockbox:          entry.Lockbox,
+			AnonymousLockbox: entry.AnonymousLockbox,
+			Epoch:            entry.Epoch,
 		}
-		// 2a. Try personal access
-		gk, err := entry.Lockbox.GetFileKey(c.userID, c.decKey)
-		if err != nil {
-		}
-		if err != nil && entry.OwnerID != "" && entry.OwnerID != c.userID {
-			// 2b. Try delegated access (requires owner group key)
-			// Check if we have the owner group key cached
-			c.keyMu.RLock()
-			ogdk, gok := c.groupKeys[entry.OwnerID]
-			c.keyMu.RUnlock()
-
-			if gok {
-				gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, ogdk)
-			} else {
-				// Fallback to network if not cached
-				if ogdk, gerr := c.getGroupPrivateKey(ctx, entry.OwnerID); gerr == nil {
-					gk, err = entry.Lockbox.GetFileKey(entry.OwnerID, ogdk)
-				}
+		seed, serr := c.getGroupEpochSeedFromGroup(ctx, g)
+		if serr == nil {
+			keys, kerr := crypto.DeriveGroupKeys(seed)
+			if kerr == nil {
+				gdk = keys.EncKey
+				// Cache it
+				cacheKey := entry.ID + ":" + strconv.Itoa(int(entry.Epoch))
+				c.keyMu.Lock()
+				c.groupKeys[cacheKey] = gdk
+				c.keyMu.Unlock()
 			}
 		}
-		if err != nil {
-			return "", err
-		}
+	}
 
-		gdk, err = crypto.UnmarshalDecapsulationKey(gk)
-		if err != nil {
-			return "", err
-		}
-
-		// Cache it
-		c.keyMu.Lock()
-		c.groupKeys[entry.ID] = gdk
-		c.keyMu.Unlock()
+	if gdk == nil {
+		return "", fmt.Errorf("failed to obtain group private key for name decryption")
 	}
 
 	if len(entry.ClientBlob) > 0 {
 		var blob metadata.GroupClientBlob
 		if err := c.decryptClientBlob(entry.ClientBlob, gdk, &blob); err == nil {
 			return blob.Name, nil
-		} else {
 		}
-	} else {
 	}
 
-	return "", fmt.Errorf("failed to decrypt group name")
+	return "", fmt.Errorf("failed to decrypt group name: client blob missing or invalid")
 }
 
 // GetGroupRegistryKey retrieves and decrypts the group registry key.
@@ -5179,8 +5378,8 @@ func (c *Client) getGroupRegistryKey(ctx context.Context, group *metadata.Group)
 
 	// 2. Try group-based management access
 	if group.OwnerID != "" && group.OwnerID != c.userID {
-		if _, exists := group.RegistryLockbox[group.OwnerID]; exists {
-			gk, gerr := c.getGroupPrivateKey(ctx, group.OwnerID)
+		if entry, exists := group.RegistryLockbox[group.OwnerID]; exists {
+			gk, gerr := c.getGroupPrivateKey(ctx, group.OwnerID, entry.Epoch)
 			if gerr == nil {
 				return group.RegistryLockbox.GetFileKey(group.OwnerID, gk)
 			}
@@ -5212,6 +5411,52 @@ func (c *Client) decryptRegistry(key []byte, encrypted []byte) ([]metadata.Membe
 // CreateGroup creates a new user group.
 func (c *Client) createGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error) {
 	return c.createGroupInternal(ctx, name, false, quotaEnabled, "")
+}
+
+// getGroupEpochKey retrieves the current epoch key for a group.
+func (c *Client) getGroupEpochKey(ctx context.Context, groupID string) ([]byte, error) {
+	group, err := c.getGroup(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch group: %w", err)
+	}
+	return c.extractGroupEpochKey(group)
+}
+
+// getGroupEpochKeyUnverified retrieves the current epoch key using the unverified cache.
+func (c *Client) getGroupEpochKeyUnverified(ctx context.Context, groupID string) ([]byte, error) {
+	group, err := c.getGroupUnverifiedCached(ctx, groupID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch unverified group: %w", err)
+	}
+	return c.extractGroupEpochKey(group)
+}
+
+func (c *Client) extractGroupEpochKey(group *metadata.Group) ([]byte, error) {
+	// For named members: epoch key is in Lockbox[userID+":epoch"]
+	if epochEntry, ok := group.Lockbox[c.userID+":epoch"]; ok {
+		// Decapsulate using user's private key
+		secret, err := crypto.Decapsulate(c.decKey, epochEntry.KEMCiphertext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decapsulate epoch key: %w", err)
+		}
+		epochKey, err := crypto.DecryptDEM(secret, epochEntry.DEMCiphertext)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decrypt epoch key: %w", err)
+		}
+		return epochKey, nil
+	}
+
+	// For anonymous members: epoch key is in AnonymousLockbox
+	for _, cipherblob := range group.AnonymousLockbox {
+		var anonLB crypto.Lockbox
+		if err := json.Unmarshal(cipherblob, &anonLB); err == nil {
+			if epochKey, err := anonLB.GetFileKey("epoch", c.decKey); err == nil {
+				return epochKey, nil
+			}
+		}
+	}
+
+	return nil, fmt.Errorf("user is not an authorized member (epoch key not found)")
 }
 
 // CreateSystemGroup creates a new system group (Admin only).
@@ -5319,23 +5564,85 @@ func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID
 
 	attestationBytes, _ := json.Marshal(entry)
 
-	// 3. Create the Attestation File (using POSIX API) at the unique ID path
-	if err := c.CreateFile(ctx, attestationPath, bytes.NewReader(attestationBytes), int64(len(attestationBytes))); err != nil {
-		if !isConflict(err) {
-			return fmt.Errorf("failed to create group attestation file %s: %w", attestationPath, err)
+	// 3. Define Permissions
+	// File is owned by the creator (the one anchoring).
+	// The group manager (group.OwnerID) gets RW access via ACL.
+	acl := &ACL{
+		Users:  make(map[string]uint32),
+		Groups: make(map[string]uint32),
+	}
+
+	managerID := group.OwnerID
+	if managerID == metadata.SelfOwnedGroup {
+		managerID = group.ID
+	}
+
+	// Determine if manager is a user or group
+	if _, err := c.getUserUnverified(ctx, managerID); err == nil {
+		acl.Users[managerID] = 0006 // Read + Write
+	} else {
+		acl.Groups[managerID] = 0006 // Read + Write
+	}
+
+	exists := true
+	_, _, err = c.resolvePath(ctx, attestationPath)
+	if err != nil {
+		if isNotFound(err) {
+			exists = false
+		} else {
+			return fmt.Errorf("failed to resolve attestation path %s: %w", attestationPath, err)
 		}
 	}
 
-	// 4. Update the name link (remove if exists, then link)
-	namePath := regDir + name + ".group"
-	err = c.RemoveEntry(ctx, namePath)
-	if err != nil && !isNotFound(err) {
-		return fmt.Errorf("failed to remove existing group name link %s: %w", namePath, err)
+	if exists {
+		// Update in place - ONLY update the content.
+		// We use writeFile directly to avoid touching Inode metadata like ACLs
+		// which would invalidate the OwnerDelegationSig.
+		inode, _, err := c.resolvePath(ctx, attestationPath)
+		if err != nil {
+			return fmt.Errorf("failed to resolve existing attestation for update: %w", err)
+		}
+
+		// Note: writeFile handles the lockbox update (to remove revoked members)
+		// and signs the manifest with the manager's key.
+		_, err = c.writeFile(ctx, inode.ID, inode.Nonce, bytes.NewReader(attestationBytes), int64(len(attestationBytes)), inode.Mode)
+		if err != nil {
+			return fmt.Errorf("failed to overwrite existing group attestation: %w", err)
+		}
+	} else {
+		// Create new. Inherits 'users' Read access from /registry DefaultACL.
+		// We grant the manager RW access via ACL.
+		acl := &ACL{
+			Users:  make(map[string]uint32),
+			Groups: make(map[string]uint32),
+		}
+		managerID := group.OwnerID
+		if managerID == metadata.SelfOwnedGroup {
+			managerID = group.ID
+		}
+		if _, err := c.getUserUnverified(ctx, managerID); err == nil {
+			acl.Users[managerID] = 0006 // Read + Write
+		} else {
+			acl.Groups[managerID] = 0006 // Read + Write
+		}
+
+		opts := MkdirOptions{
+			Mode:      ptr(uint32(0640)), // Owner RW, Group R
+			AccessACL: acl,
+		}
+		if err := c.CreateFileExtended(ctx, attestationPath, bytes.NewReader(attestationBytes), int64(len(attestationBytes)), opts); err != nil {
+			if !isConflict(err) {
+				return fmt.Errorf("failed to create group attestation file %s: %w", attestationPath, err)
+			}
+		}
 	}
 
-	if err := c.Link(ctx, attestationPath, namePath); err != nil {
-		if !isConflict(err) {
-			return fmt.Errorf("failed to create group attestation link %s: %w", namePath, err)
+	// 4. Update the name link (if it doesn't exist)
+	namePath := regDir + name + ".group"
+	_, _, err = c.resolvePath(ctx, namePath)
+	if err != nil && isNotFound(err) {
+		if err := c.Link(ctx, attestationPath, namePath); err != nil && !isConflict(err) {
+			logger.Debugf("AnchorGroupInRegistry: failed to create group attestation link %s: %v", namePath, err)
 		}
 	}
 
@@ -5375,28 +5682,59 @@ func (c *Client) AnchorUserInRegistry(ctx context.Context, username string, user
 
 	data, _ := json.Marshal(entry)
 
-	if err := c.CreateFile(ctx, attestationPath, bytes.NewReader(data), int64(len(data))); err != nil {
-		if !isConflict(err) {
-			return fmt.Errorf("failed to create user attestation file %s: %w", attestationPath, err)
+	exists := true
+	_, _, err = c.resolvePath(ctx, attestationPath)
+	if err != nil {
+		if isNotFound(err) {
+			exists = false
+		} else {
+			return fmt.Errorf("failed to resolve user attestation path %s: %w", attestationPath, err)
 		}
-	} else {
 	}
 
+	if exists {
+		// Update in place
+		wc, err := c.OpenBlobWrite(ctx, attestationPath)
+		if err != nil {
+			return fmt.Errorf("failed to open existing user attestation for write: %w", err)
+		}
+		if _, err := io.Copy(wc, bytes.NewReader(data)); err != nil {
+			wc.Close()
+			return fmt.Errorf("failed to write existing user attestation: %w", err)
+		}
+		if err := wc.Close(); err != nil {
+			return fmt.Errorf("failed to close existing user attestation: %w", err)
+		}
+
+		// Ensure ownership and mode is correct
+		if err := c.setAttr(ctx, attestationPath, metadata.SetAttrRequest{
+			Mode: ptr(uint32(0640)),
+		}); err != nil {
+			return fmt.Errorf("failed to update attributes on existing user attestation: %w", err)
+		}
+	} else {
+		// Create new with restricted permissions (inherits users group access from /registry)
+		opts := MkdirOptions{
+			Mode:    ptr(uint32(0640)),
+			OwnerID: c.userID,
+		}
+		if err := c.CreateFileExtended(ctx, attestationPath, bytes.NewReader(data), int64(len(data)), opts); err != nil {
+			if !isConflict(err) {
+				return fmt.Errorf("failed to create user attestation file %s: %w", attestationPath, err)
+			}
+		}
+	}
 	namePath := regDir + username + ".user"
-	err = c.RemoveEntry(ctx, namePath)
-	if err != nil && !isNotFound(err) {
-		return fmt.Errorf("failed to remove existing user name link %s: %w", namePath, err)
-	}
-
-	if err := c.Link(ctx, attestationPath, namePath); err != nil {
-		if !isConflict(err) {
-			return fmt.Errorf("failed to create user attestation link %s: %w", namePath, err)
+	_, _, err = c.resolvePath(ctx, namePath)
+	if err != nil && isNotFound(err) {
+		if err := c.Link(ctx, attestationPath, namePath); err != nil && !isConflict(err) {
+			logger.Debugf("AnchorUserInRegistry: failed to create user attestation link %s: %v", namePath, err)
 		}
-	} else {
 	}
 
 	return nil
 }
+
 func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem bool, quotaEnabled bool, ownerID string) (*metadata.Group, error) {
 	if c.registryDir != "" {
 		regPath := c.registryDir
@@ -5421,57 +5759,17 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 
 	// 1. Generate Encryption Key (ML-KEM)
 	dk, _ := crypto.GenerateEncryptionKey()
-	pk := dk.EncapsulationKey().Bytes()
-	priv := crypto.MarshalDecapsulationKey(dk)
-
-	// 2. Generate Signing Key (ML-DSA)
-	sk, _ := crypto.GenerateIdentityKey()
-	spk := sk.Public()
-	spriv := sk.MarshalPrivate()
-
-	lb := crypto.NewLockbox()
-	// Encrypt group private encryption key for the creator (the admin)
-	// NOTE: Since the admin is creating the group, they must be able to sign
-	// the initial version. We also grant the admin access to the keys.
-	if err := lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), priv); err != nil {
+	_ = dk // Still used for encryptClientBlob below
+	// 2. Generate Initial Epoch Seed (Master Seed)
+	masterSeed := make([]byte, 64)
+	if _, err := io.ReadFull(rand.Reader, masterSeed); err != nil {
 		return nil, err
 	}
-	if err := lb.AddRecipient(c.userID+":sign", c.decKey.EncapsulationKey(), spriv); err != nil {
-		return nil, err
-	}
+	epochSeed := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, 0)
+	keys, _ := crypto.DeriveGroupKeys(epochSeed)
 
-	// If owner is different from creator, also give them access
-	if ownerID != c.userID && ownerID != metadata.SelfOwnedGroup {
-		// Attempt to fetch owner as User
-		owner, err := c.getUser(ctx, ownerID)
-		if err == nil {
-			opk, err := crypto.UnmarshalEncapsulationKey(owner.EncKey)
-			if err != nil {
-				return nil, fmt.Errorf("invalid owner encryption key: %w", err)
-			}
-			if err := lb.AddRecipient(ownerID, opk, priv); err != nil {
-				return nil, err
-			}
-			if err := lb.AddRecipient(ownerID+":sign", opk, spriv); err != nil {
-				return nil, err
-			}
-		} else {
-			// Fallback: Attempt to fetch owner as Group (Hierarchical Ownership)
-			ownerGroup, err := c.getGroup(ctx, ownerID)
-			if err != nil {
-				return nil, fmt.Errorf("failed to fetch owner %s (neither user nor group): %w", ownerID, err)
-			}
-			opk, err := crypto.UnmarshalEncapsulationKey(ownerGroup.EncKey)
-			if err != nil {
-				return nil, fmt.Errorf("invalid owner group encryption key: %w", err)
-			}
-			if err := lb.AddRecipient(ownerID, opk, priv); err != nil {
-				return nil, err
-			}
-			if err := lb.AddRecipient(ownerID+":sign", opk, spriv); err != nil {
-				return nil, err
-			}
-		}
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive initial group keys: %w", err)
 	}
 
 	// 3. Generate Registry Key (Symmetric)
@@ -5480,66 +5778,16 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 		return nil, err
 	}
 
+	encMasterSeed, err := crypto.EncryptDEM(rk, masterSeed)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encrypt master seed: %w", err)
+	}
+
 	// 3.2 Prepare ClientBlob
 	blob := metadata.GroupClientBlob{Name: name}
-	encBlob, err := c.encryptClientBlob(blob, dk.EncapsulationKey())
+	encBlob, err := c.encryptClientBlob(blob, keys.EncKey.EncapsulationKey())
 	if err != nil {
 		return nil, fmt.Errorf("failed to encrypt group client blob: %w", err)
-	}
-
-	rlb := crypto.NewLockbox()
-	// Encrypt Registry Key for the creator
-	if err := rlb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), rk); err != nil {
-		return nil, err
-	}
-	// And for the owner if different and not self-owned
-	if ownerID != c.userID && ownerID != metadata.SelfOwnedGroup {
-		// Resolve owner's public key (already cached or fetched above)
-		var opk *mlkem.EncapsulationKey768
-		owner, err := c.getUser(ctx, ownerID)
-		if err == nil {
-			opk, _ = crypto.UnmarshalEncapsulationKey(owner.EncKey)
-		} else {
-			ownerGroup, _ := c.getGroup(ctx, ownerID)
-			opk, _ = crypto.UnmarshalEncapsulationKey(ownerGroup.EncKey)
-		}
-		if opk != nil {
-			rlb.AddRecipient(ownerID, opk, rk)
-		}
-	}
-
-	// Determine initial member for MembersHMAC and Registry
-	ownerIsUser := false
-	if ownerID != metadata.SelfOwnedGroup {
-		if ownerID == c.userID {
-			ownerIsUser = true
-		} else {
-			// Check if ownerID is a user (we already fetched this info above)
-			if _, err := c.getUser(ctx, ownerID); err == nil {
-				ownerIsUser = true
-			}
-		}
-	}
-
-	initialMembers := []metadata.MemberEntry{}
-	membersHMAC := make(map[string]bool)
-
-	if ownerID == metadata.SelfOwnedGroup {
-		// Self-Owned: Creator is the first member
-		membersHMAC[c.computeMemberHMAC(spk, c.userID)] = true
-		initialMembers = append(initialMembers, metadata.MemberEntry{UserID: c.userID, Info: "Creator (Initial Manager)"})
-	} else if ownerIsUser {
-		// User-Owned: Owner is the first member
-		membersHMAC[c.computeMemberHMAC(spk, ownerID)] = true
-		initialMembers = append(initialMembers, metadata.MemberEntry{UserID: ownerID, Info: "Owner"})
-		// If creator is an admin provisioning for a user, they don't necessarily need to be a member
-	}
-	// Note: If owner is a Group, membersHMAC starts empty. Members of the owning group
-	// gain access via hierarchical checks in the FSM.
-
-	encRegistry, err := c.encryptRegistry(rk, initialMembers)
-	if err != nil {
-		return nil, err
 	}
 
 	// Phase 69.7: Generate Binding Nonce and GroupID
@@ -5547,27 +5795,81 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 	groupID := metadata.GenerateGroupID(ownerID, nonce)
 
 	group := &metadata.Group{
-		ID:                groupID,
-		GID:               gid,
-		OwnerID:           ownerID,
-		MembersHMAC:       membersHMAC,
-		Nonce:             nonce,
-		EncKey:            pk,
-		SignKey:           spk,
-		Lockbox:           lb,
-		RegistryLockbox:   rlb,
-		EncryptedRegistry: encRegistry,
-		ClientBlob:        encBlob,
-		IsSystem:          isSystem,
-		QuotaEnabled:      quotaEnabled,
-		Version:           1,
+		ID:                 groupID,
+		GID:                gid,
+		OwnerID:            ownerID,
+		Nonce:              nonce,
+		EncKey:             keys.EncKey.EncapsulationKey().Bytes(),
+		SignKey:            keys.SignKey.Public(),
+		RegistryLockbox:    nil, // Populated below
+		EncryptedRegistry:  nil, // Populated below
+		ClientBlob:         encBlob,
+		IsSystem:           isSystem,
+		QuotaEnabled:       quotaEnabled,
+		Version:            1,
+		Epoch:              0,
+		EncryptedEpochSeed: encMasterSeed,
 	}
 	group.SetName(name)
 
+	lb := crypto.NewLockbox()
+	// 3.1 Encrypt group Epoch Seed for the creator
+	// Phase 71: Use provisionRecipient with group context for HMAC privacy.
+	if err := c.provisionRecipient(ctx, lb, c.userID, epochSeed, group); err != nil {
+		return nil, fmt.Errorf("failed to provision creator in group lockbox: %w", err)
+	}
+
+	// If owner is different from creator, also give them access
+	if ownerID != c.userID && ownerID != metadata.SelfOwnedGroup {
+		if err := c.provisionRecipient(ctx, lb, ownerID, epochSeed, group); err != nil {
+			return nil, fmt.Errorf("failed to provision owner in group lockbox: %w", err)
+		}
+	}
+	group.Lockbox = lb
+
+	rlb := crypto.NewLockbox()
+	// Encrypt Registry Key for the creator (raw UserID for management)
+	if err := c.provisionRecipient(ctx, rlb, c.userID, rk, nil); err != nil {
+		return nil, err
+	}
+	// And for the owner if different and not self-owned
+	if ownerID != c.userID && ownerID != metadata.SelfOwnedGroup {
+		if err := c.provisionRecipient(ctx, rlb, ownerID, rk, nil); err != nil {
+			return nil, err
+		}
+	}
+	group.RegistryLockbox = rlb
+
+	// Determine initial member for MembersHMAC and Registry
+	ownerIsUser := false
+	if ownerID != metadata.SelfOwnedGroup {
+		if ownerID == c.userID {
+			ownerIsUser = true
+		} else {
+			// Check if ownerID is a user
+			if _, err := c.getUser(ctx, ownerID); err == nil {
+				ownerIsUser = true
+			}
+		}
+	}
+
+	initialMembers := []metadata.MemberEntry{}
+	if ownerID == metadata.SelfOwnedGroup {
+		initialMembers = append(initialMembers, metadata.MemberEntry{UserID: c.userID, Info: "Creator (Initial Manager)"})
+	} else if ownerIsUser {
+		initialMembers = append(initialMembers, metadata.MemberEntry{UserID: ownerID, Info: "Owner"})
+	}
+
+	encRegistry, err := c.encryptRegistry(rk, initialMembers)
+	if err != nil {
+		return nil, err
+	}
+	group.EncryptedRegistry = encRegistry
+
 	// Cache keys for signing
 	c.keyMu.Lock()
-	c.groupKeys[groupID] = dk
-	c.groupSignKeys[groupID] = sk
+	c.groupKeys[groupID] = keys.EncKey
+	c.groupSignKeys[groupID] = keys.SignKey
 	c.keyMu.Unlock()
 
 	// Sign the Group
@@ -5577,8 +5879,6 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 
 	// Atomic Batch Creation
 	cmds := []metadata.LogCommand{}
-
-	// 1. Create FSM Group
 	createGrpCmd, err := c.prepareCreateGroup(ctx, group)
 	if err != nil {
 		return nil, err
@@ -5595,82 +5895,39 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 		return nil, err
 	}
 
-	// Update cache with the newly created group so AnchorGroupInRegistry can find it
+	// Update cache with the newly created group
 	c.cacheMu.Lock()
 	c.verifiedGroupCache[group.ID] = group
 	c.cacheMu.Unlock()
 
 	// 2. Anchor in Registry (Phase 69)
-	// We MUST anchor the group identity in /registry for VerifyGroup to pass.
-	// We use the creator's identity as the verifier.
 	if err := c.AnchorGroupInRegistry(ctx, name, group.ID); err != nil {
-		// If anchoring fails (e.g. during bootstrap), we log a warning but continue
-		// if it's a critical system group.
 		logger.Debugf("Warning: failed to anchor group %s in registry: %v", name, err)
 	}
 
 	return group, nil
 }
 
-func (c *Client) computeMemberHMAC(signKey []byte, userID string) string {
-	mac := hmac.New(sha256.New, signKey)
+func (c *Client) computeMemberHMAC(hmacKey string, userID string) string {
+	mac := hmac.New(sha256.New, []byte(hmacKey))
 	mac.Write([]byte(userID))
-	return hex.EncodeToString(mac.Sum(nil))
+	res := hex.EncodeToString(mac.Sum(nil))
+	return res
 }
 
 // AddUserToGroup adds a new member to an existing group.
 func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info string, ci *ContactInfo) error {
-	var userEK *mlkem.EncapsulationKey768
-	if ci != nil {
-		if ci.UserID != userID {
-			return fmt.Errorf("contact string user ID mismatch")
-		}
-		var err error
-		userEK, err = crypto.UnmarshalEncapsulationKey(ci.EncKey)
-		if err != nil {
-			return fmt.Errorf("invalid contact enc key: %w", err)
-		}
-	} else {
-		// We need the user's public key from the server
-		user, err := c.getUser(ctx, userID)
-		if err != nil {
-			return err
-		}
-		userEK, err = crypto.UnmarshalEncapsulationKey(user.EncKey)
-		if err != nil {
-			return err
-		}
-	}
-
 	_, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
-		// 1. Update Group Private Keys (Lockbox)
-		gk, err := c.getGroupPrivateKey(ctx, groupID)
+		// 1. Fetch current Epoch Seed
+		epochSeed, err := c.getGroupEpochSeed(ctx, groupID)
 		if err != nil {
 			return err
 		}
-		priv := crypto.MarshalDecapsulationKey(gk)
 
-		gsk, err := c.getGroupSignKey(ctx, groupID)
-		if err != nil {
+		// Phase 71: Use provisionRecipient with group context for HMAC privacy.
+		if err := c.provisionRecipient(ctx, group.Lockbox, userID, epochSeed, group); err != nil {
 			return err
 		}
-		spriv := gsk.MarshalPrivate()
-
-		// Add new member to lockbox
-		if err := group.Lockbox.AddRecipient(userID, userEK, priv); err != nil {
-			return err
-		}
-		if err := group.Lockbox.AddRecipient(userID+":sign", userEK, spriv); err != nil {
-			return err
-		}
-
-		if group.MembersHMAC == nil {
-			group.MembersHMAC = make(map[string]bool)
-		}
-		target := c.computeMemberHMAC(group.SignKey, userID)
-		group.MembersHMAC[target] = true
-
-		// 3. New Nonce for replay protection
 
 		// 2. Update Member Registry (if we are a manager)
 		rk, err := c.getGroupRegistryKey(ctx, group)
@@ -5703,33 +5960,74 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 	return err
 }
 
-// RemoveUserFromGroup removes a member from an existing group.
-func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error {
+// AddAnonymousUserToGroup adds an anonymous member using their ML-KEM public key.
+func (c *Client) AddAnonymousUserToGroup(ctx context.Context, groupID string, pubKey *mlkem.EncapsulationKey768) error {
 	_, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
-		// 1. Remove from Members map
-		if group.MembersHMAC != nil {
-			target := c.computeMemberHMAC(group.SignKey, userID)
-			delete(group.MembersHMAC, target)
+		epochSeed, err := c.getGroupEpochSeed(ctx, groupID)
+		if err != nil {
+			return err
 		}
 
-		// 2. Remove from Lockbox
-		if group.Lockbox != nil {
-			delete(group.Lockbox, userID)
-			delete(group.Lockbox, userID+":sign")
+		// Encapsulate and encrypt the Epoch Seed for this anonymous user
+		tempLB := crypto.NewLockbox()
+		if err := tempLB.AddRecipient("seed", pubKey, epochSeed, group.Epoch); err != nil {
+			return err
 		}
 
-		// 3. New Nonce
+		anonBlob, err := json.Marshal(tempLB)
+		if err != nil {
+			return err
+		}
 
-		// 3. Remove from Registry (if we are a manager)
+		group.AnonymousLockbox = append(group.AnonymousLockbox, anonBlob)
+
+		// Update AnonymousRegistry (encrypted with Registry Key)
 		rk, err := c.getGroupRegistryKey(ctx, group)
 		if err == nil {
-			// We are a manager, update the registry
+			var pubKeys [][]byte
+			if len(group.AnonymousRegistry) > 0 {
+				plainReg, err := crypto.DecryptDEM(rk, group.AnonymousRegistry)
+				if err == nil {
+					json.Unmarshal(plainReg, &pubKeys)
+				}
+			}
+			pubKeys = append(pubKeys, pubKey.Bytes())
+			newPlainReg, _ := json.Marshal(pubKeys)
+			encReg, _ := crypto.EncryptDEM(rk, newPlainReg)
+			group.AnonymousRegistry = encReg
+		}
+
+		return nil
+	})
+	return err
+}
+
+// RevokeGroupMember removes a member (named or anonymous) and performs O(1) key ratchet revocation.
+func (c *Client) RevokeGroupMember(ctx context.Context, groupID string, targetUserID string, targetAnonPubKey []byte) error {
+	var groupName string
+
+	updatedGroup, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
+		// We are a manager, update the registry
+		rk, err := c.getGroupRegistryKey(ctx, group)
+		if err != nil {
+			return fmt.Errorf("must be a manager to revoke members: %w", err)
+		}
+
+		name, err := c.getGroupName(ctx, group)
+		if err == nil {
+			groupName = name
+		}
+
+		// 1. Resolve remaining members
+		retainUsers := make(map[string]bool)
+		if targetUserID != "" {
 			members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
 			if err == nil {
 				var newMembers []metadata.MemberEntry
 				for _, m := range members {
-					if m.UserID != userID {
+					if m.UserID != targetUserID {
 						newMembers = append(newMembers, m)
+						retainUsers[m.UserID] = true
 					}
 				}
 				encRegistry, err := c.encryptRegistry(rk, newMembers)
@@ -5738,15 +6036,112 @@ func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string
 				}
 				group.EncryptedRegistry = encRegistry
 			}
+		}
+		retainUsers[c.userID] = true
+		if group.OwnerID != metadata.SelfOwnedGroup {
+			retainUsers[group.OwnerID] = true
+		}
 
-			// Also remove from RegistryLockbox
-			if group.RegistryLockbox != nil {
-				delete(group.RegistryLockbox, userID)
+		// (Implement anonymous registry parsing here later when we add AddAnonymousUserToGroup)
+
+		// New Epoch Seed (O(1) Ratchet)
+		masterSeed, err := c.getGroupMasterSeed(ctx, group)
+		if err != nil {
+			return fmt.Errorf("failed to fetch master seed for revocation: %w", err)
+		}
+
+		group.Epoch++
+		if group.Epoch >= metadata.MaxEpochs {
+			return fmt.Errorf("maximum number of revocations reached for this group")
+		}
+
+		epochSeed := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, group.Epoch)
+		keys, err := crypto.DeriveGroupKeys(epochSeed)
+		if err != nil {
+			return err
+		}
+
+		// Store old sign key in history
+		if group.HistoricalSignKeys == nil {
+			group.HistoricalSignKeys = make(map[uint32][]byte)
+		}
+		group.HistoricalSignKeys[group.Epoch-1] = group.SignKey
+
+		group.EncKey = keys.EncKey.EncapsulationKey().Bytes()
+		group.SignKey = keys.SignKey.Public()
+
+		// 3. Rebuild Named Lockbox
+		newLockbox := crypto.NewLockbox()
+		for uid := range retainUsers {
+			// Phase 71: Use provisionRecipient with group context for HMAC privacy.
+			if err := c.provisionRecipient(ctx, newLockbox, uid, epochSeed, group); err != nil {
+				continue
 			}
 		}
+		group.Lockbox = newLockbox
+
+		// 4. Rebuild Anonymous Lockbox
+		var remainingAnon [][]byte
+		if len(group.AnonymousRegistry) > 0 {
+			plainAnon, err := crypto.DecryptDEM(rk, group.AnonymousRegistry)
+			if err == nil {
+				var anonPubKeys [][]byte
+				json.Unmarshal(plainAnon, &anonPubKeys)
+				var newAnonPubKeys [][]byte
+				for _, pk := range anonPubKeys {
+					if !bytes.Equal(pk, targetAnonPubKey) {
+						newAnonPubKeys = append(newAnonPubKeys, pk)
+						remainingAnon = append(remainingAnon, pk)
+					}
+				}
+				newPlainReg, _ := json.Marshal(newAnonPubKeys)
+				encReg, _ := crypto.EncryptDEM(rk, newPlainReg)
+				group.AnonymousRegistry = encReg
+			}
+		}
+
+		group.AnonymousLockbox = nil
+		for _, pkBytes := range remainingAnon {
+			apk, err := crypto.UnmarshalEncapsulationKey(pkBytes)
+			if err != nil {
+				continue
+			}
+			tempLB := crypto.NewLockbox()
+			tempLB.AddRecipient("seed", apk, epochSeed, group.Epoch)
+			anonBlob, _ := json.Marshal(tempLB)
+			group.AnonymousLockbox = append(group.AnonymousLockbox, anonBlob)
+		}
+
+		// Cache new keys
+		c.keyMu.Lock()
+		c.groupKeys[group.ID] = keys.EncKey
+		c.groupSignKeys[group.ID] = keys.SignKey
+		c.keyMu.Unlock()
+
 		return nil
 	})
+
+	if err == nil && groupName != "" {
+		if anchorErr := c.AnchorGroupInRegistry(ctx, groupName, updatedGroup.ID); anchorErr != nil {
+			return fmt.Errorf("revocation succeeded but registry anchoring failed: %w", anchorErr)
+		}
+	}
+
 	return err
+}
+
+func (c *Client) getGroupMasterSeed(ctx context.Context, group *metadata.Group) ([]byte, error) {
+	// The master seed is always encrypted with the Registry Key in EncryptedEpochSeed
+	rk, err := c.getGroupRegistryKey(ctx, group)
+	if err != nil {
+		return nil, err
+	}
+	return crypto.DecryptDEM(rk, group.EncryptedEpochSeed)
+}
+
+// RemoveUserFromGroup delegates to RevokeGroupMember.
+func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error {
+	return c.RevokeGroupMember(ctx, groupID, userID, nil)
 }
 
 // SetAttr updates the attributes of an inode at the given path.
@@ -5761,22 +6156,11 @@ func (c *Client) setAttr(ctx context.Context, path string, attr metadata.SetAttr
 
 // SetAttrByID updates the attributes of an inode by ID. Returns the updated inode.
 func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []byte, attr metadata.SetAttrRequest) (*metadata.Inode, error) {
-	var ownerPK *mlkem.EncapsulationKey768
-	var groupPK *mlkem.EncapsulationKey768
-	var worldPK *mlkem.EncapsulationKey768
-
-	// 1. Pre-fetch any required public keys before entering the atomic update
-	// (which holds the controlMu semaphore).
+	// 1. Pre-fetch required metadata before entering the atomic update
 	if attr.OwnerID != nil {
-		u, err := c.getUser(ctx, *attr.OwnerID)
-		if err != nil {
+		if _, err := c.getUser(ctx, *attr.OwnerID); err != nil {
 			return nil, fmt.Errorf("failed to fetch new owner: %w", err)
 		}
-		pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal new owner key: %w", err)
-		}
-		ownerPK = pk
 	}
 
 	targetMode := inode.Mode
@@ -5792,43 +6176,31 @@ func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 	groupRW := (targetMode & 0060) != 0
 
 	if worldRead {
-		wpk, err := c.getWorldPublicKey(ctx)
-		if err == nil {
-			worldPK = wpk
+		if _, err := c.getWorldPublicKey(ctx); err != nil {
+			logger.Debugf("setAttrByID: failed to pre-fetch world key: %v", err)
 		}
 	}
 
-	if targetGroupID != "" && groupRW {
-		group, err := c.getGroup(ctx, targetGroupID)
-		if err == nil {
-			gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-			if err == nil {
-				groupPK = gpk
-			}
+	if targetGroupID != "" && groupRW && !worldRead {
+		if _, err := c.getGroup(ctx, targetGroupID); err != nil {
+			logger.Debugf("setAttrByID: failed to pre-fetch group %s: %v", targetGroupID, err)
+		}
+		if _, err := c.getGroupEpochSeed(ctx, targetGroupID); err != nil {
+			logger.Debugf("setAttrByID: failed to pre-fetch seed for group %s: %v", targetGroupID, err)
 		}
 	}
 
 	// 1.5 Pre-fetch ACL recipients
-	aclRecipients := make(map[string]*mlkem.EncapsulationKey768)
 	if attr.AccessACL != nil {
 		for uid, bits := range attr.AccessACL.Users {
 			if (bits & 4) != 0 {
-				u, err := c.getUser(ctx, uid)
-				if err == nil {
-					if pk, err := crypto.UnmarshalEncapsulationKey(u.EncKey); err == nil {
-						aclRecipients[uid] = pk
-					}
-				}
+				c.getUserUnverified(ctx, uid)
 			}
 		}
 		for gid, bits := range attr.AccessACL.Groups {
-			if (bits & 4) != 0 {
-				group, err := c.getGroup(ctx, gid)
-				if err == nil {
-					if pk, err := crypto.UnmarshalEncapsulationKey(group.EncKey); err == nil {
-						aclRecipients[gid] = pk
-					}
-				}
+			if (bits&4) != 0 && !worldRead {
+				c.getGroupUnverifiedCached(ctx, gid)
+				c.getGroupEpochSeedUnverified(ctx, gid)
 			}
 		}
 	}
@@ -5860,9 +6232,11 @@ func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 			i.DefaultACL = attr.DefaultACL
 		}
 
-		// Update Lockbox (using pre-fetched keys)
-		if ownerPK != nil {
-			i.Lockbox.AddRecipient(*attr.OwnerID, ownerPK, key)
+		// Update Lockbox using provisionRecipient (all info is pre-cached above)
+		if attr.OwnerID != nil {
+			if err := c.provisionRecipient(ctx, i.Lockbox, *attr.OwnerID, key, nil); err != nil {
+				return err
+			}
 		}
 
 		worldRead := (i.Mode & 0004) != 0
@@ -5870,25 +6244,43 @@ func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 
 		// 2.1 World Access
 		_, worldInLockbox := i.Lockbox[metadata.WorldID]
-		if worldRead && worldPK != nil {
-			i.Lockbox.AddRecipient(metadata.WorldID, worldPK, key)
-		} else if !worldRead && worldInLockbox {
+		if worldRead {
+			if err := c.provisionRecipient(ctx, i.Lockbox, metadata.WorldID, key, nil); err != nil {
+				return err
+			}
+		} else if worldInLockbox {
 			delete(i.Lockbox, metadata.WorldID)
 		}
 
 		// 2.2 Group Access
 		if i.GroupID != "" {
 			_, groupInLockbox := i.Lockbox[i.GroupID]
-			if groupRW && groupPK != nil {
-				i.Lockbox.AddRecipient(i.GroupID, groupPK, key)
-			} else if !groupRW && groupInLockbox {
+			if groupRW && !worldRead {
+				if err := c.provisionRecipient(ctx, i.Lockbox, i.GroupID, key, nil); err != nil {
+					// Log but continue; owner still has access
+					logger.Debugf("setAttrByID: failed to provision group %s: %v", i.GroupID, err)
+				}
+			} else if (!groupRW || worldRead) && groupInLockbox {
 				delete(i.Lockbox, i.GroupID)
 			}
 		}
 
 		// 2.3 ACL Access Expansion
-		for uid, pk := range aclRecipients {
-			i.Lockbox.AddRecipient(uid, pk, key)
+		if i.AccessACL != nil {
+			for uid, bits := range i.AccessACL.Users {
+				if (bits & 4) != 0 {
+					if err := c.provisionRecipient(ctx, i.Lockbox, uid, key, nil); err != nil {
+						return err
+					}
+				}
+			}
+			for gid, bits := range i.AccessACL.Groups {
+				if (bits&4) != 0 && !worldRead {
+					if err := c.provisionRecipient(ctx, i.Lockbox, gid, key, nil); err != nil {
+						logger.Debugf("setAttrByID: failed to provision ACL group %s: %v", gid, err)
+					}
+				}
+			}
 		}
 
 		return nil
@@ -7027,7 +7419,7 @@ func (c *Client) signGroup(ctx context.Context, group *metadata.Group, isUpdate 
 
 		if !ok {
 			var err error
-			gdk, err = c.getGroupPrivateKey(ctx, group.ID)
+			gdk, err = c.getGroupPrivateKey(ctx, group.ID, group.Epoch)
 			if err != nil {
 				return fmt.Errorf("failed to fetch group key for signing: %w", err)
 			}
@@ -7108,7 +7500,12 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 			if err := json.Unmarshal(results[0], &updated); err != nil {
 				return nil, fmt.Errorf("failed to decode updated group: %w", err)
 			}
-			c.invalidateGroupCache(id)
+
+			// Update Cache
+			c.cacheMu.Lock()
+			c.verifiedGroupCache[id] = &updated
+			c.cacheMu.Unlock()
+
 			return &updated, nil
 		}
 
@@ -7142,9 +7539,11 @@ func (c *Client) getGroupMembers(ctx context.Context, groupID string) iter.Seq2[
 				return
 			}
 		} else {
-			// Not a manager, return public member list (HMACs only)
-			for h := range group.MembersHMAC {
-				members = append(members, metadata.MemberEntry{UserID: "hmac:" + h, Info: "[HIDDEN]"})
+			// Not a manager, return public member list (UserIDs only, derived from Lockbox keys)
+			for k := range group.Lockbox {
+				if !strings.Contains(k, ":") {
+					members = append(members, metadata.MemberEntry{UserID: k, Info: "[HIDDEN]"})
+				}
 			}
 		}
 
@@ -7158,51 +7557,45 @@ func (c *Client) getGroupMembers(ctx context.Context, groupID string) iter.Seq2[
 
 // GroupChown changes the owner of a group.
 func (c *Client) GroupChown(ctx context.Context, groupID, newOwnerID string) error {
-	// Pre-fetch new owner's public key once outside the retry loop
-	var newOwnerEK *mlkem.EncapsulationKey768
-	newOwner, err := c.getUser(ctx, newOwnerID)
-	if err == nil {
-		newOwnerEK, _ = crypto.UnmarshalEncapsulationKey(newOwner.EncKey)
-	} else {
-		// Try as group?
-		targetGroup, err := c.getGroup(ctx, newOwnerID)
-		if err == nil {
-			newOwnerEK, _ = crypto.UnmarshalEncapsulationKey(targetGroup.EncKey)
-		}
-	}
-
-	_, err = c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
-		if newOwnerEK == nil {
-			return fmt.Errorf("failed to fetch encryption key for new owner %s", newOwnerID)
-		}
+	_, err := c.updateGroup(ctx, groupID, func(group *metadata.Group) error {
 		// 1. Update RegistryLockbox (if we are a manager)
 		rk, err := c.getGroupRegistryKey(ctx, group)
-		if err == nil && newOwnerEK != nil {
+		if err == nil {
 			// Re-key Registry for new owner
 			if group.RegistryLockbox == nil {
 				group.RegistryLockbox = crypto.NewLockbox()
 			}
-			group.RegistryLockbox.AddRecipient(newOwnerID, newOwnerEK, rk)
+			// RegistryLockbox uses raw UserIDs (not anonymous)
+			if err := c.provisionRecipient(ctx, group.RegistryLockbox, newOwnerID, rk, nil); err != nil {
+				return err
+			}
 		}
 
-		// 2. Update Primary Lockbox (Encryption & Signing Keys)
-		if newOwnerEK != nil {
-			// Fetch group keys to re-key
-			gk, err := c.getGroupPrivateKey(ctx, groupID)
-			if err == nil {
-				group.Lockbox.AddRecipient(newOwnerID, newOwnerEK, crypto.MarshalDecapsulationKey(gk))
-			}
-			gsk, err := c.getGroupSignKey(ctx, groupID)
-			if err == nil {
-				group.Lockbox.AddRecipient(newOwnerID+":sign", newOwnerEK, gsk.MarshalPrivate())
+		// 2. Update Primary Lockbox (Epoch Seed)
+		// Phase 71: Use provisionRecipient with group context for HMAC privacy.
+		seed, err := c.getGroupEpochSeed(ctx, groupID)
+		if err == nil {
+			if err := c.provisionRecipient(ctx, group.Lockbox, newOwnerID, seed, group); err != nil {
+				return err
 			}
 		}
 
 		// 3. Remove old owner access if they are not a member
-		target := c.computeMemberHMAC(group.SignKey, c.userID)
-		if group.MembersHMAC == nil || !group.MembersHMAC[target] {
-			delete(group.Lockbox, c.userID)
-			delete(group.Lockbox, c.userID+":sign")
+		isMember := false
+		if rk != nil {
+			members, err := c.decryptRegistry(rk, group.EncryptedRegistry)
+			if err == nil {
+				for _, m := range members {
+					if m.UserID == c.userID {
+						isMember = true
+						break
+					}
+				}
+			}
+		}
+		if !isMember {
+			target := c.computeMemberHMAC(group.ID, c.userID)
+			delete(group.Lockbox, target)
 			delete(group.RegistryLockbox, c.userID)
 		}
 

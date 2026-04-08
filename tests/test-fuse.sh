@@ -78,7 +78,7 @@ else
 fi
 
 echo "TEST 5: Symlinks"
-ln --s f1 $MNT/s1
+ln -s f1 $MNT/s1
 RL=$(readlink $MNT/s1)
 if [ "$RL" = "f1" ]; then
     echo "PASS: TEST 5"

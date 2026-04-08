@@ -170,7 +170,7 @@ run_test "High Availability Failover" "/bin/test-ha.sh" || FAILED=1
 echo "--- FINAL SUMMARY ---"
 cat $REPORT_FILE
 
-if [ $FAILED --ne 0 ]; then
+if [ $FAILED -ne 0 ]; then
     echo "One or more tests failed."
     exit 1
 fi

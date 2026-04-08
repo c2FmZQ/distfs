@@ -4,9 +4,11 @@ package metadata
 
 import (
 	"encoding/json"
-	bolt "go.etcd.io/bbolt"
 	"path/filepath"
 	"testing"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestEvaluatePOSIXAccess(t *testing.T) {
@@ -45,8 +47,8 @@ func TestEvaluatePOSIXAccess(t *testing.T) {
 	setGroup(Group{
 		ID:      "g1",
 		SignKey: []byte("test-key"),
-		MembersHMAC: map[string]bool{
-			ComputeMemberHMAC([]byte("test-key"), "u2"): true,
+		Lockbox: map[string]crypto.LockboxEntry{
+			ComputeMemberHMAC("g1", "u2"): {},
 		},
 	})
 	if !evaluatePOSIXAccess(fsm, inode, "u2", 0004) {
@@ -77,8 +79,8 @@ func TestEvaluatePOSIXAccess(t *testing.T) {
 	setGroup(Group{
 		ID:      "g2",
 		SignKey: []byte("test-key-2"),
-		MembersHMAC: map[string]bool{
-			ComputeMemberHMAC([]byte("test-key-2"), "u4"): true,
+		Lockbox: map[string]crypto.LockboxEntry{
+			ComputeMemberHMAC("g2", "u4"): {},
 		},
 	})
 	inode.AccessACL.Groups = map[string]uint32{

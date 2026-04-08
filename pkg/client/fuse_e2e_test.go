@@ -74,9 +74,14 @@ func bootstrapClusterLocal(t *testing.T, raftNode *metadata.RaftNode) (*mlkem.En
 
 	// Bootstrap cluster sign key
 	csk, _ := crypto.GenerateIdentityKey()
+	sk, err := raftNode.FSM.SystemKey()
+	if err != nil {
+		t.Fatalf("failed to get system key for bootstrap: %v", err)
+	}
+	encPriv, _ := crypto.EncryptDEM(sk, csk.MarshalPrivate())
 	cskData := metadata.ClusterSignKey{
 		Public:           csk.Public(),
-		EncryptedPrivate: csk.MarshalPrivate(),
+		EncryptedPrivate: encPriv,
 	}
 	cskBytes, _ := json.Marshal(cskData)
 	lcmdBytes, _ := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: cskBytes}.Marshal()

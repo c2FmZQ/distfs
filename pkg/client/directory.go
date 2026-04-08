@@ -31,6 +31,7 @@ import (
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/logger"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
@@ -184,23 +185,27 @@ func (c *Client) BootstrapFileSystem(ctx context.Context) error {
 		return fmt.Errorf("bootstrap: Mkdir /users failed: %w", err)
 	}
 	if originalRegDir != "" {
-		if err := c.MkdirExtended(ctx, originalRegDir, 0700, MkdirOptions{GroupID: gids["registry"]}); err != nil {
-			return fmt.Errorf("bootstrap: Mkdir %s failed: %w", originalRegDir, err)
-		}
-
 		// 4.5. Setup Registry Permissions and Default ACL before anchoring
 		// Grant 'users' group read access to /registry so they can verify identities
-		regACL := ACL{
+		regACL := &ACL{
 			Groups: map[string]uint32{
 				gids["users"]: 0005, // Read + Execute
 			},
 		}
-		if err := c.Setfacl(ctx, originalRegDir, regACL); err != nil {
-			return err
+		regDefaultACL := &ACL{
+			Groups: map[string]uint32{
+				gids["users"]: 0004, // Read-only inherited for files
+			},
 		}
-		// Set Default ACL so new files inherit read access
-		if err := c.setAttr(ctx, originalRegDir, metadata.SetAttrRequest{DefaultACL: regACL.toInternal()}); err != nil {
-			return err
+
+		if err := c.MkdirExtended(ctx, originalRegDir, 0750, MkdirOptions{
+			GroupID:    gids["registry"],
+			AccessACL:  regACL,
+			DefaultACL: regDefaultACL,
+		}); err != nil {
+			if !isConflict(err) {
+				return fmt.Errorf("bootstrap: Mkdir %s failed: %w", originalRegDir, err)
+			}
 		}
 	}
 
@@ -626,9 +631,24 @@ func (c *Client) addEntryInternal(ctx context.Context, parentID string, parentKe
 			}
 		}
 
-		// Explicit options override inherited defaults (if provided)
+		// Explicit options merge with inherited defaults (if provided)
 		if opts.AccessACL != nil {
-			accessACL = opts.AccessACL.toInternal()
+			if accessACL == nil {
+				accessACL = &metadata.POSIXAccess{
+					Users:  make(map[string]uint32),
+					Groups: make(map[string]uint32),
+				}
+			}
+			for k, v := range opts.AccessACL.Users {
+				accessACL.Users[k] = v
+			}
+			for k, v := range opts.AccessACL.Groups {
+				accessACL.Groups[k] = v
+			}
+			if opts.AccessACL.Mask != nil {
+				m := *opts.AccessACL.Mask
+				accessACL.Mask = &m
+			}
 		}
 		if opts.DefaultACL != nil {
 			defaultACL = opts.DefaultACL.toInternal()
@@ -1436,69 +1456,42 @@ func (c *Client) createLockbox(ctx context.Context, key []byte, mode uint32, own
 		effectiveOwner = c.userID
 	}
 
-	if effectiveOwner == c.userID {
-		if c.decKey != nil {
-			lb.AddRecipient(c.userID, c.decKey.EncapsulationKey(), key)
-		}
-	} else {
-		// User Owner
-		user, err := c.getUser(ctx, effectiveOwner)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch user owner %s: %w", effectiveOwner, err)
-		}
-		upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal user enc key: %w", err)
-		}
-		lb.AddRecipient(effectiveOwner, upk, key)
+	// 1. Owner Access
+	if err := c.provisionRecipient(ctx, lb, effectiveOwner, key, nil); err != nil {
+		return nil, fmt.Errorf("failed to provision owner %s: %w", effectiveOwner, err)
 	}
 
-	if (mode & 0004) != 0 {
-		wpk, err := c.getWorldPublicKey(ctx)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch world public key: %w", err)
+	worldRead := (mode & 0004) != 0
+
+	// 2. World Access
+	if worldRead {
+		if err := c.provisionRecipient(ctx, lb, metadata.WorldID, key, nil); err != nil {
+			return nil, fmt.Errorf("failed to provision world: %w", err)
 		}
-		lb.AddRecipient(metadata.WorldID, wpk, key)
 	}
 
-	if groupID != "" && (mode&0040) != 0 {
-		group, err := c.getGroup(ctx, groupID)
-		if err != nil {
-			return nil, fmt.Errorf("failed to fetch group %s: %w", groupID, err)
+	// 3. Group Access (if world is not readable)
+	if groupID != "" && (mode&0040) != 0 && !worldRead {
+		if err := c.provisionRecipient(ctx, lb, groupID, key, nil); err != nil {
+			// Log but don't fail; the owner still has access
+			logger.Debugf("Warning: failed to provision group %s for lockbox: %v", groupID, err)
 		}
-		gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to unmarshal group enc key: %w", err)
-		}
-		lb.AddRecipient(groupID, gpk, key)
 	}
 
-	// Add users/groups granted read access via POSIX ACL
+	// 4. ACL Access
 	if acl != nil {
 		for uid, bits := range acl.Users {
-			if (bits & 4) != 0 { // Has read permission
-				user, err := c.getUser(ctx, uid)
-				if err != nil {
-					return nil, fmt.Errorf("failed to fetch ACL user %s: %w", uid, err)
+			if (bits & 4) != 0 {
+				if err := c.provisionRecipient(ctx, lb, uid, key, nil); err != nil {
+					return nil, fmt.Errorf("failed to provision ACL user %s: %w", uid, err)
 				}
-				upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-				if err != nil {
-					return nil, fmt.Errorf("failed to unmarshal ACL user enc key: %w", err)
-				}
-				lb.AddRecipient(uid, upk, key)
 			}
 		}
 		for gid, bits := range acl.Groups {
-			if (bits & 4) != 0 { // Has read permission
-				group, err := c.getGroup(ctx, gid)
-				if err != nil {
-					return nil, fmt.Errorf("failed to fetch ACL group %s: %w", gid, err)
+			if (bits&4) != 0 && !worldRead {
+				if err := c.provisionRecipient(ctx, lb, gid, key, nil); err != nil {
+					return nil, fmt.Errorf("failed to provision ACL group %s: %w", gid, err)
 				}
-				gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
-				if err != nil {
-					return nil, fmt.Errorf("failed to unmarshal ACL group enc key: %w", err)
-				}
-				lb.AddRecipient(gid, gpk, key)
 			}
 		}
 	}

@@ -144,8 +144,10 @@ DistFS uses groups for shared access. All encryption is end-to-end; the server n
 - `(c *Client) CreateGroup(ctx context.Context, name string, quotaEnabled bool) (*GroupInfo, error)`
 - `(c *Client) CreateGroupWithOptions(ctx context.Context, name string, quotaEnabled bool, ownerID string) (*GroupInfo, error)`
 - `(c *Client) CreateSystemGroup(ctx context.Context, name string, quotaEnabled bool) (*GroupInfo, error)` (Admin only)
-- `(c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info string, ci *ContactInfo) error`: Adds a member to a group. 
-- `(c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error`: Removes a member.
+- `(c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info string, ci *ContactInfo) error`: Adds a named member to a group. 
+- `(c *Client) AddAnonymousUserToGroup(ctx context.Context, groupID string, pubKey *mlkem.EncapsulationKey768) error`: Adds an anonymous member to a group.
+- `(c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string) error`: Convenience method for revoking a named member.
+- `(c *Client) RevokeGroupMember(ctx context.Context, groupID, targetUserID string, targetAnonPubKey []byte) error`: Removes a member (named or anonymous) and performs O(1) key ratchet revocation.
 - `(c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEntry, error]`
 
 ### 7.2 Discovery

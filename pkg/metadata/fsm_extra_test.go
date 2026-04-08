@@ -721,7 +721,7 @@ func TestFSM_GroupSecurity_Full(t *testing.T) {
 
 	// 3. Owner updates the group (Valid)
 	g1.Version = 2
-	g1.MembersHMAC = map[string]bool{"some-hmac": true}
+	g1.Lockbox = map[string]crypto.LockboxEntry{"some-user": {}}
 	g1.SignGroupForTest("user1", userSK)
 	gb1u, _ := json.Marshal(g1)
 	cmd3, _ := LogCommand{Type: CmdUpdateGroup, Data: gb1u, UserID: "user1"}.Marshal()

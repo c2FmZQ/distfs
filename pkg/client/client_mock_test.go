@@ -143,7 +143,7 @@ func TestClient_MockedConflict(t *testing.T) {
 					OwnerID: "u1",
 					Lockbox: make(crypto.Lockbox),
 				}
-				inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey)
+				inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey, 0)
 
 				blob := metadata.InodeClientBlob{
 					MTime: time.Now().UnixNano(),

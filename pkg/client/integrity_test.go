@@ -46,7 +46,7 @@ func TestManifestIntegrity(t *testing.T) {
 
 	// 2. Setup Identities
 	// 2.1 Admin
-	adminID := "alice"
+	adminID := raftNode.FSM.ComputeUserID("alice")
 	dkA, _ := crypto.GenerateEncryptionKey()
 	skA, _ := crypto.GenerateIdentityKey()
 
@@ -57,7 +57,9 @@ func TestManifestIntegrity(t *testing.T) {
 	dataDir := t.TempDir()
 	dataSt, _ := createTestStorage(t, dataDir)
 	dataStore, _ := data.NewDiskStore(dataSt)
-	dataServer := data.NewServer(dataStore, ek.Bytes(), raftNode.FSM, data.NoopValidator{}, true, true)
+
+	csk, _ := raftNode.FSM.GetClusterSignPublicKey()
+	dataServer := data.NewServer(dataStore, csk, raftNode.FSM, data.NoopValidator{}, true, true)
 	dataTS := httptest.NewServer(dataServer)
 	defer dataTS.Close()
 
@@ -79,7 +81,7 @@ func TestManifestIntegrity(t *testing.T) {
 	}
 
 	// 2.2 User B
-	userID := "user-b"
+	userID := raftNode.FSM.ComputeUserID("user-b")
 	dkB, _ := crypto.GenerateEncryptionKey()
 	skB, _ := crypto.GenerateIdentityKey()
 	uB := metadata.User{ID: userID, SignKey: skB.Public(), EncKey: dkB.EncapsulationKey().Bytes()}

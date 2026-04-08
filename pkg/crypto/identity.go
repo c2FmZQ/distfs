@@ -15,6 +15,7 @@
 package crypto
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 
@@ -67,6 +68,17 @@ func GenerateIdentityKey() (*IdentityKey, error) {
 	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate identity key: %w", err)
+	}
+	return &IdentityKey{priv: priv, pub: pub}, nil
+}
+
+// GenerateIdentityKeyFromSeed generates a key pair from a 32-byte seed.
+func GenerateIdentityKeyFromSeed(seed []byte) (*IdentityKey, error) {
+	// ML-DSA-65 requires a 32-byte seed.
+	// We use bytes.NewReader(seed) as the entropy source for deterministic generation.
+	pub, priv, err := mldsa65.GenerateKey(bytes.NewReader(seed))
+	if err != nil {
+		return nil, fmt.Errorf("failed to generate identity key from seed: %w", err)
 	}
 	return &IdentityKey{priv: priv, pub: pub}, nil
 }

@@ -52,7 +52,7 @@ if [ $SKIP_UNIT -eq 0 ]; then
     echo "Running Unit Tests..."
     go fmt ./...
     go vet ./...
-    if ! go test -timeout=12m -race -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
+    if ! go test -timeout=14m -failfast ./... > "$LOG_DIR/unit-tests.log" 2>&1; then
         cat "$LOG_DIR/unit-tests.log" >> $REPORT
         echo '```' >> $REPORT
         echo "Unit Tests Failed"

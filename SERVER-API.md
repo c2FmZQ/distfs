@@ -86,7 +86,6 @@ Used for requests within an established session. Provides improved performance a
 | `POST` | `/v1/group/` | Session + E2EE | Create a new security group. Payload: `{"id": "name", "quota_enabled": bool}`. |
 | `GET` | `/v1/group/{id}` | Session | Fetch group metadata and members. |
 | `PUT` | `/v1/group/{id}` | Session + E2EE | Update group (Owner/Admin only). |
-| `GET` | `/v1/group/{id}/private` | Session + E2EE | Get Group Key (Encapsulated for member). |
 | `GET` | `/v1/group/gid/allocate` | Session | Request a unique numeric GID. |
 
 ### 2.5 Data Node API
@@ -128,7 +127,9 @@ Used for requests within an established session. Provides improved performance a
   "leases": {"nonce": {"id": "session_id", "exp": 123, "type": 1}},
   "unlinked": false,
   "user_sig": "base64_sig",
-  "group_sig": "base64_sig"
+  "group_sig": "base64_sig",
+  "owner_delegation_sig": "base64_sig",
+  "cluster_sig": "base64_sig"
 }
 ```
 
@@ -197,21 +198,26 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 
 ### 4.2 Group Hash
 The group `signature` is over the SHA-256 hash of these fields concatenated **exactly**:
-1. `[]byte("DistFS-Group-v1|")`
+1. `[]byte("DistFS-Group-v2|")`
 2. `[]byte("group-id:" + id + "|")`
 3. `[]byte("v:")` + `BigEndian(uint64(version))` + `[]byte("|")`
-4. `[]byte("sys:" + (is_system ? "1" : "0") + "|")`
-5. `[]byte("client_blob:")` + `client_blob_bytes` + `[]byte("|")`
-6. `[]byte("owner:" + owner_id + "|")`
-7. `[]byte("signer:" + signer_id + "|")`
-8. `[]byte("members:")` + `SortedCSV(member_id:status)` + `[]byte("|")`
-9. `[]byte("enc_key:")` + `enc_key_bytes` + `[]byte("|")`
-10. `[]byte("sign_key:")` + `sign_key_bytes` + `[]byte("|")`
-11. `[]byte("enc_sign_key:")` + `enc_sign_key_bytes` + `[]byte("|")`
-12. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
-13. `[]byte("registry_lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
-14. `[]byte("enc_registry:")` + `enc_registry_bytes` + `[]byte("|")`
-15. `[]byte("quota_enabled:" + (quota_enabled ? "1" : "0") + "|")`
+4. `[]byte("nonce:")` + `nonce_bytes` + `[]byte("|")`
+5. `[]byte("sys:" + (is_system ? "1" : "0") + "|")`
+6. `[]byte("epoch:")` + `BigEndian(uint32(epoch))` + `[]byte("|")`
+7. `[]byte("enc_epoch_seed:")` + `enc_epoch_seed_bytes` + `[]byte("|")`
+8. `[]byte("client_blob:")` + `client_blob_bytes` + `[]byte("|")`
+9. `[]byte("owner:" + owner_id + "|")`
+10. `[]byte("signer:" + signer_id + "|")`
+11. `[]byte("anonymous_lockbox:")` + `CSV(ciphertext)` + `[]byte("|")`
+12. `[]byte("anonymous_registry:")` + `anonymous_registry_bytes` + `[]byte("|")`
+13. `[]byte("enc_key:")` + `enc_key_bytes` + `[]byte("|")`
+14. `[]byte("sign_key:")` + `sign_key_bytes` + `[]byte("|")`
+15. `[]byte("hsk:")` + `SortedCSV(epoch:sign_key)` + `[]byte("|")`
+16. `[]byte("enc_sign_key:")` + `enc_sign_key_bytes` + `[]byte("|")`
+17. `[]byte("lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
+18. `[]byte("registry_lockbox:")` + `SortedCSV(id:kem+dem)` + `[]byte("|")`
+19. `[]byte("enc_registry:")` + `enc_registry_bytes` + `[]byte("|")`
+20. `[]byte("quota_enabled:" + (quota_enabled ? "1" : "0") + "|")`
 
 ---
 
@@ -265,3 +271,11 @@ The DistFS API maps FSM sentinel errors to structured JSON HTTP responses (`APIE
 | `X-DistFS-Sealed` | Mandatory for mutations | Signals request body is a `SealedRequest`. |
 | `X-DistFS-Admin-Bypass` | Optional (Admins only) | Bypasses ownership checks for recovery. |
 | `X-DistFS-Sealed` | Optional for `GET` | If `true`, server returns a `SealedResponse`. |
+ledRequest`. |
+| `X-DistFS-Admin-Bypass` | Optional (Admins only) | Bypasses ownership checks for recovery. |
+| `X-DistFS-Sealed` | Optional for `GET` | If `true`, server returns a `SealedResponse`. |
+ for `GET` | If `true`, server returns a `SealedResponse`. |
+ledRequest`. |
+| `X-DistFS-Admin-Bypass` | Optional (Admins only) | Bypasses ownership checks for recovery. |
+| `X-DistFS-Sealed` | Optional for `GET` | If `true`, server returns a `SealedResponse`. |
+onal for `GET` | If `true`, server returns a `SealedResponse`. |

@@ -74,12 +74,12 @@ func TestLockbox(t *testing.T) {
 	lb := NewLockbox()
 
 	// Add Alice
-	if err := lb.AddRecipient("alice", ekA, fileKey); err != nil {
+	if err := lb.AddRecipient("alice", ekA, fileKey, 0); err != nil {
 		t.Fatalf("AddRecipient Alice failed: %v", err)
 	}
 
 	// Add Bob
-	if err := lb.AddRecipient("bob", ekB, fileKey); err != nil {
+	if err := lb.AddRecipient("bob", ekB, fileKey, 0); err != nil {
 		t.Fatalf("AddRecipient Bob failed: %v", err)
 	}
 

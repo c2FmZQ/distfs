@@ -77,13 +77,12 @@ func TestGroupUpdateConcurrency(t *testing.T) {
 		t.Fatalf("GetGroup failed: %v", err)
 	}
 
-	h1 := metadata.ComputeMemberHMAC(finalGroup.SignKey, "user1")
-	h2 := metadata.ComputeMemberHMAC(finalGroup.SignKey, "user2")
-
-	if !finalGroup.MembersHMAC[h1] {
+	target1 := clientAlice.computeMemberHMAC(finalGroup.ID, "user1")
+	if _, ok := finalGroup.Lockbox[target1]; !ok {
 		t.Errorf("user1 missing from group members")
 	}
-	if !finalGroup.MembersHMAC[h2] {
+	target2 := clientAlice.computeMemberHMAC(finalGroup.ID, "user2")
+	if _, ok := finalGroup.Lockbox[target2]; !ok {
 		t.Errorf("user2 missing from group members")
 	}
 

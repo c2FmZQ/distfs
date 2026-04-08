@@ -356,7 +356,19 @@ func (s *Server) loadClusterSignKey() {
 		return
 	}
 
-	priv := crypto.UnmarshalIdentityKey(encPriv)
+	sk, err := s.fsm.SystemKey()
+	if err != nil {
+		logger.Debugf("ERROR: Cannot decrypt cluster sign key: cluster secret not initialized")
+		return
+	}
+
+	privBytes, err := crypto.DecryptDEM(sk, encPriv)
+	if err != nil {
+		logger.Debugf("ERROR: Failed to decrypt cluster sign key: %v", err)
+		return
+	}
+
+	priv := crypto.UnmarshalIdentityKey(privBytes)
 	// UnmarshalIdentityKey for Ed25519 always succeeds if bytes are provided
 	// as it just wraps the slice.
 
@@ -648,7 +660,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// 1. Identify Public Routes
 	isPublic := false
 	switch r.URL.Path {
-	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world",
+	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world", "/v1/meta/key/cluster/sign",
 		"/v1/user/register", "/v1/login", "/v1/auth/config", "/v1/auth/challenge",
 		"/v1/cluster/stats", "/v1/user/keysync":
 		isPublic = true
@@ -667,6 +679,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		case "/v1/meta/key/sign":
 			s.handleGetServerSignKey(w, r)
+			return
+		case "/v1/meta/key/cluster/sign":
+			s.handleGetClusterSignKey(w, r)
 			return
 		case "/v1/meta/key/world":
 			s.handleGetWorldPublicKey(w, r)
@@ -849,7 +864,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		isAdmin := s.fsm.IsAdmin(user.ID)
 		if !isAdmin {
-			s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
+			s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
 			return
 		}
 		s.handleAdmin(w, r)
@@ -896,16 +911,6 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
 			if id == "" {
 				s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
-				return
-			}
-			if strings.HasSuffix(id, "/sign/private") && r.Method == http.MethodGet {
-				id = strings.TrimSuffix(id, "/sign/private")
-				s.handleGetGroupSignKey(w, r, id)
-				return
-			}
-			if strings.HasSuffix(id, "/private") && r.Method == http.MethodGet {
-				id = strings.TrimSuffix(id, "/private")
-				s.handleGetGroupPrivateKey(w, r, id)
 				return
 			}
 			if r.Method == http.MethodGet {
@@ -1323,22 +1328,16 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if exists {
-		bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-		isAdmin := s.fsm.IsAdmin(user.ID)
-		if bypass && isAdmin {
-			// Bypass enabled and authorized
-		} else {
-			reqBit := uint32(0004) // R
-			if req.Mode == "W" {
-				reqBit = 0002 // W
-			}
+		reqBit := uint32(0004) // R
+		if req.Mode == "W" {
+			reqBit = 0002 // W
+		}
 
-			if !evaluatePOSIXAccess(s.fsm, &inode, user.ID, reqBit) {
-				msg := fmt.Sprintf("forbidden: POSIX permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
-				log.Printf("ERROR: handleIssueToken: %s", msg)
-				s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
-				return
-			}
+		if !evaluatePOSIXAccess(s.fsm, &inode, user.ID, reqBit) {
+			msg := fmt.Sprintf("forbidden: POSIX permission check failed (inode=%s owner=%s user=%s mode=%s inode_mode=%o group=%s)", req.InodeID, inode.OwnerID, user.ID, req.Mode, inode.Mode, inode.GroupID)
+			log.Printf("ERROR: handleIssueToken: %s", msg)
+			s.writeError(w, r, ErrCodeForbidden, "POSIX access denied", http.StatusForbidden)
+			return
 		}
 	} else {
 		// Inode doesn't exist yet. Only allow "W" mode for creation.
@@ -1937,15 +1936,6 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 		return
 	}
 
-	if err := s.checkReadPermission(r, user, id); err != nil {
-		if err == ErrNotFound {
-			s.writeError(w, r, ErrCodeNotFound, err.Error(), http.StatusNotFound)
-		} else {
-			s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
-		}
-		return
-	}
-
 	var data []byte
 	var inode Inode
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -2029,9 +2019,6 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	result := make([]*Inode, 0, len(ids))
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		for _, id := range ids {
-			if s.checkReadPermission(r, user, id) != nil {
-				continue // Skip unauthorized inodes in batch fetch
-			}
 			plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
 			if err != nil || plain == nil {
 				continue
@@ -2118,42 +2105,12 @@ func evaluatePOSIXAccess(fsm *MetadataFSM, inode *Inode, userID string, required
 	}
 
 	if matchedGroup {
-		result := (groupUnion & mask & req) != 0
-		return result
+		return (groupUnion & mask & req) != 0
 	}
 
 	// 4. Other
 	otherBits := inode.Mode & 7
-	result := (otherBits & req) != 0
-	return result
-}
-
-func (s *Server) checkReadPermission(r *http.Request, user *User, inodeID string) error {
-	bypass, _ := r.Context().Value(adminBypassContextKey).(bool)
-	isAdmin := s.fsm.IsAdmin(user.ID)
-	if bypass && isAdmin {
-		return nil
-	}
-	var inode Inode
-	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(inodeID))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(plain, &inode)
-	})
-	if err != nil {
-		return err
-	}
-
-	if evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0004) {
-		return nil
-	}
-
-	return fmt.Errorf("forbidden")
+	return (otherBits & req) != 0
 }
 
 func (s *Server) handleRegisterNode(w http.ResponseWriter, r *http.Request) {
@@ -2246,7 +2203,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 
 	// 2. Authorization: Any authenticated user can read group metadata
 	// (Public keys are needed for integrity verification of group-signed inodes).
-	// Group membership remains private via the MembersHMAC map.
+	// Group membership remains private via the Lockbox and AnonymousLockbox.
 
 	data, _ := json.Marshal(group)
 	w.Header().Set("Content-Type", "application/json")
@@ -2613,124 +2570,6 @@ func (s *Server) checkWritePermission(r *http.Request, user *User, inodeID strin
 	return fmt.Errorf("forbidden")
 }
 
-func (s *Server) handleGetGroupPrivateKey(w http.ResponseWriter, r *http.Request, id string) {
-	user, err := s.authenticate(r)
-	if err != nil {
-		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
-	if err != nil {
-		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
-		return
-	}
-	if !inGroup {
-		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	var group Group
-	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := s.fsm.Get(tx, []byte("groups"), []byte(id))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(plain, &group)
-	})
-	if err != nil {
-		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
-		return
-	}
-
-	// Group Private Key is stored in group.Lockbox, encrypted for each member.
-	entry, ok := group.Lockbox[user.ID]
-	if !ok {
-		// Should not happen if IsUserInGroup returned true, but for safety:
-		s.writeError(w, r, ErrCodeInternal, "user not in group lockbox", http.StatusInternalServerError)
-		return
-	}
-
-	data, _ := json.Marshal(entry)
-	w.Header().Set("Content-Type", "application/json")
-
-	// E2EE?
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, user, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
-}
-
-func (s *Server) handleGetGroupSignKey(w http.ResponseWriter, r *http.Request, id string) {
-	user, err := s.authenticate(r)
-	if err != nil {
-		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-		return
-	}
-
-	inGroup, err := s.fsm.IsUserInGroup(user.ID, id)
-	if err != nil {
-		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
-		return
-	}
-	if !inGroup {
-		s.writeError(w, r, ErrCodeForbidden, "forbidden", http.StatusForbidden)
-		return
-	}
-
-	var group Group
-	err = s.fsm.db.View(func(tx *bolt.Tx) error {
-		plain, err := s.fsm.Get(tx, []byte("groups"), []byte(id))
-		if err != nil {
-			return err
-		}
-		if plain == nil {
-			return ErrNotFound
-		}
-		return json.Unmarshal(plain, &group)
-	})
-	if err != nil {
-		s.writeError(w, r, ErrCodeNotFound, "group not found", http.StatusNotFound)
-		return
-	}
-
-	// Group Signing Key is stored in group.Lockbox with ":sign" suffix, encrypted for each member.
-	entry, ok := group.Lockbox[user.ID+":sign"]
-	if !ok {
-		// Old groups might not have this, or user wasn't added with it
-		s.writeError(w, r, ErrCodeInternal, "group signing key not available for user", http.StatusNotFound)
-		return
-	}
-
-	data, _ := json.Marshal(entry)
-	w.Header().Set("Content-Type", "application/json")
-
-	// E2EE?
-	if user != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, user, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
-}
-
 const (
 	raftSecretHeader    = "X-Raft-Secret"
 	raftNonceHeader     = "X-Raft-Nonce"
@@ -2875,9 +2714,12 @@ func (s *Server) RedactGroup(g *Group) {
 	g.SignKey = nil
 	g.EncryptedSignKey = nil
 	g.Lockbox = nil
+	g.AnonymousLockbox = nil
 	g.RegistryLockbox = nil
 	g.EncryptedRegistry = nil
-	g.MembersHMAC = nil // Bulk lists shouldn't reveal member IDs
+	g.AnonymousRegistry = nil
+	g.HistoricalSignKeys = nil
+	g.EncryptedEpochSeed = nil
 	// NOTE: g.Signature must REMAINS for client-side verification
 }
 
@@ -3018,7 +2860,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 						Usage:        g.Usage,
 						Quota:        g.Quota,
 						QuotaEnabled: g.QuotaEnabled,
-						MemberCount:  len(g.MembersHMAC),
+						MemberCount:  len(g.Lockbox) + len(g.AnonymousLockbox),
 						IsSystem:     g.IsSystem,
 					},
 				})
@@ -3532,6 +3374,16 @@ func (s *Server) handleGetServerSignKey(w http.ResponseWriter, r *http.Request) 
 	w.Write(s.signKey.Public())
 }
 
+func (s *Server) handleGetClusterSignKey(w http.ResponseWriter, r *http.Request) {
+	pub := s.getClusterSignPubKey()
+	if pub == nil {
+		s.writeError(w, r, ErrCodeInternal, "cluster sign key not initialized", http.StatusNotFound)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+	w.Write(pub)
+}
+
 func (s *Server) handleGetWorldPublicKey(w http.ResponseWriter, r *http.Request) {
 	world, err := s.fsm.GetWorldIdentity()
 	if err != nil {
@@ -3552,6 +3404,11 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 	user, err := s.authenticate(r)
 	if err != nil {
 		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if user.Locked {
+		s.writeError(w, r, ErrCodeForbidden, "account is locked; world access denied", http.StatusForbidden)
 		return
 	}
 

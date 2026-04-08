@@ -916,7 +916,7 @@ func TestVerifyInode_Signatures(t *testing.T) {
 	// 4. Valid Signature and Lockbox (SUCCESS)
 	fileKey := make([]byte, 32)
 	inode.Lockbox = make(crypto.Lockbox)
-	inode.Lockbox.AddRecipient(u1ID, dk.EncapsulationKey(), fileKey)
+	inode.Lockbox.AddRecipient(u1ID, dk.EncapsulationKey(), fileKey, 0)
 	inode.SetFileKey(fileKey)
 
 	// Must have a valid ClientBlob for successful decryption

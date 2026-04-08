@@ -49,15 +49,14 @@ func TestGroupManagementSecurity(t *testing.T) {
 	nonceA := GenerateNonce()
 	groupAID := GenerateGroupID(tc.AdminID, nonceA)
 	groupA := Group{
-		ID:          groupAID,
-		OwnerID:     tc.AdminID,
-		Nonce:       nonceA,
-		SignerID:    tc.AdminID,
-		MembersHMAC: map[string]bool{ComputeMemberHMAC(tc.AdminSK.Public(), tc.AdminID): true},
-		Version:     1,
-		GID:         10001,
-		Lockbox:     crypto.NewLockbox(),
-		SignKey:     tc.AdminSK.Public(),
+		ID:       groupAID,
+		OwnerID:  tc.AdminID,
+		Nonce:    nonceA,
+		SignerID: tc.AdminID,
+		Version:  1,
+		GID:      10001,
+		Lockbox:  map[string]crypto.LockboxEntry{ComputeMemberHMAC(groupAID, tc.AdminID): {}},
+		SignKey:  tc.AdminSK.Public(),
 	}
 	groupA.Signature = tc.AdminSK.Sign(groupA.Hash())
 	objBytes, _ := json.Marshal(groupA)
@@ -104,15 +103,14 @@ func TestGroupManagementSecurity(t *testing.T) {
 	nonceSelf := GenerateNonce()
 	gSelfID := GenerateGroupID(SelfOwnedGroup, nonceSelf)
 	gSelf := Group{
-		ID:          gSelfID,
-		OwnerID:     SelfOwnedGroup,
-		SignerID:    tc.AdminID,
-		MembersHMAC: map[string]bool{computeTestHMAC(tc.AdminSK.Public(), tc.AdminID): true},
-		Nonce:       nonceSelf,
-		Version:     1,
-		GID:         10002,
-		Lockbox:     crypto.NewLockbox(),
-		SignKey:     tc.AdminSK.Public(),
+		ID:       gSelfID,
+		OwnerID:  SelfOwnedGroup,
+		SignerID: tc.AdminID,
+		Nonce:    nonceSelf,
+		Version:  1,
+		GID:      10002,
+		Lockbox:  map[string]crypto.LockboxEntry{ComputeMemberHMAC(gSelfID, tc.AdminID): {}},
+		SignKey:  tc.AdminSK.Public(),
 	}
 	gSelf.Signature = tc.AdminSK.Sign(gSelf.Hash())
 	objBytes, _ = json.Marshal(gSelf)
@@ -135,10 +133,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 		}
 		var g Group
 		json.Unmarshal(plain, &g)
-		if g.MembersHMAC == nil {
-			g.MembersHMAC = make(map[string]bool)
+		if g.Lockbox == nil {
+			g.Lockbox = make(crypto.Lockbox)
 		}
-		g.MembersHMAC[computeTestHMAC(g.SignKey, uBobID)] = true
+		target := ComputeMemberHMAC(g.ID, uBobID)
+		g.Lockbox[target] = crypto.LockboxEntry{}
 		encoded, _ := json.Marshal(g)
 		return tc.Node.FSM.Put(tx, []byte("groups"), []byte(gSelfID), encoded)
 	})
@@ -158,7 +157,11 @@ func TestGroupManagementSecurity(t *testing.T) {
 	resp.Body.Close()
 
 	bobUpdate := gSelfRefreshed
-	bobUpdate.MembersHMAC[computeTestHMAC(bobUpdate.SignKey, uMalloryID)] = true
+	if bobUpdate.Lockbox == nil {
+		bobUpdate.Lockbox = make(crypto.Lockbox)
+	}
+	targetMallory := ComputeMemberHMAC(bobUpdate.ID, uMalloryID)
+	bobUpdate.Lockbox[targetMallory] = crypto.LockboxEntry{}
 	bobUpdate.Version++
 	bobUpdate.SignGroupForTest(uBobID, uBobSign)
 

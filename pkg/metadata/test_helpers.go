@@ -199,12 +199,11 @@ func BootstrapBackbone(t *testing.T, raftNode *RaftNode, adminID string, adminDK
 	})
 
 	// 3. Create foundational groups
-	createGroup := func(id string, gid uint32, ownerID string) (Group, *mlkem.DecapsulationKey768) {
-		dk, _ := crypto.GenerateEncryptionKey()
-		sk, _ := crypto.GenerateIdentityKey()
-		lb := crypto.NewLockbox()
-		lb.AddRecipient(adminID, adminUPK, crypto.MarshalDecapsulationKey(dk))
-		lb.AddRecipient(adminID+":sign", adminUPK, sk.MarshalPrivate())
+	createGroup := func(id string, gid uint32, ownerID string) (Group, []byte) {
+		masterSeed := make([]byte, 64)
+		rand.Read(masterSeed)
+		epochSeed := crypto.DeriveEpochKey(masterSeed, MaxEpochs, 0)
+		keys, _ := crypto.DeriveGroupKeys(epochSeed)
 
 		nonce := GenerateNonce()
 		derivedID := GenerateGroupID(ownerID, nonce)
@@ -212,34 +211,44 @@ func BootstrapBackbone(t *testing.T, raftNode *RaftNode, adminID string, adminDK
 			id = derivedID
 		}
 
-		// Initialize MembersHMAC
-		membersHMAC := make(map[string]bool)
-		membersHMAC[ComputeMemberHMAC(sk.Public(), adminID)] = true
-		if ownerID != "" && ownerID != adminID && ownerID != SelfOwnedGroup {
-			membersHMAC[ComputeMemberHMAC(sk.Public(), ownerID)] = true
-		}
+		lb := crypto.NewLockbox()
+		target := ComputeMemberHMAC(id, adminID)
+		lb.AddRecipient(target, adminUPK, epochSeed, 0)
+
+		rk := make([]byte, 32)
+		encMasterSeed, _ := crypto.EncryptDEM(rk, masterSeed)
 
 		g := Group{
-			ID:           id,
-			GID:          gid,
-			OwnerID:      ownerID,
-			MembersHMAC:  membersHMAC,
-			Nonce:        nonce,
-			Version:      1,
-			QuotaEnabled: true,
-			EncKey:       dk.EncapsulationKey().Bytes(),
-			SignKey:      sk.Public(),
-			SignerID:     adminID,
-			Lockbox:      lb,
+			ID:                 id,
+			GID:                gid,
+			OwnerID:            ownerID,
+			Nonce:              nonce,
+			Version:            1,
+			QuotaEnabled:       true,
+			EncKey:             keys.EncKey.EncapsulationKey().Bytes(),
+			SignKey:            keys.SignKey.Public(),
+			SignerID:           adminID,
+			Lockbox:            lb,
+			Epoch:              0,
+			EncryptedEpochSeed: encMasterSeed,
 		}
 		g.Signature = adminSK.Sign(g.Hash())
 		apply(CmdCreateGroup, g)
-		return g, dk
+
+		if id == "users" {
+			raftNode.FSM.db.Update(func(tx *bolt.Tx) error {
+				b := tx.Bucket([]byte("system"))
+				b.Put([]byte("test_users_seed"), epochSeed)
+				return nil
+			})
+		}
+
+		return g, epochSeed
 	}
 
-	adminG, _ := createGroup("", 1000, SelfOwnedGroup)
-	_, _ = createGroup("", 1001, adminG.ID)
-	_, _ = createGroup("", 1002, adminG.ID)
+	adminG, _ := createGroup("admin", 1000, SelfOwnedGroup)
+	_, _ = createGroup("users", 1001, adminG.ID)
+	_, _ = createGroup("registry", 1002, adminG.ID)
 }
 
 func createTestStorage(t *testing.T, dir string) (*storage.Storage, storage_crypto.MasterKey) {
@@ -266,11 +275,16 @@ func BootstrapClusterKeys(t *testing.T, raftNode *RaftNode) (*mlkem.Encapsulatio
 
 	// 2. Bootstrap cluster sign key
 	csk, _ := crypto.GenerateIdentityKey()
+	// Foundational keys must be encrypted with the FSM system key
+	sk, err := raftNode.FSM.SystemKey()
+	if err != nil {
+		t.Fatalf("failed to get system key for bootstrap: %v", err)
+	}
+	encPriv, _ := crypto.EncryptDEM(sk, csk.MarshalPrivate())
 	cskData := ClusterSignKey{
 		Public:           csk.Public(),
-		EncryptedPrivate: csk.MarshalPrivate(),
+		EncryptedPrivate: encPriv,
 	}
-
 	// 3. Server-specific keys (Identity + Decryption)
 	signKey, _ := crypto.GenerateIdentityKey()
 	nodeDecKey, _ := crypto.GenerateEncryptionKey()
@@ -594,13 +608,9 @@ func JoinUsersGroup(t *testing.T, raftNode *RaftNode, groupID string, userID str
 		return json.Unmarshal(plain, &user)
 	})
 
-	if g.MembersHMAC == nil {
-		g.MembersHMAC = make(map[string]bool)
-	}
 	if g.Lockbox == nil {
 		g.Lockbox = make(crypto.Lockbox)
 	}
-	g.MembersHMAC[ComputeMemberHMAC(g.SignKey, userID)] = true
 
 	// Also update Lockbox so the user can actually use the group
 	upk, _ := crypto.UnmarshalEncapsulationKey(user.EncKey)
@@ -609,17 +619,17 @@ func JoinUsersGroup(t *testing.T, raftNode *RaftNode, groupID string, userID str
 	// In tests, the admin has access to everything.
 	// But wait, JoinUsersGroup doesn't have the group DK.
 	// We stored it in 'system' bucket in BootstrapBackbone!
-	var gdkBytes []byte
+	var seed []byte
 	raftNode.FSM.db.View(func(tx *bolt.Tx) error {
-		gdkBytes, _ = raftNode.FSM.Get(tx, []byte("system"), []byte("test_users_dk"))
+		seed, _ = raftNode.FSM.Get(tx, []byte("system"), []byte("test_users_seed"))
 		return nil
 	})
 
-	g.Lockbox.AddRecipient(userID, upk, gdkBytes)
+	target := ComputeMemberHMAC(g.ID, userID)
+	g.Lockbox.AddRecipient(target, upk, seed, g.Epoch)
 
 	g.Version++
-	g.Nonce = make([]byte, 16)
-	rand.Read(g.Nonce)
+	g.Nonce = GenerateNonce()
 	g.SignerID = adminID
 	g.Signature = adminSK.Sign(g.Hash())
 
@@ -633,4 +643,67 @@ func JoinUsersGroup(t *testing.T, raftNode *RaftNode, groupID string, userID str
 	if err := raftNode.Raft.Apply(cb, 10*time.Second).Error(); err != nil {
 		t.Fatalf("JoinUsersGroup Apply failed: %v", err)
 	}
+}
+
+func DumpFSM(raftNode *RaftNode) {
+	fmt.Printf("\n--- FSM DUMP ---\n")
+	raftNode.FSM.db.View(func(tx *bolt.Tx) error {
+		// 1. Groups
+		fmt.Printf("\n[Groups]\n")
+		gb := []byte("groups")
+		b := tx.Bucket(gb)
+		if b != nil {
+			b.ForEach(func(k, v []byte) error {
+				plain, err := raftNode.FSM.DecryptValue(gb, v)
+				if err != nil {
+					fmt.Printf("ID: %s (ENCRYPTED)\n", string(k))
+					return nil
+				}
+				var g Group
+				json.Unmarshal(plain, &g)
+				lbKeys := []string{}
+				for lk, entry := range g.Lockbox {
+					status := "KEM"
+					if len(entry.KEMCiphertext) == 0 {
+						status = "NO-KEM"
+					}
+					lbKeys = append(lbKeys, fmt.Sprintf("%s(%s)", lk, status))
+				}
+				fmt.Printf("ID: %s, GID: %d, Owner: %s, Signer: %s, Epoch: %d, Lockbox Size: %d, Recipients: %v\n", g.ID, g.GID, g.OwnerID, g.SignerID, g.Epoch, len(g.Lockbox), lbKeys)
+				return nil
+			})
+		}
+
+		// 2. Inodes
+		fmt.Printf("\n[Inodes]\n")
+		ib := []byte("inodes")
+		b = tx.Bucket(ib)
+		if b != nil {
+			b.ForEach(func(k, v []byte) error {
+				plain, err := raftNode.FSM.DecryptValue(ib, v)
+				if err != nil {
+					fmt.Printf("ID: %s (ENCRYPTED)\n", string(k))
+					return nil
+				}
+				var i Inode
+				json.Unmarshal(plain, &i)
+				lbKeys := []string{}
+				for lk := range i.Lockbox {
+					lbKeys = append(lbKeys, lk)
+				}
+				// Try to get filename if possible (some inodes are rooted at /)
+				name := "???"
+				if len(i.Links) > 0 {
+					for n := range i.Links {
+						name = n
+						break
+					}
+				}
+				fmt.Printf("ID: %s, Name: %s, Type: %v, Owner: %s, Group: %s, Mode: %o, Lockbox Size: %d, Recipients: %v\n", i.ID, name, i.Type, i.OwnerID, i.GroupID, i.Mode, len(i.Lockbox), lbKeys)
+				return nil
+			})
+		}
+		return nil
+	})
+	fmt.Printf("--- END FSM DUMP ---\n\n")
 }

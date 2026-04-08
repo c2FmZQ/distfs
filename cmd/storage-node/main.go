@@ -320,9 +320,17 @@ func main() {
 									if err != nil {
 										log.Fatalf("failed to generate cluster sign key: %v", err)
 									}
+									sk, err := rn.FSM.SystemKey()
+									if err != nil {
+										log.Fatalf("failed to get system key for bootstrap: %v", err)
+									}
+									encPriv, err := crypto.EncryptDEM(sk, csk.MarshalPrivate())
+									if err != nil {
+										log.Fatalf("failed to encrypt cluster sign key: %v", err)
+									}
 									keyData := metadata.ClusterSignKey{
 										Public:           csk.Public(),
-										EncryptedPrivate: csk.MarshalPrivate(),
+										EncryptedPrivate: encPriv,
 									}
 									data, _ := json.Marshal(keyData)
 									cmd := metadata.LogCommand{Type: metadata.CmdSetClusterSignKey, Data: data}

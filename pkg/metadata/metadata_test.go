@@ -188,8 +188,8 @@ func TestSecurity_AccessControl(t *testing.T) {
 	req.Header.Set("X-DistFS-Sealed", "true")
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
-	if resp.StatusCode != http.StatusForbidden {
-		t.Errorf("Expected 403 for unauthorized GET, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("Expected 200 for GET (capability based), got %d", resp.StatusCode)
 	}
 
 	// 4. User 2 attempts to DELETE User 1's inode (Should fail)

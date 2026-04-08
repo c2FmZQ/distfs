@@ -124,18 +124,15 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 	return fsm, nil
 }
 
-func (fsm *MetadataFSM) systemKey() []byte {
+func (fsm *MetadataFSM) SystemKey() ([]byte, error) {
 	fsm.mu.RLock()
 	defer fsm.mu.RUnlock()
 	if len(fsm.clusterSecret) == 0 {
-		// Return a distinct marker or panic?
-		// If we use an empty key, it corrupts. If we panic, it crashes.
-		// Crashing is better than silent corruption during Raft apply.
-		panic("FSM: clusterSecret is uninitialized; cannot generate systemKey")
+		return nil, fmt.Errorf("cluster secret not initialized")
 	}
 	mac := hmac.New(sha256.New, fsm.clusterSecret)
 	mac.Write([]byte("FSM_SYSTEM_V1"))
-	return mac.Sum(nil)
+	return mac.Sum(nil), nil
 }
 
 func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error) {
@@ -147,7 +144,11 @@ func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error)
 		return data, nil
 	}
 	if sBuck == "system" {
-		ct, err := crypto.EncryptDEM(fsm.systemKey(), data)
+		sk, err := fsm.SystemKey()
+		if err != nil {
+			return nil, err
+		}
+		ct, err := crypto.EncryptDEM(sk, data)
 		if err != nil {
 			return nil, err
 		}
@@ -180,7 +181,11 @@ func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error)
 	}
 	gen := binary.BigEndian.Uint32(data[:4])
 	if gen == 0 {
-		return crypto.DecryptDEM(fsm.systemKey(), data[4:])
+		sk, err := fsm.SystemKey()
+		if err != nil {
+			return nil, err
+		}
+		return crypto.DecryptDEM(sk, data[4:])
 	}
 	fsm.mu.RLock()
 	kr := fsm.keyRing
@@ -1220,7 +1225,10 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte, sessionID s
 	fsm.updateGroupIndices(tx, &update, &existing)
 
 	encoded, _ := json.Marshal(update)
-	return fsm.Put(tx, []byte("groups"), []byte(update.ID), encoded)
+	if err := fsm.Put(tx, []byte("groups"), []byte(update.ID), encoded); err != nil {
+		return err
+	}
+	return &update
 }
 
 func (fsm *MetadataFSM) checkGroupManagementPermission(tx *bolt.Tx, g *Group, signerID string) error {
@@ -1231,9 +1239,9 @@ func (fsm *MetadataFSM) checkGroupManagementPermission(tx *bolt.Tx, g *Group, si
 
 	// B. Self-Management (magic string)
 	if g.OwnerID == SelfOwnedGroup {
-		// Verify requester is a member of the group itself
-		target := ComputeMemberHMAC(g.SignKey, signerID)
-		if g.MembersHMAC != nil && g.MembersHMAC[target] {
+		// Verify requester is a member of the group itself by checking the Lockbox (HMAC)
+		target := ComputeMemberHMAC(g.ID, signerID)
+		if _, ok := g.Lockbox[target]; ok {
 			return nil
 		}
 		return fmt.Errorf("signer %s is not a member of self-owned group %s", signerID, g.ID)
@@ -1247,9 +1255,10 @@ func (fsm *MetadataFSM) checkGroupManagementPermission(tx *bolt.Tx, g *Group, si
 		var owningGroup Group
 		json.Unmarshal(plain, &owningGroup)
 
-		// Check if signer is a member/owner of the owning group
-		target := ComputeMemberHMAC(owningGroup.SignKey, signerID)
-		if (owningGroup.MembersHMAC != nil && owningGroup.MembersHMAC[target]) || owningGroup.OwnerID == signerID {
+		// Check if signer is a member/owner of the owning group (HMAC)
+		target := ComputeMemberHMAC(owningGroup.ID, signerID)
+		_, isMember := owningGroup.Lockbox[target]
+		if isMember || owningGroup.OwnerID == signerID {
 			return nil
 		}
 	}
@@ -1265,8 +1274,8 @@ func (fsm *MetadataFSM) updateGroupIndices(tx *bolt.Tx, group, existing *Group) 
 		return err
 	}
 	if existing != nil {
-		for hmac := range existing.MembersHMAC {
-			if !group.MembersHMAC[hmac] {
+		for userID := range existing.Lockbox {
+			if _, ok := group.Lockbox[userID]; !ok {
 				// ...
 			}
 		}
@@ -1499,6 +1508,25 @@ func (fsm *MetadataFSM) executeRemoveNode(tx *bolt.Tx, data []byte) interface{} 
 }
 
 func (fsm *MetadataFSM) saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
+	// Phase 71: Server Notarization (Option A)
+	// Apply a cluster-wide signature to bind the inode to the FSM timeline.
+	plain, err := fsm.Get(tx, []byte("system"), []byte("cluster_sign_key"))
+	if err == nil && plain != nil {
+		var key ClusterSignKey
+		if err := json.Unmarshal(plain, &key); err == nil {
+			sk, err := fsm.SystemKey()
+			if err == nil {
+				decPriv, err := crypto.DecryptDEM(sk, key.EncryptedPrivate)
+				if err == nil {
+					sk := crypto.UnmarshalIdentityKey(decPriv)
+					if sk != nil {
+						inode.ClusterSig = sk.Sign(inode.ManifestHash())
+					}
+				}
+			}
+		}
+	}
+
 	const maxManifest = 100
 	if len(inode.ChunkManifest) > maxManifest {
 		pages := (len(inode.ChunkManifest) + maxManifest - 1) / maxManifest
@@ -1977,9 +2005,10 @@ func (fsm *MetadataFSM) IsUserInGroup(userID, groupID string) (bool, error) {
 		return false, err
 	}
 
-	// 1. Direct Membership
-	target := ComputeMemberHMAC(group.SignKey, userID)
-	if group.MembersHMAC != nil && group.MembersHMAC[target] {
+	// 1. Direct Membership (Anonymous lookup via HMAC)
+	target := ComputeMemberHMAC(group.ID, userID)
+	_, ok := group.Lockbox[target]
+	if ok {
 		return true, nil
 	}
 
@@ -2059,8 +2088,8 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 			if g.OwnerID == userID {
 				setRole(g.ID, RoleOwner)
 			} else {
-				target := ComputeMemberHMAC(g.SignKey, userID)
-				if g.MembersHMAC[target] {
+				target := ComputeMemberHMAC(g.ID, userID)
+				if _, ok := g.Lockbox[target]; ok {
 					setRole(g.ID, RoleMember)
 				}
 			}
@@ -2093,7 +2122,8 @@ func (fsm *MetadataFSM) GetUserGroups(userID string) ([]GroupListEntry, error) {
 				json.Unmarshal(plain, &g)
 				entries = append(entries, GroupListEntry{
 					ID: g.ID, OwnerID: g.OwnerID, Role: role, EncKey: g.EncKey,
-					Lockbox: g.Lockbox, IsSystem: g.IsSystem, Usage: g.Usage, Quota: g.Quota,
+					Lockbox: g.Lockbox, AnonymousLockbox: g.AnonymousLockbox,
+					Epoch: g.Epoch, IsSystem: g.IsSystem, Usage: g.Usage, Quota: g.Quota,
 					ClientBlob: g.ClientBlob,
 				})
 			}

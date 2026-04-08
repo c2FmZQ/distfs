@@ -27,7 +27,7 @@ $CLI ls /users/fuse-user/subdir | grep -q "file3.txt"
 
 # 4. ln
 echo "Testing ln..."
-$CLI ln --s /users/fuse-user/file1.txt /users/fuse-user/link1
+$CLI ln -s /users/fuse-user/file1.txt /users/fuse-user/link1
 $CLI stat /users/fuse-user/link1 | grep -q "symbolic link"
 $CLI ln /users/fuse-user/file1.txt /users/fuse-user/link2
 $CLI stat /users/fuse-user/link2 | grep -q "Links: 2"
@@ -43,14 +43,14 @@ $CLI tail -n 1 /users/fuse-user/lines.txt | grep -q "line3"
 
 # 6. du, df
 echo "Testing du, df..."
-$CLI du --h /users/fuse-user
-$CLI df --h | grep -q "distfs"
+$CLI du --human /users/fuse-user
+$CLI df --human | grep -q "distfs"
 
 # 7. facl
 echo "Testing facl..."
 $CLI getfacl /users/fuse-user/file1.txt
 # Share with public-user (using registry username)
-$CLI setfacl --m u:public-user:r-- /users/fuse-user/file1.txt
+$CLI setfacl -m u:public-user:r-- /users/fuse-user/file1.txt
 $CLI getfacl /users/fuse-user/file1.txt | grep -q "user:.*:r--"
 
 echo "FILEUTILS E2E PASSED"
