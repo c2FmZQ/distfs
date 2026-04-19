@@ -11,7 +11,6 @@ import (
 	"errors"
 	"hash/fnv"
 	"io"
-	"log"
 	"os"
 	"sync"
 	"syscall"
@@ -169,7 +168,7 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 	if d.inode == nil {
 		if d.isRoot {
 			if inode, key, err := d.fs.client.resolvePath(ctx, "/"); err != nil {
-				log.Printf("ResolvePath: %v", err)
+				logger.Debugf("ResolvePath: %v", err)
 			} else {
 				d.inode = inode
 				d.key = key
@@ -1046,7 +1045,7 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 		if len(page) == chunkSize {
 			entry, err := h.file.fs.client.uploadChunkData(ctx, h.file.inode.ID, h.file.key, uint64(pageIdx), page)
 			if err != nil {
-				log.Printf("Incremental upload failed: %v", err)
+				logger.Debugf("Incremental upload failed: %v", err)
 				return mapError(err)
 			}
 			h.stagingManifest[pageIdx] = entry
@@ -1096,7 +1095,7 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		}
 		entry, err := h.file.fs.client.uploadChunkData(ctx, inodeID, fileKey, uint64(idx), page)
 		if err != nil {
-			log.Printf("FUSE Flush upload failed (idx=%d): %v", idx, err)
+			logger.Debugf("FUSE Flush upload failed (idx=%d): %v", idx, err)
 			return mapError(err)
 		}
 		if h.stagingManifest == nil {
@@ -1145,7 +1144,7 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		})
 
 		if err != nil {
-			log.Printf("FUSE Flush commit failed: %v", err)
+			logger.Debugf("FUSE Flush commit failed: %v", err)
 			// Restore staging on failure
 			for k, v := range staging {
 				h.stagingManifest[k] = v
@@ -1244,7 +1243,7 @@ func setAttr(ctx context.Context, c *Client, inode *metadata.Inode, inodeKey []b
 		MTime:   mtime,
 	})
 	if err != nil {
-		log.Printf("FUSE Setattr failed: %v", err)
+		logger.Debugf("FUSE Setattr failed: %v", err)
 		return nil, mapError(err)
 	}
 

@@ -55,28 +55,12 @@ func (c *Client) RegisterUser(ctx context.Context, jwt string, signKeyPub, encKe
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/user/register", bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to create registration request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("registration failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("registration failed: %d %s", resp.StatusCode, string(b))
-	}
-
 	var user struct {
 		ID string `json:"id"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&user); err != nil {
-		return "", fmt.Errorf("failed to decode response: %w", err)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/user/register", body, requestOptions{skipAuth: true, skipControl: true, retry: true}, &user)
+	if err != nil {
+		return "", err
 	}
 	return user.ID, nil
 }
@@ -145,27 +129,16 @@ func PerformUnifiedOnboarding(ctx context.Context, opts OnboardingOptions) error
 		return err
 	}
 
-	httpClient := NewClient(opts.ServerURL).
+	distfsClient := NewClient(opts.ServerURL).
 		WithDisableDoH(opts.DisableDoH).
-		WithAllowInsecure(opts.AllowInsecure).httpClient()
+		WithAllowInsecure(opts.AllowInsecure)
 
-	// Fetch Server Key
-	req, err := http.NewRequestWithContext(ctx, "GET", opts.ServerURL+"/v1/meta/key", nil)
-	if err != nil {
-		return fmt.Errorf("failed to create server key request: %w", err)
-	}
-	resp, err := httpClient.Do(req)
+	httpClient := distfsClient.httpClient()
+
+	// Fetch Server Key (uses retry logic internally)
+	sKey, err := distfsClient.GetServerKeyBytes(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to fetch server key: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("failed to fetch server key: status %d: %s", resp.StatusCode, string(b))
-	}
-	sKey, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("failed to read server key: %w", err)
 	}
 	svKey, err := crypto.UnmarshalEncapsulationKey(sKey)
 	if err != nil {

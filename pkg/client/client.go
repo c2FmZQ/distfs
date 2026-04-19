@@ -30,13 +30,11 @@ import (
 	"io"
 	"io/fs"
 	"iter"
-	"log"
 	mrand "math/rand"
 	"net"
 	"net/http"
 	"net/url"
-	"path/filepath"
-	"strconv"
+	stdpath "path"
 	"strings"
 	"sync"
 	"time"
@@ -247,22 +245,13 @@ func (c *Client) getServerSignKey(ctx context.Context) ([]byte, error) {
 		return sk, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/key/sign", nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/sign", nil, requestOptions{skipAuth: true, skipControl: true, retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	defer bodyRC.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := c.unsealResponse(ctx, resp)
-		return nil, c.newAPIError(resp, body)
-	}
-
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	b, err := io.ReadAll(io.LimitReader(bodyRC, 1024*1024)) // 1MB limit
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -282,22 +271,13 @@ func (c *Client) getClusterSignKey(ctx context.Context) ([]byte, error) {
 		return sk, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/key/cluster/sign", nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/cluster/sign", nil, requestOptions{skipAuth: true, skipControl: true, retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	defer bodyRC.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := c.unsealResponse(ctx, resp)
-		return nil, c.newAPIError(resp, body)
-	}
-
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	b, err := io.ReadAll(io.LimitReader(bodyRC, 1024*1024)) // 1MB limit
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -331,14 +311,8 @@ func (c *Client) getGroupEpochSeedFromGroup(ctx context.Context, group *metadata
 	// 1. Try Personal Access (HMAC for Phase 71 privacy)
 	target := c.computeMemberHMAC(group.ID, c.userID)
 
-	if entry, ok := group.Lockbox[target]; ok {
-		if len(entry.KEMCiphertext) > 0 {
-			secret, err := c.decKey.Decapsulate(entry.KEMCiphertext)
-			if err != nil {
-				return nil, fmt.Errorf("failed to decapsulate group lockbox entry: %w", err)
-			}
-			return crypto.DecryptDEM(secret, entry.DEMCiphertext)
-		}
+	if key, err := group.Lockbox.GetFileKey(target, c.decKey); err == nil {
+		return key, nil
 	}
 
 	// 2. Try Anonymous Access (Trial Decryption of AnonymousLockbox)
@@ -359,10 +333,11 @@ func (c *Client) getGroupEpochSeedFromGroup(ctx context.Context, group *metadata
 	// 3. Try Group-based Access (Nested Groups)
 	// If the group is owned by another group, we might have access via the owning group ID
 	if group.OwnerID != "" && group.OwnerID != metadata.SelfOwnedGroup {
-		if entry, ok := group.Lockbox[group.OwnerID]; ok {
+		target := c.computeMemberHMAC(group.ID, group.OwnerID)
+		if entry, ok := group.Lockbox[target]; ok {
 			gk, gerr := c.getGroupPrivateKey(ctx, group.OwnerID, entry.Epoch)
 			if gerr == nil {
-				key, err := group.Lockbox.GetFileKey(group.OwnerID, gk)
+				key, err := group.Lockbox.GetFileKey(target, gk)
 				if err == nil {
 					return key, nil
 				}
@@ -391,22 +366,13 @@ func (c *Client) getServerKey(ctx context.Context) (*mlkem.EncapsulationKey768, 
 		return sk, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/key", nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key", nil, requestOptions{skipAuth: true, skipControl: true, retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
+	defer bodyRC.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := c.unsealResponse(ctx, resp)
-		return nil, c.newAPIError(resp, body)
-	}
-
-	b, err := io.ReadAll(io.LimitReader(resp.Body, 1024*1024)) // 1MB limit
+	b, err := io.ReadAll(io.LimitReader(bodyRC, 1024*1024)) // 1MB limit
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -590,6 +556,11 @@ type InodeUpdateFunc func(*metadata.Inode) error
 // GroupUpdateFunc is a callback used to modify a group during an atomic update.
 type GroupUpdateFunc func(*metadata.Group) error
 
+type groupKeyCacheID struct {
+	id    string
+	epoch uint32
+}
+
 // Client is the primary entry point for interacting with a DistFS cluster.
 // It handles end-to-end encryption, chunking, and metadata coordination.
 type Client struct {
@@ -609,8 +580,8 @@ type Client struct {
 
 	worldPublic   *mlkem.EncapsulationKey768
 	worldPrivate  *mlkem.DecapsulationKey768
-	groupKeys     map[string]*mlkem.DecapsulationKey768
-	groupSignKeys map[string]*crypto.IdentityKey
+	groupKeys     map[groupKeyCacheID]*mlkem.DecapsulationKey768
+	groupSignKeys map[groupKeyCacheID]*crypto.IdentityKey
 
 	userCache            map[string]*metadata.User
 	verifiedGroupCache   map[string]*metadata.Group
@@ -669,16 +640,16 @@ func NewClient(serverAddr string) *Client {
 		keyMu:                &sync.RWMutex{},
 		pathCache:            make(map[string]pathCacheEntry),
 		pathMu:               &sync.RWMutex{},
-		groupKeys:            make(map[string]*mlkem.DecapsulationKey768),
-		groupSignKeys:        make(map[string]*crypto.IdentityKey),
+		groupKeys:            make(map[groupKeyCacheID]*mlkem.DecapsulationKey768),
+		groupSignKeys:        make(map[groupKeyCacheID]*crypto.IdentityKey),
 		userCache:            make(map[string]*metadata.User),
 		verifiedGroupCache:   make(map[string]*metadata.Group),
 		unverifiedGroupCache: make(map[string]*metadata.Group),
 		cacheMu:              &sync.RWMutex{},
 		sessionMu:            &sync.RWMutex{},
 		loginMu:              &sync.Mutex{},
-		controlSem:           make(chan struct{}, 1024), // High throughput for metadata
-		dataSem:              make(chan struct{}, 64),   // Limit chunk I/O
+		controlSem:           make(chan struct{}, 128), // High throughput for metadata
+		dataSem:              make(chan struct{}, 64),  // Limit chunk I/O
 		mutationMu:           &sync.Mutex{},
 		mutationLocks:        make(map[string]*sync.Mutex),
 		rootID:               metadata.RootID,
@@ -876,23 +847,9 @@ func (c *Client) Login(ctx context.Context) error {
 	// 1. Get Challenge
 	reqData := metadata.AuthChallengeRequest{UserID: c.userID}
 	b, _ := json.Marshal(reqData)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/auth/challenge", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := c.unsealResponse(ctx, resp)
-		return c.newAPIError(resp, body)
-	}
-
 	var challengeRes metadata.AuthChallengeResponse
-	if err := json.NewDecoder(resp.Body).Decode(&challengeRes); err != nil {
+	_, _, err := c.doRequest(ctx, "POST", "/v1/auth/challenge", b, requestOptions{skipAuth: true, skipControl: true, retry: true}, &challengeRes)
+	if err != nil {
 		return err
 	}
 
@@ -922,24 +879,9 @@ func (c *Client) Login(ctx context.Context) error {
 	}
 	b, _ = json.Marshal(solve)
 
-	req, err = http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/login", bytes.NewReader(b))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err = c.httpCli.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := c.unsealResponse(ctx, resp)
-		return c.newAPIError(resp, body)
-	}
-
 	var res metadata.SessionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
+	_, _, err = c.doRequest(ctx, "POST", "/v1/login", b, requestOptions{skipAuth: true, skipControl: true, retry: true}, &res)
+	if err != nil {
 		return err
 	}
 
@@ -960,23 +902,23 @@ func (c *Client) Login(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) getPathCache(path string) (pathCacheEntry, bool) {
+func (c *Client) getPathCache(fullPath string) (pathCacheEntry, bool) {
 	c.pathMu.RLock()
 	defer c.pathMu.RUnlock()
-	entry, ok := c.pathCache[path]
+	entry, ok := c.pathCache[fullPath]
 	return entry, ok
 }
 
-func (c *Client) putPathCache(path string, entry pathCacheEntry) {
+func (c *Client) putPathCache(fullPath string, entry pathCacheEntry) {
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
-	c.pathCache[path] = entry
+	c.pathCache[fullPath] = entry
 }
 
-func (c *Client) invalidatePathCache(path string) {
+func (c *Client) invalidatePathCache(fullPath string) {
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
-	delete(c.pathCache, path)
+	delete(c.pathCache, fullPath)
 }
 
 func (c *Client) invalidatePathCacheByID(id string) {
@@ -1062,6 +1004,9 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 		toSign := make([]byte, 8+len(payload))
 		copy(toSign[0:8], tsBytes)
 		copy(toSign[8:], payload)
+		if c.signKey == nil {
+			return errors.New("client identity required for sealed requests")
+		}
 		sig := c.signKey.Sign(toSign)
 
 		inner := make([]byte, 8+len(sig)+len(payload))
@@ -1096,6 +1041,9 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 		toSign := make([]byte, 8+len(payload))
 		copy(toSign[0:8], tsBytes)
 		copy(toSign[8:], payload)
+		if c.signKey == nil {
+			return errors.New("client identity required for sealed requests")
+		}
 		sig := c.signKey.Sign(toSign)
 
 		inner := make([]byte, 8+len(sig)+len(payload))
@@ -1233,49 +1181,9 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 	c.allocMu.RUnlock()
 
 	var nodes []metadata.Node
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/meta/allocate", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, []byte("{}")); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-		return json.NewDecoder(body).Decode(&nodes)
-	})
-
+	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/allocate", nil, requestOptions{sealed: true, unseal: true, retry: true}, &nodes)
 	if err != nil {
-		return nil, fmt.Errorf("node allocation failed after retries: %w", err)
+		return nil, err
 	}
 
 	c.allocMu.Lock()
@@ -1294,48 +1202,18 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 	}
 	data, _ := json.Marshal(reqData)
 
-	var token string
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
+	// Special case: Token is raw bytes, not JSON
+	bodyRC, _, err := c.doRequest(ctx, "POST", "/v1/meta/token", data, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	if err != nil {
+		return "", err
+	}
+	defer bodyRC.Close()
 
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/meta/token", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		respBytes, err := io.ReadAll(body)
-		if err != nil {
-			return err
-		}
-		token = base64.StdEncoding.EncodeToString(respBytes)
-		return nil
-	})
-
-	return token, err
+	respBytes, err := io.ReadAll(bodyRC)
+	if err != nil {
+		return "", err
+	}
+	return base64.StdEncoding.EncodeToString(respBytes), nil
 }
 
 func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes []metadata.Node, token string) error {
@@ -1493,46 +1371,14 @@ func (c *Client) cleanupChunks(ctx context.Context, inodeID string, chunks []met
 
 // GetNodes returns all storage nodes in the cluster.
 func (c *Client) getNodes(ctx context.Context) ([]metadata.Node, error) {
-	var nodes []metadata.Node
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		// This route requires X-Raft-Secret if not authenticated as admin,
-		// but since we are a user client, we use the public key discovery or similar.
-		// Actually, let's use the /v1/node GET route which might be public or internal.
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/node", nil)
-		if err != nil {
-			return err
-		}
-		// Try with session token first
-		if sess := c.getSessionToken(); sess != "" {
-			req.Header.Set("Session-Token", sess)
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		var res struct {
-			Nodes []metadata.Node `json:"nodes"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			return err
-		}
-		nodes = res.Nodes
-		return nil
-	})
-	return nodes, err
+	var res struct {
+		Nodes []metadata.Node `json:"nodes"`
+	}
+	_, _, err := c.doRequest(ctx, "GET", "/v1/node", nil, requestOptions{skipAuth: true, skipControl: true, retry: true}, &res)
+	if err != nil {
+		return nil, err
+	}
+	return res.Nodes, nil
 }
 
 var downloadBufPool = sync.Pool{
@@ -1710,38 +1556,7 @@ func (e *APIError) ToFS() error {
 func (c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEntry, error] {
 	return func(yield func(metadata.GroupListEntry, error) bool) {
 		var resp metadata.GroupListResponse
-		err := c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
-			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/user/groups", nil)
-			if err != nil {
-				return err
-			}
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-
-			res, err := c.httpCli.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, res)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if res.StatusCode != http.StatusOK {
-				body, _ := c.unsealResponse(ctx, res)
-				return c.newAPIError(res, body)
-			}
-
-			return json.NewDecoder(body).Decode(&resp)
-		})
-
+		_, _, err := c.doRequest(ctx, "GET", "/v1/user/groups", nil, requestOptions{unseal: true, retry: true}, &resp)
 		if err != nil {
 			yield(metadata.GroupListEntry{}, err)
 			return
@@ -1831,38 +1646,7 @@ func (c *Client) GetQuota(ctx context.Context) (metadata.UserQuota, metadata.Use
 
 func (c *Client) getUserRaw(ctx context.Context, id string) (*metadata.User, error) {
 	var user metadata.User
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/user/"+id, nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return fmt.Errorf("HTTP %d", resp.StatusCode)
-		}
-
-		return json.NewDecoder(body).Decode(&user)
-	})
-
+	_, _, err := c.doRequest(ctx, "GET", "/v1/user/"+id, nil, requestOptions{unseal: true, retry: true}, &user)
 	if err != nil {
 		return nil, err
 	}
@@ -2181,52 +1965,12 @@ func (c *Client) applyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 	}
 
 	var results []json.RawMessage
-	err = c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/meta/batch", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode == http.StatusConflict {
-			return metadata.ErrConflict
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-
-		if err := json.NewDecoder(body).Decode(&results); err != nil {
-			return err
-		}
-
-		c.clearPathCache()
-		return nil
-	})
+	_, _, err = c.doRequest(ctx, "POST", "/v1/meta/batch", data, requestOptions{sealed: true, unseal: true, retry: true, conflict: false}, &results)
 
 	if err != nil {
 		return nil, err
 	}
+	c.clearPathCache()
 	return results, nil
 }
 
@@ -2277,84 +2021,63 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 	ctx, state, created := withVerificationState(ctx)
 
 	var inode metadata.Inode
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/inode/"+id, nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		if err := json.NewDecoder(body).Decode(&inode); err != nil {
-			return err
-		}
-
-		// Phase 31: Root Anchoring
-		if id == c.rootID {
-			c.rootMu.Lock()
-			owner := c.rootOwner
-			version := c.rootVersion
-
-			if owner != "" && inode.OwnerID != owner {
-				c.rootMu.Unlock()
-				return fmt.Errorf("ROOT COMPROMISE DETECTED: expected owner %s, got %s", owner, inode.OwnerID)
-			}
-			if version > 0 && inode.Version < version {
-				c.rootMu.Unlock()
-				return fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", version, inode.Version)
-			}
-
-			// Update anchor
-			c.rootOwner = inode.OwnerID
-			c.rootVersion = inode.Version
-			needKeys := len(c.rootOwnerPK) == 0
-			c.rootMu.Unlock()
-
-			if needKeys {
-				// TOFU: Capture owner's keys
-				user, err := c.getUserInternal(ctx, inode.OwnerID, true)
-				if err == nil {
-					c.rootMu.Lock()
-					c.rootOwnerPK = user.SignKey
-					c.rootOwnerEK = user.EncKey
-					c.rootMu.Unlock()
-				}
-			}
-		}
-
-		return nil
-	})
-
+	_, _, err := c.doRequest(ctx, "GET", "/v1/meta/inode/"+id, nil, requestOptions{unseal: true, retry: true}, &inode)
 	if err != nil {
 		return nil, err
+	}
+
+	// Phase 31: Root Anchoring
+	if id == c.rootID {
+		c.rootMu.Lock()
+		owner := c.rootOwner
+		version := c.rootVersion
+
+		if owner != "" && inode.OwnerID != owner {
+			c.rootMu.Unlock()
+			return nil, fmt.Errorf("ROOT COMPROMISE DETECTED: expected owner %s, got %s", owner, inode.OwnerID)
+		}
+		if version > 0 && inode.Version < version {
+			c.rootMu.Unlock()
+			return nil, fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", version, inode.Version)
+		}
+
+		// Update anchor
+		c.rootOwner = inode.OwnerID
+		c.rootVersion = inode.Version
+		needKeys := len(c.rootOwnerPK) == 0
+		c.rootMu.Unlock()
+
+		if needKeys {
+			// TOFU: Capture owner's keys
+			user, err := c.getUserInternal(ctx, inode.OwnerID, true)
+			if err == nil {
+				c.rootMu.Lock()
+				c.rootOwnerPK = user.SignKey
+				c.rootOwnerEK = user.EncKey
+				c.rootMu.Unlock()
+			}
+		}
 	}
 
 	// Phase 31: Verification
 	if verify {
 		if err := c.verifyInode(ctx, &inode); err != nil {
 			return nil, err
+		}
+	}
+
+	// 1. Decrypt ClientBlob if present
+	if len(inode.ClientBlob) > 0 {
+		if fileKey, err := c.unlockInode(ctx, &inode); err == nil {
+			inode.SetFileKey(fileKey)
+			var blob metadata.InodeClientBlob
+			if err := c.decryptInodeClientBlob(inode.ClientBlob, fileKey, &blob); err == nil {
+				inode.SetSymlinkTarget(blob.SymlinkTarget)
+				inode.SetInlineData(blob.InlineData)
+				inode.SetMTime(blob.MTime)
+				inode.SetUID(blob.UID)
+				inode.SetGID(blob.GID)
+			}
 		}
 	}
 
@@ -2390,40 +2113,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 		}
 
 		var chunkInodes []*metadata.Inode
-		err = c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
-			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/meta/inodes", nil)
-			if err != nil {
-				return err
-			}
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-			if err := c.sealBody(ctx, req, data); err != nil {
-				return err
-			}
-
-			resp, err := c.httpCli.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := c.unsealResponse(ctx, resp)
-				return c.newAPIError(resp, body)
-			}
-			return json.NewDecoder(body).Decode(&chunkInodes)
-		})
-
+		_, _, err = c.doRequest(ctx, "POST", "/v1/meta/inodes", data, requestOptions{sealed: true, unseal: true, retry: true}, &chunkInodes)
 		if err != nil {
 			return nil, err
 		}
@@ -3190,9 +2880,9 @@ func (c *Client) readFile(ctx context.Context, id string, fileKey []byte) (io.Re
 	return c.newReader(ctx, id, fileKey)
 }
 
-func (c *Client) OpenBlobRead(ctx context.Context, path string) (io.ReadCloser, error) {
+func (c *Client) OpenBlobRead(ctx context.Context, fullPath string) (io.ReadCloser, error) {
 	// 1. Resolve path to Inode
-	inode, key, err := c.resolvePath(ctx, path)
+	inode, key, err := c.resolvePath(ctx, fullPath)
 	if err != nil {
 		return nil, err
 	}
@@ -3227,15 +2917,15 @@ func (c *Client) OpenBlobRead(ctx context.Context, path string) (io.ReadCloser, 
 	return nil, err
 }
 
-func (c *Client) OpenBlobWrite(ctx context.Context, path string) (io.WriteCloser, error) {
-	return c.OpenBlobWriteWithLease(ctx, path, "")
+func (c *Client) OpenBlobWrite(ctx context.Context, fullPath string) (io.WriteCloser, error) {
+	return c.OpenBlobWriteWithLease(ctx, fullPath, "")
 }
 
 // OpenBlobWriteWithLease creates a writer for a blob.
 // If leaseNonce is empty, it will acquire a new exclusive path lease.
-func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseNonce string) (io.WriteCloser, error) {
+func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, leaseNonce string) (io.WriteCloser, error) {
 	// 1. Resolve Path and compute PathID
-	dir, fileName := filepath.Split(strings.TrimRight(path, "/"))
+	dir, fileName := stdpath.Split(strings.TrimRight(fullPath, "/"))
 	if dir == "" {
 		dir = "/"
 	}
@@ -3252,7 +2942,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 	groupID := pInode.GroupID
 
 	pathID := "path:" + parentID + ":" + nameHMAC
-	if path == "/" {
+	if fullPath == "/" {
 		pathID = "path:root:" + c.rootID
 	}
 
@@ -3315,7 +3005,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		Version: 1,
 	}
 	inode.SetFileKey(fileKey)
-	// Acquire lease first to prevent concurrent writers on this path.
+	// Acquire lease first to prevent concurrent writers on this stdpath.
 	nonce := leaseNonce
 	if nonce == "" {
 		nonce = generateNonce()
@@ -3343,7 +3033,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, path string, leaseN
 		name:       fileName,
 		nameHMAC:   nameHMAC,
 		swapMode:   true,
-		swapPath:   path,
+		swapPath:   fullPath,
 		pathID:     pathID,
 		oldInodeID: oldInodeID,
 		isNew:      true, // It's "new" because it's a new InodeID
@@ -3568,7 +3258,7 @@ func (w *FileWriter) Close() error {
 		leaseTarget = w.pathID
 	}
 	if releaseErr := w.client.releaseLeases(w.ctx, []string{leaseTarget}, w.leaseNonce); releaseErr != nil {
-		log.Printf("Warning: Failed to release lease for %s: %v", leaseTarget, releaseErr)
+		logger.Debugf("Warning: Failed to release lease for %s: %v", leaseTarget, releaseErr)
 	}
 
 	if err == nil {
@@ -4228,7 +3918,7 @@ func (c *Client) openManyForUpdate(ctx context.Context, names []string, data []a
 	return func(commit bool) {
 		if commit {
 			if err := c.saveDataFiles(ctx, names, data); err != nil {
-				log.Printf("Failed to save files during transactional update: %v", err)
+				logger.Debugf("Failed to save files during transactional update: %v", err)
 			}
 		}
 		c.releaseLeases(ctx, pathIDs, nonce)
@@ -4324,9 +4014,9 @@ func (c *Client) DumpInode(ctx context.Context, id string) (string, error) {
 	return string(b), nil
 }
 
-// EnsureFileKey ensures the client has the decryption key for the given path.
-func (c *Client) EnsureFileKey(ctx context.Context, path string) error {
-	inode, _, err := c.resolvePath(ctx, path)
+// EnsureFileKey ensures the client has the decryption key for the given stdpath.
+func (c *Client) EnsureFileKey(ctx context.Context, fullPath string) error {
+	inode, _, err := c.resolvePath(ctx, fullPath)
 	if err != nil {
 		return err
 	}
@@ -4361,14 +4051,15 @@ func (c *Client) AdminGetGroupInfo(ctx context.Context, id string) (string, erro
 
 // AdminGetGroupMembers returns the list of group members.
 func (c *Client) AdminGetGroupMembers(ctx context.Context, id string) (map[string]string, error) {
-	members := make(map[string]string)
-	for m, err := range c.getGroupMembers(ctx, id) {
-		if err != nil {
-			return nil, err
-		}
-		members[m.UserID] = m.Info
+	members, err := c.AdminGetGroupMembersList(ctx, id)
+	if err != nil {
+		return nil, err
 	}
-	return members, nil
+	res := make(map[string]string)
+	for _, m := range members {
+		res[m.UserID] = m.Info
+	}
+	return res, nil
 }
 
 // AdminGetGroupMembersList returns the list of group members as raw entries.
@@ -4418,7 +4109,7 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 
 	if len(fileKey) == 0 {
 		// 1. Try to unlock file key from lockbox (Personal Access)
-		// We try this FIRST because it's the most common and fastest path.
+		// We try this FIRST because it's the most common and fastest stdpath.
 		if c.decKey != nil {
 			key, err := inode.Lockbox.GetFileKey(c.userID, c.decKey)
 			if err == nil {
@@ -4855,7 +4546,7 @@ func (c *Client) updateKeyCache(inode *metadata.Inode, key []byte) {
 
 // getGroupPrivateKey retrieves the group private key by deriving it from the epoch seed.
 func (c *Client) getGroupPrivateKey(ctx context.Context, groupID string, epoch uint32) (*mlkem.DecapsulationKey768, error) {
-	cacheKey := groupID + ":" + strconv.Itoa(int(epoch))
+	cacheKey := groupKeyCacheID{id: groupID, epoch: epoch}
 	c.keyMu.RLock()
 	gk, ok := c.groupKeys[cacheKey]
 	c.keyMu.RUnlock()
@@ -4897,7 +4588,7 @@ func (c *Client) getGroupPrivateKey(ctx context.Context, groupID string, epoch u
 
 // getGroupSignKey retrieves the group signing key by deriving it from the epoch seed.
 func (c *Client) getGroupSignKey(ctx context.Context, groupID string, epoch uint32) (*crypto.IdentityKey, error) {
-	cacheKey := groupID + ":" + strconv.Itoa(int(epoch))
+	cacheKey := groupKeyCacheID{id: groupID, epoch: epoch}
 	c.keyMu.RLock()
 	gk, ok := c.groupSignKeys[cacheKey]
 	c.keyMu.RUnlock()
@@ -4925,28 +4616,18 @@ func (c *Client) getWorldPublicKey(ctx context.Context) (*mlkem.EncapsulationKey
 		return wp, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/key/world", nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world", nil, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer bodyRC.Close()
+
+	keyBytes, err := io.ReadAll(bodyRC)
 	if err != nil {
 		return nil, err
 	}
 
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := c.unsealResponse(ctx, resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, fmt.Errorf("failed to fetch world pub key: %d %s", resp.StatusCode, string(b))
-	}
-	b, _ := io.ReadAll(body)
-	pk, err := crypto.UnmarshalEncapsulationKey(b)
+	pk, err := crypto.UnmarshalEncapsulationKey(keyBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -4966,35 +4647,17 @@ func (c *Client) GetWorldPrivateKey(ctx context.Context) (*mlkem.DecapsulationKe
 		return wp, nil
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/meta/key/world/private", nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world/private", nil, requestOptions{unseal: true, retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
-	if err := c.authenticateRequest(ctx, req); err != nil {
-		return nil, err
-	}
-
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-
-	body, err := c.unsealResponse(ctx, resp)
-	if err != nil {
-		return nil, err
-	}
-	defer body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(body)
-		return nil, fmt.Errorf("failed to fetch world private key: %d %s", resp.StatusCode, string(b))
-	}
+	defer bodyRC.Close()
 
 	var data struct {
 		KEM string `json:"kem"`
 		DEM string `json:"dem"`
 	}
-	if err := json.NewDecoder(body).Decode(&data); err != nil {
+	if err := json.NewDecoder(bodyRC).Decode(&data); err != nil {
 		return nil, err
 	}
 
@@ -5090,7 +4753,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 
 	// 1. Decrypt ClientBlob if present
 	if len(group.ClientBlob) > 0 {
-		gk, err := c.getGroupDecryptionKey(ctx, group.ID) // Safe to use unverified for read
+		gk, err := c.getGroupPrivateKey(ctx, group.ID, group.Epoch) // Safe to use unverified for read
 		if err == nil {
 			var blob metadata.GroupClientBlob
 			if err := c.decryptClientBlob(group.ClientBlob, gk, &blob); err == nil {
@@ -5111,55 +4774,6 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 
 // getGroupUnverified fetches the group metadata skipping cache and VERIFICATION.
 // Useful for integrity verification tests or initial bootstrap anchoring.
-
-// getGroupDecryptionKey safely extracts a decryption key from a group's lockbox.
-// It uses the unverifiedGroupCache to avoid circular registry dependencies during reads.
-// This is secure because AEAD decryption of the target Inode inherently validates the extracted key.
-func (c *Client) getGroupDecryptionKey(ctx context.Context, groupID string) (*mlkem.DecapsulationKey768, error) {
-	// 1. Check Key Cache first
-	c.keyMu.RLock()
-	if gk, ok := c.groupKeys[groupID]; ok {
-		c.keyMu.RUnlock()
-		return gk, nil
-	}
-	c.keyMu.RUnlock()
-
-	// 2. Fetch Unverified Group
-	group, err := c.getGroupUnverifiedCached(ctx, groupID)
-	if err != nil {
-		return nil, err
-	}
-
-	if c.decKey == nil {
-		return nil, fmt.Errorf("client has no identity to unlock group")
-	}
-
-	// 3. Extract Key from Lockbox
-	gkBytes, err := group.Lockbox.GetFileKey(c.userID, c.decKey)
-	if err != nil {
-		// Try via ownership (if we are the owner)
-		if group.OwnerID != "" && group.OwnerID != c.userID {
-			ogk, oerr := c.getGroupDecryptionKey(ctx, group.OwnerID)
-			if oerr == nil {
-				gkBytes, err = group.Lockbox.GetFileKey(group.OwnerID, ogk)
-			}
-		}
-		if err != nil {
-			return nil, fmt.Errorf("failed to unlock group %s: %w", groupID, err)
-		}
-	}
-
-	gk, err := crypto.UnmarshalDecapsulationKey(gkBytes)
-	if err != nil {
-		return nil, err
-	}
-
-	c.keyMu.Lock()
-	c.groupKeys[groupID] = gk
-	c.keyMu.Unlock()
-
-	return gk, nil
-}
 
 // getGroupUnverifiedCached fetches a group from the unverified (or verified) cache,
 // falling back to the server if necessary. It DOES NOT verify the group.
@@ -5189,33 +4803,7 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 
 func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, error) {
 	var group metadata.Group
-	err := c.withRetry(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/group/"+id, nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-
-		return json.NewDecoder(body).Decode(&group)
-	})
+	_, _, err := c.doRequest(ctx, "GET", "/v1/group/"+id, nil, requestOptions{unseal: true, retry: true}, &group)
 	if err != nil {
 		return nil, err
 	}
@@ -5343,7 +4931,7 @@ func (c *Client) AdminDecryptGroupName(ctx context.Context, entry metadata.Group
 			if kerr == nil {
 				gdk = keys.EncKey
 				// Cache it
-				cacheKey := entry.ID + ":" + strconv.Itoa(int(entry.Epoch))
+				cacheKey := groupKeyCacheID{id: entry.ID, epoch: entry.Epoch}
 				c.keyMu.Lock()
 				c.groupKeys[cacheKey] = gdk
 				c.keyMu.Unlock()
@@ -5413,52 +5001,6 @@ func (c *Client) createGroup(ctx context.Context, name string, quotaEnabled bool
 	return c.createGroupInternal(ctx, name, false, quotaEnabled, "")
 }
 
-// getGroupEpochKey retrieves the current epoch key for a group.
-func (c *Client) getGroupEpochKey(ctx context.Context, groupID string) ([]byte, error) {
-	group, err := c.getGroup(ctx, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch group: %w", err)
-	}
-	return c.extractGroupEpochKey(group)
-}
-
-// getGroupEpochKeyUnverified retrieves the current epoch key using the unverified cache.
-func (c *Client) getGroupEpochKeyUnverified(ctx context.Context, groupID string) ([]byte, error) {
-	group, err := c.getGroupUnverifiedCached(ctx, groupID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch unverified group: %w", err)
-	}
-	return c.extractGroupEpochKey(group)
-}
-
-func (c *Client) extractGroupEpochKey(group *metadata.Group) ([]byte, error) {
-	// For named members: epoch key is in Lockbox[userID+":epoch"]
-	if epochEntry, ok := group.Lockbox[c.userID+":epoch"]; ok {
-		// Decapsulate using user's private key
-		secret, err := crypto.Decapsulate(c.decKey, epochEntry.KEMCiphertext)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decapsulate epoch key: %w", err)
-		}
-		epochKey, err := crypto.DecryptDEM(secret, epochEntry.DEMCiphertext)
-		if err != nil {
-			return nil, fmt.Errorf("failed to decrypt epoch key: %w", err)
-		}
-		return epochKey, nil
-	}
-
-	// For anonymous members: epoch key is in AnonymousLockbox
-	for _, cipherblob := range group.AnonymousLockbox {
-		var anonLB crypto.Lockbox
-		if err := json.Unmarshal(cipherblob, &anonLB); err == nil {
-			if epochKey, err := anonLB.GetFileKey("epoch", c.decKey); err == nil {
-				return epochKey, nil
-			}
-		}
-	}
-
-	return nil, fmt.Errorf("user is not an authorized member (epoch key not found)")
-}
-
 // CreateSystemGroup creates a new system group (Admin only).
 func (c *Client) createSystemGroup(ctx context.Context, name string, quotaEnabled bool) (*metadata.Group, error) {
 	return c.createGroupInternal(ctx, name, true, quotaEnabled, "")
@@ -5508,28 +5050,7 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 	var res struct {
 		GID uint32 `json:"gid"`
 	}
-	err := c.withRetry(ctx, func() error {
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/group/gid/allocate", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&res); err != nil {
-			return err
-		}
-		return nil
-	})
+	_, _, err := c.doRequest(ctx, "GET", "/v1/group/gid/allocate", nil, requestOptions{unseal: true, retry: true}, &res)
 	return res.GID, err
 }
 
@@ -5867,9 +5388,10 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 	group.EncryptedRegistry = encRegistry
 
 	// Cache keys for signing
+	cacheKey := groupKeyCacheID{id: groupID, epoch: group.Epoch}
 	c.keyMu.Lock()
-	c.groupKeys[groupID] = keys.EncKey
-	c.groupSignKeys[groupID] = keys.SignKey
+	c.groupKeys[cacheKey] = keys.EncKey
+	c.groupSignKeys[cacheKey] = keys.SignKey
 	c.keyMu.Unlock()
 
 	// Sign the Group
@@ -6113,9 +5635,10 @@ func (c *Client) RevokeGroupMember(ctx context.Context, groupID string, targetUs
 		}
 
 		// Cache new keys
+		cacheKey := groupKeyCacheID{id: group.ID, epoch: group.Epoch}
 		c.keyMu.Lock()
-		c.groupKeys[group.ID] = keys.EncKey
-		c.groupSignKeys[group.ID] = keys.SignKey
+		c.groupKeys[cacheKey] = keys.EncKey
+		c.groupSignKeys[cacheKey] = keys.SignKey
 		c.keyMu.Unlock()
 
 		return nil
@@ -6144,9 +5667,9 @@ func (c *Client) RemoveUserFromGroup(ctx context.Context, groupID, userID string
 	return c.RevokeGroupMember(ctx, groupID, userID, nil)
 }
 
-// SetAttr updates the attributes of an inode at the given path.
-func (c *Client) setAttr(ctx context.Context, path string, attr metadata.SetAttrRequest) error {
-	inode, key, err := c.resolvePath(ctx, path)
+// SetAttr updates the attributes of an inode at the given stdpath.
+func (c *Client) setAttr(ctx context.Context, fullPath string, attr metadata.SetAttrRequest) error {
+	inode, key, err := c.resolvePath(ctx, fullPath)
 	if err != nil {
 		return err
 	}
@@ -6289,65 +5812,31 @@ func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 	return updated, err
 }
 
-// Remove deletes an inode at the given path.
-// Remove deletes the file or empty directory at the given path.
-func (c *Client) Remove(ctx context.Context, path string) error {
-	return c.RemoveEntry(ctx, path)
+// Remove deletes an inode at the given stdpath.
+// Remove deletes the file or empty directory at the given stdpath.
+func (c *Client) Remove(ctx context.Context, fullPath string) error {
+	return c.RemoveEntry(ctx, fullPath)
 }
 
 // PushKeySync uploads an encrypted configuration blob to the server.
 // Requires a valid session and mandatory Layer 7 E2EE (Sealing).
 func (c *Client) pushKeySync(ctx context.Context, blob *metadata.KeySyncBlob) error {
 	data, _ := json.Marshal(blob)
-	req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/user/keysync", nil)
+	bodyRC, _, err := c.doRequest(ctx, "POST", "/v1/user/keysync", data, requestOptions{sealed: true, retry: true}, nil)
 	if err != nil {
 		return err
 	}
-
-	if err := c.authenticateRequest(ctx, req); err != nil {
-		return err
-	}
-
-	if err := c.sealBody(ctx, req, data); err != nil {
-		return err
-	}
-
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("push keysync failed: %d %s", resp.StatusCode, string(b))
-	}
+	bodyRC.Close()
 	return nil
 }
 
 // PullKeySync retrieves the encrypted configuration blob from the server.
 // Authenticates using an OIDC JWT.
 func (c *Client) pullKeySync(ctx context.Context, jwt string) (*metadata.KeySyncBlob, error) {
-	req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/user/keysync", nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+jwt)
-
-	resp, err := c.httpCli.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("pull keysync failed: %d %s", resp.StatusCode, string(b))
-	}
-
 	var blob metadata.KeySyncBlob
-	if err := json.NewDecoder(resp.Body).Decode(&blob); err != nil {
-		return nil, fmt.Errorf("failed to decode keysync blob: %w", err)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/user/keysync", nil, requestOptions{jwt: jwt, skipAuth: true, retry: true}, &blob)
+	if err != nil {
+		return nil, err
 	}
 	return &blob, nil
 }
@@ -6378,38 +5867,174 @@ func (c *Client) releaseData() {
 	<-c.dataSem
 }
 
-func (c *Client) withRetry(ctx context.Context, op func() error) error {
+type requestOptions struct {
+	sealed      bool   // Seal request body
+	unseal      bool   // Unseal response body
+	retry       bool   // Use standard retry
+	conflict    bool   // Use conflict-aware retry
+	skipAuth    bool   // Skip standard session authentication
+	skipControl bool   // Skip concurrency control semaphore
+	jwt         string // Custom JWT for Authorization header
+}
+
+// doRequest encapsulates the standard metadata request lifecycle:
+// acquireControl -> withRetry -> Auth -> [Seal] -> Execute -> [Unseal] -> releaseControl.
+func (c *Client) doRequest(ctx context.Context, method, urlPath string, body []byte, opts requestOptions, out interface{}) (io.ReadCloser, *http.Response, error) {
+	var resp *http.Response
+	var bodyRC io.ReadCloser
+
+	op := func() error {
+		if !opts.skipControl {
+			if err := c.acquireControl(ctx); err != nil {
+				return err
+			}
+			defer c.releaseControl()
+		}
+
+		req, err := http.NewRequestWithContext(ctx, method, c.serverAddr+urlPath, nil)
+		if err != nil {
+			return err
+		}
+
+		if opts.jwt != "" {
+			req.Header.Set("Authorization", "Bearer "+opts.jwt)
+		}
+
+		if !opts.skipAuth {
+			if err := c.authenticateRequest(ctx, req); err != nil {
+				return err
+			}
+		}
+
+		if opts.sealed {
+			if len(body) == 0 {
+				body = []byte("{}")
+			}
+			if err := c.sealBody(ctx, req, body); err != nil {
+				return err
+			}
+		} else if len(body) > 0 {
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.ContentLength = int64(len(body))
+			req.Header.Set("Content-Type", "application/json")
+		}
+
+		r, err := c.httpCli.Do(req)
+		if err != nil {
+			return err
+		}
+
+		// Read and unseal exactly once
+		var unsealed io.ReadCloser
+		if opts.unseal {
+			unsealed, err = c.unsealResponse(ctx, r)
+		} else {
+			unsealed = r.Body
+		}
+
+		if err != nil {
+			r.Body.Close()
+			return err
+		}
+
+		if r.StatusCode >= 400 {
+			err = c.newAPIError(r, unsealed)
+			unsealed.Close()
+			return err
+		}
+
+		resp = r
+		bodyRC = unsealed
+
+		if out != nil {
+			err := json.NewDecoder(unsealed).Decode(out)
+			unsealed.Close()
+			return err
+		}
+
+		return nil
+	}
+
+	var err error
+	if opts.conflict {
+		err = c.withConflictRetry(ctx, op)
+	} else if opts.retry {
+		err = c.withRetry(ctx, op)
+	} else {
+		err = op()
+	}
+
+	return bodyRC, resp, err
+}
+
+type withRetryOptions struct {
+	maxIter    int
+	maxBackoff time.Duration
+	isConflict bool
+}
+
+func (c *Client) withRetryInternal(ctx context.Context, opts withRetryOptions, op func() error) error {
 	var lastErr error
 	backoff := 50 * time.Millisecond
-	maxBackoff := 500 * time.Millisecond
 
 	for i := 0; ; i++ {
+		if opts.maxIter > 0 && i >= opts.maxIter {
+			if lastErr != nil {
+				return lastErr
+			}
+			return metadata.ErrConflict
+		}
+
 		err := op()
 		if err == nil {
 			return nil
 		}
 		lastErr = err
 
-		if !c.isRetryable(err) {
-			return err
-		}
-
-		// Exponential backoff with jitter
-		jitter := time.Duration(mrand.Int63n(int64(backoff / 2)))
-		select {
-		case <-ctx.Done():
-			if lastErr != nil {
-				return fmt.Errorf("%w: %v", ctx.Err(), lastErr)
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
+				return err
 			}
-			return ctx.Err()
-		case <-time.After(backoff + jitter):
 		}
 
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
+		isConflict := opts.isConflict && isConflict(err)
+
+		if isConflict || c.isRetryable(err) {
+			select {
+			case <-ctx.Done():
+				if lastErr != nil {
+					return fmt.Errorf("%w: %v", ctx.Err(), lastErr)
+				}
+				return ctx.Err()
+			default:
+			}
+
+			jitter := time.Duration(mrand.Int63n(int64(backoff/2) + 1))
+			select {
+			case <-ctx.Done():
+				if lastErr != nil {
+					return fmt.Errorf("%w: %v", ctx.Err(), lastErr)
+				}
+				return ctx.Err()
+			case <-time.After(backoff + jitter):
+			}
+			backoff *= 2
+			if backoff > opts.maxBackoff {
+				backoff = opts.maxBackoff
+			}
+			continue
 		}
+		return err
 	}
+}
+
+func (c *Client) withRetry(ctx context.Context, op func() error) error {
+	return c.withRetryInternal(ctx, withRetryOptions{
+		maxIter:    0,
+		maxBackoff: 500 * time.Millisecond,
+		isConflict: false,
+	}, op)
 }
 
 func (c *Client) isRetryable(err error) bool {
@@ -6470,80 +6095,16 @@ func (c *Client) isRetryable(err error) bool {
 }
 
 func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
-	backoff := 50 * time.Millisecond
-	maxBackoff := 5 * time.Second
-
-	for i := 0; i < 100; i++ {
-		err := op()
-		if err == nil {
-			return nil
-		}
-		var apiErr *APIError
-		if errors.As(err, &apiErr) {
-			if apiErr.StatusCode == http.StatusUnauthorized || apiErr.StatusCode == http.StatusForbidden {
-				return err
-			}
-		}
-
-		isConflict := (errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusConflict) ||
-			errors.Is(err, metadata.ErrConflict) ||
-			(apiErr != nil && apiErr.Code == metadata.ErrCodeVersionConflict) ||
-			(apiErr != nil && apiErr.Code == metadata.ErrCodeLeaseRequired)
-
-		if isConflict || c.isRetryable(err) {
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			jitter := time.Duration(mrand.Int63n(int64(backoff/2) + 1))
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff + jitter):
-			}
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-			continue
-		}
-		return err
-	}
-	return metadata.ErrConflict
+	return c.withRetryInternal(ctx, withRetryOptions{
+		maxIter:    100,
+		maxBackoff: 5 * time.Second,
+		isConflict: true,
+	}, op)
 }
 
 func (c *Client) getClusterStats(ctx context.Context) (*metadata.ClusterStats, error) {
 	var stats metadata.ClusterStats
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/cluster/stats", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		return json.NewDecoder(resp.Body).Decode(&stats)
-	})
-
+	_, _, err := c.doRequest(ctx, "GET", "/v1/cluster/stats", nil, requestOptions{sealed: true, unseal: true, retry: true}, &stats)
 	if err != nil {
 		return nil, err
 	}
@@ -6584,39 +6145,8 @@ func (c *Client) acquireLeases(ctx context.Context, ids []string, duration time.
 	}
 	data, _ := json.Marshal(req)
 
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/meta/lease/acquire", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, hReq, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-		return nil
-	})
+	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/acquire", data, requestOptions{sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	return err
 }
 
 // ReleaseLeases releases previously acquired distributed leases.
@@ -6636,78 +6166,15 @@ func (c *Client) releaseLeases(ctx context.Context, ids []string, nonce string) 
 	}
 	data, _ := json.Marshal(req)
 
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/meta/lease/release", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, hReq, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-		return nil
-	})
+	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/release", data, requestOptions{sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	return err
 }
 
 // AdminListUsers returns an iterator over all users in the cluster.
 func (c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error] {
 	return func(yield func(*metadata.User, error) bool) {
 		var users []metadata.User
-		err := c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
-			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/admin/users", nil)
-			if err != nil {
-				return err
-			}
-			req.Header.Set("X-DistFS-Sealed", "true")
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-
-			resp, err := c.httpCli.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := c.unsealResponse(ctx, resp)
-				return c.newAPIError(resp, body)
-			}
-
-			return json.NewDecoder(body).Decode(&users)
-		})
-
+		_, _, err := c.doRequest(ctx, "GET", "/v1/admin/users", nil, requestOptions{sealed: true, unseal: true, retry: true}, &users)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -6727,46 +6194,11 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 		cursor := ""
 		for {
 			var groups []metadata.Group
-			var nextCursor string
-
-			err := c.withRetry(ctx, func() error {
-				if err := c.acquireControl(ctx); err != nil {
-					return err
-				}
-				defer c.releaseControl()
-
-				u := c.serverAddr + "/v1/admin/groups"
-				if cursor != "" {
-					u += "?cursor=" + cursor
-				}
-				req, err := http.NewRequestWithContext(ctx, "GET", u, nil)
-				if err != nil {
-					return err
-				}
-				req.Header.Set("X-DistFS-Sealed", "true")
-				if err := c.authenticateRequest(ctx, req); err != nil {
-					return err
-				}
-
-				resp, err := c.httpCli.Do(req)
-				if err != nil {
-					return err
-				}
-				body, err := c.unsealResponse(ctx, resp)
-				if err != nil {
-					return err
-				}
-				defer body.Close()
-
-				if resp.StatusCode != http.StatusOK {
-					body, _ := c.unsealResponse(ctx, resp)
-					return c.newAPIError(resp, body)
-				}
-
-				nextCursor = resp.Header.Get("X-DistFS-Next-Cursor")
-				return json.NewDecoder(body).Decode(&groups)
-			})
-
+			u := "/v1/admin/groups"
+			if cursor != "" {
+				u += "?cursor=" + cursor
+			}
+			_, resp, err := c.doRequest(ctx, "GET", u, nil, requestOptions{sealed: true, unseal: true, retry: true}, &groups)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -6778,6 +6210,7 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 				}
 			}
 
+			nextCursor := resp.Header.Get("X-DistFS-Next-Cursor")
 			if nextCursor == "" {
 				break
 			}
@@ -6790,39 +6223,7 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error] {
 	return func(yield func(*metadata.LeaseInfo, error) bool) {
 		var leases []metadata.LeaseInfo
-		err := c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
-			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/admin/leases", nil)
-			if err != nil {
-				return err
-			}
-			req.Header.Set("X-DistFS-Sealed", "true")
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-
-			resp, err := c.httpCli.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := c.unsealResponse(ctx, resp)
-				return c.newAPIError(resp, body)
-			}
-
-			return json.NewDecoder(body).Decode(&leases)
-		})
-
+		_, _, err := c.doRequest(ctx, "GET", "/v1/admin/leases", nil, requestOptions{sealed: true, unseal: true, retry: true}, &leases)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -6840,38 +6241,7 @@ func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseI
 func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 	return func(yield func(*metadata.Node) bool) {
 		var nodes []metadata.Node
-		_ = c.withRetry(ctx, func() error {
-			if err := c.acquireControl(ctx); err != nil {
-				return err
-			}
-			defer c.releaseControl()
-
-			req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/admin/nodes", nil)
-			if err != nil {
-				return err
-			}
-			req.Header.Set("X-DistFS-Sealed", "true")
-			if err := c.authenticateRequest(ctx, req); err != nil {
-				return err
-			}
-
-			resp, err := c.httpCli.Do(req)
-			if err != nil {
-				return err
-			}
-			body, err := c.unsealResponse(ctx, resp)
-			if err != nil {
-				return err
-			}
-			defer body.Close()
-
-			if resp.StatusCode != http.StatusOK {
-				body, _ := c.unsealResponse(ctx, resp)
-				return c.newAPIError(resp, body)
-			}
-
-			return json.NewDecoder(body).Decode(&nodes)
-		})
+		_, _, _ = c.doRequest(ctx, "GET", "/v1/admin/nodes", nil, requestOptions{sealed: true, unseal: true, retry: true}, &nodes)
 
 		for i := range nodes {
 			if !yield(&nodes[i]) {
@@ -6884,38 +6254,7 @@ func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 // AdminClusterStatus returns detailed information about the cluster state and node statistics.
 func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
 	var status map[string]interface{}
-	err := c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/admin/status", nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("X-DistFS-Sealed", "true") // Required
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		return json.NewDecoder(body).Decode(&status)
-	})
+	_, _, err := c.doRequest(ctx, "GET", "/v1/admin/status", nil, requestOptions{sealed: true, unseal: true, retry: true}, &status)
 	return status, err
 }
 
@@ -7009,51 +6348,24 @@ func (c *Client) ResolveGroupName(ctx context.Context, name string) (string, *Gr
 
 // AdminAudit streams redacted audit records from the server.
 func (c *Client) AdminAudit(ctx context.Context, handler func(metadata.AuditRecord) error) error {
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
+	bodyRC, resp, err := c.doRequest(ctx, "GET", "/v1/admin/audit", nil, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	if err != nil {
+		return err
+	}
+	defer bodyRC.Close()
+
+	decoder := json.NewDecoder(bodyRC)
+	for decoder.More() {
+		var record metadata.AuditRecord
+		if err := decoder.Decode(&record); err != nil {
+			return fmt.Errorf("audit stream decode error: %w", err)
+		}
+		if err := handler(record); err != nil {
 			return err
 		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "GET", c.serverAddr+"/v1/admin/audit", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-
-		// Phase 48: Audit requires sealing. For GET we must set the header
-		// to indicate we expect standard unsealing behavior on the response.
-		req.Header.Set("X-DistFS-Sealed", "true")
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-
-		decoder := json.NewDecoder(body)
-		for decoder.More() {
-			var record metadata.AuditRecord
-			if err := decoder.Decode(&record); err != nil {
-				return fmt.Errorf("audit stream decode error: %w", err)
-			}
-			if err := handler(record); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	_ = resp
+	return nil
 }
 
 // AdminAuditForest captures all audit records and organizes the Inodes into directory trees.
@@ -7154,116 +6466,25 @@ func (c *Client) AdminAuditForest(ctx context.Context) (roots []*metadata.Redact
 // AdminPromote grants administrative privileges to a user.
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/admin/promote", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, payload); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-			return c.newAPIError(resp, body)
-		}
-
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/promote", payload, requestOptions{sealed: true, retry: true}, nil)
+	if err == nil {
 		c.invalidateUserCache(userID)
-		return nil
-	})
+	}
+	return err
 }
 
 // AdminJoinNode adds a new storage node to the cluster.
 func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	payload, _ := json.Marshal(map[string]string{"address": address})
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/admin/join", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, payload); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-		return nil
-	})
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/join", payload, requestOptions{sealed: true, retry: true}, nil)
+	return err
 }
 
 // AdminRemoveNode removes a storage node from the cluster by ID.
 func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 	payload, _ := json.Marshal(map[string]string{"id": id})
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		req, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/admin/remove", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, req); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, req, payload); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(req)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			body, _ := c.unsealResponse(ctx, resp)
-			return c.newAPIError(resp, body)
-		}
-		return nil
-	})
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/remove", payload, requestOptions{sealed: true, retry: true}, nil)
+	return err
 }
 
 // AdminSetUserLock locks or unlocks a user account.
@@ -7273,118 +6494,31 @@ func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked boo
 		Locked: locked,
 	}
 	data, _ := json.Marshal(req)
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/admin/lock", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, hReq, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/lock", data, requestOptions{sealed: true, retry: true}, nil)
+	if err == nil {
 		c.invalidateUserCache(userID)
-		return nil
-	})
+	}
+	return err
 }
 
 // AdminSetUserQuota updates the resource limits for a user.
 func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
 	data, _ := json.Marshal(req)
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/admin/quota/user", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, hReq, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/user", data, requestOptions{sealed: true, retry: true}, nil)
+	if err == nil {
 		c.invalidateUserCache(req.UserID)
-		return nil
-	})
+	}
+	return err
 }
 
 // AdminSetGroupQuota updates the resource limits for a group.
 func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error {
 	data, _ := json.Marshal(req)
-	return c.withRetry(ctx, func() error {
-		if err := c.acquireControl(ctx); err != nil {
-			return err
-		}
-		defer c.releaseControl()
-
-		hReq, err := http.NewRequestWithContext(ctx, "POST", c.serverAddr+"/v1/admin/quota/group", nil)
-		if err != nil {
-			return err
-		}
-		if err := c.authenticateRequest(ctx, hReq); err != nil {
-			return err
-		}
-		if err := c.sealBody(ctx, hReq, data); err != nil {
-			return err
-		}
-
-		resp, err := c.httpCli.Do(hReq)
-		if err != nil {
-			return err
-		}
-		body, err := c.unsealResponse(ctx, resp)
-		if err != nil {
-			return err
-		}
-		defer body.Close()
-
-		if resp.StatusCode != http.StatusOK {
-			return c.newAPIError(resp, body)
-		}
-
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/group", data, requestOptions{sealed: true, retry: true}, nil)
+	if err == nil {
 		c.invalidateGroupCache(req.GroupID)
-		return nil
-	})
+	}
+	return err
 }
 
 // IsResultError checks if a Raft command result is an error and returns it.
@@ -7413,8 +6547,9 @@ func (c *Client) isResultError(data json.RawMessage) *APIError {
 func (c *Client) signGroup(ctx context.Context, group *metadata.Group, isUpdate bool) error {
 	// Re-encrypt ClientBlob if transient fields are set
 	if name := group.GetName(); name != "" {
+		cacheKey := groupKeyCacheID{id: group.ID, epoch: group.Epoch}
 		c.keyMu.RLock()
-		gdk, ok := c.groupKeys[group.ID]
+		gdk, ok := c.groupKeys[cacheKey]
 		c.keyMu.RUnlock()
 
 		if !ok {

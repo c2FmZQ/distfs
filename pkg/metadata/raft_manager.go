@@ -58,6 +58,7 @@ func NewRaftNode(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.St
 func NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir string, st *storage.Storage, nodeKey *NodeKey, clusterSecret []byte, config *raft.Config) (*RaftNode, error) {
 	if config == nil {
 		config = raft.DefaultConfig()
+		config.LogLevel = "INFO"
 	}
 	config.LocalID = raft.ServerID(nodeID)
 	// NoSnapshotRestoreOnStart default is false.

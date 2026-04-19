@@ -7,3 +7,8 @@ Vulnerability: Authentication Bypass (Test Utility Risk)
 Location: cmd/test-auth/main.go
 Line Content: http.HandleFunc("/mint", func(w http.ResponseWriter, r *http.Request) { ... })
 Justification: This binary is explicitly a test utility and is not intended for production deployment. Its insecure nature is acceptable within the test infrastructure context.
+
+Vulnerability: Broken Access Control (IDOR) in Inode Retrieval
+Location: pkg/metadata/server.go:1942
+Line Content: plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
+Justification: This behavior is intended by design in the current Phase 71 implementation to support specific system traversal and anchoring logic.

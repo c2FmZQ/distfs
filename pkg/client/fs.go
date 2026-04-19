@@ -352,7 +352,7 @@ func (c *Client) LstatDirEntry(ctx context.Context, path string) (*DistDirEntry,
 	return c.newDirEntry(inode, name, inode.ID, key), nil
 }
 
-func (c *Client) newFileInfo(i *metadata.Inode, name string) *DistFileInfo {
+func (c *Client) populateInodeInfo(i *metadata.Inode) InodeInfo {
 	info := InodeInfo{
 		ID:            i.ID,
 		Type:          i.Type,
@@ -382,8 +382,12 @@ func (c *Client) newFileInfo(i *metadata.Inode, name string) *DistFileInfo {
 			}
 		}
 	}
+	return info
+}
+
+func (c *Client) newFileInfo(i *metadata.Inode, name string) *DistFileInfo {
 	return &DistFileInfo{
-		info: info,
+		info: c.populateInodeInfo(i),
 		name: name,
 	}
 }
@@ -582,20 +586,7 @@ func (c *Client) newDirEntry(i *metadata.Inode, name string, inodeID string, key
 		key:    key,
 	}
 	if i != nil {
-		res.info = InodeInfo{
-			ID:            i.ID,
-			Type:          i.Type,
-			Mode:          i.Mode,
-			Size:          i.Size,
-			OwnerID:       i.OwnerID,
-			GroupID:       i.GroupID,
-			NLink:         i.NLink,
-			Version:       i.Version,
-			MTime:         i.GetMTime(),
-			SymlinkTarget: i.GetSymlinkTarget(),
-			AccessACL:     fromInternalACL(i.AccessACL),
-			DefaultACL:    fromInternalACL(i.DefaultACL),
-		}
+		res.info = c.populateInodeInfo(i)
 	} else {
 		res.info = InodeInfo{ID: inodeID}
 	}

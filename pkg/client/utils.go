@@ -48,7 +48,8 @@ func isConflict(err error) bool {
 	if errors.As(err, &apiErr) {
 		return apiErr.StatusCode == http.StatusConflict ||
 			apiErr.Code == metadata.ErrCodeVersionConflict ||
-			apiErr.Code == metadata.ErrCodeExists
+			apiErr.Code == metadata.ErrCodeExists ||
+			apiErr.Code == metadata.ErrCodeLeaseRequired
 	}
 	return false
 }

@@ -26,7 +26,7 @@ import (
 	"io"
 	"io/fs"
 	"net/http"
-	"path/filepath"
+	stdpath "path"
 	"strings"
 	"time"
 
@@ -276,7 +276,7 @@ func (c *Client) getPathID(ctx context.Context, path string) (string, error) {
 		return "path:root:" + c.rootID, nil
 	}
 
-	dir, name := filepath.Split(strings.TrimRight(path, "/"))
+	dir, name := stdpath.Split(strings.TrimRight(path, "/"))
 	if dir == "" {
 		dir = "/"
 	}
@@ -448,7 +448,7 @@ func (c *Client) resolveSequential(ctx context.Context, currentInode *metadata.I
 		}
 
 		// Update prefix and cache
-		prefix = filepath.Join(prefix, part)
+		prefix = stdpath.Join(prefix, part)
 		cachePath := prefix
 		if !strings.HasPrefix(cachePath, "/") {
 			cachePath = "/" + cachePath
@@ -486,13 +486,13 @@ func (c *Client) resolveSymlink(ctx context.Context, inode *metadata.Inode, key 
 		return nil, nil, fmt.Errorf("symlink %s has no target", prefix)
 	}
 
-	if !filepath.IsAbs(target) {
-		dir := filepath.Dir(prefix)
-		target = filepath.Join(dir, target)
+	if !stdpath.IsAbs(target) {
+		dir := stdpath.Dir(prefix)
+		target = stdpath.Join(dir, target)
 	}
 
 	// SEC: Sanitize target path to prevent escaping DistFS root
-	target = "/" + strings.TrimLeft(filepath.Clean(target), "/")
+	target = "/" + strings.TrimLeft(stdpath.Clean(target), "/")
 
 	return c.resolvePathInternalRecursive(ctx, target, followFinal, symlinkCount)
 }
@@ -771,7 +771,7 @@ type MkdirOptions struct {
 	DefaultACL *ACL
 }
 
-// Mkdir creates a new directory at the specified path.
+// Mkdir creates a new directory at the specified stdpath.
 func (c *Client) Mkdir(ctx context.Context, path string, perm fs.FileMode) error {
 	return c.MkdirExtended(ctx, path, perm, MkdirOptions{})
 }
@@ -794,7 +794,7 @@ func (c *Client) MkdirAll(ctx context.Context, path string) error {
 		if part == "" {
 			continue
 		}
-		current = filepath.Join(current, part)
+		current = stdpath.Join(current, part)
 		err := c.Mkdir(ctx, current, 0755)
 		if err != nil && err != metadata.ErrExists {
 			return err
@@ -825,7 +825,7 @@ func (c *Client) SetMTime(ctx context.Context, path string, mtime int64) error {
 }
 
 // Chmod changes the mode of a file or directory.
-// Chmod changes the permission bits of the file or directory at the given path.
+// Chmod changes the permission bits of the file or directory at the given stdpath.
 func (c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error {
 	return c.setAttr(ctx, path, metadata.SetAttrRequest{
 		Mode: ptr(uint32(mode)),
@@ -833,7 +833,7 @@ func (c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error
 }
 
 // Chown changes the owner and group of a file or directory.
-// Chown changes the owner and group of the file or directory at the given path.
+// Chown changes the owner and group of the file or directory at the given stdpath.
 func (c *Client) Chown(ctx context.Context, path string, ownerID, groupID string) error {
 	return c.setAttr(ctx, path, metadata.SetAttrRequest{
 		OwnerID: &ownerID,
@@ -850,8 +850,8 @@ func (c *Client) Symlink(ctx context.Context, target, linkPath string) error {
 // Rename moves or renames a directory entry.
 // Rename atomically moves or renames a file or directory.
 func (c *Client) Rename(ctx context.Context, oldPath, newPath string) error {
-	oldDir, oldName := filepath.Split(strings.TrimRight(oldPath, "/"))
-	newDir, newName := filepath.Split(strings.TrimRight(newPath, "/"))
+	oldDir, oldName := stdpath.Split(strings.TrimRight(oldPath, "/"))
+	newDir, newName := stdpath.Split(strings.TrimRight(newPath, "/"))
 
 	oldParent, oldParentKey, err := c.resolvePath(ctx, oldDir)
 	if err != nil {
@@ -1068,8 +1068,8 @@ func (c *Client) copyInternal(ctx context.Context, inodeID string, src, dst stri
 
 		// 3. Recurse
 		for _, entry := range entries {
-			childSrc := filepath.Join(src, entry.Name())
-			childDst := filepath.Join(dst, entry.Name())
+			childSrc := stdpath.Join(src, entry.Name())
+			childDst := stdpath.Join(dst, entry.Name())
 			if err := c.copyInternal(ctx, entry.id, childSrc, childDst); err != nil {
 				return err
 			}
@@ -1090,7 +1090,7 @@ func (c *Client) copyInternal(ctx context.Context, inodeID string, src, dst stri
 
 // RemoveEntry deletes a directory entry.
 func (c *Client) RemoveEntry(ctx context.Context, path string) error {
-	dir, name := filepath.Split(strings.TrimRight(path, "/"))
+	dir, name := stdpath.Split(strings.TrimRight(path, "/"))
 	parent, parentKey, err := c.resolvePath(ctx, dir)
 	if err != nil {
 		return err
@@ -1103,7 +1103,7 @@ func (c *Client) RemoveEntry(ctx context.Context, path string) error {
 	return nil
 }
 
-// RemoveAll recursively deletes a path.
+// RemoveAll recursively deletes a stdpath.
 func (c *Client) RemoveAll(ctx context.Context, path string) error {
 	path = "/" + strings.Trim(path, "/")
 	inode, _, err := c.resolvePath(ctx, path)
@@ -1124,7 +1124,7 @@ func (c *Client) RemoveAll(ctx context.Context, path string) error {
 		entries, err := fs.ReadDir(distFS, relPath)
 		if err == nil {
 			for _, entry := range entries {
-				if err := c.RemoveAll(ctx, filepath.Join(path, entry.Name())); err != nil {
+				if err := c.RemoveAll(ctx, stdpath.Join(path, entry.Name())); err != nil {
 					return err
 				}
 			}
@@ -1208,14 +1208,14 @@ func (c *Client) removeEntryRaw(ctx context.Context, parentID string, parentKey 
 	})
 }
 
-// Stat returns file info for the given path.
-// Stat returns metadata information for the file or directory at the given path.
+// Stat returns file info for the given stdpath.
+// Stat returns metadata information for the file or directory at the given stdpath.
 func (c *Client) Stat(ctx context.Context, path string) (*DistFileInfo, error) {
 	inode, _, err := c.resolvePathExtended(ctx, path, true)
 	if err != nil {
 		return nil, err
 	}
-	_, fileName := filepath.Split(path)
+	_, fileName := stdpath.Split(path)
 	if fileName == "" && path == "/" {
 		fileName = "/"
 	}
@@ -1229,14 +1229,14 @@ func (c *Client) Lstat(ctx context.Context, path string) (*DistFileInfo, error) 
 	if err != nil {
 		return nil, err
 	}
-	_, fileName := filepath.Split(path)
+	_, fileName := stdpath.Split(path)
 	if fileName == "" && path == "/" {
 		fileName = "/"
 	}
 	return c.newFileInfo(inode, fileName), nil
 }
 
-// ReadDir returns a list of directory entries for the given path.
+// ReadDir returns a list of directory entries for the given stdpath.
 func (c *Client) ReadDir(ctx context.Context, path string) ([]*DistDirEntry, error) {
 	return c.ReadDirExtended(ctx, path, false)
 }
@@ -1272,7 +1272,7 @@ func (c *Client) Link(ctx context.Context, targetPath, linkPath string) error {
 		return errors.New("is a directory")
 	}
 
-	dir, name := filepath.Split(strings.TrimRight(linkPath, "/"))
+	dir, name := stdpath.Split(strings.TrimRight(linkPath, "/"))
 	parent, parentKey, err := c.resolvePath(ctx, dir)
 	if err != nil {
 		return fmt.Errorf("resolve parent: %w", err)
@@ -1389,7 +1389,7 @@ func (c *Client) addEntryByPath(ctx context.Context, path string, iType metadata
 		return fmt.Errorf("cannot create root")
 	}
 
-	dir, name := filepath.Split(path)
+	dir, name := stdpath.Split(path)
 
 	parentInode, parentKey, err := c.resolvePath(ctx, dir)
 	if err != nil {
