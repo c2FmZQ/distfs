@@ -204,7 +204,10 @@ func BootstrapBackbone(t *testing.T, raftNode *RaftNode, adminID string, adminDK
 		if _, err := io.ReadFull(rand.Reader, masterSeed); err != nil {
 			panic("entropy failure in test: " + err.Error())
 		}
-		epochSeed := crypto.DeriveEpochKey(masterSeed, MaxEpochs, 0)
+		epochSeed, err := crypto.DeriveEpochKey(masterSeed, MaxEpochs, 0)
+		if err != nil {
+			panic(err)
+		}
 		keys, _ := crypto.DeriveGroupKeys(epochSeed)
 
 		nonce := GenerateNonce()

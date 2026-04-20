@@ -51,19 +51,7 @@ func UnmarshalIdentityPublicKey(b []byte) (*IdentityPublicKey, error) {
 	return &IdentityPublicKey{pub: &pub}, nil
 }
 
-func UnmarshalIdentityPrivateKey(b []byte) (*IdentityKey, error) {
-	if len(b) != mldsa65.PrivateKeySize {
-		return nil, fmt.Errorf("invalid private key size")
-	}
-	var priv mldsa65.PrivateKey
-	if err := priv.UnmarshalBinary(b); err != nil {
-		return nil, err
-	}
-	// ML-DSA private key usually contains the public key bytes
-	return &IdentityKey{priv: &priv, pub: priv.Public().(*mldsa65.PublicKey)}, nil
-}
-
-// GenerateIdentityKey creates a new random identity key.
+// GenerateIdentityKey creates a new ML-DSA (Dilithium) key pair.
 func GenerateIdentityKey() (*IdentityKey, error) {
 	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
 	if err != nil {

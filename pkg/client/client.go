@@ -350,7 +350,10 @@ func (c *Client) getGroupEpochSeedFromGroup(ctx context.Context, group *metadata
 	if err == nil {
 		masterSeed, err := crypto.DecryptDEM(rk, group.EncryptedEpochSeed)
 		if err == nil {
-			return crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, group.Epoch), nil
+			epochSeed, kerr := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, group.Epoch)
+			if kerr == nil {
+				return epochSeed, nil
+			}
 		}
 	}
 
@@ -5286,8 +5289,11 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 	if _, err := io.ReadFull(rand.Reader, masterSeed); err != nil {
 		return nil, err
 	}
-	epochSeed := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, 0)
-	keys, _ := crypto.DeriveGroupKeys(epochSeed)
+	epochSeed, err := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to derive initial epoch key: %w", err)
+	}
+	keys, err := crypto.DeriveGroupKeys(epochSeed)
 
 	if err != nil {
 		return nil, fmt.Errorf("failed to derive initial group keys: %w", err)
@@ -5577,7 +5583,10 @@ func (c *Client) RevokeGroupMember(ctx context.Context, groupID string, targetUs
 			return fmt.Errorf("maximum number of revocations reached for this group")
 		}
 
-		epochSeed := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, group.Epoch)
+		epochSeed, err := crypto.DeriveEpochKey(masterSeed, metadata.MaxEpochs, group.Epoch)
+		if err != nil {
+			return err
+		}
 		keys, err := crypto.DeriveGroupKeys(epochSeed)
 		if err != nil {
 			return err

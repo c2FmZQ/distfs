@@ -16,9 +16,9 @@ package crypto
 
 import (
 	"crypto/mlkem"
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/sha512"
+	"fmt"
 	"hash"
 	"io"
 
@@ -75,15 +75,6 @@ func DeriveGroupKeys(epochSeed []byte) (*GroupKeys, error) {
 	}, nil
 }
 
-// GenerateNonce returns 16 random bytes.
-func GenerateNonce() []byte {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic(err) // Should never happen with crypto/rand
-	}
-	return b
-}
-
 // DerivePreviousEpochKey implements the Hash Chain for forward secrecy.
 // K_{N-1} = Hash(K_N)
 // We use SHA-512 to maintain 64 bytes of entropy throughout the chain.
@@ -94,9 +85,9 @@ func DerivePreviousEpochKey(currentKey []byte) []byte {
 
 // DeriveEpochKey derives a specific epoch key from the seed.
 // EpochKey = Hash^(MaxEpochs - Epoch)(EpochSeed)
-func DeriveEpochKey(seed []byte, maxEpochs, currentEpoch uint32) []byte {
+func DeriveEpochKey(seed []byte, maxEpochs, currentEpoch uint32) ([]byte, error) {
 	if currentEpoch > maxEpochs {
-		panic("currentEpoch cannot exceed maxEpochs")
+		return nil, fmt.Errorf("currentEpoch (%d) cannot exceed maxEpochs (%d)", currentEpoch, maxEpochs)
 	}
 	iterations := maxEpochs - currentEpoch
 
@@ -107,5 +98,5 @@ func DeriveEpochKey(seed []byte, maxEpochs, currentEpoch uint32) []byte {
 		h := sha512.Sum512(key)
 		key = h[:]
 	}
-	return key
+	return key, nil
 }
