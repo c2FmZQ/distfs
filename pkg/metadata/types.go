@@ -152,13 +152,6 @@ type UserQuota struct {
 	MaxBytes  int64 `json:"max_bytes"`
 }
 
-// ComputeNameHMAC calculates the HMAC-SHA256 of a filename using the parent's file key.
-func ComputeNameHMAC(parentKey []byte, name string) string {
-	mac := hmac.New(sha256.New, parentKey)
-	mac.Write([]byte(name))
-	return hex.EncodeToString(mac.Sum(nil))
-}
-
 // ComputeMemberHMAC calculates the HMAC-SHA256 of a UserID using a static group key (Group ID).
 func ComputeMemberHMAC(hmacKey string, userID string) string {
 	mac := hmac.New(sha256.New, []byte(hmacKey))

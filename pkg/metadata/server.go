@@ -1395,19 +1395,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	ctxUser, _ := r.Context().Value(userContextKey).(*User)
-	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
@@ -1772,18 +1760,7 @@ func (s *Server) handleListGroups(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	if r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, user, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string) {
@@ -1828,18 +1805,7 @@ func (s *Server) handleGetUser(w http.ResponseWriter, r *http.Request, id string
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
@@ -1905,19 +1871,7 @@ func (s *Server) handleAllocateChunk(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	ctxUser, _ := r.Context().Value(userContextKey).(*User)
-	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id string) {
@@ -1972,19 +1926,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	ctxUser, _ := r.Context().Value(userContextKey).(*User)
-	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
@@ -2046,19 +1988,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	ctxUser, _ := r.Context().Value(userContextKey).(*User)
-	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 // evaluatePOSIXAccess checks permissions against the POSIX.1e ACL specification.
@@ -2209,19 +2139,7 @@ func (s *Server) handleGetGroup(w http.ResponseWriter, r *http.Request, id strin
 	w.Header().Set("Content-Type", "application/json")
 
 	// E2EE?
-	ctxUser, _ := r.Context().Value(userContextKey).(*User)
-	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
-		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
-			return
-		}
-	}
-
-	w.WriteHeader(http.StatusOK)
-	w.Write(data)
+	s.writeSealedResponse(w, r, data)
 }
 
 func (s *Server) checkGroupWritePermission(r *http.Request, user *User, updatedGroup *Group) error {
@@ -2702,6 +2620,23 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 
 	w.WriteHeader(status)
 	w.Write(b)
+}
+
+func (s *Server) writeSealedResponse(w http.ResponseWriter, r *http.Request, data []byte) {
+	// E2EE?
+	ctxUser, _ := r.Context().Value(userContextKey).(*User)
+	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
+		sealed, err := s.sealResponse(r, ctxUser, data)
+		if err == nil {
+			w.Header().Set("X-DistFS-Sealed", "true")
+			w.WriteHeader(http.StatusOK)
+			w.Write(sealed)
+			return
+		}
+	}
+
+	w.WriteHeader(http.StatusOK)
+	w.Write(data)
 }
 
 func (s *Server) RedactUser(u *User) {

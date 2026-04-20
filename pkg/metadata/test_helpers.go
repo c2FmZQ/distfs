@@ -201,7 +201,9 @@ func BootstrapBackbone(t *testing.T, raftNode *RaftNode, adminID string, adminDK
 	// 3. Create foundational groups
 	createGroup := func(id string, gid uint32, ownerID string) (Group, []byte) {
 		masterSeed := make([]byte, 64)
-		rand.Read(masterSeed)
+		if _, err := io.ReadFull(rand.Reader, masterSeed); err != nil {
+			panic("entropy failure in test: " + err.Error())
+		}
 		epochSeed := crypto.DeriveEpochKey(masterSeed, MaxEpochs, 0)
 		keys, _ := crypto.DeriveGroupKeys(epochSeed)
 
