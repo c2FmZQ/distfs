@@ -74,6 +74,26 @@ const (
 	ErrCodeQuotaDisabled = "DISTFS_QUOTA_DISABLED"
 	// ErrCodeNoNodes indicates no storage nodes are available or registered.
 	ErrCodeNoNodes = "DISTFS_NO_NODES"
+	// ErrCodeNotDirectory indicates a component of the path prefix is not a directory.
+	ErrCodeNotDirectory = "DISTFS_NOT_DIR"
+	// ErrCodeIsDirectory indicates the path is a directory and opened for writing.
+	ErrCodeIsDirectory = "DISTFS_IS_DIR"
+	// ErrCodeNotEmpty indicates the directory is not empty.
+	ErrCodeNotEmpty = "DISTFS_NOT_EMPTY"
+	// ErrCodeNameTooLong indicates the path or path component exceeds maximum length.
+	ErrCodeNameTooLong = "DISTFS_NAME_TOO_LONG"
+	// ErrCodeInvalid indicates an invalid operation (e.g., renaming a directory to a subdirectory of itself).
+	ErrCodeInvalid = "DISTFS_INVALID"
+	// ErrCodePerm indicates permission denied for an operation not covered by Forbidden.
+	ErrCodePerm = "DISTFS_PERM"
+	// ErrCodeNoData indicates a requested attribute does not exist.
+	ErrCodeNoData = "DISTFS_NO_DATA"
+	// ErrCodeNotSupp indicates an unsupported operation or attribute.
+	ErrCodeNotSupp = "DISTFS_NOT_SUPP"
+	// ErrCodeTooBig indicates a value or payload exceeds maximum size.
+	ErrCodeTooBig = "DISTFS_TOO_BIG"
+	// ErrCodeRange indicates a provided buffer is too small.
+	ErrCodeRange = "DISTFS_RANGE"
 )
 
 // OIDCConfig represents the OpenID Connect configuration needed by clients for authentication.
@@ -987,6 +1007,16 @@ var (
 	ErrQuotaExceeded           = errors.New("quota exceeded")
 	ErrQuotaDisabled           = errors.New("group quota is disabled")
 	ErrForbidden               = errors.New("forbidden")
+	ErrNotDirectory            = errors.New("not a directory")
+	ErrIsDirectory             = errors.New("is a directory")
+	ErrNotEmpty                = errors.New("directory not empty")
+	ErrNameTooLong             = errors.New("name too long")
+	ErrInvalid                 = errors.New("invalid argument")
+	ErrPerm                    = errors.New("operation not permitted")
+	ErrNoData                  = errors.New("no data available")
+	ErrNotSupp                 = errors.New("operation not supported")
+	ErrTooBig                  = errors.New("argument list too long")
+	ErrRange                   = errors.New("result too large")
 )
 
 const (

@@ -22,6 +22,44 @@ func mapError(err error) error {
 	// 1. Check for specific APIError mapping
 	var apiErr *APIError
 	if errors.As(err, &apiErr) {
+		switch apiErr.Code {
+		case metadata.ErrCodeNotDirectory:
+			return syscall.ENOTDIR
+		case metadata.ErrCodeIsDirectory:
+			return syscall.EISDIR
+		case metadata.ErrCodeNotEmpty:
+			return syscall.ENOTEMPTY
+		case metadata.ErrCodeNameTooLong:
+			return syscall.ENAMETOOLONG
+		case metadata.ErrCodeInvalid:
+			return syscall.EINVAL
+		case metadata.ErrCodePerm:
+			return syscall.EPERM
+		case metadata.ErrCodeNoData:
+			return syscall.ENODATA
+		case metadata.ErrCodeNotSupp:
+			return syscall.ENOTSUP
+		case metadata.ErrCodeTooBig:
+			return syscall.E2BIG
+		case metadata.ErrCodeRange:
+			return syscall.ERANGE
+		case metadata.ErrCodeQuotaExceeded:
+			return syscall.EDQUOT
+		case metadata.ErrCodeForbidden:
+			return syscall.EACCES
+		case metadata.ErrCodeNotFound:
+			return syscall.ENOENT
+		case metadata.ErrCodeExists:
+			return syscall.EEXIST
+		case metadata.ErrCodeVersionConflict:
+			return syscall.EAGAIN
+		case metadata.ErrCodeLeaseRequired:
+			return syscall.EACCES
+		case metadata.ErrCodeAtomicRollback:
+			return syscall.EAGAIN
+		}
+
+		// Fallback to StatusCode if Code doesn't match
 		switch apiErr.StatusCode {
 		case http.StatusNotFound:
 			return syscall.ENOENT
@@ -53,6 +91,42 @@ func mapError(err error) error {
 	}
 	if errors.Is(err, metadata.ErrAtomicRollback) {
 		return syscall.EAGAIN
+	}
+	if errors.Is(err, metadata.ErrNotDirectory) {
+		return syscall.ENOTDIR
+	}
+	if errors.Is(err, metadata.ErrIsDirectory) {
+		return syscall.EISDIR
+	}
+	if errors.Is(err, metadata.ErrNotEmpty) {
+		return syscall.ENOTEMPTY
+	}
+	if errors.Is(err, metadata.ErrNameTooLong) {
+		return syscall.ENAMETOOLONG
+	}
+	if errors.Is(err, metadata.ErrInvalid) {
+		return syscall.EINVAL
+	}
+	if errors.Is(err, metadata.ErrPerm) {
+		return syscall.EPERM
+	}
+	if errors.Is(err, metadata.ErrNoData) {
+		return syscall.ENODATA
+	}
+	if errors.Is(err, metadata.ErrNotSupp) {
+		return syscall.ENOTSUP
+	}
+	if errors.Is(err, metadata.ErrTooBig) {
+		return syscall.E2BIG
+	}
+	if errors.Is(err, metadata.ErrRange) {
+		return syscall.ERANGE
+	}
+	if errors.Is(err, metadata.ErrForbidden) {
+		return syscall.EACCES
+	}
+	if errors.Is(err, metadata.ErrQuotaExceeded) {
+		return syscall.EDQUOT
 	}
 
 	// 3. Handle Context errors

@@ -20,6 +20,7 @@ COPY tests/bin/distfs-bench /bin/distfs-bench
 COPY tests/bin/distfs-fuse-load /bin/distfs-fuse-load
 COPY tests/bin/web-test-server /bin/web-test-server
 COPY web /distfs/web
+COPY tests/test-lib.sh /bin/test-lib.sh
 COPY tests/test-e2e.sh /bin/test-e2e.sh
 COPY tests/test-fuse.sh /bin/test-fuse.sh
 COPY tests/test-ha.sh /bin/test-ha.sh

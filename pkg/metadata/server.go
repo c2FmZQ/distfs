@@ -2579,6 +2579,26 @@ func (s *Server) sanitizeResponse(res interface{}) interface{} {
 			code = ErrCodeQuotaDisabled
 		} else if errors.Is(err, ErrForbidden) {
 			code = ErrCodeForbidden
+		} else if errors.Is(err, ErrNotDirectory) {
+			code = ErrCodeNotDirectory
+		} else if errors.Is(err, ErrIsDirectory) {
+			code = ErrCodeIsDirectory
+		} else if errors.Is(err, ErrNotEmpty) {
+			code = ErrCodeNotEmpty
+		} else if errors.Is(err, ErrNameTooLong) {
+			code = ErrCodeNameTooLong
+		} else if errors.Is(err, ErrInvalid) {
+			code = ErrCodeInvalid
+		} else if errors.Is(err, ErrPerm) {
+			code = ErrCodePerm
+		} else if errors.Is(err, ErrNoData) {
+			code = ErrCodeNoData
+		} else if errors.Is(err, ErrNotSupp) {
+			code = ErrCodeNotSupp
+		} else if errors.Is(err, ErrTooBig) {
+			code = ErrCodeTooBig
+		} else if errors.Is(err, ErrRange) {
+			code = ErrCodeRange
 		}
 		return APIErrorResponse{Code: code, Message: err.Error()}
 	}

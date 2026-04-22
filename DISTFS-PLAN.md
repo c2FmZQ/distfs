@@ -1476,6 +1476,132 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
 *   **Step 71.6: Testing & Verification**
     *   **Action:** **Security Test:** Verify a revoked user cannot read newly created files or decrypt files shared after revocation.
     *   **Action:** **Security Test:** Verify a revoked user cannot mutate group files (backdated forgery check).
-    *   **Action:** **Integration Test:** Verify an anonymous user can successfully trial-decrypt the `AnonymousLockbox` and read files from previous epochs.
+    *   **Integration Test:** Verify an anonymous user can successfully trial-decrypt the `AnonymousLockbox` and read files from previous epochs.
 
+    ---
 
+    ## Phase 72: POSIX Compliance Error Validation
+    **Goal:** Improve POSIX compliance by validating and returning standard error codes for all API failure modes. **Crucially, all structural and permission errors must be enforced within the Raft FSM to ensure that POSIX operations remain atomic and consistent across the cluster.**
+
+    *   **Step 72.1: Sentinel Error Definitions**
+        *   **Action:** Add new sentinel errors to `pkg/metadata/types.go`:
+            *   `ErrNotDirectory` (ENOTDIR)
+            *   `ErrIsDirectory` (EISDIR)
+            *   `ErrNotEmpty` (ENOTEMPTY)
+            *   `ErrNameTooLong` (ENAMETOOLONG)
+            *   `ErrInvalid` (EINVAL)
+            *   `ErrPerm` (EPERM)
+            *   `ErrNoData` (ENODATA - for xattrs)
+            *   `ErrNotSupp` (ENOTSUP - for unsupported xattrs)
+            *   `ErrTooBig` (E2BIG - for xattr values)
+            *   `ErrRange` (ERANGE - for xattr buffers)
+        *   **Action:** Define corresponding `ErrCode*` string constants for the wire protocol.
+    *   **Step 72.2: POSIX Error Test Suite**
+        *   **Action:** Create `pkg/client/fuse_error_test.go` for exhaustive error-state validation.
+        *   **Action:** Implement `assertErrno(t, err, expected)` helper.
+        *   **Action:** Implement comprehensive tests for:
+            *   **Global Path Resolution**:
+                *   `ENOTDIR`: A component of the path prefix is not a directory.
+                *   `ENOENT`: A component of the path prefix does not exist.
+                *   `EACCES`: Search permission (execute bit) denied on a component of the path prefix.
+                *   `ELOOP`: Too many levels of symbolic links encountered during resolution.
+                *   `ENAMETOOLONG`: Path or path component exceeds maximum length.
+            *   **Namespace Operations**:
+                *   **`Mkdir`**:
+                    *   `EEXIST`: Target directory already exists.
+                    *   `ENOENT`: Parent directory does not exist.
+                    *   `ENOTDIR`: Parent is a file.
+                    *   `EDQUOT`: User or group inode/byte quota exceeded.
+                    *   `EACCES`: Write permission denied on parent directory.
+                *   **`Rmdir`**:
+                    *   `ENOENT`: Target does not exist.
+                    *   `ENOTEMPTY`: Directory contains files or subdirectories (excluding `.` and `..`).
+                    *   `ENOTDIR`: Target is a file, not a directory.
+                    *   `EACCES`: Write permission denied on parent directory.
+                    *   `EBUSY`: Attempt to remove the root directory or an active mount point.
+                *   **`Unlink`**:
+                    *   `ENOENT`: Target does not exist.
+                    *   `EISDIR`: Target is a directory (use `rmdir` instead).
+                    *   `EACCES`: Write permission denied on parent directory.
+                    *   `EPERM`: Parent directory has sticky bit set and caller is not owner/root.
+                *   **`Rename`**:
+                    *   `ENOENT`: Source does not exist or destination parent does not exist.
+                    *   `ENOTEMPTY`: Destination is a non-empty directory.
+                    *   `EISDIR`: Destination is a directory, but source is a file.
+                    *   `ENOTDIR`: Destination is a file, but source is a directory.
+                    *   `EINVAL`: Source is a parent of Destination.
+                    *   `EACCES`: Permission denied on source/dest parent or moving a restricted directory.
+                    *   `EXDEV`: (Optional) Attempt to rename across different root anchors/groups.
+            *   **File & Link Operations**:
+                *   **`Create` / `Open`**:
+                    *   `ENOENT`: File does not exist (without `O_CREAT`).
+                    *   `EEXIST`: `O_CREAT | O_EXCL` specified and file exists.
+                    *   `EISDIR`: Path is a directory and `O_WRONLY` or `O_RDWR` requested.
+                    *   `EACCES`: Permission denied for the requested access mode (`O_RDONLY`, etc.).
+                    *   `EDQUOT`/`ENOSPC`: Quota exceeded or no space when creating a new file.
+                    *   `ETXTBSY`: (Optional) File is a shared library or executable currently in use (not likely in DistFS but good to consider).
+                *   **`Read`**:
+                    *   `EISDIR`: Attempted to read a directory as a file.
+                    *   `EIO`: Underlying storage network error or decryption failure.
+                    *   `EACCES`: File opened without read permission.
+                *   **`Write`**:
+                    *   `EFBIG`: File size exceeds maximum allowed.
+                    *   `ENOSPC`: No space left on storage nodes.
+                    *   `EDQUOT`: User or group byte quota exceeded.
+                    *   `EIO`: Network failure or chunk encryption error during write.
+                    *   `EACCES`: File opened without write permission.
+                *   **`Flush` / `Release`**:
+                    *   `EIO`: Delayed chunk commits failed.
+                    *   `EDQUOT`/`ENOSPC`: Delayed chunk commits failed due to quota/space exhaustion.
+                *   **`Symlink`**:
+                    *   `EEXIST`: Link path already exists.
+                    *   `EDQUOT`: Inode quota exceeded.
+                    *   `EACCES`: Write permission denied on target directory.
+                *   **`Link`**:
+                    *   `ENOENT`: Source file does not exist.
+                    *   `EPERM`: Source is a directory (hard links to directories are forbidden).
+                    *   `EEXIST`: Link path already exists.
+                    *   `EMLINK`: Maximum link count (`NLink`) for the inode reached.
+                *   **`Readlink`**:
+                    *   `ENOENT`: Path does not exist.
+                    *   `EINVAL`: Path is not a symbolic link.
+            *   **Metadata & ACLs**:
+                *   **`Chmod`/`Chown`**:
+                    *   `ENOENT`: Path does not exist.
+                    *   `EPERM`: Caller is not the owner or a cluster administrator.
+                    *   `EACCES`: Permission denied to modify metadata.
+                *   **`Truncate`/`Setattr`**:
+                    *   `ENOENT`: Path does not exist.
+                    *   `EISDIR`: Cannot truncate a directory.
+                    *   `EFBIG`: File size exceeds implementation limits or user quota.
+                    *   `EINVAL`: Invalid size or attribute value.
+                *   **`Getxattr`/`Setfacl`**:
+                    *   `ENODATA`: Requested attribute (e.g., ACL) does not exist.
+                    *   `E2BIG`: ACL payload or attribute value exceeds maximum size.
+                    *   `EACCES`: Permission denied to read/write extended attributes.
+                    *   `EPERM`: (Setxattr) Attempt to modify protected system attributes without permission.
+                *   **`Listxattr`**:
+                    *   `ERANGE`: Provided buffer is too small to hold the attribute list.
+            *   **Coordination & Cluster**:
+                *   **`Fsync`**:
+                    *   `EIO`: General I/O failure during chunk commit.
+                    *   `EDQUOT`/`ENOSPC`: No space left on storage nodes or quota exceeded during flush.
+                *   **`Statfs`**:
+                    *   `EIO`: Metadata server failed to aggregate cluster health/stats.
+
+    *   **Step 72.3: Error Mapping Refinement**
+        *   **Action:** Update `sanitizeResponse` in `pkg/metadata/server.go` to map new sentinel errors to `DISTFS_*` codes.
+        *   **Action:** Update `mapError` in `pkg/client/fuse_errors.go` to handle all new wire codes and syscall mappings.
+    *   **Step 72.4: FSM-Level Error Enforcement**
+        *   **Action:** Update `pkg/metadata/fsm.go` to perform all POSIX validation during command application.
+        *   **Action:** Ensure `executeUpdateInode` and `executeCreateInode` enforce directory types, link limits, and quota atomically.
+        *   **Action:** Implement `ENOTEMPTY` check in `executeDeleteInode` before unlinking.
+        *   **Action:** Ensure `setxattr` and `getxattr` handlers return `ENODATA` or `E2BIG` correctly.
+    *   **Step 72.5: FUSE Protocol Alignment**
+        *   **Action:** Refactor `pkg/client/fuse_fs.go` to remove redundant client-side pre-flight checks and rely on FSM-generated error codes.
+        *   **Action:** Ensure `Setattr` and `Fsync` correctly propagate space and quota errors from the backend.
+    *   **Step 72.6: Verification & Regression**
+        *   **Action:** Achieve 100% pass rate for the `fuse_error_test.go` suite.
+        *   **Action:** Run `scripts/run-tests.sh` to ensure no regressions in existing E2E behavior.
+    *   **Step 72.7: FUSE Load Test Modernization**
+        *   **Action:** Update `./scripts/run-fuse-load.sh` and `cmd/distfs-fuse-load` to exercise error paths under concurrent load.

@@ -9,6 +9,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"hash/fnv"
 	"io"
 	"os"
@@ -25,6 +26,8 @@ import (
 // FS implements the fuse.FS interface for DistFS.
 type FS struct {
 	client *Client
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 var _ fs.FS = (*FS)(nil)
@@ -32,7 +35,12 @@ var _ fs.FSStatfser = (*FS)(nil)
 
 // NewFS creates a new FUSE file system.
 func NewFS(c *Client) *FS {
-	fsys := &FS{client: c}
+	ctx, cancel := context.WithCancel(context.Background())
+	fsys := &FS{
+		client: c,
+		ctx:    ctx,
+		cancel: cancel,
+	}
 	// Configure lease expiration callback to notify VFS
 	c = c.WithLeaseExpiredCallback(func(id string, err error) {
 		// We don't have easy access to the fuse.Server or mountpoint here to call Invalidate,
@@ -41,6 +49,11 @@ func NewFS(c *Client) *FS {
 	})
 	fsys.client = c
 	return fsys
+}
+
+// Close gracefully cancels operations tied to the lifetime of the FUSE mount.
+func (f *FS) Close() {
+	f.cancel()
 }
 
 func (f *FS) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollResponse) error {
@@ -510,6 +523,7 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 
 	err := d.fs.client.renameRaw(ctx, oldID, oldKey, req.OldName, newID, newKey, req.NewName)
 	if err != nil {
+		fmt.Printf("renameRaw failed: %T %v\n", err, err)
 		return mapError(err)
 	}
 	d.mu.Lock()
@@ -1069,6 +1083,11 @@ func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fu
 }
 
 func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
+	// Flush request are often receiving an Interrupt after a few milliseconds.
+	// Ignore the kernel interrupt but respect filesystem unmount context.
+	ctx, cancel := context.WithCancelCause(h.file.fs.ctx)
+	defer cancel(nil)
+	start := time.Now()
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -1095,7 +1114,7 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		}
 		entry, err := h.file.fs.client.uploadChunkData(ctx, inodeID, fileKey, uint64(idx), page)
 		if err != nil {
-			logger.Debugf("FUSE Flush upload failed (idx=%d): %v", idx, err)
+			logger.Debugf("FUSE Flush upload failed (idx=%d): %v [%s]", idx, err, time.Since(start))
 			return mapError(err)
 		}
 		if h.stagingManifest == nil {
@@ -1144,7 +1163,7 @@ func (h *FileHandle) Flush(ctx context.Context, req *fuse.FlushRequest) error {
 		})
 
 		if err != nil {
-			logger.Debugf("FUSE Flush commit failed: %v", err)
+			logger.Debugf("FUSE Flush commit failed: %v [%s]", err, time.Since(start))
 			// Restore staging on failure
 			for k, v := range staging {
 				h.stagingManifest[k] = v

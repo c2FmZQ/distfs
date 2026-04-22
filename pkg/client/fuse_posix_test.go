@@ -87,15 +87,16 @@ func TestFUSE_POSIXCompliance(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Mount failed: %v", err)
 	}
+	filesys := NewFS(c)
 	defer func() {
 		fuse.Unmount(mountpoint)
+		filesys.Close()
 		conn.Close()
 		time.Sleep(2 * time.Second) // Give kernel/background flushes time to finish
 	}()
 	defer tsMeta.Close()
 	defer metaServer.Shutdown()
 
-	filesys := NewFS(c)
 	serverDone := make(chan error, 1)
 	go func() {
 		serverDone <- fs.Serve(conn, filesys)

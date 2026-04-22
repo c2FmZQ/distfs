@@ -1,20 +1,19 @@
 #!/bin/bash
-set -e
 # Independent runner for FUSE POSIX Load Test
 set -e
 
 echo "Building binaries for FUSE Load Test..."
 mkdir -p tests/bin
-CGO_ENABLED=0 go build -tags pprof -o tests/bin/storage-node ./cmd/storage-node
-CGO_ENABLED=0 go build -o tests/bin/distfs ./cmd/distfs
-CGO_ENABLED=0 go build -tags pprof -o tests/bin/distfs-fuse ./cmd/distfs-fuse
-CGO_ENABLED=0 go build -o tests/bin/test-auth ./cmd/test-auth
-CGO_ENABLED=0 go build -tags pprof -o tests/bin/distfs-fuse-load ./cmd/distfs-fuse-load
+CGO_ENABLED=0 go build -tags debug,pprof -o tests/bin/storage-node ./cmd/storage-node
+CGO_ENABLED=0 go build -tags debug,pprof -o tests/bin/distfs ./cmd/distfs
+CGO_ENABLED=0 go build -tags debug,pprof -o tests/bin/distfs-fuse ./cmd/distfs-fuse
+CGO_ENABLED=0 go build -tags debug,pprof -o tests/bin/test-auth ./cmd/test-auth
+CGO_ENABLED=0 go build -tags debug,pprof -o tests/bin/distfs-fuse-load ./cmd/distfs-fuse-load
 
 echo "Cleaning up existing load test environment..."
-docker compose -f tests/docker-compose.fuse-load.yml down -v --remove-orphans > /dev/null 2>&1
+docker compose -f tests/docker-compose.fuse-load.yml down -v --remove-orphans
 
-LOG_FILE="fuse-load-$(date +%Y%m%d-%H%M%S).log"
+LOG_FILE="logs/fuse-load-$(date +%Y%m%d-%H%M%S).log"
 echo "Launching 5-minute FUSE Load Test (Logging to $LOG_FILE)..."
 
 # Run docker-compose in the background

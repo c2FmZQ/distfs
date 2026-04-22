@@ -447,8 +447,29 @@ func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs m
 				for nameHMAC, oldEntry := range pre.Children {
 					childID := oldEntry.ID
 					stillPresent := false
-					if newEntry, ok := post.Children[nameHMAC]; ok && newEntry.ID == childID {
-						stillPresent = true
+					if newEntry, ok := post.Children[nameHMAC]; ok {
+						if newEntry.ID == childID {
+							stillPresent = true
+						} else {
+							// Overwrite detected
+							oldPlain, _ := fsm.Get(tx, []byte("inodes"), []byte(childID))
+							newPlain, _ := fsm.Get(tx, []byte("inodes"), []byte(newEntry.ID))
+							if oldPlain != nil && newPlain != nil {
+								var oldInode, newInode Inode
+								json.Unmarshal(oldPlain, &oldInode)
+								json.Unmarshal(newPlain, &newInode)
+
+								if newInode.Type == DirType && oldInode.Type != DirType {
+									return ErrNotDirectory
+								}
+								if newInode.Type != DirType && oldInode.Type == DirType {
+									return ErrIsDirectory
+								}
+								if oldInode.Type == DirType && len(oldInode.Children) > 0 {
+									return ErrNotEmpty
+								}
+							}
+						}
 					}
 					if !stillPresent {
 						expectedDeltas[childID]--
@@ -723,6 +744,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	json.Unmarshal(plain, &inode)
 
 	if update.Version != inode.Version+1 {
+		fmt.Printf("FSM Conflict on inode %s: update.Version=%d, inode.Version=%d\n", update.ID, update.Version, inode.Version)
 		return ErrConflict
 	}
 

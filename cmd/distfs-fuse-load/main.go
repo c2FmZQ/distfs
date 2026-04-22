@@ -227,7 +227,7 @@ func doWrite(rng *rand.Rand, base string, m *metrics, state *State) {
 	data := make([]byte, size)
 	rng.Read(data)
 
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := os.WriteFile(path, data, 0640); err != nil {
 		fmt.Printf("WRITE FAILURE: %v\n", err)
 		atomic.AddUint64(&m.failures, 1)
 		return

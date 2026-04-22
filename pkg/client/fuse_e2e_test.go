@@ -219,6 +219,7 @@ func TestFUSE_ReadWriteSeek(t *testing.T) {
 
 		return func() {
 			t.Logf("Unmounting %s...", mountpoint)
+			filesys.Close()
 			if err := fuse.Unmount(mountpoint); err != nil {
 				t.Logf("Unmount warning: %v", err)
 			}

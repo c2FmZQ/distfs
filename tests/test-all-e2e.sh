@@ -4,6 +4,8 @@ set -e
 REPORT_FILE="/tmp/distfs-e2e-report.txt"
 echo "--- DISTFS E2E REPORT ---" > $REPORT_FILE
 
+. "$(dirname $0)/test-lib.sh"
+
 run_test() {
     name=$1
     script=$2
@@ -21,31 +23,6 @@ run_test() {
 
 echo "Starting Unified E2E Test Suite..."
 
-# Function to wait for cluster readiness
-wait_for_ready() {
-    echo "Waiting for cluster leader..."
-    for i in $(seq 1 30); do
-        if wget -qO- "http://storage-node-1:8080/v1/health" 2>/dev/null | grep -q '"is_leader":true'; then
-            echo "Cluster leader found."
-            
-            # Also wait for OIDC discovery
-            echo "Waiting for OIDC discovery..."
-            for j in $(seq 1 30); do
-                if wget -qO- "http://storage-node-1:8080/v1/auth/config" 2>/dev/null | grep -q "issuer"; then
-                    echo "OIDC discovery successful."
-                    return 0
-                fi
-                sleep 1
-            done
-            echo "Timed out waiting for OIDC discovery."
-            return 1
-        fi
-        sleep 1
-    done
-    echo "Timed out waiting for cluster leader."
-    return 1
-}
-
 wait_for_ready || exit 1
 
 # Use a clean temporary directory for this run's configuration
@@ -53,24 +30,7 @@ export DISTFS_CONFIG_DIR=$(mktemp -d)
 export DISTFS_PASSWORD="testpassword"
 echo "Using config directory: $DISTFS_CONFIG_DIR"
 
-# GLOBAL SETUP: Create Admin
-echo "PERFORMING GLOBAL SETUP..."
-JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" init --new --server http://storage-node-1:8080 --jwt "$JWT"; then
-    echo "GLOBAL SETUP FAILED: Admin initialization failed"
-    exit 1
-fi
-
-ADMIN_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" whoami)
-echo "Global Admin ID: $ADMIN_ID"
-
-# Phase 69: System Backbone Bootstrapping
-# Initializing canonical root now correctly provisions backbone directories and groups.
-echo "Initializing canonical root and system backbone..."
-if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" admin-create-root; then
-    echo "GLOBAL SETUP FAILED: admin-create-root failed"
-    exit 1
-fi
+global_setup "$DISTFS_CONFIG_DIR"
 
 # 1. Shared Administrators Group for root management
 # The 'admin' group already exists from admin-create-root, but we create an 'administrators' one
@@ -79,27 +39,6 @@ echo "Creating Administrators group..."
 distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
 ADMIN_GID=$(grep "^ID:" /tmp/admin-group.txt | awk '{print $2}')
 echo "Administrators GID: $ADMIN_GID"
-
-# Note: USERS_GID is correctly "users" as created by admin-create-root
-USERS_GID="users"
-
-provision_user() {
-    name=$1
-    email=$2
-    conf="/tmp/${name}-config.json"
-    path="/users/${name}"
-    echo "Provisioning ${name} ($email) at ${path}..."
-    
-    U_JWT=$(wget -qO- "http://test-auth:8080/mint?email=$email")
-    U_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$conf" init --new --server http://storage-node-1:8080 --jwt "$U_JWT")
-    U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
-    
-    # Provision directory and unlock via Global Admin
-    distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$U_ID"
-    
-    # Add to users group to allow traversal
-    distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" "$name"
-}
 
 provision_user "fuse-user" "fuse-user@example.com"
 provision_user "gc-user" "gc-user@example.com"
@@ -125,7 +64,7 @@ distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DI
 # Promote and add to Administrators group
 distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
 distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$USERS_GID" bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "users" bench-user
 
 # Provision HA directory (world-writable for test flexibility)
 echo "Provisioning /ha..."

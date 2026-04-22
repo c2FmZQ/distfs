@@ -153,12 +153,17 @@ func main() {
 				<-sigChan
 				log.Println("Unmounting...")
 				fuse.Unmount(mountpoint)
-				os.Exit(0)
 			}()
 
 			filesys := client.NewFS(c)
+			defer filesys.Close()
+			server := fs.New(conn, &fs.Config{
+				//Debug: func(msg any) {
+				//	log.Printf("XXXXX FUSE %s", msg)
+				//},
+			})
 
-			if err := fs.Serve(conn, filesys); err != nil {
+			if err := server.Serve(filesys); err != nil {
 				return err
 			}
 			return nil

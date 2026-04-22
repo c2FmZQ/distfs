@@ -4,44 +4,54 @@ services:
     build:
       context: ..
       dockerfile: tests/Dockerfile
-    entrypoint: ["/bin/test-auth", "--addr", ":8080", "--baseURL", "http://test-auth:8080"]
+    entrypoint: ["/bin/test-auth", "--addr", ":8080", "--baseURL", "https://web-test-server/auth"]
+    volumes:
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
 
   storage-node-1:
     container_name: storage-node-1
     build:
       context: ..
       dockerfile: tests/Dockerfile
-    command: ["--id", "node-1", "--raft-bind", "0.0.0.0:5000", "--raft-advertise", "storage-node-1:5000", "--cluster-addr", "0.0.0.0:9090", "--cluster-advertise", "https://storage-node-1:9090", "--api-addr", "0.0.0.0:8080", "--api-url", "http://storage-node-1:8080", "--bootstrap", "--oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "--raft-secret", "supersecret", "--disable-doh"]
-    ports:
-      - "8080:8080"
+    command: ["--id", "node-1", "--raft-bind", "0.0.0.0:5000", "--raft-advertise", "storage-node-1:5000", "--cluster-addr", "0.0.0.0:9090", "--cluster-advertise", "https://storage-node-1:9090", "--api-addr", "0.0.0.0:8080", "--api-url", "https://storage-node-1.web-test-server", "--bootstrap", "--oidc-discovery-url", "https://web-test-server/auth/.well-known/openid-configuration", "--raft-secret", "supersecret", "--disable-doh"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000001
+    volumes:
+      - node1-data:/data
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
     depends_on:
-      - test-auth
+      test-auth:
+        condition: service_started
 
   storage-node-2:
     container_name: storage-node-2
     build:
       context: ..
       dockerfile: tests/Dockerfile
-    command: ["--id", "node-2", "--raft-bind", "0.0.0.0:5000", "--raft-advertise", "storage-node-2:5000", "--cluster-addr", "0.0.0.0:9090", "--cluster-advertise", "https://storage-node-2:9090", "--api-addr", "0.0.0.0:8080", "--api-url", "http://storage-node-2:8080", "--oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "--raft-secret", "supersecret", "--disable-doh"]
+    command: ["--id", "node-2", "--raft-bind", "0.0.0.0:5000", "--raft-advertise", "storage-node-2:5000", "--cluster-addr", "0.0.0.0:9090", "--cluster-advertise", "https://storage-node-2:9090", "--api-addr", "0.0.0.0:8080", "--api-url", "https://storage-node-2.web-test-server", "--oidc-discovery-url", "https://web-test-server/auth/.well-known/openid-configuration", "--raft-secret", "supersecret", "--disable-doh"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000002
+    volumes:
+      - node2-data:/data
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
     depends_on:
-      - test-auth
-      - storage-node-1
+      test-auth:
+        condition: service_started
 
   storage-node-3:
     container_name: storage-node-3
     build:
       context: ..
       dockerfile: tests/Dockerfile
-    command: ["--id", "node-3", "--raft-bind", "0.0.0.0:5000", "--raft-advertise", "storage-node-3:5000", "--cluster-addr", "0.0.0.0:9090", "--cluster-advertise", "https://storage-node-3:9090", "--api-addr", "0.0.0.0:8080", "--api-url", "http://storage-node-3:8080", "--oidc-discovery-url", "http://test-auth:8080/.well-known/openid-configuration", "--raft-secret", "supersecret", "--disable-doh"]
+    command: ["--id", "node-3", "--raft-bind", "0.0.0.0:5000", "--raft-advertise", "storage-node-3:5000", "--cluster-addr", "0.0.0.0:9090", "--cluster-advertise", "https://storage-node-3:9090", "--api-addr", "0.0.0.0:8080", "--api-url", "https://storage-node-3.web-test-server", "--oidc-discovery-url", "https://web-test-server/auth/.well-known/openid-configuration", "--raft-secret", "supersecret", "--disable-doh"]
     environment:
       - DISTFS_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000003
+    volumes:
+      - node3-data:/data
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
     depends_on:
-      - test-auth
-      - storage-node-1
+      test-auth:
+        condition: service_started
 
   fuse-load-runner:
     container_name: fuse-load-runner
@@ -52,16 +62,51 @@ services:
     ports:
       - "6060:6060"
       - "6061:6061"
-    depends_on:
-      - storage-node-1
-      - storage-node-2
-      - storage-node-3
-      - test-auth
     cap_add:
       - SYS_ADMIN
-    devices:
-      - /dev/fuse:/dev/fuse
     security_opt:
       - apparmor:unconfined
     environment:
+      - DISTFS_SERVER_URL=https://web-test-server
       - DISTFS_PASSWORD=loadpass
+    devices:
+      - /dev/fuse:/dev/fuse
+    depends_on:
+      storage-node-1:
+        condition: service_started
+      storage-node-2:
+        condition: service_started
+      storage-node-3:
+        condition: service_started
+    volumes:
+      - tlsproxy-root-ca:/etc/ssl/certs:ro
+
+  web-test-server:
+    container_name: web-test-server
+    image: c2fmzq/tlsproxy:v0.25.2
+    user: "0:0"
+    command: ["--config", "/config.yaml", "--use-ephemeral-certificate-manager", "--quiet"]
+    environment:
+      - HOME=/tmp
+      - CERTMANAGER_STATE_FILE=/ca-state/ca-state.json
+    volumes:
+      - ./tlsproxy-config.yaml:/config.yaml
+      - tlsproxy-root-ca:/ca-state
+    networks:
+      default:
+        aliases:
+          - web-test-server
+          - storage-node-1.web-test-server
+          - storage-node-2.web-test-server
+          - storage-node-3.web-test-server
+
+networks:
+  default:
+    internal: true
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  client-config:
+  tlsproxy-root-ca:
