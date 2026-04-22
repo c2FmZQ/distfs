@@ -61,6 +61,8 @@ func (f *FS) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollRes
 }
 
 func (f *FS) Statfs(ctx context.Context, req *fuse.StatfsRequest, resp *fuse.StatfsResponse) error {
+	ctx, cancel := context.WithCancelCause(f.ctx)
+	defer cancel(nil)
 	stats, err := f.client.getClusterStats(ctx)
 	if err != nil {
 		return mapError(err)
@@ -176,6 +178,8 @@ func (d *Dir) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 
 	if d.inode == nil {
@@ -264,6 +268,8 @@ func (d *Dir) Lookup(ctx context.Context, name string) (fs.Node, error) {
 }
 
 func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 
 	if d.inode == nil {
@@ -304,6 +310,8 @@ func (d *Dir) ReadDirAll(ctx context.Context) ([]fuse.Dirent, error) {
 }
 
 func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.CreateResponse) (fs.Node, fs.Handle, error) {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
@@ -352,6 +360,8 @@ func (d *Dir) Create(ctx context.Context, req *fuse.CreateRequest, resp *fuse.Cr
 
 // Setxattr handles POSIX ACL updates.
 func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	if req.Name != "system.posix_acl_access" && req.Name != "system.posix_acl_default" {
 		return fuse.ErrNoXattr
 	}
@@ -399,6 +409,8 @@ func (d *Dir) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 
 // Getxattr handles POSIX ACL reads.
 func (d *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	if req.Name != "system.posix_acl_access" && req.Name != "system.posix_acl_default" {
 		return fuse.ErrNoXattr
 	}
@@ -429,6 +441,8 @@ func (d *Dir) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fus
 }
 
 func (d *Dir) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 	inode := d.inode
 	d.mu.Unlock()
@@ -456,6 +470,8 @@ func (d *Dir) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *f
 }
 
 func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error) {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
@@ -485,6 +501,8 @@ func (d *Dir) Mkdir(ctx context.Context, req *fuse.MkdirRequest) (fs.Node, error
 }
 
 func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Node) error {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	targetDir := newDir.(*Dir)
 
 	d.mu.Lock()
@@ -536,6 +554,8 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 }
 
 func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
@@ -564,6 +584,8 @@ func (d *Dir) Remove(ctx context.Context, req *fuse.RemoveRequest) error {
 }
 
 func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, error) {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
@@ -593,6 +615,8 @@ func (d *Dir) Symlink(ctx context.Context, req *fuse.SymlinkRequest) (fs.Node, e
 }
 
 func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	d.mu.Lock()
 	if d.inode == nil {
 		if d.isRoot {
@@ -620,6 +644,8 @@ func (d *Dir) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.
 }
 
 func (d *Dir) Link(ctx context.Context, req *fuse.LinkRequest, old fs.Node) (fs.Node, error) {
+	ctx, cancel := context.WithCancelCause(d.fs.ctx)
+	defer cancel(nil)
 	oldFile := old.(*File)
 
 	d.mu.Lock()
@@ -682,6 +708,8 @@ func (f *File) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse.PollR
 }
 
 func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -705,6 +733,8 @@ func (f *File) Attr(ctx context.Context, a *fuse.Attr) error {
 }
 
 func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string, error) {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.inode.Type != metadata.SymlinkType {
@@ -715,6 +745,8 @@ func (f *File) Readlink(ctx context.Context, req *fuse.ReadlinkRequest) (string,
 
 // Setxattr handles POSIX ACL updates for files.
 func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	if req.Name != "system.posix_acl_access" {
 		return fuse.ErrNoXattr // Files cannot have default ACLs
 	}
@@ -761,6 +793,8 @@ func (f *File) Setxattr(ctx context.Context, req *fuse.SetxattrRequest) error {
 
 // Getxattr handles POSIX ACL reads for files.
 func (f *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fuse.GetxattrResponse) error {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	if req.Name != "system.posix_acl_access" {
 		return fuse.ErrNoXattr
 	}
@@ -790,6 +824,8 @@ func (f *File) Getxattr(ctx context.Context, req *fuse.GetxattrRequest, resp *fu
 }
 
 func (f *File) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *fuse.ListxattrResponse) error {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	f.mu.Lock()
 	inode := f.inode
 	f.mu.Unlock()
@@ -814,6 +850,8 @@ func (f *File) Listxattr(ctx context.Context, req *fuse.ListxattrRequest, resp *
 }
 
 func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse.SetattrResponse) error {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	f.mu.Lock()
 	inode := f.inode
 	key := f.key
@@ -829,6 +867,8 @@ func (f *File) Setattr(ctx context.Context, req *fuse.SetattrRequest, resp *fuse
 }
 
 func (f *File) Open(ctx context.Context, req *fuse.OpenRequest, resp *fuse.OpenResponse) (fs.Handle, error) {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	if f.inode.Type == metadata.SymlinkType {
 		return nil, syscall.ELOOP
 	}
@@ -847,6 +887,8 @@ func (f *File) Forget() {
 }
 
 func (f *File) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
+	ctx, cancel := context.WithCancelCause(f.fs.ctx)
+	defer cancel(nil)
 	f.mu.Lock()
 	handles := make([]*FileHandle, len(f.handles))
 	copy(handles, f.handles)
@@ -881,6 +923,8 @@ func (h *FileHandle) Poll(ctx context.Context, req *fuse.PollRequest, resp *fuse
 }
 
 func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse.ReadResponse) error {
+	ctx, cancel := context.WithCancelCause(h.file.fs.ctx)
+	defer cancel(nil)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -976,6 +1020,8 @@ func (h *FileHandle) Read(ctx context.Context, req *fuse.ReadRequest, resp *fuse
 }
 
 func (h *FileHandle) Write(ctx context.Context, req *fuse.WriteRequest, resp *fuse.WriteResponse) error {
+	ctx, cancel := context.WithCancelCause(h.file.fs.ctx)
+	defer cancel(nil)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
@@ -1219,6 +1265,8 @@ func (h *FileHandle) Fsync(ctx context.Context, req *fuse.FsyncRequest) error {
 }
 
 func (h *FileHandle) Release(ctx context.Context, req *fuse.ReleaseRequest) error {
+	ctx, cancel := context.WithCancelCause(h.file.fs.ctx)
+	defer cancel(nil)
 	h.mu.Lock()
 	// Clear memory
 	h.pages = nil
