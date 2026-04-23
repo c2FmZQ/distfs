@@ -40,13 +40,16 @@ type RootAnchor struct {
 
 // Config represents the client-side configuration.
 type Config struct {
-	ServerURL     string                `json:"server_url"`
-	UserID        string                `json:"user_id"`
-	EncKey        string                `json:"enc_key"`
-	SignKey       string                `json:"sign_key"`
-	ServerKey     string                `json:"server_key"`
-	DefaultRootID string                `json:"default_root_id,omitempty"`
-	Roots         map[string]RootAnchor `json:"roots,omitempty"`
+	ServerURL            string                `json:"server_url"`
+	UserID               string                `json:"user_id"`
+	EncKey               string                `json:"enc_key"`
+	SignKey              string                `json:"sign_key"`
+	ServerKey            string                `json:"server_key"`
+	DefaultRootID        string                `json:"default_root_id,omitempty"`
+	Roots                map[string]RootAnchor `json:"roots,omitempty"`
+	CacheDir             string                `json:"cache_dir,omitempty"`
+	CacheMaxBytes        int64                 `json:"cache_max_bytes,omitempty"`
+	MetadataCacheEnabled bool                  `json:"metadata_cache_enabled,omitempty"`
 }
 
 // Encrypt wraps a config into an encrypted blob.

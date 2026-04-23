@@ -73,6 +73,16 @@ To ensure the integrity of the zero-knowledge model even if the server is compro
 
 **The Benefit:** Ensures that mathematical truth (signatures and hashes) always overrides the server's database claims, making the system resilient to total infrastructure compromise.
 
+### 2.6 Secure Persistent Caching (Offline Support)
+Maintaining high performance in an E2EE system usually requires aggressive caching, but standard local caches represent a massive security vulnerability if the user's device is stolen.
+
+**The Mechanism:** DistFS implements a **Universal KVStore** abstraction with mandatory encryption at rest. 
+*   **Platform Awareness:** The client automatically utilizes **BoltDB** on native Linux systems and **IndexedDB** within browser environments (WASM).
+*   **Zero-Knowledge Persistence:** Every item in the local cache (metadata and data chunks) is encrypted using **AES-256-GCM** with a key derived from the user's passphrase via **Argon2id**. 
+*   **Offline Fallback:** If the network is unavailable, the client provides seamless read-only access to all cached content. The system utilizes cryptographic version numbers to perform background re-validation as soon as connectivity is restored.
+
+**The Benefit:** Dramatically reduces network latency and bandwidth consumption while enabling reliable access to critical data in disconnected environments, all without ever storing plaintext keys or data on local disk.
+
 ---
 
 ## 3. POSIX Fidelity & Performance Mitigations
@@ -99,6 +109,8 @@ DistFS employs a unified node architecture where a single Go binary (`storage-no
 
 1.  **Metadata Role:** 3-5 nodes run a strongly consistent BoltDB-backed Raft FSM, managing Inodes, distributed leases, and the Dark Registry.
 2.  **Data Role:** All nodes in the cluster participate in an eventually consistent, parallel fan-out storage pool handling the 1MB encrypted data chunks.
+
+**Universal Caching:** The client integrates a tiered L1 (memory) and L2 (persistent encrypted disk/IndexedDB) caching layer, enabling **read-only offline access** and near-native performance for repetitive I/O workloads.
 
 **Hardware-Bound Security (TPM):** For maximum local security, storage nodes can be configured to bind their Master Keys to a **TPM 2.0** (Trusted Platform Module) using `/dev/tpmrm0`. This ensures the filesystem cannot be unsealed if the disk is moved to a different machine.
 

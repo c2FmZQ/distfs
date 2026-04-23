@@ -124,6 +124,23 @@ To obtain an inode's file key, a client performs a uniform asymmetric trial decr
     *   **Inode Unlocking:** The client uses the derived Group private key to decapsulate the entry in the **Inode's** lockbox for that `recipientID` (the GroupID).
 5.  **Verification:** Once a potential file key is obtained, it is used to decrypt the `ClientBlob`. Decryption success and a valid signature check confirm the key is correct.
 
+### 3.9 Universal Persistent Caching & Offline Mode
+To improve performance and enable access during network partitions, DistFS implements a persistent, platform-aware caching layer that adheres to the "Trust No One" security model.
+
+1.  **Unified Storage Interface (`KVStore`):** The client utilizes a common storage abstraction to manage persistent data, ensuring consistent behavior across all platforms.
+2.  **Cross-Platform Implementations:**
+    *   **Native (CLI/FUSE):** Utilizes **BoltDB** for structured metadata (inodes, groups, users) and a sharded filesystem structure for encrypted data chunks.
+    *   **WASM (Browser):** Leverages browser-native **IndexedDB** to provide persistent storage without requiring a local filesystem.
+3.  **Local Encryption at Rest:** To maintain the zero-knowledge boundary even for local caches, all data stored in the `KVStore` is encrypted using **AES-256-GCM**. The encryption key is derived from the user's passphrase (provided during `init` or `login`) via **Argon2id**, ensuring that an attacker with local disk access cannot inspect the cached file system structure or content.
+4.  **Tiered Caching (L1/L2):**
+    *   **L1 (In-Memory):** High-speed bounded LRU caches for active sessions.
+    *   **L2 (Persistent):** Encrypted disk/IndexedDB storage for long-term persistence across restarts.
+5.  **Read-Only Offline Mode:**
+    *   **Fallback:** If the metadata server is unreachable or the user explicitly toggles offline mode, the client automatically falls back to the L2 persistent cache.
+    *   **Integrity:** Cached Inodes, Groups, and Users retain their cryptographic signatures, allowing the client to verify data integrity even when disconnected.
+    *   **Write Protection:** To prevent split-brain conflicts, all mutation operations are strictly prohibited while in offline mode.
+6.  **Strong Metadata Re-validation:** When online, the client can efficiently cross-check the freshness of cached items by sending a batch of `(ID, Version)` pairs to the server. The server identifies which items have newer versions, allowing the client to perform surgical cache invalidation.
+
 ---
 
 ## 4. Metadata Layer (MetaNodes)

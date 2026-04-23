@@ -900,7 +900,26 @@ const (
 	ActionAdminClusterRem  = "AdminClusterRemove"
 	ActionAdminClusterJoin = "AdminClusterJoin"
 	ActionAdminAudit       = "AdminAudit"
+	ActionValidateMetadata = "ValidateMetadata"
 )
+
+// MetadataVersion represents an ID and its current version.
+type MetadataVersion struct {
+	ID      string `json:"id"`
+	Version uint64 `json:"version"`
+}
+
+// ValidateMetadataRequest is the payload for ActionValidateMetadata.
+type ValidateMetadataRequest struct {
+	Inodes []MetadataVersion `json:"inodes,omitempty"`
+	Groups []MetadataVersion `json:"groups,omitempty"`
+}
+
+// ValidateMetadataResponse returns the IDs of metadata items that have changed.
+type ValidateMetadataResponse struct {
+	StaleInodes []string `json:"stale_inodes,omitempty"`
+	StaleGroups []string `json:"stale_groups,omitempty"`
+}
 
 // GetInodeRequest is the payload for ActionGetInode
 type GetInodeRequest struct {

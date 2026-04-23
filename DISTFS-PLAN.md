@@ -1628,3 +1628,31 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
         *   **Action:** Run the full E2E test suite to guarantee all operations succeed over the new obscured routing mechanism.
     *   **Step 73.5: Documentation Updates**
         *   **Action:** Update `SERVER-API.md` and `DISTFS.md` to reflect the new unified `/v1/invoke` endpoint architecture and the removal of the individual metadata routes.
+
+    ---
+
+    ## Phase 74: Universal Caching and Offline Mode
+
+    **Goal:** Implement a persistent, cross-platform caching layer for encrypted chunks and metadata to improve performance and enable read-only offline access.
+
+    *   **Step 74.1: Storage Abstraction & Native Store**
+        *   **Action:** Define `KVStore` interface in `pkg/client/storage.go`.
+        *   **Action:** Implement `NativeStore` in `pkg/client/storage_native.go` (using BoltDB and standard file I/O).
+        *   **Action:** Add `CacheDir` and `CacheMaxBytes` to `pkg/config/Config`.
+    *   **Step 74.2: WASM IndexedDB Store**
+        *   **Action:** Implement `WASMStore` in `pkg/client/storage_wasm.go` using `syscall/js`.
+        *   **Action:** Define the IndexedDB schema (buckets as object stores).
+    *   **Step 74.3: Cache Encryption**
+        *   **Action:** Implement `SecureKVStore` wrapper that handles AES-GCM encryption/decryption of values.
+        *   **Action:** Update `initClient` and `NewClient` to derive/accept a `CacheEncryptionKey`.
+    *   **Step 74.4: Chunk Cache Integration**
+        *   **Action:** Update `downloadChunk` to utilize the `KVStore`.
+        *   **Action:** Update `uploadChunk` to populate the `KVStore`.
+    *   **Step 74.5: Metadata Cache Integration**
+        *   **Action:** Update `getInode`, `getGroup`, `getUser` to utilize `KVStore`.
+        *   **Action:** Implement background re-validation logic.
+    *   **Step 74.6: Offline Fallback & Testing**
+        *   **Action:** Implement `Client.SetOffline(bool)` and detection in `doRequest`.
+        *   **Action:** Add unit tests for `NativeStore`.
+        *   **Action:** Add integration tests for offline read-only behavior.
+

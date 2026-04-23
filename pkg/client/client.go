@@ -617,6 +617,10 @@ type Client struct {
 
 	registryDir string
 
+	// Phase 74: Universal Caching
+	store   KVStore
+	offline bool
+
 	allocCache  []metadata.Node
 	allocExpiry time.Time
 	allocMu     *sync.RWMutex
@@ -733,6 +737,34 @@ func (c *Client) withRootAnchor(id, owner string, pk, ek []byte, version uint64)
 	c2.rootOwnerEK = ek
 	c2.rootVersion = version
 	return &c2
+}
+
+func (c *Client) WithStore(store KVStore) *Client {
+	c2 := *c
+	c2.store = store
+	return &c2
+}
+
+func (c *Client) WithSecureStore(store KVStore, key []byte) *Client {
+	if store == nil {
+		return c
+	}
+	s, err := NewSecureKVStore(store, key)
+	if err != nil {
+		logger.Debugf("failed to create secure store: %v", err)
+		return c
+	}
+	c2 := *c
+	c2.store = s
+	return &c2
+}
+
+func (c *Client) SetOffline(offline bool) {
+	c.offline = offline
+}
+
+func (c *Client) IsOffline() bool {
+	return c.offline
 }
 
 func (c *Client) WithRegistry(dir string) *Client {
@@ -1220,6 +1252,12 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 }
 
 func (c *Client) uploadChunk(ctx context.Context, id string, data []byte, nodes []metadata.Node, token string) error {
+	if c.store != nil {
+		if err := c.store.Put("chunks", id, data); err != nil {
+			logger.Debugf("failed to cache uploaded chunk %s: %v", id, err)
+		}
+	}
+
 	if len(nodes) == 0 {
 		return fmt.Errorf("no nodes allocated")
 	}
@@ -1392,6 +1430,16 @@ var downloadBufPool = sync.Pool{
 }
 
 func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, token string) ([]byte, error) {
+	if c.store != nil {
+		if data, err := c.store.Get("chunks", id); err == nil {
+			return data, nil
+		}
+	}
+
+	if c.offline {
+		return nil, ErrOffline
+	}
+
 	if len(urls) == 0 {
 		return nil, fmt.Errorf("no URLs provided for chunk %s", id)
 	}
@@ -1505,6 +1553,13 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 	if err != nil {
 		return nil, fmt.Errorf("failed to download chunk %s from any node: %w", id, err)
 	}
+
+	if c.store != nil {
+		if err := c.store.Put("chunks", id, data); err != nil {
+			logger.Debugf("failed to cache chunk %s: %v", id, err)
+		}
+	}
+
 	return data, nil
 }
 
@@ -1638,6 +1693,21 @@ func (c *Client) getUser(ctx context.Context, id string) (*metadata.User, error)
 	return c.getUserInternal(ctx, id, false)
 }
 
+func (c *Client) ValidateMetadata(ctx context.Context, inodes []metadata.MetadataVersion, groups []metadata.MetadataVersion) (*metadata.ValidateMetadataResponse, error) {
+	req := metadata.ValidateMetadataRequest{
+		Inodes: inodes,
+		Groups: groups,
+	}
+	data, _ := json.Marshal(req)
+
+	var resp metadata.ValidateMetadataResponse
+	_, _, err := c.doRequest(ctx, "POST", "/v1/invoke", data, requestOptions{action: metadata.ActionValidateMetadata, unseal: true, retry: true}, &resp)
+	if err != nil {
+		return nil, err
+	}
+	return &resp, nil
+}
+
 // GetQuota returns the current user's quota and usage.
 func (c *Client) GetQuota(ctx context.Context) (metadata.UserQuota, metadata.UserUsage, error) {
 	user, err := c.getUser(ctx, c.UserID())
@@ -1648,14 +1718,42 @@ func (c *Client) GetQuota(ctx context.Context) (metadata.UserQuota, metadata.Use
 }
 
 func (c *Client) getUserRaw(ctx context.Context, id string) (*metadata.User, error) {
-	var user metadata.User
-	req := metadata.GetUserRequest{ID: id}
-	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "GET", "/v1/user/"+id, data, requestOptions{action: metadata.ActionGetUser, unseal: true, retry: true}, &user)
-	if err != nil {
-		return nil, err
+	// Phase 74: Metadata Cache
+	var user *metadata.User
+	var cacheHit bool
+	if c.store != nil {
+		if data, err := c.store.Get("users", id); err == nil {
+			var cuser metadata.User
+			if json.Unmarshal(data, &cuser) == nil {
+				user = &cuser
+				cacheHit = true
+			}
+		}
 	}
-	return &user, nil
+
+	if !cacheHit || !c.offline {
+		var fetchedUser metadata.User
+		req := metadata.GetUserRequest{ID: id}
+		data, _ := json.Marshal(req)
+		_, _, err := c.doRequest(ctx, "GET", "/v1/user/"+id, data, requestOptions{action: metadata.ActionGetUser, unseal: true, retry: true}, &fetchedUser)
+		if err != nil {
+			if (c.offline || errors.Is(err, ErrOffline)) && user != nil {
+				// Fallback to cached version if offline
+			} else {
+				return nil, err
+			}
+		} else {
+			user = &fetchedUser
+			// Update cache
+			if c.store != nil {
+				if udata, err := json.Marshal(user); err == nil {
+					c.store.Put("users", id, udata)
+				}
+			}
+		}
+	}
+
+	return user, nil
 }
 
 func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache bool) (*metadata.User, error) {
@@ -2025,13 +2123,40 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (*metadata.Inode, error) {
 	ctx, state, created := withVerificationState(ctx)
 
-	req := metadata.GetInodeRequest{ID: id}
-	data, _ := json.Marshal(req)
+	// Phase 74: Metadata Cache
+	var inode *metadata.Inode
+	var cacheHit bool
+	if c.store != nil {
+		if data, err := c.store.Get("inodes", id); err == nil {
+			var cinode metadata.Inode
+			if json.Unmarshal(data, &cinode) == nil {
+				inode = &cinode
+				cacheHit = true
+			}
+		}
+	}
 
-	var inode metadata.Inode
-	_, _, err := c.doRequest(ctx, "GET", "/v1/meta/inode/"+id, data, requestOptions{action: metadata.ActionGetInode, unseal: true, retry: true}, &inode)
-	if err != nil {
-		return nil, err
+	if !cacheHit || !c.offline {
+		req := metadata.GetInodeRequest{ID: id}
+		data, _ := json.Marshal(req)
+
+		var fetchedInode metadata.Inode
+		_, _, err := c.doRequest(ctx, "GET", "/v1/meta/inode/"+id, data, requestOptions{action: metadata.ActionGetInode, unseal: true, retry: true}, &fetchedInode)
+		if err != nil {
+			if (c.offline || errors.Is(err, ErrOffline)) && inode != nil {
+				// Fallback to cached version if offline
+			} else {
+				return nil, err
+			}
+		} else {
+			inode = &fetchedInode
+			// Update cache
+			if c.store != nil {
+				if idata, err := json.Marshal(inode); err == nil {
+					c.store.Put("inodes", id, idata)
+				}
+			}
+		}
 	}
 
 	// Phase 31: Root Anchoring
@@ -2069,14 +2194,14 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 
 	// Phase 31: Verification
 	if verify {
-		if err := c.verifyInode(ctx, &inode); err != nil {
+		if err := c.verifyInode(ctx, inode); err != nil {
 			return nil, err
 		}
 	}
 
 	// 1. Decrypt ClientBlob if present
 	if len(inode.ClientBlob) > 0 {
-		if fileKey, err := c.unlockInode(ctx, &inode); err == nil {
+		if fileKey, err := c.unlockInode(ctx, inode); err == nil {
 			inode.SetFileKey(fileKey)
 			var blob metadata.InodeClientBlob
 			if err := c.decryptInodeClientBlob(inode.ClientBlob, fileKey, &blob); err == nil {
@@ -2095,7 +2220,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		}
 	}
 
-	return &inode, nil
+	return inode, nil
 }
 
 func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode, error) {
@@ -2542,7 +2667,7 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 	token, _ := c.issueToken(ctx, id, nil, "R")
 
 	nonce := leaseNonce
-	if nonce == "" {
+	if nonce == "" && !c.offline {
 		nonce = generateNonce()
 		// POSIX compliance: acquire shared usage lease
 		err := c.acquireLeases(ctx, []string{id}, 2*time.Minute, LeaseOptions{Type: metadata.LeaseShared, Nonce: nonce})
@@ -2567,8 +2692,10 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 		onExpired:       c.onLeaseExpired,
 	}
 
-	r.wg.Add(1)
-	go r.leaseRenewalLoop(id, metadata.LeaseShared)
+	if nonce != "" {
+		r.wg.Add(1)
+		go r.leaseRenewalLoop(id, metadata.LeaseShared)
+	}
 
 	return r, nil
 }
@@ -4810,14 +4937,42 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 }
 
 func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, error) {
-	var group metadata.Group
-	req := metadata.GetGroupRequest{ID: id}
-	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "GET", "/v1/group/"+id, data, requestOptions{action: metadata.ActionGetGroup, unseal: true, retry: true}, &group)
-	if err != nil {
-		return nil, err
+	// Phase 74: Metadata Cache
+	var group *metadata.Group
+	var cacheHit bool
+	if c.store != nil {
+		if data, err := c.store.Get("groups", id); err == nil {
+			var cgroup metadata.Group
+			if json.Unmarshal(data, &cgroup) == nil {
+				group = &cgroup
+				cacheHit = true
+			}
+		}
 	}
-	return &group, nil
+
+	if !cacheHit || !c.offline {
+		var fetchedGroup metadata.Group
+		req := metadata.GetGroupRequest{ID: id}
+		data, _ := json.Marshal(req)
+		_, _, err := c.doRequest(ctx, "GET", "/v1/group/"+id, data, requestOptions{action: metadata.ActionGetGroup, unseal: true, retry: true}, &fetchedGroup)
+		if err != nil {
+			if (c.offline || errors.Is(err, ErrOffline)) && group != nil {
+				// Fallback to cached version if offline
+			} else {
+				return nil, err
+			}
+		} else {
+			group = &fetchedGroup
+			// Update cache
+			if c.store != nil {
+				if gdata, err := json.Marshal(group); err == nil {
+					c.store.Put("groups", id, gdata)
+				}
+			}
+		}
+	}
+
+	return group, nil
 }
 
 // verifyGroup verifies the group metadata signature and cross-checks it against the registry attestation.
@@ -5894,9 +6049,16 @@ type requestOptions struct {
 	jwt         string // Custom JWT for Authorization header
 }
 
+var (
+	ErrOffline = errors.New("client is in offline mode")
+)
+
 // doRequest encapsulates the standard metadata request lifecycle:
 // acquireControl -> withRetry -> Auth -> [Seal] -> Execute -> [Unseal] -> releaseControl.
 func (c *Client) doRequest(ctx context.Context, method, urlPath string, body []byte, opts requestOptions, out interface{}) (io.ReadCloser, *http.Response, error) {
+	if c.offline {
+		return nil, nil, ErrOffline
+	}
 	var resp *http.Response
 	var bodyRC io.ReadCloser
 
