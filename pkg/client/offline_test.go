@@ -49,7 +49,7 @@ func TestOfflineFallback(t *testing.T) {
 
 	// Setup Client with Cache
 	cacheDir := t.TempDir()
-	native, _ := NewNativeStore(cacheDir)
+	native, _ := NewNativeStore(cacheDir, 0)
 	cacheKey := make([]byte, 32)
 
 	c := NewClient(tsMeta.URL).

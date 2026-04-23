@@ -7,18 +7,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
+	"time"
 
 	"go.etcd.io/bbolt"
 )
 
 type NativeStore struct {
-	baseDir string
-	db      *bbolt.DB
-	mu      sync.RWMutex
+	baseDir  string
+	maxBytes int64
+	db       *bbolt.DB
+	mu       sync.RWMutex
 }
 
-func NewNativeStore(baseDir string) (*NativeStore, error) {
+func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
 	if err := os.MkdirAll(filepath.Join(baseDir, "chunks"), 0700); err != nil {
 		return nil, err
 	}
@@ -29,8 +32,9 @@ func NewNativeStore(baseDir string) (*NativeStore, error) {
 	}
 
 	return &NativeStore{
-		baseDir: baseDir,
-		db:      db,
+		baseDir:  baseDir,
+		maxBytes: maxBytes,
+		db:       db,
 	}, nil
 }
 
@@ -104,6 +108,9 @@ func (s *NativeStore) getChunk(key string) ([]byte, error) {
 		}
 		return nil, err
 	}
+	// Update access time for LRU
+	now := time.Now()
+	_ = os.Chtimes(path, now, now)
 	return data, nil
 }
 
@@ -129,7 +136,16 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmpName, path)
+	if err := os.Rename(tmpName, path); err != nil {
+		return err
+	}
+
+	// Trigger pruning if limit is set
+	if s.maxBytes > 0 {
+		go s.Prune()
+	}
+
+	return nil
 }
 
 func (s *NativeStore) deleteChunk(key string) error {
@@ -138,5 +154,64 @@ func (s *NativeStore) deleteChunk(key string) error {
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
+	return nil
+}
+
+type chunkInfo struct {
+	path  string
+	size  int64
+	atime time.Time
+}
+
+func (s *NativeStore) Prune() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var chunks []chunkInfo
+	var totalSize int64
+
+	chunksDir := filepath.Join(s.baseDir, "chunks")
+	err := filepath.WalkDir(chunksDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil // Skip errors
+		}
+		if !d.IsDir() {
+			info, err := d.Info()
+			if err != nil {
+				return nil
+			}
+			chunks = append(chunks, chunkInfo{
+				path:  path,
+				size:  info.Size(),
+				atime: info.ModTime(), // Using ModTime as proxy for Atime (updated by Chtimes)
+			})
+			totalSize += info.Size()
+		}
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if totalSize <= s.maxBytes {
+		return nil
+	}
+
+	// Sort by access time (oldest first)
+	sort.Slice(chunks, func(i, j int) bool {
+		return chunks[i].atime.Before(chunks[j].atime)
+	})
+
+	// Delete until under limit
+	for _, c := range chunks {
+		if totalSize <= s.maxBytes {
+			break
+		}
+		if err := os.Remove(c.path); err == nil {
+			totalSize -= c.size
+		}
+	}
+
 	return nil
 }

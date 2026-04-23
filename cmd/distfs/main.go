@@ -771,6 +771,28 @@ func loadClient() *client.Client {
 		WithAllowInsecure(appAllowInsecure).
 		WithDisableDoH(appDisableDoH)
 
+	// Phase 74: Initialize Universal Caching
+	cacheDir := conf.CacheDir
+	if cacheDir == "" {
+		cacheDir = filepath.Join(config.DefaultDir(), "cache")
+	}
+	maxBytes := conf.CacheMaxBytes
+	if maxBytes <= 0 {
+		maxBytes = 1 * 1024 * 1024 * 1024 // Default 1GB
+	}
+
+	store, err := client.NewNativeStore(cacheDir, maxBytes)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: failed to initialize local cache: %v\n", err)
+	} else {
+		cacheKey := conf.DeriveCacheKey()
+		if cacheKey != nil {
+			c = c.WithSecureStore(store, cacheKey)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: no passphrase available to derive cache key, caching disabled\n")
+		}
+	}
+
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	skBytes, _ := hex.DecodeString(conf.SignKey)
 	svKeyBytes, _ := hex.DecodeString(conf.ServerKey)

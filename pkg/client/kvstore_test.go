@@ -5,12 +5,16 @@ package client
 
 import (
 	"bytes"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestNativeStore(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewNativeStore(dir)
+	store, err := NewNativeStore(dir, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -56,9 +60,61 @@ func TestNativeStore(t *testing.T) {
 	}
 }
 
+func TestNativeStorePruning(t *testing.T) {
+	dir := t.TempDir()
+	// Limit to 100 bytes (roughly 4 chunks of 25 bytes)
+	maxBytes := int64(100)
+	store, err := NewNativeStore(dir, maxBytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	// Put 10 chunks of 25 bytes each (total 250 bytes)
+	for i := 0; i < 10; i++ {
+		key := fmt.Sprintf("chunk-%d", i)
+		data := make([]byte, 25)
+		for j := range data {
+			data[j] = byte(i)
+		}
+		if err := store.Put("chunks", key, data); err != nil {
+			t.Fatal(err)
+		}
+		// Small sleep to ensure different mod times
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Give background pruning a moment
+	time.Sleep(200 * time.Millisecond)
+
+	// List files in chunks directory
+	var count int
+	filepath.WalkDir(filepath.Join(dir, "chunks"), func(path string, d os.DirEntry, err error) error {
+		if !d.IsDir() {
+			count++
+		}
+		return nil
+	})
+
+	// 100 / 25 = 4 chunks should remain
+	if count > 4 {
+		t.Errorf("expected at most 4 chunks, got %d", count)
+	}
+
+	// Verify that the LATEST chunks are the ones that remained
+	// (Pruning removes oldest first)
+	for i := 6; i < 10; i++ {
+		key := fmt.Sprintf("chunk-%d", i)
+		_, err := store.Get("chunks", key)
+		if err != nil {
+			t.Errorf("chunk-%d should still be in cache", i)
+		}
+	}
+}
+
 func TestSecureKVStore(t *testing.T) {
 	dir := t.TempDir()
-	native, _ := NewNativeStore(dir)
+	native, _ := NewNativeStore(dir, 0)
 	defer native.Close()
 
 	key := make([]byte, 32)
