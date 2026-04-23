@@ -3,7 +3,6 @@
 package metadata
 
 import (
-	"bytes"
 	"crypto/rand"
 	"encoding/json"
 	"errors"
@@ -59,12 +58,8 @@ func TestGroupManagementSecurity(t *testing.T) {
 		SignKey:  tc.AdminSK.Public(),
 	}
 	groupA.Signature = tc.AdminSK.Sign(groupA.Hash())
-	objBytes, _ := json.Marshal(groupA)
-	batch := []LogCommand{{Type: CmdCreateGroup, Data: objBytes, UserID: tc.AdminID}}
-	payload, _ := json.Marshal(batch)
-	body := SealTestRequestSymmetric(t, tc.AdminID, tc.AdminSK, secretAlice, payload)
-	req, _ := http.NewRequest("POST", tc.TS.URL+"/v1/meta/batch", bytes.NewReader(body))
-	req.Header.Set("X-DistFS-Sealed", "true")
+	batch := []LogCommand{{Type: CmdCreateGroup, Data: MustMarshalJSON(groupA), UserID: tc.AdminID}}
+	req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionBatch, batch, tc.AdminID, tc.AdminSK, secretAlice)
 	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
@@ -75,9 +70,16 @@ func TestGroupManagementSecurity(t *testing.T) {
 	// Read the group with the generated ID from the response
 	opened := UnsealTestResponseWithSession(t, tc.AdminDK, secretAlice, tc.NodeSK.Public(), resp)
 	var results []json.RawMessage
-	json.Unmarshal(opened, &results)
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v, body=%s", err, string(opened))
+	}
+	if len(results) == 0 {
+		t.Fatalf("Expected at least one result in batch")
+	}
 	var createdA Group
-	json.Unmarshal(results[0], &createdA)
+	if err := json.Unmarshal(results[0], &createdA); err != nil {
+		t.Fatalf("Failed to unmarshal created group: %v", err)
+	}
 	resp.Body.Close()
 
 	// 3. Mallory attempts to hijack Group A (Should fail)
@@ -87,12 +89,8 @@ func TestGroupManagementSecurity(t *testing.T) {
 	hijackA.Nonce = GenerateNonce()
 	hijackA.SignGroupForTest(uMalloryID, uMallorySign)
 
-	objBytes, _ = json.Marshal(hijackA)
-	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes, UserID: uMalloryID}}
-	payload, _ = json.Marshal(batch)
-	body = SealTestRequestSymmetric(t, uMalloryID, uMallorySign, secretMallory, payload)
-	req, _ = http.NewRequest("POST", tc.TS.URL+"/v1/meta/batch", bytes.NewReader(body))
-	req.Header.Set("X-DistFS-Sealed", "true")
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: MustMarshalJSON(hijackA), UserID: uMalloryID}}
+	req = NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionBatch, batch, uMalloryID, uMallorySign, secretMallory)
 	req.Header.Set("Session-Token", tokenMallory)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode == http.StatusOK {
@@ -113,17 +111,18 @@ func TestGroupManagementSecurity(t *testing.T) {
 		SignKey:  tc.AdminSK.Public(),
 	}
 	gSelf.Signature = tc.AdminSK.Sign(gSelf.Hash())
-	objBytes, _ = json.Marshal(gSelf)
-	batch = []LogCommand{{Type: CmdCreateGroup, Data: objBytes, UserID: tc.AdminID}}
-	payload, _ = json.Marshal(batch)
-	body = SealTestRequestSymmetric(t, tc.AdminID, tc.AdminSK, secretAlice, payload)
-	req, _ = http.NewRequest("POST", tc.TS.URL+"/v1/meta/batch", bytes.NewReader(body))
-	req.Header.Set("X-DistFS-Sealed", "true")
+	batch = []LogCommand{{Type: CmdCreateGroup, Data: MustMarshalJSON(gSelf), UserID: tc.AdminID}}
+	req = NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionBatch, batch, tc.AdminID, tc.AdminSK, secretAlice)
 	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("Failed to create self-managed group: %d", resp.StatusCode)
 	}
+	opened = UnsealTestResponseWithSession(t, tc.AdminDK, secretAlice, tc.NodeSK.Public(), resp)
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
 
 	// Update Bob to be a member of Group Self
 	err := tc.Node.FSM.db.Update(func(tx *bolt.Tx) error {
@@ -149,11 +148,12 @@ func TestGroupManagementSecurity(t *testing.T) {
 	tokenBob, secretBob := LoginSessionForTestWithSecret(t, tc.TS, uBobID, uBobSign)
 
 	// Refresh
-	req, _ = http.NewRequest("GET", tc.TS.URL+"/v1/group/"+gSelfID, nil)
+	req = NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionGetGroup, GetGroupRequest{ID: gSelfID}, uBobID, uBobSign, secretBob)
 	req.Header.Set("Session-Token", tokenBob)
 	resp, _ = http.DefaultClient.Do(req)
+	openedBob := UnsealTestResponseWithSession(t, uBobDec, secretBob, tc.NodeSK.Public(), resp)
 	var gSelfRefreshed Group
-	json.NewDecoder(resp.Body).Decode(&gSelfRefreshed)
+	json.Unmarshal(openedBob, &gSelfRefreshed)
 	resp.Body.Close()
 
 	bobUpdate := gSelfRefreshed
@@ -165,18 +165,19 @@ func TestGroupManagementSecurity(t *testing.T) {
 	bobUpdate.Version++
 	bobUpdate.SignGroupForTest(uBobID, uBobSign)
 
-	objBytes, _ = json.Marshal(bobUpdate)
-	batch = []LogCommand{{Type: CmdUpdateGroup, Data: objBytes, UserID: uBobID}}
-	payload, _ = json.Marshal(batch)
-	body = SealTestRequestSymmetric(t, uBobID, uBobSign, secretBob, payload)
-	req, _ = http.NewRequest("POST", tc.TS.URL+"/v1/meta/batch", bytes.NewReader(body))
-	req.Header.Set("X-DistFS-Sealed", "true")
+	batch = []LogCommand{{Type: CmdUpdateGroup, Data: MustMarshalJSON(bobUpdate), UserID: uBobID}}
+	req = NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionBatch, batch, uBobID, uBobSign, secretBob)
 	req.Header.Set("Session-Token", tokenBob)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		t.Errorf("Expected 200 for Bob updating self-managed group, got %d: %s", resp.StatusCode, string(body))
 	}
+	openedBob = UnsealTestResponseWithSession(t, uBobDec, secretBob, tc.NodeSK.Public(), resp)
+	if err := json.Unmarshal(openedBob, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
 }
 
 func TestGroupQuotaEnforcement(t *testing.T) {

@@ -143,6 +143,7 @@ type batchRequest struct {
 }
 
 type sessionKeyEntry struct {
+	userID string
 	key    []byte
 	expiry int64
 }
@@ -662,39 +663,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world", "/v1/meta/key/cluster/sign",
 		"/v1/user/register", "/v1/login", "/v1/auth/config", "/v1/auth/challenge",
-		"/v1/cluster/stats", "/v1/user/keysync":
+		"/v1/cluster/stats", "/v1/user/keysync", "/v1/node/info":
 		isPublic = true
-	case "/v1/node/info":
-		isPublic = true
-	}
-
-	// 2. Handle Public Routes before forwarding (Performance & Availability)
-	if r.Method == http.MethodGet {
-		switch r.URL.Path {
-		case "/v1/health":
-			s.handleHealth(w, r)
-			return
-		case "/v1/meta/key":
-			s.handleGetClusterKey(w, r)
-			return
-		case "/v1/meta/key/sign":
-			s.handleGetServerSignKey(w, r)
-			return
-		case "/v1/meta/key/cluster/sign":
-			s.handleGetClusterSignKey(w, r)
-			return
-		case "/v1/meta/key/world":
-			s.handleGetWorldPublicKey(w, r)
-			return
-		case "/v1/node/info":
-			s.handleNodeInfo(w, r)
-			return
-		}
-	}
-
-	// Cluster Private Key (Authenticated encapsulation)
-	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
-		// Needs auth, skip for now - will be handled later
 	}
 
 	// Debug Routes (Protected by shared secret)
@@ -702,17 +672,15 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if r.URL.Path == "/v1/system/bootstrap" && r.Method == http.MethodPost {
-		s.handleSystemBootstrap(w, r)
+	// 3. Leader Forwarding (Redirect mutations to leader)
+	// Some routes are local-only or handle their own forwarding.
+	if r.URL.Path == "/v1/system/bootstrap" || r.URL.Path == "/v1/health" || r.URL.Path == "/v1/node/info" {
+		// Bypass forwarding
+	} else if s.forwardIfNecessary(w, r) {
 		return
 	}
 
-	// For all other requests, if we are not the leader, forward to the leader.
-	if s.forwardIfNecessary(w, r) {
-		return
-	}
-
-	// 4. Authenticate User for remaining routes
+	// 4. Authenticate User
 	user, err := s.authenticate(r)
 	if err != nil {
 		authHeader := r.Header.Get("Authorization")
@@ -748,188 +716,77 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 		// Handle Sealed Request (Layer 7 E2EE)
 		if r.Header.Get("X-DistFS-Sealed") == "true" && r.Method != http.MethodGet {
-			payload, err := s.unsealRequest(w, r, user)
+			payload, newCtx, err := s.unsealRequest(w, r, user)
 			if err != nil {
-				var maxBytesErr *http.MaxBytesError
-				if errors.As(err, &maxBytesErr) {
-					return
-				} else {
-					s.writeError(w, r, ErrCodeInternal, "failed to unseal: "+err.Error(), http.StatusBadRequest)
-				}
+				s.writeError(w, r, ErrCodeInternal, "failed to unseal: "+err.Error(), http.StatusBadRequest)
 				return
 			}
+			*r = *r.WithContext(newCtx)
 			r.Body = io.NopCloser(bytes.NewReader(payload))
 			r.ContentLength = int64(len(payload))
-		} else if r.Method == http.MethodPost || r.Method == http.MethodPut || (r.Method == http.MethodDelete && r.ContentLength > 0) {
-			// Enforce E2EE for mutations
-			if r.Header.Get("X-DistFS-Sealed") != "true" {
-				s.writeError(w, r, ErrCodeForbidden, "E2EE mandatory for this request", http.StatusForbidden)
-				return
-			}
-		}
-
-		ctx = context.WithValue(r.Context(), userContextKey, user)
-		if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
-			ctx = context.WithValue(ctx, adminBypassContextKey, true)
-		}
-		r = r.WithContext(ctx)
-	}
-
-	// 5. Mutation & Protected Routes
-	if r.URL.Path == "/v1/node" {
-		if !s.checkRaftSecret(r) {
-			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		if r.Method == http.MethodPost {
-			s.handleRegisterNode(w, r)
-			return
-		}
-		if r.Method == http.MethodGet {
-			s.handleGetNodes(w, r)
-			return
-		}
-	}
-	if strings.HasPrefix(r.URL.Path, "/v1/node/") {
-		if !s.checkRaftSecret(r) {
-			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		id := strings.TrimPrefix(r.URL.Path, "/v1/node/")
-		if r.Method == http.MethodDelete {
-			s.handleRemoveNode(w, r, id)
-			return
 		}
 	}
 
-	if r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost {
+	// 5. Main Routing
+	switch {
+	case r.URL.Path == "/v1/invoke" && r.Method == http.MethodPost:
+		s.handleInvoke(w, r)
+	case r.URL.Path == "/v1/system/bootstrap" && r.Method == http.MethodPost:
+		s.handleSystemBootstrap(w, r)
+
+	case r.URL.Path == "/v1/health":
+		s.handleHealth(w, r)
+	case r.URL.Path == "/v1/meta/key":
+		s.handleGetClusterKey(w, r)
+	case r.URL.Path == "/v1/meta/key/sign":
+		s.handleGetServerSignKey(w, r)
+	case r.URL.Path == "/v1/meta/key/cluster/sign":
+		s.handleGetClusterSignKey(w, r)
+	case r.URL.Path == "/v1/meta/key/world":
+		s.handleGetWorldPublicKey(w, r)
+	case r.URL.Path == "/v1/node/info":
+		s.handleNodeInfo(w, r)
+	case r.URL.Path == "/v1/auth/config":
+		s.handleGetAuthConfig(w, r)
+	case r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost:
+		s.handleAuthChallenge(w, r)
+	case r.URL.Path == "/v1/login" && r.Method == http.MethodPost:
+		s.handleLogin(w, r)
+	case r.URL.Path == "/v1/user/register" && r.Method == http.MethodPost:
 		s.handleRegisterUser(w, r)
-		return
-	}
-	if r.URL.Path == "/v1/user/keysync" {
+	case r.URL.Path == "/v1/cluster/stats" && r.Method == http.MethodGet:
+		s.handleGetClusterStats(w, r)
+
+	// Special unsealed but authenticated
+	case r.URL.Path == "/v1/user/keysync":
 		if r.Method == http.MethodGet {
 			s.handleGetKeySync(w, r)
-			return
-		}
-		if r.Method == http.MethodPost {
+		} else if r.Method == http.MethodPost {
 			s.handleStoreKeySync(w, r)
-			return
 		}
-	}
-	if r.URL.Path == "/v1/login" && r.Method == http.MethodPost {
-		s.handleLogin(w, r)
-		return
-	}
-	if r.URL.Path == "/v1/auth/config" && r.Method == http.MethodGet {
-		s.handleGetAuthConfig(w, r)
-		return
-	}
-	if r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost {
-		s.handleAuthChallenge(w, r)
-		return
-	}
-
-	if r.URL.Path == "/v1/meta/key/world/private" && r.Method == http.MethodGet {
-		if user == nil {
-			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		s.handleGetWorldPrivateKey(w, r)
-		return
-	}
-
-	if r.URL.Path == "/v1/cluster/stats" && r.Method == http.MethodGet {
-		s.handleGetClusterStats(w, r)
-		return
-	}
-
-	if r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet {
-		if !s.checkRaftSecret(r) && user == nil {
-			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	case r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet:
 		s.handleGetMetrics(w, r)
-		return
-	}
-
-	// Admin Routes (Individual PQC Authorization)
-	if strings.HasPrefix(r.URL.Path, "/v1/admin/") {
-		if user == nil {
+	case r.URL.Path == "/v1/node":
+		if s.checkRaftSecret(r) {
+			if r.Method == http.MethodPost {
+				s.handleRegisterNode(w, r)
+			} else {
+				s.handleGetNodes(w, r)
+			}
+		} else {
 			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-			return
 		}
-		if r.Header.Get("X-DistFS-Sealed") != "true" {
-			s.writeError(w, r, ErrCodeForbidden, "E2EE mandatory for admin operations", http.StatusForbidden)
-			return
-		}
-		isAdmin := s.fsm.IsAdmin(user.ID)
-		if !isAdmin {
-			s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
-			return
-		}
-		s.handleAdmin(w, r)
-		return
-	}
-
-	// 7. Authenticated Standard Routes (Inode / User / Group)
-	if strings.HasPrefix(r.URL.Path, "/v1/user/") || strings.HasPrefix(r.URL.Path, "/v1/group/") || strings.HasPrefix(r.URL.Path, "/v1/meta/") {
-		if user == nil {
+	case strings.HasPrefix(r.URL.Path, "/v1/node/"):
+		if s.checkRaftSecret(r) {
+			id := strings.TrimPrefix(r.URL.Path, "/v1/node/")
+			s.handleRemoveNode(w, r, id)
+		} else {
 			s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
-			return
 		}
 
-		if r.URL.Path == "/v1/user/groups" && r.Method == http.MethodGet {
-			s.handleListGroups(w, r)
-			return
-		}
-		if r.URL.Path == "/v1/group/gid/allocate" && r.Method == http.MethodGet {
-			s.handleAllocateGID(w, r)
-			return
-		}
-		if strings.HasPrefix(r.URL.Path, "/v1/user/") && r.Method == http.MethodGet {
-			id := strings.TrimPrefix(r.URL.Path, "/v1/user/")
-			s.handleGetUser(w, r, id)
-			return
-		}
-
-		if strings.HasPrefix(r.URL.Path, "/v1/meta/inode/") {
-			id := strings.TrimPrefix(r.URL.Path, "/v1/meta/inode/")
-			if r.Method == http.MethodGet {
-				s.handleGetInode(w, r, id)
-				return
-			}
-		} else if r.URL.Path == "/v1/meta/inodes" && r.Method == http.MethodPost {
-			s.handleGetInodes(w, r)
-			return
-		} else if r.URL.Path == "/v1/meta/token" && r.Method == http.MethodPost {
-			s.handleIssueToken(w, r)
-			return
-		} else if r.URL.Path == "/v1/meta/batch" && r.Method == http.MethodPost {
-			s.handleBatch(w, r)
-			return
-		} else if strings.HasPrefix(r.URL.Path, "/v1/group/") {
-			id := strings.TrimPrefix(r.URL.Path, "/v1/group/")
-			if id == "" {
-				s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
-				return
-			}
-			if r.Method == http.MethodGet {
-				s.handleGetGroup(w, r, id)
-				return
-			}
-		} else if r.URL.Path == "/v1/meta/allocate" && r.Method == http.MethodPost {
-			s.handleAllocateChunk(w, r)
-			return
-		} else if r.URL.Path == "/v1/meta/lease/acquire" && r.Method == http.MethodPost {
-			s.handleAcquireLeases(w, r)
-			return
-		} else if r.URL.Path == "/v1/meta/lease/release" && r.Method == http.MethodPost {
-			s.handleReleaseLeases(w, r)
-			return
-		}
+	default:
+		s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 	}
-
-	s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
 }
 
 func (s *Server) forwardIfNecessary(w http.ResponseWriter, r *http.Request) bool {
@@ -2516,40 +2373,6 @@ func (s *Server) checkRaftSecret(r *http.Request) bool {
 	return subtle.ConstantTimeCompare(provided[:], expected[:]) == 1
 }
 
-func (s *Server) handleAdmin(w http.ResponseWriter, r *http.Request) {
-	path := strings.TrimPrefix(r.URL.Path, "/v1/admin/")
-	switch {
-	case path == "users" && r.Method == http.MethodGet:
-		s.handleClusterUsers(w, r)
-	case path == "groups" && r.Method == http.MethodGet:
-		s.handleClusterGroups(w, r)
-	case path == "leases" && r.Method == http.MethodGet:
-		s.handleClusterLeases(w, r)
-	case path == "nodes" && r.Method == http.MethodGet:
-		s.handleClusterNodes(w, r)
-	case path == "status" && r.Method == http.MethodGet:
-		s.handleClusterStatus(w, r)
-	case path == "join" && r.Method == http.MethodPost:
-		s.handleClusterJoin(w, r)
-	case path == "remove" && r.Method == http.MethodPost:
-		s.handleClusterRemove(w, r)
-	case path == "node" && r.Method == http.MethodPost:
-		s.handleRegisterNode(w, r)
-	case path == "promote" && r.Method == http.MethodPost:
-		s.handleAdminPromote(w, r)
-	case path == "lock" && r.Method == http.MethodPost:
-		s.handleAdminSetUserLock(w, r)
-	case path == "audit" && r.Method == http.MethodGet:
-		s.handleAudit(w, r)
-	case path == "quota/user" && r.Method == http.MethodPost:
-		s.handleSetUserQuota(w, r)
-	case path == "quota/group" && r.Method == http.MethodPost:
-		s.handleSetGroupQuota(w, r)
-	default:
-		s.writeError(w, r, ErrCodeNotFound, "not found", http.StatusNotFound)
-	}
-}
-
 func (s *Server) writeError(w http.ResponseWriter, r *http.Request, code string, message string, status int) {
 	resp := APIErrorResponse{
 		Code:    code,
@@ -3407,16 +3230,16 @@ func (s *Server) parseSessionToken(tokenStr string) (*SessionToken, error) {
 	return &st.Token, nil
 }
 
-func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *User) ([]byte, error) {
+func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *User) ([]byte, context.Context, error) {
 	// Limit reading to 10MB to prevent DoS
 	limitBody := http.MaxBytesReader(w, r.Body, 10*1024*1024)
 	var sealed SealedRequest
 	if err := json.NewDecoder(limitBody).Decode(&sealed); err != nil {
-		return nil, fmt.Errorf("invalid sealed request: %w", err)
+		return nil, nil, fmt.Errorf("invalid sealed request: %w", err)
 	}
 
 	if sealed.UserID != user.ID {
-		return nil, fmt.Errorf("user mismatch in sealed request")
+		return nil, nil, fmt.Errorf("user mismatch in sealed request")
 	}
 
 	// 0. Check Session Cache (Memoization)
@@ -3437,7 +3260,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 					if err == nil {
 						// Success with cached key
 						if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
-							return nil, err
+							return nil, nil, err
 						}
 						// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
 						ctx := context.WithValue(r.Context(), sessionKeyContextKey, entry.key)
@@ -3445,8 +3268,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 						ctx = context.WithValue(ctx, requestSignatureContextKey, sig)
 						ctx = context.WithValue(ctx, requestTimestampContextKey, ts)
 						ctx = context.WithValue(ctx, sessionNonceContextKey, st.Nonce)
-						*r = *r.WithContext(ctx)
-						return payload, nil
+						return payload, ctx, nil
 					} else {
 					}
 					// If symmetric decryption fails, fall back to full KEM (maybe key rotated?)
@@ -3457,7 +3279,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	// 1. Get Active Cluster Key
 	active, err := s.fsm.GetActiveKey()
 	if err != nil {
-		return nil, fmt.Errorf("active cluster key not found")
+		return nil, nil, fmt.Errorf("active cluster key not found")
 	}
 
 	s.epochPrivateKeysMu.RLock()
@@ -3471,13 +3293,13 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 		if s.raft.State() == raft.Leader {
 			go s.keyWorker.rotate()
 		}
-		return nil, fmt.Errorf("active epoch key private part not available in-memory")
+		return nil, nil, fmt.Errorf("active epoch key private part not available in-memory")
 	}
 
 	// 2. Open (Full KEM)
 	ts, payload, sharedSecret, sig, err := crypto.OpenRequest(dk, user.SignKey, sealed.Sealed)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open request: %w", err)
+		return nil, nil, fmt.Errorf("failed to open request: %w", err)
 	}
 
 	var sessionNonce string
@@ -3488,6 +3310,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 			sessionNonce = st.Nonce
 			s.sessionKeyMu.Lock()
 			s.sessionKeyCache[st.Nonce] = sessionKeyEntry{
+				userID: user.ID,
 				key:    sharedSecret,
 				expiry: st.Expiry,
 			}
@@ -3509,7 +3332,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 	// 3. Replay Protection
 	if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
@@ -3521,9 +3344,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 		ctx = context.WithValue(ctx, sessionNonceContextKey, sessionNonce)
 	}
 
-	*r = *r.WithContext(ctx)
-
-	return payload, nil
+	return payload, ctx, nil
 }
 func (s *Server) checkReplay(userID string, ts int64, ciphertext []byte) error {
 	now := time.Now().UnixNano()
@@ -3867,4 +3688,159 @@ func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(snap)
+}
+
+func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-DistFS-Sealed") != "true" {
+		s.writeError(w, r, ErrCodeForbidden, "invoke endpoint requires sealing", http.StatusForbidden)
+		return
+	}
+
+	ctxUser, ok := r.Context().Value(userContextKey).(*User)
+	if !ok || ctxUser == nil {
+		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	// Verify unsealing happened (session key must be present in context)
+	if r.Context().Value(sessionKeyContextKey) == nil {
+		s.writeError(w, r, ErrCodeInternal, "request not unsealed", http.StatusInternalServerError)
+		return
+	}
+
+	var env SealedEnvelope
+	if err := json.NewDecoder(r.Body).Decode(&env); err != nil {
+		s.writeError(w, r, ErrCodeInternal, "invalid envelope", http.StatusBadRequest)
+		return
+	}
+
+	// We put the payload back into r.Body for downstream handlers that use json.NewDecoder
+	r.Body = io.NopCloser(bytes.NewReader(env.Payload))
+	r.ContentLength = int64(len(env.Payload))
+
+	// Re-inject user and admin bypass into context just in case it was lost during unsealing
+	ctx := r.Context()
+	ctx = context.WithValue(ctx, userContextKey, ctxUser)
+	if r.Header.Get("X-DistFS-Admin-Bypass") == "true" {
+		ctx = context.WithValue(ctx, adminBypassContextKey, true)
+	}
+	*r = *r.WithContext(ctx)
+
+	switch env.Action {
+	case ActionGetInode:
+		var req GetInodeRequest
+		if err := json.Unmarshal(env.Payload, &req); err != nil {
+			s.writeError(w, r, ErrCodeInternal, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		s.handleGetInode(w, r, req.ID)
+	case ActionGetInodes:
+		s.handleGetInodes(w, r)
+	case ActionGetWorldPrivate:
+		s.handleGetWorldPrivateKey(w, r)
+	case ActionIssueToken:
+		s.handleIssueToken(w, r)
+	case ActionBatch:
+		s.handleBatch(w, r)
+	case ActionAllocateChunk:
+		s.handleAllocateChunk(w, r)
+	case ActionAcquireLeases:
+		s.handleAcquireLeases(w, r)
+	case ActionReleaseLeases:
+		s.handleReleaseLeases(w, r)
+	case ActionGetUser:
+		var req GetUserRequest
+		if err := json.Unmarshal(env.Payload, &req); err != nil {
+			s.writeError(w, r, ErrCodeInternal, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		s.handleGetUser(w, r, req.ID)
+	case ActionListGroups:
+		s.handleListGroups(w, r)
+	case ActionGetGroup:
+		var req GetGroupRequest
+		if err := json.Unmarshal(env.Payload, &req); err != nil {
+			s.writeError(w, r, ErrCodeInternal, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		s.handleGetGroup(w, r, req.ID)
+	case ActionAllocateGID:
+		s.handleAllocateGID(w, r)
+
+	// Admin Actions
+	case ActionAdminUsers:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterUsers(w, r)
+	case ActionAdminGroups:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterGroups(w, r)
+	case ActionAdminLeases:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterLeases(w, r)
+	case ActionAdminNodes:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterNodes(w, r)
+	case ActionAdminStatus:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterStatus(w, r)
+	case ActionAdminPromote:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleAdminPromote(w, r)
+	case ActionAdminUserLock:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleAdminSetUserLock(w, r)
+	case ActionAdminUserQuota:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleSetUserQuota(w, r)
+	case ActionAdminGroupQuota:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleSetGroupQuota(w, r)
+	case ActionAdminClusterRem:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterRemove(w, r)
+	case ActionAdminClusterJoin:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleClusterJoin(w, r)
+	case ActionAdminAudit:
+		if !s.fsm.IsAdmin(ctxUser.ID) {
+			s.writeError(w, r, ErrCodeForbidden, "admin privileges required", http.StatusForbidden)
+			return
+		}
+		s.handleAudit(w, r)
+	default:
+		s.writeError(w, r, ErrCodeInvalid, "unknown action", http.StatusBadRequest)
+	}
 }

@@ -1184,7 +1184,7 @@ func (c *Client) allocateNodes(ctx context.Context) ([]metadata.Node, error) {
 	c.allocMu.RUnlock()
 
 	var nodes []metadata.Node
-	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/allocate", nil, requestOptions{sealed: true, unseal: true, retry: true}, &nodes)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/allocate", nil, requestOptions{action: metadata.ActionAllocateChunk, sealed: true, unseal: true, retry: true}, &nodes)
 	if err != nil {
 		return nil, err
 	}
@@ -1206,7 +1206,7 @@ func (c *Client) issueToken(ctx context.Context, inodeID string, chunks []string
 	data, _ := json.Marshal(reqData)
 
 	// Special case: Token is raw bytes, not JSON
-	bodyRC, _, err := c.doRequest(ctx, "POST", "/v1/meta/token", data, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	bodyRC, _, err := c.doRequest(ctx, "POST", "/v1/meta/token", data, requestOptions{action: metadata.ActionIssueToken, sealed: true, unseal: true, retry: true}, nil)
 	if err != nil {
 		return "", err
 	}
@@ -1559,7 +1559,7 @@ func (e *APIError) ToFS() error {
 func (c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEntry, error] {
 	return func(yield func(metadata.GroupListEntry, error) bool) {
 		var resp metadata.GroupListResponse
-		_, _, err := c.doRequest(ctx, "GET", "/v1/user/groups", nil, requestOptions{unseal: true, retry: true}, &resp)
+		_, _, err := c.doRequest(ctx, "GET", "/v1/user/groups", nil, requestOptions{action: metadata.ActionListGroups, unseal: true, retry: true}, &resp)
 		if err != nil {
 			yield(metadata.GroupListEntry{}, err)
 			return
@@ -1649,7 +1649,9 @@ func (c *Client) GetQuota(ctx context.Context) (metadata.UserQuota, metadata.Use
 
 func (c *Client) getUserRaw(ctx context.Context, id string) (*metadata.User, error) {
 	var user metadata.User
-	_, _, err := c.doRequest(ctx, "GET", "/v1/user/"+id, nil, requestOptions{unseal: true, retry: true}, &user)
+	req := metadata.GetUserRequest{ID: id}
+	data, _ := json.Marshal(req)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/user/"+id, data, requestOptions{action: metadata.ActionGetUser, unseal: true, retry: true}, &user)
 	if err != nil {
 		return nil, err
 	}
@@ -1968,7 +1970,7 @@ func (c *Client) applyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 	}
 
 	var results []json.RawMessage
-	_, _, err = c.doRequest(ctx, "POST", "/v1/meta/batch", data, requestOptions{sealed: true, unseal: true, retry: true, conflict: false}, &results)
+	_, _, err = c.doRequest(ctx, "POST", "/v1/meta/batch", data, requestOptions{action: metadata.ActionBatch, sealed: true, unseal: true, retry: true, conflict: false}, &results)
 
 	if err != nil {
 		return nil, err
@@ -2023,8 +2025,11 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (*metadata.Inode, error) {
 	ctx, state, created := withVerificationState(ctx)
 
+	req := metadata.GetInodeRequest{ID: id}
+	data, _ := json.Marshal(req)
+
 	var inode metadata.Inode
-	_, _, err := c.doRequest(ctx, "GET", "/v1/meta/inode/"+id, nil, requestOptions{unseal: true, retry: true}, &inode)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/meta/inode/"+id, data, requestOptions{action: metadata.ActionGetInode, unseal: true, retry: true}, &inode)
 	if err != nil {
 		return nil, err
 	}
@@ -2116,7 +2121,7 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 		}
 
 		var chunkInodes []*metadata.Inode
-		_, _, err = c.doRequest(ctx, "POST", "/v1/meta/inodes", data, requestOptions{sealed: true, unseal: true, retry: true}, &chunkInodes)
+		_, _, err = c.doRequest(ctx, "POST", "/v1/meta/inodes", data, requestOptions{action: metadata.ActionGetInodes, sealed: true, unseal: true, retry: true}, &chunkInodes)
 		if err != nil {
 			return nil, err
 		}
@@ -4650,7 +4655,7 @@ func (c *Client) GetWorldPrivateKey(ctx context.Context) (*mlkem.DecapsulationKe
 		return wp, nil
 	}
 
-	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world/private", nil, requestOptions{unseal: true, retry: true}, nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world/private", nil, requestOptions{action: metadata.ActionGetWorldPrivate, unseal: true, retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -4806,7 +4811,9 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 
 func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, error) {
 	var group metadata.Group
-	_, _, err := c.doRequest(ctx, "GET", "/v1/group/"+id, nil, requestOptions{unseal: true, retry: true}, &group)
+	req := metadata.GetGroupRequest{ID: id}
+	data, _ := json.Marshal(req)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/group/"+id, data, requestOptions{action: metadata.ActionGetGroup, unseal: true, retry: true}, &group)
 	if err != nil {
 		return nil, err
 	}
@@ -5053,7 +5060,7 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 	var res struct {
 		GID uint32 `json:"gid"`
 	}
-	_, _, err := c.doRequest(ctx, "GET", "/v1/group/gid/allocate", nil, requestOptions{unseal: true, retry: true}, &res)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/group/gid/allocate", nil, requestOptions{action: metadata.ActionAllocateGID, unseal: true, retry: true}, &res)
 	return res.GID, err
 }
 
@@ -5877,6 +5884,7 @@ func (c *Client) releaseData() {
 }
 
 type requestOptions struct {
+	action      string // Target action for /v1/invoke
 	sealed      bool   // Seal request body
 	unseal      bool   // Unseal response body
 	retry       bool   // Use standard retry
@@ -5891,6 +5899,24 @@ type requestOptions struct {
 func (c *Client) doRequest(ctx context.Context, method, urlPath string, body []byte, opts requestOptions, out interface{}) (io.ReadCloser, *http.Response, error) {
 	var resp *http.Response
 	var bodyRC io.ReadCloser
+
+	if opts.action != "" {
+		opts.sealed = true
+		if len(body) == 0 {
+			body = []byte("{}")
+		}
+		env := metadata.SealedEnvelope{
+			Action:  opts.action,
+			Payload: body,
+		}
+		var err error
+		body, err = json.Marshal(env)
+		if err != nil {
+			return nil, nil, err
+		}
+		urlPath = "/v1/invoke"
+		method = http.MethodPost
+	}
 
 	op := func() error {
 		if !opts.skipControl {
@@ -6154,7 +6180,7 @@ func (c *Client) acquireLeases(ctx context.Context, ids []string, duration time.
 	}
 	data, _ := json.Marshal(req)
 
-	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/acquire", data, requestOptions{sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/acquire", data, requestOptions{action: metadata.ActionAcquireLeases, sealed: true, unseal: true, retry: true, conflict: false}, nil)
 	return err
 }
 
@@ -6175,7 +6201,7 @@ func (c *Client) releaseLeases(ctx context.Context, ids []string, nonce string) 
 	}
 	data, _ := json.Marshal(req)
 
-	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/release", data, requestOptions{sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/release", data, requestOptions{action: metadata.ActionReleaseLeases, sealed: true, unseal: true, retry: true, conflict: false}, nil)
 	return err
 }
 
@@ -6183,7 +6209,7 @@ func (c *Client) releaseLeases(ctx context.Context, ids []string, nonce string) 
 func (c *Client) AdminListUsers(ctx context.Context) iter.Seq2[*metadata.User, error] {
 	return func(yield func(*metadata.User, error) bool) {
 		var users []metadata.User
-		_, _, err := c.doRequest(ctx, "GET", "/v1/admin/users", nil, requestOptions{sealed: true, unseal: true, retry: true}, &users)
+		_, _, err := c.doRequest(ctx, "GET", "/v1/admin/users", nil, requestOptions{action: metadata.ActionAdminUsers, unseal: true, retry: true}, &users)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -6203,11 +6229,9 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 		cursor := ""
 		for {
 			var groups []metadata.Group
-			u := "/v1/admin/groups"
-			if cursor != "" {
-				u += "?cursor=" + cursor
-			}
-			_, resp, err := c.doRequest(ctx, "GET", u, nil, requestOptions{sealed: true, unseal: true, retry: true}, &groups)
+			req := metadata.AdminGroupsRequest{Cursor: cursor, Limit: 1000}
+			data, _ := json.Marshal(req)
+			_, resp, err := c.doRequest(ctx, "GET", "/v1/admin/groups", data, requestOptions{action: metadata.ActionAdminGroups, unseal: true, retry: true}, &groups)
 			if err != nil {
 				yield(nil, err)
 				return
@@ -6232,7 +6256,7 @@ func (c *Client) AdminListGroups(ctx context.Context) iter.Seq2[*metadata.Group,
 func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseInfo, error] {
 	return func(yield func(*metadata.LeaseInfo, error) bool) {
 		var leases []metadata.LeaseInfo
-		_, _, err := c.doRequest(ctx, "GET", "/v1/admin/leases", nil, requestOptions{sealed: true, unseal: true, retry: true}, &leases)
+		_, _, err := c.doRequest(ctx, "GET", "/v1/admin/leases", nil, requestOptions{action: metadata.ActionAdminLeases, unseal: true, retry: true}, &leases)
 		if err != nil {
 			yield(nil, err)
 			return
@@ -6250,7 +6274,7 @@ func (c *Client) AdminListLeases(ctx context.Context) iter.Seq2[*metadata.LeaseI
 func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 	return func(yield func(*metadata.Node) bool) {
 		var nodes []metadata.Node
-		_, _, _ = c.doRequest(ctx, "GET", "/v1/admin/nodes", nil, requestOptions{sealed: true, unseal: true, retry: true}, &nodes)
+		_, _, _ = c.doRequest(ctx, "GET", "/v1/admin/nodes", nil, requestOptions{action: metadata.ActionAdminNodes, unseal: true, retry: true}, &nodes)
 
 		for i := range nodes {
 			if !yield(&nodes[i]) {
@@ -6263,7 +6287,7 @@ func (c *Client) AdminListNodes(ctx context.Context) iter.Seq[*metadata.Node] {
 // AdminClusterStatus returns detailed information about the cluster state and node statistics.
 func (c *Client) AdminClusterStatus(ctx context.Context) (map[string]interface{}, error) {
 	var status map[string]interface{}
-	_, _, err := c.doRequest(ctx, "GET", "/v1/admin/status", nil, requestOptions{sealed: true, unseal: true, retry: true}, &status)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/admin/status", nil, requestOptions{action: metadata.ActionAdminStatus, unseal: true, retry: true}, &status)
 	return status, err
 }
 
@@ -6357,7 +6381,7 @@ func (c *Client) ResolveGroupName(ctx context.Context, name string) (string, *Gr
 
 // AdminAudit streams redacted audit records from the server.
 func (c *Client) AdminAudit(ctx context.Context, handler func(metadata.AuditRecord) error) error {
-	bodyRC, resp, err := c.doRequest(ctx, "GET", "/v1/admin/audit", nil, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	bodyRC, resp, err := c.doRequest(ctx, "GET", "/v1/admin/audit", nil, requestOptions{action: metadata.ActionAdminAudit, unseal: true, retry: true}, nil)
 	if err != nil {
 		return err
 	}
@@ -6475,7 +6499,7 @@ func (c *Client) AdminAuditForest(ctx context.Context) (roots []*metadata.Redact
 // AdminPromote grants administrative privileges to a user.
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/promote", payload, requestOptions{sealed: true, retry: true}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/promote", payload, requestOptions{action: metadata.ActionAdminPromote, unseal: true, retry: true}, nil)
 	if err == nil {
 		c.invalidateUserCache(userID)
 	}
@@ -6485,14 +6509,14 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 // AdminJoinNode adds a new storage node to the cluster.
 func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	payload, _ := json.Marshal(map[string]string{"address": address})
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/join", payload, requestOptions{sealed: true, retry: true}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/join", payload, requestOptions{action: metadata.ActionAdminClusterJoin, unseal: true, retry: true}, nil)
 	return err
 }
 
 // AdminRemoveNode removes a storage node from the cluster by ID.
 func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 	payload, _ := json.Marshal(map[string]string{"id": id})
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/remove", payload, requestOptions{sealed: true, retry: true}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/remove", payload, requestOptions{action: metadata.ActionAdminClusterRem, unseal: true, retry: true}, nil)
 	return err
 }
 
@@ -6503,7 +6527,7 @@ func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked boo
 		Locked: locked,
 	}
 	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/lock", data, requestOptions{sealed: true, retry: true}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/lock", data, requestOptions{action: metadata.ActionAdminUserLock, unseal: true, retry: true}, nil)
 	if err == nil {
 		c.invalidateUserCache(userID)
 	}
@@ -6513,7 +6537,7 @@ func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked boo
 // AdminSetUserQuota updates the resource limits for a user.
 func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
 	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/user", data, requestOptions{sealed: true, retry: true}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/user", data, requestOptions{action: metadata.ActionAdminUserQuota, unseal: true, retry: true}, nil)
 	if err == nil {
 		c.invalidateUserCache(req.UserID)
 	}
@@ -6523,7 +6547,7 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 // AdminSetGroupQuota updates the resource limits for a group.
 func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error {
 	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/group", data, requestOptions{sealed: true, retry: true}, nil)
+	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/group", data, requestOptions{action: metadata.ActionAdminGroupQuota, unseal: true, retry: true}, nil)
 	if err == nil {
 		c.invalidateGroupCache(req.GroupID)
 	}

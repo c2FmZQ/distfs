@@ -868,6 +868,71 @@ type SealedResponse struct {
 	Sealed []byte `json:"sealed"`
 }
 
+// SealedEnvelope represents the decrypted inner payload, containing the action to perform.
+type SealedEnvelope struct {
+	Action  string          `json:"action"`
+	Payload json.RawMessage `json:"payload"`
+}
+
+// Action Constants for the /v1/invoke endpoint
+const (
+	ActionGetInode         = "GetInode"
+	ActionGetInodes        = "GetInodes"
+	ActionGetWorldPrivate  = "GetWorldPrivate"
+	ActionIssueToken       = "IssueToken"
+	ActionBatch            = "Batch"
+	ActionAllocateChunk    = "AllocateChunk"
+	ActionAcquireLeases    = "AcquireLeases"
+	ActionReleaseLeases    = "ReleaseLeases"
+	ActionGetUser          = "GetUser"
+	ActionListGroups       = "ListGroups"
+	ActionGetGroup         = "GetGroup"
+	ActionAllocateGID      = "AllocateGID"
+	ActionAdminUsers       = "AdminUsers"
+	ActionAdminGroups      = "AdminGroups"
+	ActionAdminLeases      = "AdminLeases"
+	ActionAdminNodes       = "AdminNodes"
+	ActionAdminStatus      = "AdminStatus"
+	ActionAdminPromote     = "AdminPromote"
+	ActionAdminUserLock    = "AdminUserLock"
+	ActionAdminUserQuota   = "AdminUserQuota"
+	ActionAdminGroupQuota  = "AdminGroupQuota"
+	ActionAdminClusterRem  = "AdminClusterRemove"
+	ActionAdminClusterJoin = "AdminClusterJoin"
+	ActionAdminAudit       = "AdminAudit"
+)
+
+// GetInodeRequest is the payload for ActionGetInode
+type GetInodeRequest struct {
+	ID string `json:"id"`
+}
+
+// GetUserRequest is the payload for ActionGetUser
+type GetUserRequest struct {
+	ID string `json:"id"`
+}
+
+// GetGroupRequest is the payload for ActionGetGroup
+type GetGroupRequest struct {
+	ID string `json:"id"`
+}
+
+// AdminGroupsRequest is the payload for ActionAdminGroups
+type AdminGroupsRequest struct {
+	Cursor string `json:"cursor"`
+	Limit  int    `json:"limit"`
+}
+
+// AdminClusterRemoveRequest is the payload for ActionAdminClusterRem
+type AdminClusterRemoveRequest struct {
+	ID string `json:"id"`
+}
+
+// AdminClusterJoinRequest is the payload for ActionAdminClusterJoin
+type AdminClusterJoinRequest struct {
+	Address string `json:"address"`
+}
+
 // KeySyncBlob stores a passphrase-encrypted client configuration for synchronization.
 type KeySyncBlob struct {
 	KDF        string `json:"kdf"`

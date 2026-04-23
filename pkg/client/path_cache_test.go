@@ -52,8 +52,10 @@ func TestPathCache(t *testing.T) {
 	metaServer.StopKeyRotation()
 
 	tsMeta := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Count GET /v1/meta/inode/{id}
-		if r.Method == "GET" && (len(r.URL.Path) > 14 && r.URL.Path[:15] == "/v1/meta/inode/") {
+		// Count GetInode actions (heuristically for now as it's sealed)
+		// Sequential resolution calls getInodeInternal for each path segment.
+		// These are now POST /v1/invoke.
+		if r.URL.Path == "/v1/invoke" && r.Method == "POST" {
 			atomic.AddUint64(&getInodeCount, 1)
 		}
 		if r.URL.Path == "/v1/meta/key/sign" {

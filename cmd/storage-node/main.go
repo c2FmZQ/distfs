@@ -420,15 +420,14 @@ func main() {
 			publicMux := http.NewServeMux()
 			publicMux.Handle("/v1/meta/", metaServer) // Meta reads/writes
 			publicMux.Handle("/v1/meta/key", metaServer)
+			publicMux.Handle("/v1/invoke", metaServer)
 			publicMux.Handle("/v1/health", metaServer)
 			publicMux.Handle("/v1/node", metaServer)
 
 			publicMux.Handle("/v1/user/", metaServer)
-			publicMux.Handle("/v1/group/", metaServer)
 			publicMux.Handle("/v1/cluster/", metaServer)
 			publicMux.Handle("/v1/auth/", metaServer)
 			publicMux.Handle("/v1/login", metaServer)
-			publicMux.Handle("/v1/admin/", metaServer)
 			publicMux.Handle("/v1/system/", metaServer)
 			publicMux.Handle("/v1/data/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if strings.HasSuffix(r.URL.Path, "/replicate") {
@@ -446,11 +445,9 @@ func main() {
 			clusterMux.Handle("/v1/node", metaServer) // Registration
 			clusterMux.Handle("/v1/node/info", metaServer)
 			clusterMux.Handle("/v1/health", metaServer)
-			clusterMux.Handle("/v1/admin/", metaServer)
 			clusterMux.Handle("/v1/cluster/", metaServer) // Management
 			clusterMux.Handle("/v1/meta/", metaServer)
-			clusterMux.Handle("/v1/user/", metaServer)  // Forwarded writes
-			clusterMux.Handle("/v1/group/", metaServer) // Forwarded writes
+			clusterMux.Handle("/v1/user/", metaServer) // Forwarded writes
 			clusterMux.Handle("/v1/auth/", metaServer)
 			clusterMux.Handle("/v1/login", metaServer)
 			if len(clusterSecret) == 0 {

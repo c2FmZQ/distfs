@@ -712,3 +712,47 @@ func DumpFSM(raftNode *RaftNode) {
 	})
 	fmt.Printf("--- END FSM DUMP ---\n\n")
 }
+
+// NewSealedTestRequest creates a sealed request to the /v1/invoke endpoint.
+func NewSealedTestRequest(t *testing.T, tsURL, action string, payload interface{}, uid string, signKey *crypto.IdentityKey, ek []byte) *http.Request {
+	var payloadBytes []byte
+	if b, ok := payload.([]byte); ok {
+		payloadBytes = b
+	} else if payload != nil {
+		payloadBytes, _ = json.Marshal(payload)
+	}
+
+	env := SealedEnvelope{
+		Action:  action,
+		Payload: payloadBytes,
+	}
+	envJSON, _ := json.Marshal(env)
+
+	body, _ := SealTestRequestWithSecret(t, uid, signKey, ek, envJSON)
+	req, _ := http.NewRequest("POST", tsURL+"/v1/invoke", bytes.NewReader(body))
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// NewSealedTestRequestSymmetric creates a sealed request using a symmetric session key.
+func NewSealedTestRequestSymmetric(t *testing.T, tsURL, action string, payload interface{}, uid string, signKey *crypto.IdentityKey, sessionKey []byte) *http.Request {
+	var payloadBytes []byte
+	if b, ok := payload.([]byte); ok {
+		payloadBytes = b
+	} else if payload != nil {
+		payloadBytes, _ = json.Marshal(payload)
+	}
+
+	env := SealedEnvelope{
+		Action:  action,
+		Payload: payloadBytes,
+	}
+	envJSON, _ := json.Marshal(env)
+
+	body := SealTestRequestSymmetric(t, uid, signKey, sessionKey, envJSON)
+	req, _ := http.NewRequest("POST", tsURL+"/v1/invoke", bytes.NewReader(body))
+	req.Header.Set("X-DistFS-Sealed", "true")
+	req.Header.Set("Content-Type", "application/json")
+	return req
+}

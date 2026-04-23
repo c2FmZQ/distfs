@@ -79,13 +79,9 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		Chunks:  []string{"chunk1"},
 		Mode:    "W",
 	}
-	payload, _ := json.Marshal(reqBody)
-	// Must seal POST requests to /v1/meta/token
-	body := metadata.SealTestRequestSymmetric(t, "u1", u1Sign, secret1, payload)
 
-	req, _ := http.NewRequest("POST", tc.TS.URL+"/v1/meta/token", bytes.NewReader(body))
+	req := metadata.NewSealedTestRequestSymmetric(t, tc.TS.URL, metadata.ActionIssueToken, reqBody, "u1", u1Sign, secret1)
 	req.Header.Set("Session-Token", token1)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("Failed to request token: %v", err)
@@ -128,13 +124,12 @@ func TestSecurity_ClusterSignKey(t *testing.T) {
 		t.Errorf("Data server rejected valid cluster-signed token: %v", err)
 	}
 
-	// 4. FORGERY: Sign a token using a Node's individual key (legacy/malicious behavior)
 	capToken := metadata.CapabilityToken{
 		Chunks: []string{"chunk1"},
 		Mode:   "W",
 		Exp:    time.Now().Add(time.Hour).Unix(),
 	}
-	payload, _ = json.Marshal(capToken)
+	payload, _ := json.Marshal(capToken)
 	badSig := tc.NodeSK.Sign(payload)
 	forgedToken := metadata.SignedAuthToken{
 		SignerID:  "node-1",

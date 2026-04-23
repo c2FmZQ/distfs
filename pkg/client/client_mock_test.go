@@ -112,20 +112,57 @@ func TestClient_MockedConflict(t *testing.T) {
 	ctx := context.Background()
 	dk, _ := crypto.GenerateEncryptionKey()
 	sk, _ := crypto.GenerateIdentityKey()
-	c := NewClient("http://mock").withServerKey(dk.EncapsulationKey()).withSignKey(sk).withIdentity("u1", dk).WithAdmin(true).WithRegistry("")
+	serverDK, _ := crypto.GenerateEncryptionKey()
+	c := NewClient("http://mock").withServerKey(serverDK.EncapsulationKey()).withSignKey(sk).withIdentity("u1", dk).WithAdmin(true).WithRegistry("")
 
 	nonce := metadata.GenerateNonce()
 	inodeID := metadata.GenerateInodeID("u1", nonce)
 
 	// Pre-login to avoid login logic in mock
+	sessionKey := make([]byte, 32)
+	for i := range sessionKey {
+		sessionKey[i] = byte(i)
+	}
 	c.sessionToken = "fake"
+	c.sessionKey = sessionKey
 	c.sessionExpiry = time.Now().Add(time.Hour)
 
 	attempts := 0
 	c.httpCli.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
-			if req.Method == "GET" {
-				if strings.Contains(req.URL.Path, "/v1/user/") {
+			if req.Method == "GET" && strings.Contains(req.URL.Path, "/v1/user/") {
+				res := metadata.User{ID: "u1", SignKey: sk.Public()}
+				b, _ := json.Marshal(res)
+				return &http.Response{
+					StatusCode: http.StatusOK,
+					Body:       io.NopCloser(bytes.NewReader(b)),
+				}, nil
+			}
+
+			if req.Method == "POST" && req.URL.Path == "/v1/invoke" {
+				// Unseal to identify action
+				body, _ := io.ReadAll(req.Body)
+				var sr metadata.SealedRequest
+				if err := json.Unmarshal(body, &sr); err != nil {
+					return nil, err
+				}
+
+				var payload []byte
+				var err error
+				if req.Header.Get("Session-Token") != "" {
+					_, payload, _, err = crypto.OpenRequestSymmetric(sessionKey, sk.Public(), sr.Sealed)
+				} else {
+					_, payload, _, _, err = crypto.OpenRequest(serverDK, sk.Public(), sr.Sealed)
+				}
+				if err != nil {
+					return nil, err
+				}
+				var env metadata.SealedEnvelope
+				if err := json.Unmarshal(payload, &env); err != nil {
+					return nil, err
+				}
+
+				if env.Action == metadata.ActionGetUser {
 					res := metadata.User{ID: "u1", SignKey: sk.Public()}
 					b, _ := json.Marshal(res)
 					return &http.Response{
@@ -133,55 +170,66 @@ func TestClient_MockedConflict(t *testing.T) {
 						Body:       io.NopCloser(bytes.NewReader(b)),
 					}, nil
 				}
-				// Create a valid inode with ClientBlob and Lockbox
-				fileKey := make([]byte, 32)
-				inode := metadata.Inode{
-					ID:      inodeID,
-					Nonce:   nonce,
-					Version: 1,
-					Type:    metadata.FileType,
-					OwnerID: "u1",
-					Lockbox: make(crypto.Lockbox),
+
+				if env.Action == metadata.ActionGetInode {
+					// Create a valid inode with ClientBlob and Lockbox
+					fileKey := make([]byte, 32)
+					inode := metadata.Inode{
+						ID:      inodeID,
+						Nonce:   nonce,
+						Version: 1,
+						Type:    metadata.FileType,
+						OwnerID: "u1",
+						Lockbox: make(crypto.Lockbox),
+					}
+					inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey, 0)
+
+					blob := metadata.InodeClientBlob{
+						MTime: time.Now().UnixNano(),
+					}
+					plainBlob, _ := json.Marshal(blob)
+					encBlob, _ := crypto.EncryptDEM(fileKey, plainBlob)
+					inode.ClientBlob = encBlob
+
+					// Also set transient fields for ManifestHash calculation during signing
+					inode.SetSignerID("u1")
+					inode.SignInodeForTest("u1", sk)
+
+					b, _ := json.Marshal(inode)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(bytes.NewReader(b)),
+					}, nil
 				}
-				inode.Lockbox.AddRecipient("u1", dk.EncapsulationKey(), fileKey, 0)
 
-				blob := metadata.InodeClientBlob{
-					MTime: time.Now().UnixNano(),
+				if env.Action == metadata.ActionBatch {
+					if attempts < 2 {
+						attempts++
+						return &http.Response{
+							StatusCode: http.StatusConflict,
+							Body:       io.NopCloser(bytes.NewReader([]byte(`{"code":"DISTFS_VERSION_CONFLICT"}`))),
+						}, nil
+					}
+
+					// Return a successful batch response after 2 attempts
+					attempts++
+					// For tests, use the SAME inodeID but incremented version
+					u1ID := "u1"
+					updatedInode := metadata.Inode{ID: inodeID, Nonce: nonce, Version: 2, Type: metadata.FileType, OwnerID: u1ID}
+					updatedInode.SignInodeForTest("u1", sk)
+					ib, _ := json.Marshal(updatedInode)
+					batchRes := []json.RawMessage{ib}
+					bb, _ := json.Marshal(batchRes)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(bytes.NewReader(bb)),
+					}, nil
 				}
-				plainBlob, _ := json.Marshal(blob)
-				encBlob, _ := crypto.EncryptDEM(fileKey, plainBlob)
-				inode.ClientBlob = encBlob
-
-				// Also set transient fields for ManifestHash calculation during signing
-				inode.SetSignerID("u1")
-				inode.SignInodeForTest("u1", sk)
-
-				b, _ := json.Marshal(inode)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(bytes.NewReader(b)),
-				}, nil
-			}
-			if attempts < 2 {
-				attempts++
-				return &http.Response{
-					StatusCode: http.StatusConflict,
-					Body:       io.NopCloser(bytes.NewReader([]byte("conflict"))),
-				}, nil
 			}
 
-			// Return a successful batch response after 2 attempts
-			attempts++
-			// For tests, use the SAME inodeID but incremented version
-			u1ID := "u1"
-			updatedInode := metadata.Inode{ID: inodeID, Nonce: nonce, Version: 2, Type: metadata.FileType, OwnerID: u1ID}
-			updatedInode.SignInodeForTest("u1", sk)
-			ib, _ := json.Marshal(updatedInode)
-			batchRes := []json.RawMessage{ib}
-			bb, _ := json.Marshal(batchRes)
 			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewReader(bb)),
+				StatusCode: http.StatusNotFound,
+				Body:       io.NopCloser(bytes.NewReader([]byte("not found"))),
 			}, nil
 		},
 	}

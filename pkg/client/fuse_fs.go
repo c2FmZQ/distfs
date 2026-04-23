@@ -9,7 +9,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
-	"fmt"
 	"hash/fnv"
 	"io"
 	"os"
@@ -49,6 +48,10 @@ func NewFS(c *Client) *FS {
 	})
 	fsys.client = c
 	return fsys
+}
+
+func (f *FS) Context() context.Context {
+	return f.ctx
 }
 
 // Close gracefully cancels operations tied to the lifetime of the FUSE mount.
@@ -541,7 +544,6 @@ func (d *Dir) Rename(ctx context.Context, req *fuse.RenameRequest, newDir fs.Nod
 
 	err := d.fs.client.renameRaw(ctx, oldID, oldKey, req.OldName, newID, newKey, req.NewName)
 	if err != nil {
-		fmt.Printf("renameRaw failed: %T %v\n", err, err)
 		return mapError(err)
 	}
 	d.mu.Lock()

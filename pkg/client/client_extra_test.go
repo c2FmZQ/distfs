@@ -371,13 +371,17 @@ func TestClient_AdminMethods(t *testing.T) {
 	}
 
 	// 10. AdminJoinNode
-	err = c.WithAdmin(true).AdminJoinNode(ctx, "http://127.0.0.1:9999")
+	ctxTimeout, cancel := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel()
+	err = c.WithAdmin(true).AdminJoinNode(ctxTimeout, "http://127.0.0.1:9999")
 	if err != nil {
 		// Might fail due to real Raft join logic, but handler hit
 	}
 
 	// 11. AdminRemoveNode
-	err = c.WithAdmin(true).AdminRemoveNode(ctx, "n2")
+	ctxTimeout2, cancel2 := context.WithTimeout(ctx, 1*time.Second)
+	defer cancel2()
+	err = c.WithAdmin(true).AdminRemoveNode(ctxTimeout2, "n2")
 	if err != nil {
 		// Might fail if not in cluster
 	}

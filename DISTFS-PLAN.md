@@ -1605,3 +1605,26 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
         *   **Action:** Run `scripts/run-tests.sh` to ensure no regressions in existing E2E behavior.
     *   **Step 72.7: FUSE Load Test Modernization**
         *   **Action:** Update `./scripts/run-fuse-load.sh` and `cmd/distfs-fuse-load` to exercise error paths under concurrent load.
+
+    ---
+
+    ## Phase 73: Metadata Privacy via Endpoint Obfuscation
+    **Goal:** Merge (most of) the metadata server endpoints into a single non-descript endpoint (e.g., `POST /v1/invoke`) and move the routing details inside the sealed request. This prevents network observers from inferring user behavior (e.g., fetching an inode vs. creating a group) based on URL paths.
+
+    *   **Step 73.1: Define Sealed Envelope**
+        *   **Action:** Create a `SealedEnvelope` struct in `pkg/metadata/types.go` containing `Action` (string) and `Payload` (`json.RawMessage`).
+        *   **Action:** Define constants for all actions that are currently mapped to URL paths (e.g., `ActionGetInode`, `ActionGetUser`, `ActionGetGroup`, `ActionListGroups`, `ActionBatch`, `ActionAdminPromote`, `ActionAcquireLeases`, `ActionAllocateGID`, `ActionAllocateChunk`).
+        *   **Action:** Define new request payload structs for operations that previously passed parameters via URL path or query string (e.g., `GetInodeRequest{ID string}`, `GetUserRequest{ID string}`, `GetGroupRequest{ID string}`, `ClusterGroupsRequest{Cursor string, Limit int}`).
+    *   **Step 73.2: Update Server Routing**
+        *   **Action:** Create a unified `POST /v1/invoke` endpoint in `pkg/metadata/server.go`.
+        *   **Action:** Modify the server to unseal the payload, unmarshal the `SealedEnvelope`, and route internally based on `envelope.Action`.
+        *   **Action:** Transition existing authenticated handlers (e.g., `handleGetInode`, `handleBatch`, `handleAdminPromote`) to process the `envelope.Payload` directly.
+        *   **Action:** Remove the old, explicit URL-based routing logic for these sealed endpoints from `ServeHTTP`.
+    *   **Step 73.3: Update Client Transport**
+        *   **Action:** Refactor `pkg/client/transport.go` (and `transport_wasm.go`) to wrap requests in the new `SealedEnvelope` before cryptographic sealing.
+        *   **Action:** Modify all `sendSealedRequest` calls to target the new `POST /v1/invoke` endpoint instead of specific paths.
+    *   **Step 73.4: Verification**
+        *   **Action:** Verify that unsealed/public endpoints (e.g., `health`, `register`, `login`, `auth/config`) remain accessible on their original paths.
+        *   **Action:** Run the full E2E test suite to guarantee all operations succeed over the new obscured routing mechanism.
+    *   **Step 73.5: Documentation Updates**
+        *   **Action:** Update `SERVER-API.md` and `DISTFS.md` to reflect the new unified `/v1/invoke` endpoint architecture and the removal of the individual metadata routes.

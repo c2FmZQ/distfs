@@ -49,7 +49,9 @@ Used for requests within an established session. Provides improved performance a
 
 ## 2. Exhaustive Endpoint Catalog
 
-### 2.1 Public & Discovery
+### 2.1 Public & Discovery (Unsealed)
+These endpoints remain accessible on their original paths to support bootstrapping and cluster coordination.
+
 | Method | Path | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/health` | None | Node health status. |
@@ -59,36 +61,58 @@ Used for requests within an established session. Provides improved performance a
 | `GET` | `/v1/node/info` | None | Node ID and protocol version. |
 | `GET` | `/v1/auth/config` | None | OIDC Issuer and endpoint configuration. |
 | `GET` | `/v1/cluster/stats` | None | Cluster-wide storage and node metrics. |
-
-### 2.2 Identity & Authentication
-| Method | Path | Auth | Description |
-| :--- | :--- | :--- | :--- |
 | `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. |
 | `POST` | `/v1/auth/challenge` | None | Request a login challenge for a User ID. |
-| `POST` | `/v1/login` | Challenge | Exchange a signed challenge and ephemeral KEM PK for a Session Token and KEM CT. |
-| `GET` | `/v1/user/keysync` | Bearer JWT | Retrieve encrypted configuration backup. |
+| `POST` | `/v1/login` | Challenge | Establish a session and establishment a shared secret. |
 | `POST` | `/v1/user/keysync` | Session + E2EE | Store encrypted configuration backup. |
-| `GET` | `/v1/user/{id}` | Session | Fetch a user's public profile (ID, UID, Keys). |
-| `GET` | `/v1/user/groups` | Session | List all groups the user belongs to. |
+| `GET` | `/v1/user/keysync` | Bearer JWT | Retrieve encrypted configuration backup. |
+| `POST` | `/v1/node` | Raft Secret | Internal cluster management. |
 
-### 2.3 Metadata & Inodes
-| Method | Path | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `GET` | `/v1/meta/inode/{id}` | Session | Fetch an Inode manifest. |
-| `POST` | `/v1/meta/inodes` | Session | Batch fetch Inode manifests by ID. |
-| `POST` | `/v1/meta/batch` | Session + E2EE | Atomic multi-command execution. |
-| `POST` | `/v1/meta/allocate` | Session | Request target Data Nodes for a new chunk. |
-| `POST` | `/v1/meta/token` | Session | Issue Storage Capability Token. |
+### 2.2 The Unified Invoke Endpoint
+To prevent network analysis and preserve user privacy, all authenticated metadata and identity operations are routed through a single, non-descript endpoint.
 
-### 2.4 Groups & Permissions
-| Method | Path | Auth | Description |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/v1/group/` | Session + E2EE | Create a new security group. Payload: `{"id": "name", "quota_enabled": bool}`. |
-| `GET` | `/v1/group/{id}` | Session | Fetch group metadata and members. |
-| `PUT` | `/v1/group/{id}` | Session + E2EE | Update group (Owner/Admin only). |
-| `GET` | `/v1/group/gid/allocate` | Session | Request a unique numeric GID. |
+- **Endpoint**: `POST /v1/invoke`
+- **Authentication**: Required (Layer 7 E2EE + Session Token)
+- **Request Format**: `SealedEnvelope` (Decrypted inner payload)
+- **Response Format**: `SealedResponse` (Encrypted)
 
-### 2.5 Data Node API
+#### 2.2.1 Sealed Envelope Schema
+```json
+{
+  "action": "ActionName",
+  "payload": { ... }
+}
+```
+
+#### 2.2.2 Supported Actions
+| Action | Description |
+| :--- | :--- |
+| `GetInode` | Fetch metadata for a specific inode. Payload: `{"id": "hex"}`. |
+| `GetInodes` | Fetch metadata for multiple inodes. Payload: `InodeIDBatchRequest`. |
+| `IssueToken` | Request a storage access token. Payload: `TokenRequest`. |
+| `Batch` | Apply a sequence of Raft commands atomically. Payload: `[]LogCommand`. |
+| `AllocateChunk` | Request storage nodes for a new chunk. Payload: `{}`. |
+| `AcquireLeases` | Acquire distributed leases. Payload: `AcquireLeaseRequest`. |
+| `ReleaseLeases` | Release distributed leases. Payload: `ReleaseLeaseRequest`. |
+| `GetUser` | Fetch user profile and usage. Payload: `{"id": "hex"}`. |
+| `ListGroups` | List groups the user belongs to. Payload: `{}`. |
+| `GetGroup` | Fetch group metadata and registry. Payload: `{"id": "hex"}`. |
+| `AllocateGID` | Allocate a new Global Group ID. Payload: `{}`. |
+| `GetWorldPrivate` | Fetch the private key for the "world" group. Payload: `{}`. |
+| `AdminUsers` | List all users (Admin only). Payload: `{}`. |
+| `AdminGroups` | List all groups (Admin only). Payload: `{"cursor": "...", "limit": int}`. |
+| `AdminLeases` | List all active leases (Admin only). Payload: `{}`. |
+| `AdminNodes` | List all storage nodes (Admin only). Payload: `{}`. |
+| `AdminStatus` | Get cluster health and stats (Admin only). Payload: `{}`. |
+| `AdminPromote` | Promote a user to Admin (Admin only). Payload: `{"user_id": "hex"}`. |
+| `AdminUserLock` | Lock/Unlock a user account (Admin only). Payload: `AdminSetUserLockRequest`. |
+| `AdminUserQuota` | Set user storage quota (Admin only). Payload: `SetUserQuotaRequest`. |
+| `AdminGroupQuota` | Set group storage quota (Admin only). Payload: `SetGroupQuotaRequest`. |
+| `AdminClusterJoin` | Join a new node to the cluster (Admin only). Payload: `{"address": "url"}`. |
+| `AdminClusterRemove` | Remove a node from the cluster (Admin only). Payload: `{"id": "hex"}`. |
+| `AdminAudit` | Stream cluster audit logs (Admin only). Payload: `{}`. |
+
+### 2.3 Data Node API
 | Method | Path | Auth | Description |
 | :--- | :--- | :--- | :--- |
 | `GET` | `/v1/data/{id}` | Signed Token | Download encrypted chunk. |
@@ -230,12 +254,12 @@ To hide filenames from the server, all map keys in `children` and `links` are HM
 
 ## 6. Coordination and Concurrency
 
-### 6.1 Leases (`POST /v1/meta/lease/acquire`)
+### 6.1 Leases (Action `AcquireLeases`)
 - **Request:** `{"inode_ids": ["..."], "type": 1, "duration": ns, "nonce": "..."}`
 - **Types:** `0: Shared`, `1: Exclusive`.
 - **Rule:** Mutations are rejected if an Exclusive lease is held by a different session.
 
-### 6.2 Storage Tokens (`POST /v1/meta/token`)
+### 6.2 Storage Tokens (Action `IssueToken`)
 - **Request:** `{"inode_id": "...", "chunks": ["hash"], "mode": "R|W|D"}`
 - **Response:** `{"payload": "base64_minified_json", "sig": "base64_cluster_sig"}`
 - **Capability Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts}`
@@ -271,11 +295,3 @@ The DistFS API maps FSM sentinel errors to structured JSON HTTP responses (`APIE
 | `X-DistFS-Sealed` | Mandatory for mutations | Signals request body is a `SealedRequest`. |
 | `X-DistFS-Admin-Bypass` | Optional (Admins only) | Bypasses ownership checks for recovery. |
 | `X-DistFS-Sealed` | Optional for `GET` | If `true`, server returns a `SealedResponse`. |
-ledRequest`. |
-| `X-DistFS-Admin-Bypass` | Optional (Admins only) | Bypasses ownership checks for recovery. |
-| `X-DistFS-Sealed` | Optional for `GET` | If `true`, server returns a `SealedResponse`. |
- for `GET` | If `true`, server returns a `SealedResponse`. |
-ledRequest`. |
-| `X-DistFS-Admin-Bypass` | Optional (Admins only) | Bypasses ownership checks for recovery. |
-| `X-DistFS-Sealed` | Optional for `GET` | If `true`, server returns a `SealedResponse`. |
-onal for `GET` | If `true`, server returns a `SealedResponse`. |

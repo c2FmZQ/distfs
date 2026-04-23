@@ -4,6 +4,7 @@
 package client
 
 import (
+	"context"
 	"testing"
 
 	"bazil.org/fuse"
@@ -22,7 +23,10 @@ func TestFile_Forget(t *testing.T) {
 
 func TestFile_Fsync(t *testing.T) {
 	// Minimal test for interface compliance
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
 	f := &File{
+		fs:    &FS{ctx: ctx},
 		inode: &metadata.Inode{ID: "test"},
 	}
 	err := f.Fsync(t.Context(), &fuse.FsyncRequest{})

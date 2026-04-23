@@ -30,7 +30,6 @@ func TestServer_MiscHandlers(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -49,7 +48,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	// Promote to Admin
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// Register a Node
 	nodeInfo := Node{ID: "n1", Address: "http://n1:8080", Status: NodeStatusActive, LastHeartbeat: time.Now().Unix()}
@@ -63,7 +62,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	server.ApplyRaftCommandInternal(context.Background(), CmdStoreMetrics, snapData, "")
 
 	// 1. handleAllocateGID
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/group/gid/allocate", nil)
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionAllocateGID, nil, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
@@ -86,11 +85,8 @@ func TestServer_MiscHandlers(t *testing.T) {
 	}
 
 	// 4. handleAllocateChunk
-	// Body is empty but POST needs sealing
-	sealedA := SealTestRequest(t, u1, usk, ek, nil)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/allocate", bytes.NewReader(sealedA))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAllocateChunk, nil, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleAllocateChunk failed: %d", resp.StatusCode)
@@ -133,11 +129,8 @@ func TestServer_MiscHandlers(t *testing.T) {
 		InodeID: inodeID,
 		Mode:    "R",
 	}
-	irb, _ := json.Marshal(issueReq)
-	sealedI := SealTestRequest(t, u1, usk, ek, irb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(sealedI))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionIssueToken, issueReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleIssueToken failed: %d", resp.StatusCode)
@@ -145,11 +138,8 @@ func TestServer_MiscHandlers(t *testing.T) {
 
 	// 8. handleGetInodes (Batch)
 	ids := []string{inodeID}
-	idsb, _ := json.Marshal(ids)
-	sealedIds := SealTestRequest(t, u1, usk, ek, idsb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/inodes", bytes.NewReader(sealedIds))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionGetInodes, ids, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleGetInodes failed: %d", resp.StatusCode)
@@ -160,19 +150,21 @@ func TestServer_MiscHandlers(t *testing.T) {
 	inode.Version = 2
 	inode.NLink = 1
 	inode.SignInodeForTest(u1, usk)
-	ib2, _ := json.Marshal(inode)
 	batch := []LogCommand{
-		{Type: CmdUpdateInode, Data: ib2, UserID: u1},
+		{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1},
 	}
-	bb, _ := json.Marshal(batch)
-	sealedB := SealTestRequest(t, u1, usk, ek, bb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealedB))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batch, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleBatch failed: %d", resp.StatusCode)
 	}
+	opened := UnsealTestResponseWithSession(t, udk, secret, tc.NodeSK.Public(), resp)
+	var results []json.RawMessage
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
 
 	// 10. handleAcquireLeases / handleReleaseLeases
 	leaseReq := LeaseRequest{
@@ -181,20 +173,15 @@ func TestServer_MiscHandlers(t *testing.T) {
 		Type:     LeaseExclusive,
 		Nonce:    "test-nonce",
 	}
-	lrb, _ := json.Marshal(leaseReq)
-	sealedL := SealTestRequest(t, u1, usk, ek, lrb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/lease/acquire", bytes.NewReader(sealedL))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAcquireLeases, leaseReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleAcquireLeases failed: %d", resp.StatusCode)
 	}
 
-	sealedR := SealTestRequest(t, u1, usk, ek, lrb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/lease/release", bytes.NewReader(sealedR))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionReleaseLeases, leaseReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleReleaseLeases failed: %d", resp.StatusCode)
@@ -204,7 +191,7 @@ func TestServer_MiscHandlers(t *testing.T) {
 	// Ensure world is initialized
 	http.Get(ts.URL + "/v1/meta/key/world")
 
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/meta/key/world/private", nil)
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionGetWorldPrivate, nil, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
 	req.Header.Set("X-DistFS-Admin-Bypass", "true")
 	resp, _ = http.DefaultClient.Do(req)
@@ -227,7 +214,6 @@ func TestServer_AdminHandlers(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -245,7 +231,7 @@ func TestServer_AdminHandlers(t *testing.T) {
 	}
 	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// Create Group g1
 	group := Group{ID: "g1", OwnerID: u1, GID: 5000, Version: 1, QuotaEnabled: true, SignerID: u1}
@@ -254,13 +240,8 @@ func TestServer_AdminHandlers(t *testing.T) {
 	server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, gb, u1)
 
 	// handleClusterLeases
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/admin/leases", nil)
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminLeases, nil, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
-	// Must seal for admin mutations, but GET might just work if we bypass unseal for empty body?
-	// Let's actually seal a dummy body.
-	sealed := SealTestRequest(t, u1, usk, ek, nil)
-	req.Body = io.NopCloser(bytes.NewReader(sealed))
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleClusterLeases failed: %d", resp.StatusCode)
@@ -268,21 +249,16 @@ func TestServer_AdminHandlers(t *testing.T) {
 
 	// handleSetUserQuota
 	quotaReq := SetUserQuotaRequest{UserID: u1, MaxInodes: ptr(uint64(100))}
-	qrb, _ := json.Marshal(quotaReq)
-	sealedQ := SealTestRequest(t, u1, usk, ek, qrb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/quota/user", bytes.NewReader(sealedQ))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminUserQuota, quotaReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleSetUserQuota failed: %d", resp.StatusCode)
 	}
 	// 11. handleAdminPromote
-	promoteReq, _ := json.Marshal(map[string]string{"user_id": u1})
-	sealedP := SealTestRequest(t, u1, usk, ek, promoteReq)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/promote", bytes.NewReader(sealedP))
+	promoteReq := map[string]string{"user_id": u1}
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminPromote, promoteReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleAdminPromote failed: %d", resp.StatusCode)
@@ -298,12 +274,8 @@ func TestServer_AdminHandlers(t *testing.T) {
 	}
 
 	groupQuotaReq := SetGroupQuotaRequest{GroupID: "g1", MaxInodes: ptr(uint64(50))}
-
-	gqrb, _ := json.Marshal(groupQuotaReq)
-	sealedGQ := SealTestRequest(t, u1, usk, ek, gqrb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/quota/group", bytes.NewReader(sealedGQ))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminGroupQuota, groupQuotaReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleSetGroupQuota failed: %d", resp.StatusCode)
@@ -315,7 +287,6 @@ func TestServer_ClusterAdminHandlers(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -326,15 +297,12 @@ func TestServer_ClusterAdminHandlers(t *testing.T) {
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// handleClusterJoin
 	joinReq := map[string]string{"id": "n2", "address": "http://127.0.0.1:8888"}
-	jrb, _ := json.Marshal(joinReq)
-	sealedJ := SealTestRequest(t, u1, usk, ek, jrb)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(sealedJ))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminClusterJoin, joinReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		// Might fail due to real Raft join logic
@@ -342,11 +310,8 @@ func TestServer_ClusterAdminHandlers(t *testing.T) {
 
 	// handleClusterRemove
 	removeReq := map[string]string{"id": "n2"}
-	rrb, _ := json.Marshal(removeReq)
-	sealedR := SealTestRequest(t, u1, usk, ek, rrb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/remove", bytes.NewReader(sealedR))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminClusterRem, removeReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		// Might fail if node not in cluster
@@ -400,7 +365,6 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -413,7 +377,7 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false}, usk2, tc.AdminID, tc.AdminSK)
-	token2 := LoginSessionForTest(t, ts, u2, usk2)
+	token2, secret2 := LoginSessionForTestWithSecret(t, ts, u2, usk2)
 
 	// 1. World Readable file (owned by u1)
 	inodeW := Inode{ID: "world", OwnerID: u1, Type: FileType, Mode: 0644}
@@ -427,11 +391,8 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 		Chunks  []string `json:"chunks"`
 		Mode    string   `json:"mode"`
 	}{InodeID: "world", Mode: "R"}
-	irb, _ := json.Marshal(issueReq)
-	sealedI := SealTestRequest(t, u2, usk2, ek, irb)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(sealedI))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionIssueToken, issueReq, u2, usk2, secret2)
 	req.Header.Set("Session-Token", token2)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("u2 should be able to read world file, got %d", resp.StatusCode)
@@ -439,11 +400,8 @@ func TestServer_IssueToken_Permissions(t *testing.T) {
 
 	// u2 should NOT be able to get W token
 	issueReq.Mode = "W"
-	irb, _ = json.Marshal(issueReq)
-	sealedI = SealTestRequest(t, u2, usk2, ek, irb)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(sealedI))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionIssueToken, issueReq, u2, usk2, secret2)
 	req.Header.Set("Session-Token", token2)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("u2 should NOT be able to write world-read file, got %d", resp.StatusCode)
@@ -467,7 +425,7 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 	// 1. Invalid JSON
 	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader([]byte("not-json")))
 	req.Header.Set("X-DistFS-Sealed", "true")
-	_, err := server.unsealRequest(httptest.NewRecorder(), req, &user)
+	_, _, err := server.unsealRequest(httptest.NewRecorder(), req, &user)
 	if err == nil {
 		t.Error("unsealRequest should fail for invalid JSON")
 	}
@@ -477,7 +435,7 @@ func TestServer_UnsealExtraErrors(t *testing.T) {
 	b, _ := json.Marshal(sr)
 	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(b))
 	req.Header.Set("X-DistFS-Sealed", "true")
-	_, err = server.unsealRequest(httptest.NewRecorder(), req, &user)
+	_, _, err = server.unsealRequest(httptest.NewRecorder(), req, &user)
 	if err == nil {
 		t.Error("unsealRequest should fail for too short payload")
 	}
@@ -614,7 +572,6 @@ func TestServer_BatchErrors(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	srv := tc.Server
-	ek := tc.EpochEK
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -624,15 +581,12 @@ func TestServer_BatchErrors(t *testing.T) {
 	usk, _ := crypto.GenerateIdentityKey()
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// handleBatch with invalid command type
 	batch := []LogCommand{{Type: 255, Data: []byte("{}")}}
-	bb, _ := json.Marshal(batch)
-	sealed := SealTestRequest(t, u1, usk, ek, bb)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batch, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("handleBatch should return 400 for invalid command, got %d", resp.StatusCode)
@@ -665,7 +619,6 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	srv := tc.Server
-	ek := tc.EpochEK
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -674,15 +627,12 @@ func TestServer_GetInodes_EdgeCases(t *testing.T) {
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
-	token1 := LoginSessionForTest(t, ts, u1, usk)
+	token1, secret1 := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// 1. Fetch missing inode
 	ids := []string{"missing"}
-	idsb, _ := json.Marshal(ids)
-	sealed := SealTestRequest(t, u1, usk, ek, idsb)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/inodes", bytes.NewReader(sealed))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionGetInodes, ids, u1, usk, secret1)
 	req.Header.Set("Session-Token", token1)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Expected 200 for batch fetch with missing ID, got %d", resp.StatusCode)
@@ -694,7 +644,6 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -707,7 +656,7 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false}, usk2, tc.AdminID, tc.AdminSK)
-	token2 := LoginSessionForTest(t, ts, u2, usk2)
+	token2, secret2 := LoginSessionForTestWithSecret(t, ts, u2, usk2)
 
 	// u1 owns 0000000000000000000000000000000f
 	nonce1 := make([]byte, 16)
@@ -720,11 +669,8 @@ func TestServer_Batch_Forbidden(t *testing.T) {
 
 	// u2 tries to update 0000000000000000000000000000000f via batch
 	batch := []LogCommand{{Type: CmdUpdateInode, Data: ib1, UserID: u2}}
-	bb, _ := json.Marshal(batch)
-	sealed := SealTestRequest(t, u2, usk2, ek, bb)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batch, u2, usk2, secret2)
 	req.Header.Set("Session-Token", token2)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("Expected 403 for unauthorized batch update, got %d", resp.StatusCode)
@@ -758,7 +704,6 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	srv := tc.Server
-	ek := tc.EpochEK
 	defer srv.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -769,12 +714,11 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	u1Cmd, _ := LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()
 	node.FSM.Apply(&raft.Log{Data: u1Cmd})
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// 1. Invalid address
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(SealTestRequest(t, u1, usk, ek, []byte(`{"address": "::invalid"}`))))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminClusterJoin, map[string]string{"address": "::invalid"}, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode == http.StatusOK {
 		t.Error("Expected error for invalid address")
@@ -786,9 +730,8 @@ func TestServer_handleClusterJoin_DiscoveryErrors(t *testing.T) {
 	}))
 	defer mockNode.Close()
 
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(SealTestRequest(t, u1, usk, ek, []byte(`{"address": "`+mockNode.URL+`"}`))))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminClusterJoin, map[string]string{"address": mockNode.URL}, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusForbidden {
 		t.Errorf("Expected 403 for node rejection, got %d", resp.StatusCode)
@@ -801,7 +744,6 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -815,7 +757,7 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	u1Cmd, _ := LogCommand{Type: CmdPromoteAdmin, Data: MustMarshalJSON(u1)}.Marshal()
 	node.FSM.Apply(&raft.Log{Data: u1Cmd})
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
 	// Mock node WITHOUT TLS
 	mockNode := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -833,9 +775,8 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 	}))
 	defer mockNode.Close()
 
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/admin/join", bytes.NewReader(SealTestRequest(t, u1, usk, ek, []byte(`{"address": "`+mockNode.URL+`"}`))))
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminClusterJoin, map[string]string{"address": mockNode.URL}, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusInternalServerError {
 		t.Errorf("Expected 500 for non-TLS discovery, got %d", resp.StatusCode)
@@ -847,7 +788,6 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	server := tc.Server
-	ek := tc.EpochEK
 	defer server.Shutdown()
 	defer node.Shutdown()
 	defer ts.Close()
@@ -857,7 +797,6 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	usk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "bootstrap")
-	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. handleRemoveNode (Success)
 	// Register n2 first
@@ -910,15 +849,20 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 		},
 		{Type: CmdUpdateInode, Data: MustMarshalJSON(file), UserID: u1},
 	}
-	bbA, _ := json.Marshal(batchA)
-	sealedA := SealTestRequest(t, u1, usk, ek, bbA)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealedA))
-	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
+	tokenAlice, secretAlice := LoginSessionForTestWithSecret(t, ts, u1, usk)
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batchA, u1, usk, secretAlice)
+	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleAddChild failed: %d", resp.StatusCode)
 	}
+	opened := UnsealTestResponseWithSession(t, nil, secretAlice, tc.NodeSK.Public(), resp)
+	var results []json.RawMessage
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
+
 	// Verify in FSM
 	var updatedDir Inode
 	server.fsm.db.View(func(tx *bolt.Tx) error {
@@ -930,9 +874,8 @@ func TestServer_MiscHandlers_More(t *testing.T) {
 	}
 
 	// 3. handleListGroups (Sealed)
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/groups", nil)
-	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionListGroups, nil, u1, usk, secretAlice)
+	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleListGroups (sealed) failed: %d", resp.StatusCode)
@@ -965,7 +908,6 @@ func TestServer_handleBatch_More(t *testing.T) {
 	tc := SetupCluster(t)
 	node := tc.Node
 	ts := tc.TS
-	ek := tc.EpochEK
 	srv := tc.Server
 	defer srv.Shutdown()
 	defer node.Shutdown()
@@ -975,7 +917,6 @@ func TestServer_handleBatch_More(t *testing.T) {
 	u1 := "u1"
 	usk, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk.Public()}, usk, tc.AdminID, tc.AdminSK)
-	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// 1. Batch Create
 	nonce := make([]byte, 16)
@@ -986,15 +927,19 @@ func TestServer_handleBatch_More(t *testing.T) {
 	batch := []LogCommand{
 		{Type: CmdCreateInode, Data: MustMarshalJSON(inode), UserID: u1},
 	}
-	bb, _ := json.Marshal(batch)
-	sealed := SealTestRequest(t, u1, usk, ek, bb)
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
-	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
+	tokenAlice, secretAlice := LoginSessionForTestWithSecret(t, ts, u1, usk)
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batch, u1, usk, secretAlice)
+	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Batch create failed: %d", resp.StatusCode)
 	}
+	opened := UnsealTestResponseWithSession(t, nil, secretAlice, tc.NodeSK.Public(), resp)
+	var results []json.RawMessage
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
 
 	// 2. Batch Delete (Implicit via UpdateInode NLink=0)
 	inode.Version = 2
@@ -1003,22 +948,23 @@ func TestServer_handleBatch_More(t *testing.T) {
 	batchD := []LogCommand{
 		{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1},
 	}
-	bbD, _ := json.Marshal(batchD)
-	sealedD := SealTestRequest(t, u1, usk, ek, bbD)
-	req, _ = http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealedD))
-	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batchD, u1, usk, secretAlice)
+	req.Header.Set("Session-Token", tokenAlice)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("Batch delete failed: %d", resp.StatusCode)
 	}
+	opened = UnsealTestResponseWithSession(t, nil, secretAlice, tc.NodeSK.Public(), resp)
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
 }
 
 func TestServer_Permissions_Thorough(t *testing.T) {
 	tc := SetupCluster(t)
 	node := tc.Node
 	ts := tc.TS
-	ek := tc.EpochEK
 	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
@@ -1032,7 +978,7 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	u2 := "u2"
 	usk2, _ := crypto.GenerateIdentityKey()
 	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public(), Locked: false}, usk2, tc.AdminID, tc.AdminSK)
-	token2 := LoginSessionForTest(t, ts, u2, usk2)
+	token2, _ := LoginSessionForTestWithSecret(t, ts, u2, usk2)
 
 	// 1. Group Readable
 	g1SK, _ := crypto.GenerateIdentityKey()
@@ -1055,20 +1001,20 @@ func TestServer_Permissions_Thorough(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// u2 should get R token
-	irb, _ := json.Marshal(struct {
+	token2, secret2 := LoginSessionForTestWithSecret(t, ts, u2, usk2)
+	irb := struct {
 		InodeID string `json:"inode_id"`
 		Mode    string `json:"mode"`
-	}{InodeID: "0000000000000000000000000000000a", Mode: "R"})
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/token", bytes.NewReader(SealTestRequest(t, u2, usk2, ek, irb)))
+	}{InodeID: "0000000000000000000000000000000a", Mode: "R"}
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionIssueToken, irb, u2, usk2, secret2)
 	req.Header.Set("Session-Token", token2)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ := http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("u2 should have group read access, got %d", resp.StatusCode)
 	}
 
 	// 2. handleGetUser Redaction
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/user/u1", nil)
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionGetUser, GetUserRequest{ID: u1}, u2, usk2, secret2)
 	req.Header.Set("Session-Token", token2)
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode == http.StatusOK {
@@ -1084,7 +1030,6 @@ func TestServer_SetAttr(t *testing.T) {
 	tc := SetupCluster(t)
 	node := tc.Node
 	ts := tc.TS
-	ek := tc.EpochEK
 	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
@@ -1101,7 +1046,6 @@ func TestServer_SetAttr(t *testing.T) {
 		EncKey:  udk.EncapsulationKey().Bytes(),
 	}
 	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
-	token := LoginSessionForTest(t, ts, u1, usk)
 
 	// Create an inode
 	inodeID := "file1"
@@ -1123,12 +1067,9 @@ func TestServer_SetAttr(t *testing.T) {
 	inode.Version = 2
 	inode.SignInodeForTest(u1, usk)
 	batch := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1}}
-	bb, _ := json.Marshal(batch)
-	sealed := SealTestRequest(t, u1, usk, ek, bb)
-
-	req, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed))
-	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
+	tokenAlice, secretAlice := LoginSessionForTestWithSecret(t, ts, u1, usk)
+	req := NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batch, u1, usk, secretAlice)
+	req.Header.Set("Session-Token", tokenAlice)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -1136,6 +1077,12 @@ func TestServer_SetAttr(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("handleBatch UpdateInode failed: %d", resp.StatusCode)
 	}
+	opened := UnsealTestResponseWithSession(t, udk, secretAlice, tc.NodeSK.Public(), resp)
+	var results []json.RawMessage
+	if err := json.Unmarshal(opened, &results); err != nil {
+		t.Fatalf("Failed to unmarshal batch results: %v", err)
+	}
+	resp.Body.Close()
 
 	// Verify change in FSM
 	var updatedInode Inode
@@ -1158,18 +1105,15 @@ func TestServer_SetAttr(t *testing.T) {
 	usk2, _ := crypto.GenerateIdentityKey()
 	user2 := User{ID: u2, UID: 1002, SignKey: usk2.Public()}
 	CreateUser(t, tc.Node, user2, usk2, tc.AdminID, tc.AdminSK)
-	token2 := LoginSessionForTest(t, ts, u2, usk2)
+	tokenBob, secretBob := LoginSessionForTestWithSecret(t, ts, u2, usk2)
 
 	// Bob tries to change Alice's file
 	inode.Mode = 0777
 	inode.Version = 2
 	inode.SignInodeForTest(u2, usk2) // Signed by Bob
 	batch2 := []LogCommand{{Type: CmdUpdateInode, Data: MustMarshalJSON(inode), UserID: u1}}
-	bb2, _ := json.Marshal(batch2)
-	sealed2 := SealTestRequest(t, u2, usk2, ek, bb2)
-	req2, _ := http.NewRequest("POST", ts.URL+"/v1/meta/batch", bytes.NewReader(sealed2))
-	req2.Header.Set("Session-Token", token2)
-	req2.Header.Set("X-DistFS-Sealed", "true")
+	req2 := NewSealedTestRequestSymmetric(t, ts.URL, ActionBatch, batch2, u2, usk2, secretBob)
+	req2.Header.Set("Session-Token", tokenBob)
 	resp2, _ := http.DefaultClient.Do(req2)
 	if resp2.StatusCode != http.StatusForbidden {
 		t.Errorf("expected 403 Forbidden for unauthorized batch UpdateInode, got %d", resp2.StatusCode)
@@ -1181,7 +1125,6 @@ func TestServer_HealthAndStatus(t *testing.T) {
 	node := tc.Node
 	ts := tc.TS
 	usk := tc.AdminSK
-	ek := tc.EpochEK
 	server := tc.Server
 	defer server.Shutdown()
 	defer node.Shutdown()
@@ -1195,17 +1138,14 @@ func TestServer_HealthAndStatus(t *testing.T) {
 		t.Errorf("health check failed: %d", resp.StatusCode)
 	}
 
-	// Cluster Status (under Admin)
 	u1 := "admin"
 	user := User{ID: u1, UID: 1001, SignKey: usk.Public()}
 	CreateUser(t, tc.Node, user, usk, tc.AdminID, tc.AdminSK)
 	server.ApplyRaftCommandInternal(context.Background(), CmdPromoteAdmin, MustMarshalJSON(u1), "")
-	token := LoginSessionForTest(t, ts, u1, usk)
+	token, secret := LoginSessionForTestWithSecret(t, ts, u1, usk)
 
-	sealed := SealTestRequest(t, u1, usk, ek, nil)
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/admin/status", bytes.NewReader(sealed))
+	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminStatus, nil, u1, usk, secret)
 	req.Header.Set("Session-Token", token)
-	req.Header.Set("X-DistFS-Sealed", "true")
 	resp, _ = http.DefaultClient.Do(req)
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("cluster status failed: %d", resp.StatusCode)

@@ -58,27 +58,11 @@ func TestChallengeResponseAuth(t *testing.T) {
 	b, _ = json.Marshal(solve)
 
 	// 4. Login
-	resp, err = http.Post(tc.TS.URL+"/v1/login", "application/json", bytes.NewReader(b))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("login failed: %d", resp.StatusCode)
-	}
-
-	var sresp SessionResponse
-	if err := json.NewDecoder(resp.Body).Decode(&sresp); err != nil {
-		t.Fatal(err)
-	}
-	resp.Body.Close()
-
-	if sresp.Token == "" {
-		t.Fatal("empty session token")
-	}
+	token, secret := LoginSessionForTestWithSecret(t, tc.TS, user.ID, userSK)
 
 	// 5. Use Session Token
-	req, _ := http.NewRequest("GET", tc.TS.URL+"/v1/user/"+user.ID, nil)
-	req.Header.Set("Session-Token", sresp.Token)
+	req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionGetUser, GetUserRequest{ID: user.ID}, user.ID, userSK, secret)
+	req.Header.Set("Session-Token", token)
 
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
