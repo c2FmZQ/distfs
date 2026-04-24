@@ -534,7 +534,7 @@ DistFS utilizes a two-tiered trust model to resolve the circular dependency betw
 
 ## 8. Sovereign Bootstrap & Chain of Trust
 
-DistFS uses a rigorous, recursive trust model to initialize the cluster without relying on hardcoded secrets or central authorities.
+DistFS uses a recursive trust model to initialize the cluster without relying on hardcoded secrets or central authorities.
 
 ### 8.1 The Sovereign Bootstrap (Alice)
 The first user to register with a cluster ("Alice") becomes the sovereign anchor for the entire system.

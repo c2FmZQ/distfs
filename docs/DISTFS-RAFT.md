@@ -1,6 +1,6 @@
 # DistFS Raft Consensus & Cluster Security
 
-This document provides a rigorous, in-depth technical analysis of the DistFS metadata layer. It details the consensus mechanics, the security posture of the cluster, mutual TLS (mTLS) infrastructure, and the two-tiered trust model utilized for Finite State Machine (FSM) encryption.
+This document provides an analysis of the DistFS metadata layer. It details the consensus mechanics, the security posture of the cluster, mutual TLS (mTLS) infrastructure, and the two-tiered trust model utilized for Finite State Machine (FSM) encryption.
 
 ## 1. Consensus Mechanics
 

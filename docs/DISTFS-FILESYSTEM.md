@@ -1,6 +1,6 @@
 # DistFS Filesystem Operations & Cryptography
 
-This document provides a rigorous, technical analysis of the DistFS filesystem architecture. It details the strict separation of responsibilities between the untrusted server and the cryptographic client, the establishment of trust, and the precise execution of cryptographic protocols.
+This document provides an analysis of the DistFS filesystem architecture. It details the strict separation of responsibilities between the untrusted server and the cryptographic client, the establishment of trust, and the execution of cryptographic protocols.
 
 ## 1. Separation of Responsibilities
 
