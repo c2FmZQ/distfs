@@ -2,7 +2,7 @@
 
 DistFS is an experimental distributed, end-to-end encrypted (E2EE) file system. It is designed as a research platform to explore the boundaries of zero-knowledge privacy, strongly consistent metadata, and post-quantum cryptography (PQC) within a POSIX-compliant architecture.
 
-> **Design Documentation:** For a comprehensive technical deep-dive into the architecture and security model, refer to the [DISTFS.md](DISTFS.md) living design document.
+> **Design Documentation:** For a comprehensive technical deep-dive into the architecture and security model, refer to the [DISTFS.md](docs/DISTFS.md) living design document.
 
 The core tension DistFS resolves is the fundamental incompatibility between high-fidelity POSIX environments and a zero-knowledge model. POSIX file systems require complex, dynamic metadata manipulation—such as granular Access Control Lists (ACLs), atomic renames, hierarchical directory traversal, and distributed locking. Conversely, a zero-knowledge model mandates that the server infrastructure remains mathematically blind to the data payload and structural filenames.
 
@@ -112,7 +112,7 @@ Client (FUSE / Web) <-- Sealed JSON / PQC --> Metadata Cluster (Raft)
 
 ## 5. Give It a Try (User Manual)
 
-For detailed specifications of the wire protocol and high-level client library, refer to the [SERVER-API.md](SERVER-API.md) and [CLIENT-API.md](CLIENT-API.md) source-of-truth documents.
+For detailed specifications of the wire protocol and high-level client library, refer to the [SERVER-API.md](docs/SERVER-API.md) and [CLIENT-API.md](docs/CLIENT-API.md) source-of-truth documents.
 
 We encourage you to deploy a local test cluster and experiment with the system. 
 

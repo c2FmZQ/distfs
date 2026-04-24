@@ -6,9 +6,38 @@ DistFS is a distributed, end-to-end encrypted file system designed for zero-know
 
 > **Technical Specification:** For the exhaustive Client<->Server protocol contract, refer to [SERVER-API.md](SERVER-API.md). For the high-level Go Client API, refer to [CLIENT-API.md](CLIENT-API.md).
 >
+> **Architecture Deep Dives:** For details on cluster consensus and security, see [DISTFS-RAFT.md](DISTFS-RAFT.md). For file system cryptography and trust models, see [DISTFS-FILESYSTEM.md](DISTFS-FILESYSTEM.md).
+>
 > **Implementation Plan:** For the detailed, step-by-step execution strategy of this design, refer to [DISTFS-PLAN.md](DISTFS-PLAN.md).
 
+## 1.1 Glossary of Terms
+*   **ClientBlob:** An opaque, AES-256-GCM encrypted metadata blob stored within Inode and Group objects. Contains sensitive information like filenames, symlink targets, and modification times, ensuring the server cannot read them.
+*   **Lockbox:** A cryptographic structure storing symmetric keys (like the File Key) encrypted asymmetrically for authorized recipients (Users, Groups, World). Used for sharing access without server intervention.
+*   **MetaNode / DataNode:** The two logical roles of a DistFS server binary. MetaNodes participate in the Raft consensus to manage the namespace (metadata). DataNodes store the actual encrypted file chunks. A single binary typically performs both roles.
+*   **Epoch Key:** A rotating symmetric key used for encrypting file contents within a group, shared among group members via the Group Lockbox to support forward secrecy.
+*   **PQC (Post-Quantum Cryptography):** Cryptographic algorithms (like ML-KEM and ML-DSA) designed to be secure against attacks by quantum computers, used for user identity and key exchange in DistFS.
+
 ## 2. Core Architecture
+
+```mermaid
+graph TD
+    Client["Client (Encryption & Chunking)"]
+    subgraph Cluster["DistFS Cluster"]
+        Node1["Storage Node 1<br>(Meta + Data)"]
+        Node2["Storage Node 2<br>(Meta + Data)"]
+        Node3["Storage Node 3<br>(Meta + Data)"]
+        Node4["Storage Node 4<br>(Data Only)"]
+        
+        Node1 -. "Raft Consensus" .- Node2
+        Node2 -. "Raft Consensus" .- Node3
+        Node1 -. "Raft Consensus" .- Node3
+    end
+    
+    Client -->|"Metadata Requests<br>(Sealed L7)"| Node1
+    Client -->|"Chunk R/W<br>(Encrypted Data)"| Node1
+    Client -->|"Chunk R/W<br>(Encrypted Data)"| Node4
+    Node1 -->|"Pipelined Replication"| Node4
+```
 
 The system uses a unified node architecture to simplify deployment and management.
 
@@ -28,7 +57,7 @@ The system is designed to scale horizontally, with the following soft limits:
 *   **File Size:** Up to **100 GB** (100,000 chunks @ 1MB).
     *   *Design Implication:* Large files result in large Inode structures (100k UUIDs ~ 1.6MB). The Metadata Layer splits `ChunkManifests` into multiple pages to keep individual Raft log entries small.
 *   **File Count:** Up to **1 Million Files** per cluster.
-    *   *Design Implication:* This results in ~1M keys in the Raft FSM. The `LinkSnapshotStore` and `NoSnapshotRestoreOnStart` optimizations are critical for O(1) restarts. Metadata is grouped by "Directory" to allow LRU eviction of inactive trees from memory.
+    *   *Design Implication:* This results in ~1M keys in the Raft FSM. The `NoSnapshotRestoreOnStart` optimization is critical for fast restarts. Metadata is grouped by "Directory" to allow LRU eviction of inactive trees from memory.
 
 ---
 
@@ -242,7 +271,7 @@ DistFS enforces multi-tenant resource limits at both the User and Group levels t
     *   **User Debt (Fallback):** If the group has **`QuotaEnabled: false`** (or the Inode has no `GroupID`), the individual `OwnerID` (User) is charged. 
 3.  **Security & Immutability:** The `QuotaEnabled` flag and the Inode `OwnerID` are immutable. This prevents users from maliciously shifting storage costs to other users. Assignment to a group is only permitted if the signer is a member of that group.
 4.  **Atomic Accounting:** Usage counters are updated atomically within the same Raft transaction as the metadata mutation.
-4.  **Admin Management:** Resource limits are managed by cluster administrators via the Admin CLI. Limits can be updated dynamically without affecting existing data availability.
+5.  **Admin Management:** Resource limits are managed by cluster administrators via the Admin CLI. Limits can be updated dynamically without affecting existing data availability.
 
 ### 4.9 Multiple Roots & Client Chroot
 To support multi-tenancy and specialized organizational structures, DistFS supports the creation of multiple independent filesystem roots on a single cluster.
@@ -313,9 +342,32 @@ Files are split into fixed-size chunks of **1 MB**. The client library handles p
 5.  **Ack:** Once all 3 acknowledge, Primary acks the Client.
 6.  **Commit:** Client updates the file metadata (Chunk Manifest) on the Raft Leader.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant ML as Metadata Leader
+    participant P as Primary Node
+    participant S as Secondary Node
+    participant T as Tertiary Node
+
+    C->>C: Encrypt Chunk & Hash (ChunkID)
+    C->>ML: Allocate(ChunkID)
+    ML-->>C: Target Nodes [P, S, T]
+    
+    C->>P: Push Encrypted Chunk (replicas: S, T)
+    P->>S: Forward Chunk (replicas: T)
+    S->>T: Forward Chunk
+    T-->>S: Ack
+    S-->>P: Ack
+    P-->>C: Ack
+    
+    C->>ML: Commit Chunk Manifest
+    ML-->>C: Ack
+```
+
 ### 5.3 Reliability & Maintenance
 *   **Replication Monitor:** The Leader periodically scans chunk manifests.
-    *   **Under-Replicated:** If a node is missing for > `TBD` minutes, the Leader triggers a replication job to copy the chunk to a new healthy node.
+    *   **Under-Replicated:** If a node is missing for > 15 minutes (configurable), the Leader triggers a replication job to copy the chunk to a new healthy node.
     *   **Over-Replicated:** Extra copies (e.g., node returns after temporary partition) are garbage collected to reclaim space.
 *   **Node Draining:** An admin API `POST /v1/node/{id}/drain` triggers a proactive replication of all chunks on a specific node to the rest of the cluster, allowing safe removal.
 *   **Integrity Checks:** Each node runs a background "Scrubber" process. It periodically reads all local chunks and verifies their checksums against the filename (Content-Addressable Storage). Corrupt chunks are quarantined and reported to the Leader for repair.
@@ -482,7 +534,7 @@ DistFS utilizes a two-tiered trust model to resolve the circular dependency betw
 
 ## 8. Sovereign Bootstrap & Chain of Trust
 
-DistFS uses a rigorous, recursive trust model to initialize the cluster without relying on hardcoded secrets or central authorities.
+DistFS uses a recursive trust model to initialize the cluster without relying on hardcoded secrets or central authorities.
 
 ### 8.1 The Sovereign Bootstrap (Alice)
 The first user to register with a cluster ("Alice") becomes the sovereign anchor for the entire system.
@@ -520,3 +572,19 @@ To ensure the long-term stability of the trust anchor and protect against server
 1.  **Pinned Anchor:** The first time a client resolves the root inode and successfully verifies the owner's identity via the registry, it saves the **`RootOwnerPublicKey`** in its local encrypted configuration.
 2.  **Immutability Enforcement:** In all subsequent sessions, the client verifies that the Root Owner's ID and Public Key match the pinned values.
 3.  **Local Fallback:** If the `/registry` becomes unavailable or is tampered with, the client can use its pinned `RootOwnerPublicKey` to verify foundational structures (like the `users` group) that were signed by the anchor.
+
+## 9. Threat Model & Security Boundaries
+DistFS operates under a strict threat model where the server infrastructure is fundamentally untrusted.
+
+1.  **Compromised Storage Nodes:** If an attacker gains full root access to a storage node, they only obtain AES-256-GCM encrypted chunks, encrypted Raft logs, and opaque FSM structures. They cannot read file content, filenames, or directory structures without the client-side keys.
+2.  **Malicious Metadata Server:** A compromised MetaNode might attempt to serve stale data (rollback attack) or modify group structures. DistFS mitigates this using **Dual-Signature Authorization** and **Client-Side Verification**. The client independently verifies the cryptographic provenance (`SignerID`, `OwnerDelegationSig`) and registry attestations before acting on any metadata.
+3.  **Network Eavesdropping:** All client-to-server and inter-node communication is protected by TLS/mTLS. Layer 7 E2EE (Sealing) provides an additional layer of protection against infrastructure components (e.g., load balancers, proxies) attempting to analyze API metadata.
+4.  **Out of Scope:** The primary trust boundary is the Client Device. DistFS does not protect against malware, keyloggers, or compromised operating systems on the user's local machine where the PQC private keys and passphrase reside.
+
+## 10. Disaster Recovery (DR) and Backups
+DistFS's zero-knowledge architecture simplifies the backup strategy since all data is encrypted at rest.
+
+1.  **Metadata Backups:** The Raft FSM can be backed up by exporting periodic BoltDB snapshots. Because the `system` bucket and all subsequent metadata are encrypted with the cluster-wide keys, these snapshots can be safely stored in untrusted external environments (e.g., public cloud buckets) without risking privacy.
+2.  **Data Chunk Backups:** Data chunks are immutable and content-addressed. They can be backed up incrementally by simply copying new chunks to cold storage. As with metadata, chunk backups are inherently secure due to their AES-256-GCM encryption.
+3.  **Cluster Restoration:** A cluster can be restored by standing up new MetaNodes from a Raft snapshot and pointing DataNodes to the restored chunk repository. The new cluster will require the original `DISTFS_MASTER_KEY` (or the corresponding TPM) to decrypt the local node vaults and bootstrap the FSM.
+4.  **Cryptographic Doom (Lost Keys):** Due to the strict zero-knowledge design, there is **no server-side recovery mechanism** for lost client keys. If a user loses their PQC Identity Keys and forgets their configuration passphrase, their data is permanently irretrievable. Users are strongly encouraged to utilize the multi-device key synchronization features to maintain redundant access.

@@ -1,7 +1,7 @@
 #!/bin/bash -e
 # Copyright 2026 TTBT Enterprises LLC
 
-REPORT="DISTFS-REPORT.md"
+REPORT="docs/DISTFS-REPORT.md"
 LOG_DIR="$(dirname "$0")/../logs"
 mkdir -p "$LOG_DIR"
 
