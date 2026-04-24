@@ -17,162 +17,87 @@ DistFS operates under a strict "Trust No One" model. The server infrastructure i
 *   **Data Chunking:** The client splits file data into uniform 1MB chunks, handling necessary padding to obfuscate exact file sizes.
 *   **Authorization:** Access control is entirely cryptographic. The client encapsulates symmetric keys using Post-Quantum asymmetric algorithms (ML-KEM) and signs metadata mutations (ML-DSA) to prove authorization.
 
-## 2. Establishing Trust
+## 2. Filesystem Identity
 
-Trust in DistFS is established without reliance on centralized Certificate Authorities, using a self-sovereign, recursive model.
+Identity in DistFS is decentralized and cryptographically enforced, removing the need for a central Certificate Authority.
 
-### 2.1 Sovereign Bootstrap
-The cluster is anchored by the first registered user ("Alice").
-1.  Alice generates a Post-Quantum Cryptography (PQC) identity (ML-KEM encapsulation keys and ML-DSA signing keys).
-2.  Alice registers with the cluster and is automatically granted administrative rights.
-3.  Alice initializes the filesystem root (`/`) and system namespaces (`/registry`, `/users`).
-4.  She creates her own self-signed attestation file (`/registry/alice.user`), establishing the root of the Sovereign Chain of Trust.
+### 2.1 User Identity
+A user's identity is defined by a pair of Post-Quantum Cryptography (PQC) keys:
+*   **SignKey (ML-DSA):** Used to sign Inode mutations and attestations. This proves **Attribution**.
+*   **EncKey (ML-KEM):** Used to decapsulate symmetric file keys from the Inode Lockbox. This proves **Authorization**.
 
-### 2.2 Optimistic Verification
+The unique `UserID` is not the user's public key, but an opaque identifier derived from their OIDC subject claim and the cluster's `ClusterSecret` (see `DISTFS-RAFT.md`).
+
+### 2.2 Server and Cluster Identity
+*   **ClusterSignKey (ML-DSA):** An asymmetric key pair owned by the cluster quorum. It is used to notarize the metadata timeline (`ClusterSig`) and sign registry attestations for system-level groups and users.
+*   **Epoch Keys:** Rotating symmetric keys used to protect Layer 7 traffic (`SealedEnvelope`).
+
+### 2.3 The Sovereign Anchor
+The cluster is anchored by the first registered user ("Alice"). Alice initializes the filesystem root (`/`) and establishes the root of the **Sovereign Chain of Trust** by self-signing her own attestation file in the registry.
+
+## 3. Establishing Trust
+
+Trust is established using a self-sovereign, recursive verification model.
+
+### 3.1 Sovereign Bootstrap
+1.  Alice generates her PQC identity.
+2.  Alice registers and initializes the system namespaces (`/registry`, `/users`).
+3.  Alice creates a self-signed attestation (`/registry/alice.user`), binding her `UserID` to her public keys.
+
+### 3.2 Optimistic Verification
 To prevent blocking I/O operations while verifying identity attestations in the distributed `/registry`, DistFS uses Aggregate Optimistic Verification.
 
-1.  **Optimistic Phase:** As the client traverses the file system (e.g., during `Open`), it fetches Inodes and verifies their ML-DSA signatures using public keys provided by the server. It proceeds optimistically, queuing the `SignerID` and `OwnerID` for later verification.
-2.  **Confirmation Phase:** Once the critical path is resolved, the client asynchronously fetches the registry attestations (e.g., `/registry/<ID>.user`) for all queued IDs. It verifies the attestation signatures against the trusted anchor (Alice) or previously verified intermediaries.
-3.  **Cross-Check:** The client ensures the public keys used in the Optimistic Phase exactly match the keys bound in the verified registry attestations. Failure immediately aborts the operation and marks the data as tainted.
+1.  **Optimistic Phase:** The client traverses the file system, fetching Inodes and verifying their signatures using keys provided by the server. It proceeds optimistically, queuing the `SignerID` and `OwnerID` for later verification.
+2.  **Confirmation Phase:** The client asynchronously fetches the registry attestations (e.g., `/registry/<ID>.user`) for all queued IDs and verifies them against the trusted anchor (Alice) or verified intermediaries.
+3.  **Cross-Check:** The client ensures the keys used in the Optimistic Phase match the verified registry attestations. Failure immediately aborts the operation.
 
-## 3. Cryptographic Operations
+## 4. Cryptographic Operations
 
-DistFS employs a defense-in-depth cryptographic strategy, protecting data in transit, at rest, and against metadata tampering.
+DistFS employs a defense-in-depth cryptographic strategy protecting data in transit, at rest, and against metadata tampering.
 
-### 3.1 Layer 7 End-to-End Encryption (E2EE)
-To prevent network infrastructure (proxies, load balancers) from analyzing traffic patterns, all metadata mutations are encapsulated in Layer 7 E2EE.
-*   Requests are packaged as a `SealedRequest`.
-*   The payload is a `SealedEnvelope` encrypted using an ephemeral symmetric key, which is itself encapsulated for the cluster's active, rotating **Epoch Key** (ML-KEM).
-*   Responses are `SealedResponse` envelopes, symmetrically encrypted for the client.
-*   Replay attacks are mitigated via high-resolution timestamps and sliding-window nonces within the sealed envelopes.
+### 4.1 Layer 7 End-to-End Encryption (E2EE)
+Requests are packaged as `SealedRequest` envelopes, encrypted using an ephemeral symmetric key encapsulated for the cluster's active, rotating **Epoch Key** (ML-KEM). Responses are symmetrically encrypted for the client. This prevents network infrastructure from analyzing traffic patterns.
 
-### 3.2 Data Encryption (ClientBlobs and Chunks)
-*   **AES-256-GCM:** The standard for symmetric encryption in DistFS.
-*   **ClientBlobs:** Sensitive Inode metadata (filename, `MTime`, POSIX ACLs) is serialized and encrypted into an opaque `ClientBlob` using a unique **File Key**.
-*   **Chunks:** File data is chunked and encrypted. The chunk ID is the cryptographic hash of the *encrypted* chunk, providing content-addressability.
+### 4.2 Data Encryption (Chunks and ClientBlobs)
+*   **AES-256-GCM:** Used for all symmetric encryption.
+*   **ClientBlobs:** Sensitive Inode metadata (filenames, ACLs) is encrypted into an opaque `ClientBlob` using a unique **File Key**.
+*   **Chunks:** File data is chunked into 1MB blocks, encrypted with the File Key and a unique nonce, and hashed to produce the `ChunkID`.
 
-### 3.3 Trial Decryption Algorithm
-When a client needs to access a file, it must derive the File Key from the Inode's `Lockbox`. The Lockbox contains the File Key encrypted for various authorized recipients.
+### 4.3 Lockboxes and Trial Decryption
+When a client access a file, it derives the File Key from the Inode's `Lockbox`. The Lockbox contains the File Key encrypted for authorized recipients (Users or Groups) using ML-KEM.
 
-```mermaid
-flowchart TD
-    Start[Start Trial Decryption] --> Iterate[Iterate Lockbox Entries]
-    Iterate --> CheckID{Recipient ID == Client ID?}
-    CheckID -- Yes --> DecryptSelf[Decapsulate with Personal Key]
-    CheckID -- No --> CheckWorld{Recipient ID == 'world'?}
-    
-    CheckWorld -- Yes --> FetchWorld[Fetch World Private Key]
-    FetchWorld --> DecryptWorld[Decapsulate with World Key]
-    
-    CheckWorld -- No --> CheckGroup{Is Group ID?}
-    CheckGroup -- Yes --> ResolveGroup[Resolve Group Membership]
-    ResolveGroup --> DerivGroup[Derive Group Epoch Key]
-    DerivGroup --> DecryptGroup[Decapsulate with Group Key]
-    
-    DecryptSelf --> Verify[Verify AES-GCM MAC]
-    DecryptWorld --> Verify
-    DecryptGroup --> Verify
-    
-    Verify -- Success --> Success[Return File Key]
-    Verify -- Failure --> Iterate
-    CheckGroup -- No --> Iterate
-```
-
-1.  The client iterates over all entries in the `Lockbox`.
-2.  If an entry targets the user's explicit ID, they decapsulate it directly using their ML-KEM private key.
-3.  If it targets a Group, the client must first decrypt the Group's `Lockbox` to obtain the Group's symmetric **Epoch Key**, which is then used to decrypt the Inode's Lockbox entry.
-
-### 3.4 Group Lockboxes & Forward Secrecy
-Groups utilize rotating **Epoch Keys** to manage access.
-*   When a user is added to a group, the current Epoch Key is encapsulated for their public key and added to the group's Lockbox.
-*   If a user is removed, the Epoch Key is rotated. The new key is encapsulated *only* for the remaining members.
-*   This ensures forward secrecy: a removed member cannot decrypt newly created files within the group.
-
-## 4. Chunk Distribution and Data Nodes
-
-Data nodes provide scalable, horizontal persistence for encrypted chunks.
-
-1.  **Allocation:** The client asks the Metadata Leader to allocate space for a new `ChunkID`. The Leader returns a set of target Data Nodes based on consistent hashing and available capacity.
-2.  **Pipelined Replication:** The client pushes the encrypted chunk to the primary Data Node. The primary forwards it to the secondary, which forwards it to the tertiary.
-3.  **Capability Tokens:** Data nodes enforce access control via short-lived, signed Capability Tokens issued by the Metadata Leader. The client must present a valid token to read or write a specific `ChunkID`.
-
-```mermaid
-sequenceDiagram
-    participant Client
-    participant MetaLeader as Metadata Leader
-    participant D1 as Data Node 1
-    participant D2 as Data Node 2
-    participant D3 as Data Node 3
-
-    Client->>MetaLeader: Allocate(ChunkID)
-    MetaLeader-->>Client: Return [D1, D2, D3] + Write Token
-    Client->>D1: Push Chunk (Token, Replicas: [D2, D3])
-    D1->>D2: Forward Chunk
-    D2->>D3: Forward Chunk
-    D3-->>D2: Ack
-    D2-->>D1: Ack
-    D1-->>Client: Ack
-    Client->>MetaLeader: Commit Chunk Manifest
-```
-
-## 5. Cryptography Proof for the Trust Model
-
-The trust model in DistFS relies on a self-sovereign chain of trust rooted at the initial user (Alice) and propagated through verifiable attestations. We define the security of this model using a game-based approach.
+## 5. Formal Cryptography Proofs
 
 ### 5.1 Definitions
-
 Let $\mathcal{U}$ be the set of all identities in the system.
-Let $PK_u$ and $SK_u$ denote the public and private keypair (ML-DSA) for user $u \in \mathcal{U}$.
-Let $A(u, v)$ denote an attestation where user $u$ signs the public key of user $v$.
-Let $\mathcal{T}$ be the set of trusted users. Initially, $\mathcal{T} = \{Alice\}$.
+Let $PK_u$ and $SK_u$ denote the public and private keypair (ML-DSA) for user $u$.
+Let $A(u, v) = Sign(SK_u, PK_v)$ denote an attestation.
+Let $\mathcal{T}$ be the set of trusted users, initially $\mathcal{T} = \{Alice\}$.
 
-### 5.2 The Trust Game
+### 5.2 Theorem 1: Trust Model Security (Identity Spoofing)
+**Theorem:** If ML-DSA is Existentially Unforgeable under Chosen Message Attack (EUF-CMA), the DistFS trust model is secure against unauthorized identity spoofing.
 
-**Setup:** The challenger generates $(PK_{Alice}, SK_{Alice})$ and publishes $PK_{Alice}$.
-**Queries:** The adversary $\mathcal{A}$ can query the following oracles:
-1.  **Register(u):** The challenger generates keys for a new user $u$ and returns $PK_u$.
-2.  **Attest(u, v):** If $u \in \mathcal{T}$, the challenger returns a valid attestation $A(u, v) = Sign(SK_u, PK_v)$.
+**Proof Sketch:** An adversary $\mathcal{A}$ attempting to win a Trust Game must output a forged attestation $A^*(Alice, w)$ for a user $w$. We can reduce this to breaking the EUF-CMA security of ML-DSA. If $\mathcal{A}$ can forge a valid signature $\sigma^*$ for $PK_w$ under Alice's public key $PK_{Alice}$ without the private key $SK_{Alice}$, then $\mathcal{A}$ has broken the underlying signature scheme. Since ML-DSA is assumed EUF-CMA secure, the probability of this is negligible.
 
-**Challenge:** The adversary outputs a forged attestation $A^*(Alice, w)$ for some user $w$ not previously queried to the Attest oracle with $u=Alice$.
+### 5.3 Theorem 2: Data Integrity
+**Theorem:** If AES-GCM is unforgeable (AEAD), the hash function provides Second Preimage Resistance (SPR), and ML-DSA is EUF-CMA secure, then the integrity of DistFS file data is preserved.
 
-### 5.3 Security Theorem
+**Proof Sketch:** An adversary $\mathcal{A}$ must present a modified chunk $(N_i^*, C_i^*, T_i^*)$ that is accepted as valid.
+1.  **AEAD:** Modifying $C_i$ or $T_i$ without the key $k$ is prevented by AEAD unforgeability.
+2.  **SPR:** Finding a different chunk that hashes to the same $ID_i$ is prevented by the Second Preimage Resistance of the hash function.
+3.  **EUF-CMA:** Modifying the manifest $M$ in the Inode requires forging the owner's ML-DSA signature $\sigma_M$, which is prohibited by Theorem 1.
+Thus, tampering is detected with overwhelming probability.
 
-**Theorem 1:** If the underlying signature scheme (ML-DSA) is Existentially Unforgeable under Chosen Message Attack (EUF-CMA), then the DistFS trust model is secure against unauthorized identity spoofing.
+### 5.4 Theorem 3: Metadata Attribution & Delegation
+**Theorem:** An adversary cannot modify an Inode or forge a file without being identified.
 
-**Proof (Sketch):**
-Assume there exists an adversary $\mathcal{A}$ that can win the Trust Game with non-negligible advantage $\epsilon$. We construct a reduction $\mathcal{B}$ that uses $\mathcal{A}$ to break the EUF-CMA security of ML-DSA.
+**Proof Sketch:** Every `Inode` contains a `UserSig` ($\sigma_I = Sign(SK_{signer}, Hash(Inode))$). If the signer is not the owner, the client requires an `OwnerDelegationSig` ($\sigma_D = Sign(SK_{owner}, Hash(ID || GroupID))$). Forging either $\sigma_I$ or $\sigma_D$ requires breaking the EUF-CMA security of ML-DSA. Therefore, all metadata mutations are cryptographically attributable and verifiable.
 
-1.  $\mathcal{B}$ receives a public key $PK^*$ from the ML-DSA challenger.
-2.  $\mathcal{B}$ sets $PK_{Alice} = PK^*$ and starts $\mathcal{A}$.
-3.  When $\mathcal{A}$ queries **Register(u)**, $\mathcal{B}$ acts honestly, generating and storing $(PK_u, SK_u)$.
-4.  When $\mathcal{A}$ queries **Attest(Alice, v)**, $\mathcal{B}$ forwards the request $PK_v$ to its ML-DSA signing oracle and returns the resulting signature to $\mathcal{A}$.
-5.  When $\mathcal{A}$ queries **Attest(u, v)** for $u \neq Alice$, $\mathcal{B}$ uses its stored $SK_u$ to generate the signature.
-6.  Eventually, $\mathcal{A}$ outputs a forged attestation $A^*(Alice, w) = \sigma^*$.
+### 5.5 Theorem 4: Zero-Knowledge Confidentiality
+**Theorem:** The storage nodes (server) cannot access plaintext user data.
 
-Since $\mathcal{A}$ wins the Trust Game, $\sigma^*$ is a valid signature on $PK_w$ under $PK_{Alice}$ (which is $PK^*$). Furthermore, since $w$ was not queried to the Attest oracle for $Alice$, $\mathcal{B}$ never queried its signing oracle for $PK_w$.
-Therefore, $\mathcal{B}$ successfully outputs a valid forgery $(PK_w, \sigma^*)$, breaking the EUF-CMA security of ML-DSA with advantage $\epsilon$.
-
-Since we assume ML-DSA is EUF-CMA secure, $\epsilon$ must be negligible, proving the theorem.
-
-### 5.4 Data Integrity Proof (Formal)
-
-**Theorem 2:** If the underlying authenticated encryption scheme (AES-GCM) provides Authenticated Encryption with Associated Data (AEAD) and is unforgeable, the cryptographic hash function provides Second Preimage Resistance (SPR), and the signature scheme (ML-DSA) is Existentially Unforgeable under Chosen Message Attack (EUF-CMA), then the integrity of DistFS file data is preserved against malicious tampering.
-
-**Proof (Sketch):**
-Let a file $F$ consist of a sequence of chunks $c_1, c_2, \dots, c_n$.
-The encryption of a chunk using symmetric key $k$ and a unique nonce $N_i$ is $E_k(N_i, c_i) = (C_i, T_i)$ where $C_i$ is the ciphertext and $T_i$ is the authentication tag. (We assume $N_i$ is never reused for a given $k$).
-The ChunkID is derived as $ID_i = H(N_i || C_i || T_i)$, where $H$ is a cryptographic hash function with Second Preimage Resistance.
-The Inode contains the manifest $M = [ID_1, ID_2, \dots, ID_n]$ and is signed by the owner's ML-DSA private key as $\sigma_M = Sign(SK_{owner}, M)$.
-
-Assume an adversary $\mathcal{A}$ attempts to modify a chunk without detection. $\mathcal{A}$ must present a modified chunk $c_i^*$ such that the system accepts it as valid.
-
-There are three avenues for $\mathcal{A}$:
-1.  **Modify the ciphertext/tag directly:** $\mathcal{A}$ creates $(C_i^*, T_i^*) \neq (C_i, T_i)$. For this to be accepted during decryption, the AEAD verification must succeed. By the AEAD unforgeability property of AES-GCM, producing a valid $(C_i^*, T_i^*)$ for any modified data without the key $k$ happens with negligible probability. *Note: Even if $\mathcal{A}$ compromises $k$ and forges a valid $(C_i^*, T_i^*)$, it will produce a new $ID_i^*$ that does not match the signed manifest, making AEAD a defense-in-depth layer here.*
-2.  **Find a second preimage:** $\mathcal{A}$ finds a different, validly encrypted chunk $(N_i', C_i', T_i')$ that hashes to the exact same $ID_i$. That is, $H(N_i' || C_i' || T_i') = H(N_i || C_i || T_i)$. Since $H$ is assumed to possess Second Preimage Resistance, the probability of $\mathcal{A}$ finding such a match is negligible.
-3.  **Modify the Inode Manifest:** $\mathcal{A}$ creates a new chunk with a new hash $ID_i^*$, and updates the manifest $M^*$ to include $ID_i^*$. For $M^*$ to be accepted by the system, $\mathcal{A}$ must provide a valid signature $\sigma_{M^*} = Sign(SK_{owner}, M^*)$. As shown in Theorem 1, the EUF-CMA security of ML-DSA means the probability of forging this signature without $SK_{owner}$ is negligible.
-
-Since all possible avenues for $\mathcal{A}$ to violate data integrity require breaking the security of the underlying cryptographic primitives (which are assumed secure), the probability of $\mathcal{A}$ succeeding is negligible. Thus, data integrity is preserved.
+**Proof Sketch:** Data is encrypted via AES-GCM with a File Key $k$. $k$ is stored in the `Lockbox`, encrypted *only* for authorized recipients using ML-KEM. The server only sees encrypted chunks and the opaque Lockbox. To obtain the plaintext, the server must either break AES-GCM IND-CPA security or decapsulate an ML-KEM entry without the recipient's private key. Both are assumed computationally infeasible.
 
 **Known Weakness: Replay / Rollback Attacks (Stale Manifests)**
-This proof demonstrates that an adversary cannot forge a *new* manifest. However, it does not prevent an adversary (or a malicious metadata server) from replacing the current file state with an *older, previously valid* manifest and its valid signature $\sigma_M$. Because the old signature remains cryptographically valid under $SK_{owner}$, the client will accept it, rolling back the file to a previous state.
+This proof does not prevent an adversary from replacing the current Inode with an older, validly signed version.
 *TODO: The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry to explicitly prevent rollback attacks.*
