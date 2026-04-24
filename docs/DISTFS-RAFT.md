@@ -23,6 +23,9 @@ The FSM enforces quotas for both Inodes and total Bytes.
 *   **Primary Debtor:** For every write, the FSM resolves the primary debtor based on the `QuotaEnabled` flag of the Inode's parent directory.
 *   **Atomic Rollback:** If a log entry would exceed a debtor's quota, the FSM triggers an atomic rollback, rejecting the mutation before it is permanently applied to the state.
 
+### 1.4 Atomic State Transitions (Batching)
+Multi-inode operations (e.g., `rename`, `symlink`, or atomic directory moves) are submitted as a single **Batch Command**. The FSM applies these commands within a single database transaction. If any sub-command fails or violates a security constraint, the entire batch is rolled back, ensuring the filesystem never enters an inconsistent state.
+
 ## 2. Cluster Identity
 
 Identity at the cluster level is divided between individual node identities and the shared root secret.
@@ -46,7 +49,15 @@ All client-cluster traffic is wrapped in a `SealedEnvelope`.
 *   **Confidentiality:** The envelope is encrypted using AES-256-GCM with a session key encapsulated via ML-KEM for the cluster's active **Epoch Key**.
 *   **Replay Protection:** Every envelope contains a monotonic high-resolution timestamp and a unique 128-bit nonce. The Leader maintains a sliding-window cache of recent nonces and rejects any request with a timestamp older than $\Delta t$ or a previously seen nonce.
 
-### 3.2 mTLS & TOFU Bootstrapping
+### 3.2 Cluster Notarization (ClusterSig)
+To prevent a compromised cluster from presenting different versions of the history to different clients (Forking), DistFS utilizes **Verifiable Notarization**.
+1.  **Server Signature:** The FSM signs the `ManifestHash` of every committed Inode using the cluster's **ClusterSignKey** (ML-DSA). This signature is stored as `ClusterSig`.
+2.  **Anchored Verification:** Clients pin the `ID` and `Version` of known trusted Inodes (e.g., the root directory) as **Anchors**. When fetching an Inode, the client ensures the new version is monotonically greater than or equal to the anchored version and that the `ClusterSig` is valid.
+
+### 3.3 Perfect Forward Secrecy (Session Establishment)
+During login, the client and server perform an ephemeral PQC-KEM exchange. The server generates a unique **Session Key** encapsulated for the client's ephemeral public key. This key is used to protect all subsequent traffic in that session. Because the session key is ephemeral and never persisted in the Raft log or FSM, a future compromise of the cluster's long-term keys does not reveal the content of past sessions.
+
+### 3.4 mTLS & TOFU Bootstrapping
 Inter-node communication is secured via mutual TLS with a strict TOFU-to-Strict transition (see Section 5.2).
 
 ## 4. Two-Tiered Trust Model for FSM Encryption
@@ -113,3 +124,32 @@ If $S$ is only transmitted over mTLS channels (protected by Theorem 5) and only 
 **Theorem:** An adversary $\mathcal{A}$ with access to the Group Lockbox cannot determine group membership without $S$.
 
 **Proof Sketch:** Recipient IDs in a group lockbox are derived as $R = HMAC(UserID, GroupID)$. Since $HMAC$ is a Pseudorandom Function (PRF), the values of $R$ appear indistinguishable from random noise to anyone without the salt ($S$, which is used to derive the `UserID`). Therefore, $\mathcal{A}$ cannot link a Lockbox entry back to a specific `UserID` in the Dark Registry.
+
+### 5.9 Theorem 14: Verifiable Timeline (Fork-Resistance)
+**Theorem:** A compromised metadata cluster cannot "fork" the history (presenting different consistent states to different clients) without being detected by an anchored client.
+
+**Proof Sketch:**
+Let a client $c$ have an anchored version $V_a$ of an Inode $I$.
+1.  **Monotonicity:** The FSM only commits mutations where the new version $V_{new} > V_{old}$.
+2.  **Notarization:** Every state update is signed as $Sign(SK_{cluster}, Hash(I || V_{new}))$.
+3.  **Anchoring:** When $c$ fetches $I$, it verifies the signature and ensures $V \ge V_a$.
+If the server attempts to present a forked history $H'$ to $c$, it must either produce a valid signature for a lower version number (which $c$ will reject via the anchor) or produce a forked history starting from $V_a$. However, since Raft ensures a single linearizable log, any two states at version $V > V_a$ that both possess valid cluster signatures must be identical (Collision Resistance of the signature/hash). Therefore, the server cannot present two different valid histories to different clients without breaking the underlying cryptographic primitives or Raft consensus.
+
+### 5.10 Theorem 17: Perfect Forward Secrecy (Sessions)
+**Theorem:** A compromise of the cluster's long-term identity keys does not allow an adversary to decrypt past client-server sessions.
+
+**Proof Sketch:**
+Session keys ($K_{sess}$) are established using an ephemeral PQC-KEM exchange during login.
+1.  **Encapsulation:** The server generates $K_{sess}$ and encapsulates it ($C_{kem}$) for the client's ephemeral public key $PK_{eph}$.
+2.  **Transience:** $K_{sess}$ and the corresponding private keys are stored only in volatile memory and are purged upon session expiry.
+3.  **Forward Secrecy:** Since $K_{sess}$ is not derived from or encrypted by any long-term cluster secret (like $S$ or $SK_{cluster}$), an adversary $\mathcal{A}$ who obtains the long-term keys at time $T$ still lacks the ephemeral private keys required to decapsulate past $C_{kem}$ values. Therefore, past session confidentiality is preserved.
+
+### 5.11 Theorem 19: Atomic State Transitions (Batch Consistency)
+**Theorem:** multi-Inode mutations applied via a Batch Command satisfy the property of Atomicity.
+
+**Proof Sketch:**
+The Raft FSM processes a `Batch Command` within a single database transaction.
+1.  **Isolation:** BoltDB provides ACID transactions. All sub-commands in the batch are applied to the same version of the state.
+2.  **Consistency:** The FSM validates structural constraints (e.g., link counts, directory loops) after all sub-commands in the batch are simulated but before they are committed.
+3.  **Rollback:** If any sub-command fails (due to quota, permissions, or structural error), the FSM triggers an explicit transaction rollback.
+Therefore, the filesystem state transitions from one consistent state to another, with no intermediate or partial states ever becoming visible to readers, ensuring batch atomicity.

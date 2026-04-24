@@ -32,17 +32,24 @@ The DistFS security model is defined by a series of formal theorems and proofs d
 *   **Theorem 5 (TOFU Join):** Cluster join protocol is MITM-resistant (see `DISTFS-RAFT.md`).
 *   **Theorem 7 (Identity Privacy):** User PII is protected via a Dark Registry (see `DISTFS-RAFT.md`).
 *   **Theorem 11 (Anonymous Membership):** Group lists are hidden from the server (see `DISTFS-RAFT.md`).
+*   **Theorem 14 (Verifiable Timeline):** Server cannot fork history without detection (see `DISTFS-RAFT.md`).
+*   **Theorem 20 (Hierarchical Ownership):** Authority propagates correctly (see `DISTFS-FILESYSTEM.md`).
 
 ### 3.2 Data Confidentiality & Integrity
 *   **Theorem 2 (Data Integrity):** Detection of malicious tampering (see `DISTFS-FILESYSTEM.md`).
 *   **Theorem 4 (Zero-Knowledge):** Server cannot access plaintext data (see `DISTFS-FILESYSTEM.md`).
 *   **Theorem 6 (FSM Confidentiality):** Metadata is encrypted at rest (see `DISTFS-RAFT.md`).
 *   **Theorem 12 (Forward Secrecy):** Revoked users cannot access new data (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 15 (Path Privacy):** Directory hierarchy is hidden from the server (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 16 (Secure KeySync):** Device recovery is zero-knowledge (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 18 (Byzantine-Resistant Metadata):** Server cannot modify file content (see `DISTFS.md`).
 
 ### 3.3 Network & Resource Security
 *   **Theorem 8 (Layer 7 E2EE):** Traffic is protected against analysis (see `DISTFS-RAFT.md`).
 *   **Theorem 9 (Linearizability):** POSIX atomicity is guaranteed (see `DISTFS-RAFT.md`).
 *   **Theorem 10 (Quota Safety):** Multi-tenant resource protection (see `DISTFS-RAFT.md`).
+*   **Theorem 17 (Session PFS):** Ephemeral keys protect past traffic (see `DISTFS-RAFT.md`).
+*   **Theorem 19 (Batch Atomicity):** Multi-inode updates are all-or-nothing (see `DISTFS-RAFT.md`).
 
 ### 3.4 Theorem 13: Quantum-Resistant Hybrid Resilience
 **Theorem:** The core security properties of DistFS (Confidentiality and Integrity) are preserved against a Quantum Adversary $\mathcal{A}_Q$.
@@ -53,3 +60,13 @@ A Quantum Adversary $\mathcal{A}_Q$ can solve the Discrete Logarithm and Integer
 2.  **Encapsulation:** All key encapsulation (used for File Keys and E2EE) uses ML-KEM, which is also based on M-LWE.
 3.  **Symmetric Primitives:** AES-256-GCM and SHA-256 are used for data encryption and hashing. While Grover's Algorithm provides a square-root speedup, the 256-bit key length and digest size maintain a 128-bit security margin against quantum search.
 Therefore, since all critical asymmetric and symmetric operations in DistFS are protected by quantum-resistant primitives, the overall security model is preserved against $\mathcal{A}_Q$.
+
+### 3.5 Theorem 18: Byzantine-Resistant Metadata (Auditability)
+**Theorem:** The metadata server is restricted to a Byzantine-Fail-Stop model regarding file content.
+
+**Proof Sketch:**
+Every `Inode` contains a `ManifestHash` ($H$) and a `UserSig` ($\sigma = Sign(SK_{owner}, H)$).
+1.  **Binding:** $H$ cryptographically binds the chunk IDs, file keys, version, and ownership.
+2.  **Immutability:** To modify any field within $H$, an adversary (server) must produce a new valid signature $\sigma'$.
+3.  **Verification:** Clients verify $\sigma$ for every fetched Inode.
+By the EUF-CMA security of ML-DSA, the server cannot produce a valid $\sigma'$ for a modified $H$. Therefore, the server's only "attack" is to stop serving the Inode (Fail-Stop) or serve a stale version (detected via Theorem 14). It cannot modify the file content or metadata without immediate detection by the client.

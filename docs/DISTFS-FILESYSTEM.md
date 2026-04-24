@@ -29,6 +29,13 @@ A user's identity is defined by a pair of PQC keys:
 *   **ClusterSignKey (ML-DSA):** Used by the cluster to notarize the metadata timeline (`ClusterSig`).
 *   **Epoch Keys:** Rotating symmetric keys used to protect Layer 7 traffic.
 
+### 2.3 Strict Hierarchical Ownership
+Access to manage sensitive metadata (Groups and Inodes) is governed by a strict hierarchy. A resource $R$ can only be modified by:
+1.  The **Direct Owner** of $R$.
+2.  An **Ancestor Owner** (if $R$ is owned by a group, the group's owner or parents can manage it).
+3.  A verified **Administrator** (subject to specific provisioning constraints).
+This hierarchy is enforced by the Raft FSM during log application, ensuring that cryptographic authority cannot be bypassed even if the server is compromised.
+
 ## 3. Establishing Trust
 
 Trust is established using a self-sovereign, recursive verification model.
@@ -46,17 +53,24 @@ Requests are packaged as `SealedRequest` envelopes (see `DISTFS-RAFT.md`).
 
 ### 4.2 Data Encryption (Chunks and ClientBlobs)
 *   **AES-256-GCM:** Used for all symmetric encryption.
-*   **ClientBlobs:** Encrypted Inode metadata (filenames, ACLs).
-*   **Chunks:** File data encrypted with a unique File Key and Nonce.
+*   **ClientBlobs:** Sensitive Inode metadata (filenames, symlink targets) is encrypted into an opaque `ClientBlob` using the **File Key**.
+*   **Chunks:** File data encrypted with the File Key and a unique nonce.
+*   **Opaque Paths (Dark Forest):** To hide the directory hierarchy from the server, filenames are indexed using keyed HMACs: `nameHMAC = Hex(HMAC(Parent_FileKey, plaintext_filename))`. The server only sees these opaque hmacs as map keys in the `Children` and `Links` maps.
 
 ### 4.3 Lockboxes and Trial Decryption
 Access to the **File Key** is obtained via decapsulation of a `Lockbox` entry using ML-KEM.
 
 ### 4.4 Group Forward Secrecy & Epoch Ratcheting
 Groups manage access via a rotating **Epoch Seed**.
-1.  **Epoch Advancement:** When a member is removed, the Group Manager rotates the Epoch Seed. The new seed is encapsulated *only* for current members.
-2.  **Ratcheting:** Each Epoch Seed $S_t$ can be used to derive the previous seed $S_{t-1}$ via a one-way Hash-based ratchet: $S_{t-1} = KDF(S_t)$. This allows current members to access legacy files without re-encrypting them.
+1.  **Epoch Advancement:** When a member is removed, the Group Manager rotates the Epoch Seed.
+2.  **Ratcheting:** Each Epoch Seed $S_t$ can be used to derive the previous seed $S_{t-1}$ via a one-way hash-based ratchet: $S_{t-1} = H(S_t)$. This allows current members to access legacy files.
 3.  **Forward Secrecy:** Because the ratchet is a one-way function, a removed member possessing $S_{t-1}$ cannot derive $S_t$.
+
+### 4.5 Zero-Knowledge Key Synchronization (Recovery)
+To allow cross-device recovery, DistFS supports **Key Synchronization**.
+1.  **Key Derivation:** The client derives a high-entropy **Wrapping Key** ($K_w$) from the user's password using the Argon2id memory-hard function.
+2.  **Sealing:** The user's private identity keys and configuration are encrypted (sealed) with $K_w$ using AES-GCM and stored as a `KeySyncBlob` on the server.
+3.  **Zero-Knowledge:** The server only sees the opaque ciphertext. Without the password, the server cannot derive $K_w$ or access the private keys.
 
 ## 5. Formal Cryptography Proofs
 
@@ -112,8 +126,34 @@ Every `Inode` contains a `UserSig` ($\sigma_I = Sign(SK_{signer}, Hash(Inode))$)
 **Proof Sketch:**
 Let $S_t$ be the epoch seed for epoch $t$. Let a user $u$ be removed at epoch $t$.
 1.  **Authorization:** At epoch $t$, $S_t$ is encapsulated only for users in the current membership list $\mathcal{M}_t$. Since $u \notin \mathcal{M}_t$, $u$ cannot obtain $S_t$ via decapsulation.
-2.  **One-way Ratchet:** The relationship between seeds is $S_{i-1} = KDF(S_i)$. By the pre-image resistance of the KDF, it is computationally infeasible to derive $S_i$ from $S_{i-1}$.
+2.  **One-way Ratchet:** The relationship between seeds is $S_{i-1} = H(S_i)$. By the pre-image resistance of the hash function, it is computationally infeasible to derive $S_i$ from $S_{i-1}$.
 3.  **Conclusion:** Even if $u$ possesses $S_{t-1}$ (the seed from before their removal), they cannot derive $S_t$ or any subsequent seed. Therefore, they cannot decapsulate the File Keys for any new files protected by the new epoch, satisfying Forward Secrecy.
+
+### 5.7 Theorem 15: Opaque Path Analysis (Path Privacy)
+**Theorem:** An adversary (server) with access to the metadata database cannot determine the plaintext filenames or reconstruct the directory hierarchy.
+
+**Proof Sketch:**
+1.  **Identifier Blinding:** Filenames are stored as $nameHMAC = HMAC(Parent\_FileKey, plaintext\_filename)$.
+2.  **Dark Forest:** Since $HMAC$ is a **Pseudorandom Function (PRF)** and $Parent\_FileKey$ is high-entropy and only known to authorized clients, the resulting values are indistinguishable from random bitstrings to the server.
+3.  **Independence:** The server cannot link a $nameHMAC$ in a directory's `Children` map to the child Inode's `ID` without the cryptographic keys, as the `ID` is itself an unrelated random UUID. Therefore, the server cannot reconstruct the file tree or organizational structure.
+
+### 5.8 Theorem 16: Secure Key Synchronization (Recovery)
+**Theorem:** The `KeySync` recovery mechanism does not compromise the Zero-Knowledge mandate.
+
+**Proof Sketch:**
+1.  **KDF Security:** The wrapping key $K_w$ is derived using Argon2id, which is resistant to GPU-accelerated dictionary attacks.
+2.  **Symmetric Security:** The keys are sealed using AES-GCM (IND-CPA). 
+3.  **Privacy:** To access the private keys, an adversary must either break the IND-CPA security of AES-GCM or perform a successful dictionary attack against Argon2id. Provided the user selects a high-entropy password, this is computationally infeasible. Since $K_w$ never leaves the client, the server remains in a Zero-Knowledge state regarding the user's identity keys.
+
+### 5.9 Theorem 20: Strict Hierarchical Ownership
+**Theorem:** Resource management permissions correctly propagate through the ownership hierarchy.
+
+**Proof Sketch:**
+Let $O(R)$ denote the owner of resource $R$.
+1.  **Direct Ownership:** If $O(R) = u$, then $u$ has full management authority.
+2.  **Hierarchical Ownership:** If $O(R) = G$ (a Group), the FSM resolves authority by recursively checking $O(G)$. If any ancestor in the ownership chain is the authenticated `signerID`, the mutation is permitted.
+3.  **Immutability:** Critical ownership fields (e.g., `Group.OwnerID`) are immutable after creation.
+Since the FSM enforces these checks within a deterministic Raft log, the hierarchical chain of trust is strictly maintained. An adversary cannot grant themselves authority over a resource without either compromising an ancestor's private key or breaking the FSM's referential integrity.
 
 **Known Weakness: Replay / Rollback Attacks (Stale Manifests)**
 *TODO: The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry.*
