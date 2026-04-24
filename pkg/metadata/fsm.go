@@ -667,6 +667,12 @@ func (fsm *MetadataFSM) verifyInodeSignature(tx *bolt.Tx, inode *Inode, userID s
 
 	// 3. Phase 50/51: Verify OwnerDelegationSig if signer is not the owner
 	if userID != inode.OwnerID {
+		// Admin Bypass: Admins can sign empty directories for other users (provisioning)
+		// Match the condition in client.go
+		if fsm.IsAdmin(userID) && inode.Type == DirType && len(inode.Children) == 0 {
+			return nil
+		}
+
 		if len(inode.OwnerDelegationSig) == 0 {
 			return fmt.Errorf("missing OwnerDelegationSig: non-owner mutation by %s requires owner's authorization", userID)
 		}

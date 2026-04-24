@@ -94,7 +94,8 @@ Thus, tampering is detected with overwhelming probability.
 Every `Inode` contains a `UserSig` ($\sigma_I = Sign(SK_{signer}, Hash(Inode))$).
 1.  **Verification:** The client verifies $\sigma_I$ against the `SignKey` bound to `SignerID` in the `/registry`.
 2.  **Delegation:** If `SignerID != OwnerID`, the client additionally requires and verifies an `OwnerDelegationSig` ($\sigma_D = Sign(SK_{owner}, Hash(ID || GroupID))$), proving the owner authorized the group/ACL containing the signer.
-3.  **Reduction:** Forging either $\sigma_I$ or $\sigma_D$ requires breaking the EUF-CMA security of ML-DSA. Therefore, all metadata mutations are cryptographically attributable and verifiable.
+3.  **Admin Bypass:** For initial provisioning, an authenticated Admin is permitted to sign **empty directories** for other users without an `OwnerDelegationSig`. This is a controlled exception for administrative setup and does not compromise data integrity, as the directory contains no children or file keys.
+4.  **Reduction:** Forging either $\sigma_I$ or $\sigma_D$ requires breaking the EUF-CMA security of ML-DSA. Therefore, all metadata mutations are cryptographically attributable and verifiable.
 
 ### 5.5 Theorem 4: Zero-Knowledge Confidentiality
 **Theorem:** The storage nodes (server) cannot access plaintext user data.
