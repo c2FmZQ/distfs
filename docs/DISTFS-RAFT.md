@@ -57,7 +57,10 @@ To prevent a compromised cluster from presenting different versions of the histo
 ### 3.3 Perfect Forward Secrecy (Session Establishment)
 During login, the client and server perform an ephemeral PQC-KEM exchange. The server generates a unique **Session Key** encapsulated for the client's ephemeral public key. This key is used to protect all subsequent traffic in that session. Because the session key is ephemeral and never persisted in the Raft log or FSM, a future compromise of the cluster's long-term keys does not reveal the content of past sessions.
 
-### 3.4 mTLS & TOFU Bootstrapping
+### 3.4 Proof of Identity Possession (Auth Challenges)
+To prevent session hijacking or unauthorized login, the cluster enforces a **Challenge-Response** protocol. The server issues a random 32-byte challenge which the user must sign with their private `SignKey` (ML-DSA). Only users who can prove possession of the private key bound to their `UserID` can obtain a valid session token.
+
+### 3.5 mTLS & TOFU Bootstrapping
 Inter-node communication is secured via mutual TLS with a strict TOFU-to-Strict transition (see Section 5.2).
 
 ## 4. Two-Tiered Trust Model for FSM Encryption
@@ -153,3 +156,13 @@ The Raft FSM processes a `Batch Command` within a single database transaction.
 2.  **Consistency:** The FSM validates structural constraints (e.g., link counts, directory loops) after all sub-commands in the batch are simulated but before they are committed.
 3.  **Rollback:** If any sub-command fails (due to quota, permissions, or structural error), the FSM triggers an explicit transaction rollback.
 Therefore, the filesystem state transitions from one consistent state to another, with no intermediate or partial states ever becoming visible to readers, ensuring batch atomicity.
+
+### 5.12 Theorem 25: Proof of Identity Possession (Auth Challenges)
+**Theorem:** Session tokens are only issued to users who possess the corresponding private `SignKey`.
+
+**Proof Sketch:**
+During the `Login` flow, the server generates a random 256-bit challenge $C$.
+1.  **Uniqueness:** $C$ is high-entropy and single-use, preventing replay.
+2.  **Attribution:** The user must return $Sign(SK_{user}, C)$.
+3.  **Verification:** The server verifies the signature against the user's `SignKey` in the registry.
+By the EUF-CMA security of ML-DSA, an adversary $\mathcal{A}$ who does not possess $SK_{user}$ cannot produce a valid signature for a fresh challenge $C$. Therefore, the server ensures that the requester is the legitimate owner of the identity before issuing a session token.

@@ -34,6 +34,10 @@ The DistFS security model is defined by a series of formal theorems and proofs d
 *   **Theorem 11 (Anonymous Membership):** Group lists are hidden from the server (see `DISTFS-RAFT.md`).
 *   **Theorem 14 (Verifiable Timeline):** Server cannot fork history without detection (see `DISTFS-RAFT.md`).
 *   **Theorem 20 (Hierarchical Ownership):** Authority propagates correctly (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 21 (Move-Resistance):** Bind delegation to group context (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 24 (Optimistic Safety):** Caches do not weaken security (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 25 (Identity Possession):** Login requires private key proof (see `DISTFS-RAFT.md`).
+*   **Theorem 27 (Byzantine Registry):** Registry is immune to server manipulation (see `DISTFS.md`).
 
 ### 3.2 Data Confidentiality & Integrity
 *   **Theorem 2 (Data Integrity):** Detection of malicious tampering (see `DISTFS-FILESYSTEM.md`).
@@ -43,6 +47,8 @@ The DistFS security model is defined by a series of formal theorems and proofs d
 *   **Theorem 15 (Path Privacy):** Directory hierarchy is hidden from the server (see `DISTFS-FILESYSTEM.md`).
 *   **Theorem 16 (Secure KeySync):** Device recovery is zero-knowledge (see `DISTFS-FILESYSTEM.md`).
 *   **Theorem 18 (Byzantine-Resistant Metadata):** Server cannot modify file content (see `DISTFS.md`).
+*   **Theorem 22 (Cryptographic ACLs):** Permissions are bound to owner signature (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 23 (Chunk Unlinkability):** Isolated storage blocks (see `DISTFS-FILESYSTEM.md`).
 
 ### 3.3 Network & Resource Security
 *   **Theorem 8 (Layer 7 E2EE):** Traffic is protected against analysis (see `DISTFS-RAFT.md`).
@@ -50,6 +56,7 @@ The DistFS security model is defined by a series of formal theorems and proofs d
 *   **Theorem 10 (Quota Safety):** Multi-tenant resource protection (see `DISTFS-RAFT.md`).
 *   **Theorem 17 (Session PFS):** Ephemeral keys protect past traffic (see `DISTFS-RAFT.md`).
 *   **Theorem 19 (Batch Atomicity):** Multi-inode updates are all-or-nothing (see `DISTFS-RAFT.md`).
+*   **Theorem 26 (Capability Delegation):** Storage access is cluster-authorized (see `DISTFS-FILESYSTEM.md`).
 
 ### 3.4 Theorem 13: Quantum-Resistant Hybrid Resilience
 **Theorem:** The core security properties of DistFS (Confidentiality and Integrity) are preserved against a Quantum Adversary $\mathcal{A}_Q$.
@@ -70,3 +77,14 @@ Every `Inode` contains a `ManifestHash` ($H$) and a `UserSig` ($\sigma = Sign(SK
 2.  **Immutability:** To modify any field within $H$, an adversary (server) must produce a new valid signature $\sigma'$.
 3.  **Verification:** Clients verify $\sigma$ for every fetched Inode.
 By the EUF-CMA security of ML-DSA, the server cannot produce a valid $\sigma'$ for a modified $H$. Therefore, the server's only "attack" is to stop serving the Inode (Fail-Stop) or serve a stale version (detected via Theorem 14). It cannot modify the file content or metadata without immediate detection by the client.
+
+### 3.6 Theorem 27: Byzantine-Resistant Registry
+**Theorem:** A compromised metadata server cannot silently inject or revoke user identities.
+
+**Proof Sketch:**
+The `/registry` is a self-sovereign chain of trust.
+1.  **Anchoring:** Clients pin the public key of the Sovereign Anchor (Alice).
+2.  **Attestation:** Every identity in the registry is an attestation signed by Alice or a verified administrator.
+3.  **Recursive Verification:** Clients recursively verify the signature chain of any user or group back to Alice.
+4.  **Immutability:** To inject a fake user or revoke a valid one, the server would need to forge an ML-DSA signature from an authorized anchor.
+By the EUF-CMA security of ML-DSA, this is computationally infeasible. Therefore, the registry remains a "Single Source of Truth" that the server can store but never manipulate.

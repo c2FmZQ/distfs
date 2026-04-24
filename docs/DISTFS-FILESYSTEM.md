@@ -43,8 +43,11 @@ Trust is established using a self-sovereign, recursive verification model.
 ### 3.1 Sovereign Bootstrap
 The cluster is anchored by the first registered user ("Alice").
 
-### 3.2 Optimistic Verification
-Clients fetch metadata optimistically and perform deferred confirmation against the trusted `/registry` anchors.
+### 3.2 Aggregate Optimistic Verification
+To maintain high performance without compromising security, DistFS uses **Aggregate Optimistic Verification**.
+1.  **Optimistic Phase:** Clients fetch Inodes and Groups from the server and provisionally use the provided keys to reduce latency.
+2.  **Confirmation Phase:** All fetched IDs are added to a verification queue. The client asynchronously resolves the recursive registry attestations back to a trusted anchor (Alice) in the `/registry`.
+3.  **Blocking Safety:** Any "high-trust" operation (e.g., decapsulating a file key or verifying a mutation) blocks until the corresponding identities are formally verified.
 
 ## 4. Cryptographic Operations
 
@@ -71,6 +74,12 @@ To allow cross-device recovery, DistFS supports **Key Synchronization**.
 1.  **Key Derivation:** The client derives a high-entropy **Wrapping Key** ($K_w$) from the user's password using the Argon2id memory-hard function.
 2.  **Sealing:** The user's private identity keys and configuration are encrypted (sealed) with $K_w$ using AES-GCM and stored as a `KeySyncBlob` on the server.
 3.  **Zero-Knowledge:** The server only sees the opaque ciphertext. Without the password, the server cannot derive $K_w$ or access the private keys.
+
+### 4.6 Secure Capability Delegation (Storage Access)
+Storage nodes (DataNodes) only accept requests authorized by a cryptographically signed **Capability Token**.
+1.  **Issuance:** The MetaNode Leader issues a token containing specific `ChunkIDs`, an access mode ("R" or "W"), and an expiry time.
+2.  **Signature:** The token is signed using the cluster's **ClusterSignKey** (ML-DSA).
+3.  **Verification:** The DataNode verifies the signature before processing the request, ensuring that only metadata-authorized clients can access raw blocks.
 
 ## 5. Formal Cryptography Proofs
 
@@ -153,7 +162,54 @@ Let $O(R)$ denote the owner of resource $R$.
 1.  **Direct Ownership:** If $O(R) = u$, then $u$ has full management authority.
 2.  **Hierarchical Ownership:** If $O(R) = G$ (a Group), the FSM resolves authority by recursively checking $O(G)$. If any ancestor in the ownership chain is the authenticated `signerID`, the mutation is permitted.
 3.  **Immutability:** Critical ownership fields (e.g., `Group.OwnerID`) are immutable after creation.
-Since the FSM enforces these checks within a deterministic Raft log, the hierarchical chain of trust is strictly maintained. An adversary cannot grant themselves authority over a resource without either compromising an ancestor's private key or breaking the FSM's referential integrity.
+Since the FSM enforces these checks within a deterministic Raft log, the hierarchical chain of trust is strictly maintained.
+
+### 5.10 Theorem 21: Context-Bound Attribution (Move-Resistance)
+**Theorem:** An Inode cannot be moved between groups or re-parented without the owner's explicit re-authorization.
+
+**Proof Sketch:**
+The `OwnerDelegationSig` ($\sigma_D$) is calculated over the `DelegationHash`, which includes the `Inode.ID` and the `Inode.GroupID`.
+1.  **Context Binding:** By including the `GroupID` in the signed hash, the owner cryptographically binds their delegation to a specific group context.
+2.  **Mutation Check:** If a user attempts to move an Inode to a different group, the `GroupID` changes.
+3.  **Verification Failure:** The existing $\sigma_D$ will fail verification against the new `GroupID`.
+Therefore, a non-owner cannot move a file to a group they control to bypass access rules without obtaining a new signature from the owner.
+
+### 5.11 Theorem 22: Cryptographic ACL Enforcement
+**Theorem:** Filesystem permissions (ACLs) are immutable to the metadata server and bound to the owner's cryptographic signature.
+
+**Proof Sketch:**
+Both the `ManifestHash` (for the owner) and the `DelegationHash` (for delegated signers) include the deterministically sorted representation of the `AccessACL` and `DefaultACL`.
+1.  **Integrity Binding:** Any modification to the ACLs by the server will result in a mismatch with the cryptographic hashes.
+2.  **Signature Requirement:** To commit a valid ACL change, the server must provide a new `UserSig` or `OwnerDelegationSig`.
+By the EUF-CMA security of ML-DSA, the server cannot produce these signatures. Thus, permissions are cryptographically anchored to the owner's intent.
+
+### 5.12 Theorem 23: Storage Isolation (Chunk Unlinkability)
+**Theorem:** The storage nodes (DataNodes) cannot determine which chunks belong to the same file or which user owns them.
+
+**Proof Sketch:**
+1.  **Flat Namespace:** Chunks are stored in a flat namespace indexed by their `ChunkID` (a hash of ciphertext).
+2.  **Fixed Size:** All chunks are uniform 1MB blocks, preventing size-based correlation.
+3.  **Token Blindness:** The `CapabilityToken` used to authorize DataNode access contains only the `ChunkIDs` and the requested mode. It does not contain `FileIDs`, `UserIDs`, or parent directory information.
+Since the mapping between files and chunks (the `Manifest`) is encrypted and stored only on MetaNodes, the DataNode possesses no metadata linking isolated blocks together.
+
+### 5.13 Theorem 24: Multi-Level Cache Integrity (Optimistic Safety)
+**Theorem:** Aggregate Optimistic Verification ensures that client-side caches do not weaken the security model.
+
+**Proof Sketch:**
+1.  **Verification Queue:** All fetched IDs are added to a background verification queue.
+2.  **Atomic Confirmation:** Any operation requiring a "high-trust" key (e.g., decapsulating a file key or verifying a mutation) blocks until the corresponding identity attestation has been recursively verified back to a trusted anchor (Alice) in the `/registry`.
+3.  **Cache Invalidation:** If a registry check reveals a key mismatch or revoked attestation, the cache is invalidated and the operation is aborted.
+Therefore, while the client *fetches* data optimistically, it only *trusts* data that has passed formal cryptographic verification, maintaining the "Trust No One" model.
+
+### 5.14 Theorem 26: Secure Capability Delegation
+**Theorem:** DataNodes only accept storage requests authorized by the MetaNode cluster.
+
+**Proof Sketch:**
+DataNode access requires a `CapabilityToken` signed by the cluster's `ClusterSignKey` (ML-DSA).
+1.  **Short-lived:** Tokens have a short expiry time (TTL).
+2.  **Attestation:** The DataNode verifies the cluster's signature before serving any block.
+3.  **Session Binding:** Tokens can be cryptographically bound to the client's session identifier.
+By the EUF-CMA security of the cluster key, an adversary cannot self-issue access tokens. Access is strictly delegated by the metadata layer, enforcing global consistency and permissions at the storage layer.
 
 **Known Weakness: Replay / Rollback Attacks (Stale Manifests)**
 *TODO: The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry.*
