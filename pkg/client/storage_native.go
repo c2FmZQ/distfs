@@ -93,6 +93,7 @@ func (s *NativeStore) Close() error {
 }
 
 func (s *NativeStore) getChunkPath(key string) string {
+	key = filepath.Base(key)
 	if len(key) < 4 {
 		return filepath.Join(s.baseDir, "chunks", key)
 	}

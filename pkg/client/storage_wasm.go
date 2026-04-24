@@ -5,6 +5,7 @@ package client
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"syscall/js"
 )
@@ -198,42 +199,84 @@ func (s *WASMStore) Prune() {
 		return
 	}
 
-	// We only need the keys to count and decide what to delete.
-	// Since we want LRU, we should ideally have the times, but to avoid
-	// the complex race of waiting for two requests, let's just get the keys.
 	txn := s.db.Call("transaction", []interface{}{"last_access"}, "readonly")
 	store := txn.Call("objectStore", "last_access")
-	request := store.Call("getAllKeys")
+	reqKeys := store.Call("getAllKeys")
+	reqVals := store.Call("getAll")
 
-	done := make(chan struct{})
+	doneKeys := make(chan struct{})
+	doneVals := make(chan struct{})
+
 	var keys []string
+	var times []float64
 
-	successFn := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
-		res := request.Get("result")
+	successKeysFn := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		res := reqKeys.Get("result")
 		l := res.Get("length").Int()
 		for i := 0; i < l; i++ {
 			keys = append(keys, res.Index(i).String())
 		}
-		close(done)
+		close(doneKeys)
 		return nil
 	})
 
-	request.Set("onsuccess", successFn)
-	<-done
-	successFn.Release()
+	successValsFn := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+		res := reqVals.Get("result")
+		l := res.Get("length").Int()
+		for i := 0; i < l; i++ {
+			times = append(times, res.Index(i).Float())
+		}
+		close(doneVals)
+		return nil
+	})
 
-	if len(keys) <= s.maxEntries {
+	reqKeys.Set("onsuccess", successKeysFn)
+	reqVals.Set("onsuccess", successValsFn)
+
+	<-doneKeys
+	<-doneVals
+
+	successKeysFn.Release()
+	successValsFn.Release()
+
+	if len(keys) <= s.maxEntries || len(keys) != len(times) {
 		return
 	}
 
-	// If we are over the limit, delete the first few.
-	// Without times, this is FIFO (if keys are insertion ordered, which they aren't in IDB)
-	// but it's better than nothing and avoids the "request not finished" crash.
-	toDelete := len(keys) - s.maxEntries
+	type entry struct {
+		key  string
+		time float64
+	}
+
+	entries := make([]entry, len(keys))
+	for i := range keys {
+		entries[i] = entry{key: keys[i], time: times[i]}
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].time < entries[j].time
+	})
+
+	toDelete := len(entries) - s.maxEntries
 	for i := 0; i < toDelete; i++ {
-		parts := strings.SplitN(keys[i], ":", 2)
+		parts := strings.SplitN(entries[i].key, ":", 2)
 		if len(parts) == 2 {
 			s.Delete(parts[0], parts[1])
+
+			// Also delete from last_access so it doesn't get stuck there
+			txnDel := s.db.Call("transaction", []interface{}{"last_access"}, "readwrite")
+			storeDel := txnDel.Call("objectStore", "last_access")
+
+			delReq := storeDel.Call("delete", entries[i].key)
+			doneDel := make(chan struct{})
+			successDelFn := js.FuncOf(func(this js.Value, args []js.Value) interface{} {
+				close(doneDel)
+				return nil
+			})
+			delReq.Set("onsuccess", successDelFn)
+			<-doneDel
+			successDelFn.Release()
 		}
 	}
 }
+
