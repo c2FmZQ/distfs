@@ -88,3 +88,39 @@ To prevent unbounded Raft log growth, DistFS employs periodic snapshotting. Dist
 Because the FSM is fully encrypted, BoltDB snapshots can be safely transferred between nodes over the mTLS Raft transport.
 *   When a Follower receives a snapshot, it replaces its local BoltDB file.
 *   Because the Follower already possesses the `ClusterSecret` in its local Tier 1 vault, it can immediately decrypt the `system` bucket within the new snapshot, extract the current `FSM KeyRing`, and resume processing logs without requiring an out-of-band key exchange.
+
+## 5. Cryptography Proof for Cluster Trust & Secret Distribution
+
+The cluster trust model ensures that only authorized nodes can participate in consensus and that the `ClusterSecret` remains confidential to the cluster members.
+
+### 5.1 Definitions
+
+Let $\mathcal{N}$ be the set of nodes in the cluster.
+Let $PK_n$ and $SK_n$ be the persistent asymmetric keypair for node $n \in \mathcal{N}$.
+Let $\mathcal{M}$ be the `NodeMeta` list, which is the set of public keys $\{PK_1, PK_2, \dots, PK_k\}$ of currently trusted nodes.
+Let $S$ be the `ClusterSecret`.
+
+### 5.2 Theorem 3: Security of the TOFU Join Protocol
+
+**Theorem 3:** If the underlying TLS implementation provides a secure, authenticated channel, and the signature scheme used for node identity is EUF-CMA secure, then the DistFS TOFU protocol is secure against Man-in-the-Middle (MITM) attacks after the initial trust acquisition.
+
+**Proof (Sketch):**
+The TOFU protocol has two phases: **Phase A (Trust Acquisition)** and **Phase B (Strict Enforcement)**.
+
+1.  **Phase A:** A joining node $n_{new}$ connects to an existing node $n_{leader}$ over TLS. During the initial handshake, $n_{new}$ has no prior knowledge of $\mathcal{M}$. However, $n_{leader}$ authenticates $n_{new}$ by checking its self-signed certificate against a pre-authorized join request or administrator approval.
+2.  **Secret Transmission:** Once authenticated, $n_{leader}$ transmits $S$ and $\mathcal{M}$ to $n_{new}$ over the encrypted TLS channel.
+3.  **Phase B:** Node $n_{new}$ transitions to **Strict Mode**. It now refuses any TLS handshake where the peer's public key $PK_{peer} \notin \mathcal{M}$.
+
+**Integrity Argument:** An adversary $\mathcal{A}$ attempting to impersonate a cluster member to $n_{new}$ after Phase A must present a certificate for some $PK_a \in \mathcal{M}$. Since $PK_a$ corresponds to a legitimate node $n_a$, $\mathcal{A}$ must also possess $SK_a$ to complete the TLS handshake. By the EUF-CMA security of the underlying identity keys, the probability of $\mathcal{A}$ possessing $SK_a$ or forging a valid signature for $PK_a$ is negligible. Thus, after the first secure connection, the cluster forms a closed, authenticated network.
+
+### 5.3 Theorem 4: Confidentiality of the FSM Root
+
+**Theorem 4:** Assuming the AES-GCM encryption scheme provides semantic security (IND-CPA) and the Tier 1 `ClusterSecret` $S$ is kept confidential, the contents of the FSM remain confidential even if the storage medium (BoltDB file) is exfiltrated.
+
+**Proof (Sketch):**
+1.  **Encryption Hierarchy:** The FSM data $D$ is encrypted as $C = E_{K_{fsm}}(D)$, where $K_{fsm}$ is a key from the `FSM KeyRing`.
+2.  **Root of Trust:** $K_{fsm}$ is stored in the `system` bucket, encrypted as $C_{sys} = E_{f(S)}(K_{fsm})$, where $f$ is a key derivation function and $S$ is the `ClusterSecret`.
+3.  **Confidentiality Chain:** To obtain plaintext $D$, an adversary must first obtain $K_{fsm}$ from $C_{sys}$. To decrypt $C_{sys}$, the adversary must possess $S$.
+4.  **Local Protection:** On each node $n$, $S$ is stored as $C_s = E_{K_{master}}(S)$. $K_{master}$ is bound to the node's local hardware (TPM) or a secure environment variable.
+
+If $S$ is only transmitted over mTLS channels (protected by Theorem 3) and only stored in encrypted vaults, then an adversary who only possesses the FSM file $C$ cannot derive $K_{fsm}$ without breaking the IND-CPA security of AES-GCM or compromising a node's local vault. Therefore, FSM confidentiality is preserved.
