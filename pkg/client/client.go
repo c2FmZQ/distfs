@@ -618,8 +618,11 @@ type Client struct {
 	registryDir string
 
 	// Phase 74: Universal Caching
-	store   KVStore
-	offline bool
+	store         KVStore
+	offline       bool
+	valQueue      map[string]map[string]uint64
+	valQueueMu    *sync.Mutex
+	valQueueTimer *time.Timer
 
 	allocCache  []metadata.Node
 	allocExpiry time.Time
@@ -659,6 +662,8 @@ func NewClient(serverAddr string) *Client {
 		dataSem:              make(chan struct{}, 64),  // Limit chunk I/O
 		mutationMu:           &sync.Mutex{},
 		mutationLocks:        make(map[string]*sync.Mutex),
+		valQueueMu:           &sync.Mutex{},
+		valQueue:             make(map[string]map[string]uint64),
 		rootID:               metadata.RootID,
 		rootMu:               &sync.RWMutex{},
 		allocMu:              &sync.RWMutex{},
@@ -1708,6 +1713,75 @@ func (c *Client) ValidateMetadata(ctx context.Context, inodes []metadata.Metadat
 	return &resp, nil
 }
 
+func (c *Client) triggerValidation(kind, id string, version uint64) {
+	if c.offline {
+		return
+	}
+	c.valQueueMu.Lock()
+	defer c.valQueueMu.Unlock()
+
+	if c.valQueue[kind] == nil {
+		c.valQueue[kind] = make(map[string]uint64)
+	}
+	c.valQueue[kind][id] = version
+
+	if c.valQueueTimer == nil {
+		c.valQueueTimer = time.AfterFunc(2*time.Second, c.flushValidationQueue)
+	}
+}
+
+func (c *Client) flushValidationQueue() {
+	c.valQueueMu.Lock()
+	queue := c.valQueue
+	c.valQueue = make(map[string]map[string]uint64)
+	c.valQueueTimer = nil
+	c.valQueueMu.Unlock()
+
+	if len(queue) == 0 {
+		return
+	}
+
+	var inodes []metadata.MetadataVersion
+	var groups []metadata.MetadataVersion
+
+	for id, ver := range queue["inodes"] {
+		inodes = append(inodes, metadata.MetadataVersion{ID: id, Version: ver})
+	}
+	for id, ver := range queue["groups"] {
+		groups = append(groups, metadata.MetadataVersion{ID: id, Version: ver})
+	}
+
+	if len(inodes) == 0 && len(groups) == 0 {
+		return
+	}
+
+	resp, err := c.ValidateMetadata(context.Background(), inodes, groups)
+	if err != nil {
+		return
+	}
+
+	if c.store != nil {
+		for _, id := range resp.StaleInodes {
+			c.store.Delete("inodes", id)
+			c.pathMu.Lock()
+			// Find and remove from pathCache
+			for path, entry := range c.pathCache {
+				if entry.inodeID == id {
+					delete(c.pathCache, path)
+				}
+			}
+			c.pathMu.Unlock()
+		}
+		for _, id := range resp.StaleGroups {
+			c.store.Delete("groups", id)
+			c.cacheMu.Lock()
+			delete(c.verifiedGroupCache, id)
+			delete(c.unverifiedGroupCache, id)
+			c.cacheMu.Unlock()
+		}
+	}
+}
+
 // GetQuota returns the current user's quota and usage.
 func (c *Client) GetQuota(ctx context.Context) (metadata.UserQuota, metadata.UserUsage, error) {
 	user, err := c.getUser(ctx, c.UserID())
@@ -2003,6 +2077,9 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 		results, err := c.applyBatch(ctx, []metadata.LogCommand{cmd})
 		if err != nil {
 			if isConflict(err) {
+				if c.store != nil {
+					c.store.Delete("inodes", id)
+				}
 				continue
 			}
 			return nil, err
@@ -4950,14 +5027,14 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 		}
 	}
 
-	if !cacheHit || !c.offline {
+	if !cacheHit {
 		var fetchedGroup metadata.Group
 		req := metadata.GetGroupRequest{ID: id}
 		data, _ := json.Marshal(req)
 		_, _, err := c.doRequest(ctx, "GET", "/v1/group/"+id, data, requestOptions{action: metadata.ActionGetGroup, unseal: true, retry: true}, &fetchedGroup)
 		if err != nil {
-			if (c.offline || errors.Is(err, ErrOffline)) && group != nil {
-				// Fallback to cached version if offline
+			if group != nil && (c.offline || errors.Is(err, ErrOffline) || c.isRetryable(err)) {
+				// Fallback to cached version if offline or network unavailable
 			} else {
 				return nil, err
 			}
@@ -4970,6 +5047,8 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 				}
 			}
 		}
+	} else {
+		c.triggerValidation("groups", id, group.Version)
 	}
 
 	return group, nil
@@ -6835,19 +6914,34 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 			c.cacheMu.Lock()
 			c.verifiedGroupCache[id] = &updated
 			c.cacheMu.Unlock()
+			if c.store != nil {
+				if gdata, err := json.Marshal(&updated); err == nil {
+					c.store.Put("groups", id, gdata)
+				}
+			}
 
 			return &updated, nil
 		}
-
-		if err != metadata.ErrConflict {
+		if !isConflict(err) {
 			return nil, err
 		}
+
+		// Invalidate cache on conflict to ensure we fetch fresh data on retry
+		if c.store != nil {
+			c.store.Delete("groups", id)
+		}
+		c.cacheMu.Lock()
+		delete(c.verifiedGroupCache, id)
+		delete(c.unverifiedGroupCache, id)
+		c.cacheMu.Unlock()
+
 		// On conflict, wait a bit and retry
 		time.Sleep(time.Duration(i*50) * time.Millisecond)
-	}
+		}
 
-	return nil, metadata.ErrConflict
-}
+		return nil, metadata.ErrConflict
+		}
+
 
 // getGroupMembers retrieves the list of members for a group.
 // If the requester is an authorized manager, it returns emails. Otherwise, only UserIDs.
