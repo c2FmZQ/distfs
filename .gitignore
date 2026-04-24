@@ -10,7 +10,7 @@
 /client_tests.log
 /data/
 /node*/
-/DISTFS-REPORT.md
+/docs/DISTFS-REPORT.md
 /bin/
 tests/bin/
 logs/
