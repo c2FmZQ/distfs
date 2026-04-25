@@ -58,7 +58,7 @@ Requests are packaged as `SealedRequest` envelopes (see `DISTFS-RAFT.md`).
 *   **AES-256-GCM:** Used for all symmetric encryption.
 *   **ClientBlobs:** Sensitive Inode metadata (filenames, symlink targets) is encrypted into an opaque `ClientBlob` using the **File Key**.
 *   **Chunks:** File data encrypted with the File Key and a unique nonce.
-*   **Opaque Paths (Dark Forest):** To hide the directory hierarchy from the server, filenames are indexed using keyed HMACs: `nameHMAC = Hex(HMAC(Parent_FileKey, plaintext_filename))`. The server only sees these opaque hmacs as map keys in the `Children` and `Links` maps.
+*   **Opaque Filenames (Dark Forest):** To hide the plaintext filenames from the server, they are indexed using keyed HMACs: `nameHMAC = Hex(HMAC(Parent_FileKey, plaintext_filename))`. The server only sees these opaque hmacs as map keys in the `Children` and `Links` maps, though it can still observe the overall directory structure.
 
 ### 4.3 Lockboxes and Trial Decryption
 Access to the **File Key** is obtained via decapsulation of a `Lockbox` entry using ML-KEM.

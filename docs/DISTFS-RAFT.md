@@ -111,7 +111,7 @@ If $S$ is only transmitted over mTLS channels (protected by Theorem 5) and only 
 
 **Proof Sketch:**
 1.  **Confidentiality:** All metadata is encapsulated in a `SealedEnvelope` encrypted with AES-GCM and ML-KEM. By the IND-CCA2 security of these primitives, an adversary $\mathcal{A}$ cannot distinguish between two requests or learn any bit of the payload.
-2.  **Replay:** A request $R$ is uniquely identified by $(Nonce, Timestamp)$. If $\mathcal{A}$ resubmits $R$, the Leader checks its nonce cache. If the nonce is present, it is rejected. If the timestamp is outside the valid window $\Delta t$, it is rejected. Therefore, every request is processed at most once.
+2.  **Replay:** A request $R$ is uniquely identified by $(Nonce, Timestamp)$. If $\mathcal{A}$ resubmits $R$, the Leader checks its nonce cache. If the nonce is present, it is rejected. If the timestamp is outside the valid window $\Delta t$ (e.g., $\pm 2$ minutes), it is rejected. While the nonce cache is maintained in memory and cleared on leader failover, the replay vulnerability window is strictly bounded to $\Delta t$. Therefore, every request is processed at most once within a given epoch.
 
 ### 5.6 Theorem 9: Metadata Linearizability
 **Theorem:** Any sequence of metadata operations in DistFS satisfies the Serializability property.
@@ -123,20 +123,22 @@ If $S$ is only transmitted over mTLS channels (protected by Theorem 5) and only 
 
 **Proof Sketch:** Quota enforcement happens within the Raft FSM during log application. Because the FSM is deterministic and applies entries atomically, the `PrimaryDebtor`'s current usage is checked against the limit $Q$ before the write is committed. If `usage + delta > Q`, the transaction is aborted and rolled back. Since the server is the authoritative source for quota state, the client cannot bypass this check.
 
-### 5.8 Theorem 11: Anonymous Membership (Dark Groups)
-**Theorem:** An adversary $\mathcal{A}$ with access to the Group Lockbox cannot determine group membership without $S$.
+### 5.8 Theorem 11: Anonymous Membership
+**Theorem:** An adversary $\mathcal{A}$ (the server) cannot determine the identity of users provisioned via the `AnonymousLockbox`.
 
-**Proof Sketch:** Recipient IDs in a group lockbox are derived as $R = HMAC(UserID, GroupID)$. Since $HMAC$ is a Pseudorandom Function (PRF), the values of $R$ appear indistinguishable from random noise to anyone without the salt ($S$, which is used to derive the `UserID`). Therefore, $\mathcal{A}$ cannot link a Lockbox entry back to a specific `UserID` in the Dark Registry.
+**Proof Sketch:** 
+While standard group membership is pseudonymized via $R = HMAC(GroupID, UserID)$, the server could perform a dictionary attack against known $UserID$s to resolve membership. However, users provisioned via the `AnonymousLockbox` receive the Group Epoch Seed encapsulated directly for their ephemeral ML-KEM public key, without any reference to a registered `UserID`. Since the server does not know the owner of the public key, the identity of these members remains mathematically anonymous to both the server and other group members.
 
 ### 5.9 Theorem 14: Verifiable Timeline (Fork-Resistance)
-**Theorem:** A compromised metadata cluster cannot "fork" the history (presenting different consistent states to different clients) without being detected by an anchored client.
+**Theorem:** A compromised metadata cluster cannot "fork" the history (presenting different consistent states to different clients) without being detected by an anchored client backed by a transparency log.
 
 **Proof Sketch:**
 Let a client $c$ have an anchored version $V_a$ of an Inode $I$.
 1.  **Monotonicity:** The FSM only commits mutations where the new version $V_{new} > V_{old}$.
 2.  **Notarization:** Every state update is signed as $Sign(SK_{cluster}, Hash(I || V_{new}))$.
-3.  **Anchoring:** When $c$ fetches $I$, it verifies the signature and ensures $V \ge V_a$.
-If the server attempts to present a forked history $H'$ to $c$, it must either produce a valid signature for a lower version number (which $c$ will reject via the anchor) or produce a forked history starting from $V_a$. However, since Raft ensures a single linearizable log, any two states at version $V > V_a$ that both possess valid cluster signatures must be identical (Collision Resistance of the signature/hash). Therefore, the server cannot present two different valid histories to different clients without breaking the underlying cryptographic primitives or Raft consensus.
+3.  **Anchoring:** When $c$ fetches $I$, it verifies the signature and ensures $V \ge V_a$. To prevent equivocation, clients must periodically cross-check their highest anchored `ClusterSig` against an immutable Transparency Log or through client gossip, ensuring all clients share the same linearizable timeline.
+
+<!-- TODO: Implement a decentralized transparency log or client gossip mechanism to detect server equivocation and history forking. -->
 
 ### 5.10 Theorem 17: Perfect Forward Secrecy (Sessions)
 **Theorem:** A compromise of the cluster's long-term identity keys does not allow an adversary to decrypt past client-server sessions.

@@ -2,6 +2,11 @@
 
 DistFS is a high-performance, distributed file system built on a **Zero-Knowledge** foundation. It prioritizes data privacy, end-to-end encryption, and post-quantum security.
 
+## Known Issues and Work in Progress
+
+*   **Verifiable Timeline (Fork-Resistance):** The system currently requires a decentralized transparency log or client gossip mechanism to detect server equivocation and history forking (see `DISTFS-RAFT.md`).
+*   **Replay / Rollback Attacks (Stale Manifests):** The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry (see `DISTFS-FILESYSTEM.md`).
+
 ## 1. Architectural Pillars
 
 *   **Zero-Knowledge:** The server never possesses plaintext data or encryption keys.
@@ -31,7 +36,7 @@ The DistFS security model is defined by a series of formal theorems and proofs d
 *   **Theorem 3 (Metadata Attribution):** All mutations are cryptographically attributable (see `DISTFS-FILESYSTEM.md`).
 *   **Theorem 5 (TOFU Join):** Cluster join protocol is MITM-resistant (see `DISTFS-RAFT.md`).
 *   **Theorem 7 (Identity Privacy):** User PII is protected via a Dark Registry (see `DISTFS-RAFT.md`).
-*   **Theorem 11 (Anonymous Membership):** Group lists are hidden from the server (see `DISTFS-RAFT.md`).
+*   **Theorem 11 (Anonymous Membership):** AnonymousLockbox members are mathematically hidden from the server (see `DISTFS-RAFT.md`).
 *   **Theorem 14 (Verifiable Timeline):** Server cannot fork history without detection (see `DISTFS-RAFT.md`).
 *   **Theorem 20 (Hierarchical Ownership):** Authority propagates correctly (see `DISTFS-FILESYSTEM.md`).
 *   **Theorem 21 (Move-Resistance):** Bind delegation to group context (see `DISTFS-FILESYSTEM.md`).

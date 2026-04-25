@@ -669,7 +669,7 @@ func (fsm *MetadataFSM) verifyInodeSignature(tx *bolt.Tx, inode *Inode, userID s
 	if userID != inode.OwnerID {
 		// Admin Bypass: Admins can sign empty directories for other users (provisioning)
 		// Match the condition in client.go
-		if fsm.IsAdmin(userID) && inode.Type == DirType && len(inode.Children) == 0 {
+		if fsm.IsAdmin(userID) && inode.Type == DirType && len(inode.Children) == 0 && inode.Version == 1 {
 			return nil
 		}
 
