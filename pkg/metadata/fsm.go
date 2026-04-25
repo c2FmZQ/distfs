@@ -665,6 +665,36 @@ func (fsm *MetadataFSM) verifyInodeSignature(tx *bolt.Tx, inode *Inode, userID s
 		return fmt.Errorf("invalid UserSig for user %s", userID)
 	}
 
+	// 3. Phase 50/51: Verify OwnerDelegationSig if signer is not the owner
+	if userID != inode.OwnerID {
+		// Admin Bypass: Admins can sign empty directories for other users (provisioning)
+		// Match the condition in client.go
+		if fsm.IsAdmin(userID) && inode.Type == DirType && len(inode.Children) == 0 && inode.Version == 1 {
+			return nil
+		}
+
+		if len(inode.OwnerDelegationSig) == 0 {
+			return fmt.Errorf("missing OwnerDelegationSig: non-owner mutation by %s requires owner's authorization", userID)
+		}
+
+		// Fetch Owner's SignKey
+		ov, err := fsm.Get(tx, []byte("users"), []byte(inode.OwnerID))
+		if err != nil {
+			return fmt.Errorf("failed to fetch owner %s: %w", inode.OwnerID, err)
+		}
+		if ov == nil {
+			return fmt.Errorf("owner %s not found for delegation verification", inode.OwnerID)
+		}
+		var owner User
+		if err := json.Unmarshal(ov, &owner); err != nil {
+			return fmt.Errorf("failed to unmarshal owner: %w", err)
+		}
+
+		if !crypto.VerifySignature(owner.SignKey, inode.DelegationHash(), inode.OwnerDelegationSig) {
+			return fmt.Errorf("invalid OwnerDelegationSig on inode %s", inode.ID)
+		}
+	}
+
 	return nil
 }
 
