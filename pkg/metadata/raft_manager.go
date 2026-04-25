@@ -62,6 +62,7 @@ func NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir string, st *
 	}
 	config.LocalID = raft.ServerID(nodeID)
 	// NoSnapshotRestoreOnStart default is false.
+	config.NoSnapshotRestoreOnStart = true
 
 	// 1. Generate Self-Signed Cert
 	cert, err := GenerateSelfSignedCert(nodeKey)
@@ -74,7 +75,6 @@ func NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir string, st *
 		return nil, err
 	}
 	dbPath := filepath.Join(baseDir, "fsm.bolt")
-	os.Remove(dbPath)
 	fsm, err := NewMetadataFSM(nodeID, dbPath, clusterSecret)
 	if err != nil {
 		return nil, fmt.Errorf("metadata fsm initialization: %w", err)

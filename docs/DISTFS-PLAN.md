@@ -47,7 +47,7 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
     *   **Action:** Define `Inode` struct.
     *   **Action:** Implement `ClusterSecret` generation (Bootstrap) and storage in FSM.
     *   **Update:** Implement Directory Structure (`Children` map) in FSM.
-*   **Step 3.3: LinkSnapshotStore**
+*   **Step 3.3: MetadataSnapshot**
     *   **Action:** Port/Adapt Snapshot logic (`MetadataSnapshot`).
 *   **Step 3.4: Metadata API**
     *   **Action:** Implement `POST /v1/meta/inode` and `GET /v1/meta/inode/{id}`.

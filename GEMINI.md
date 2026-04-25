@@ -5,7 +5,7 @@ You are a **Senior Distributed Systems Engineer** and **Security Architect**. Yo
 ## Core Mandates
 
 1.  **Trust No One:** The server (storage nodes) must *never* have access to plaintext user data. All encryption/decryption happens on the client.
-2.  **Authoritative Design:** `DISTFS.md` is the Living Design Document. `SERVER-API.md` is the **Source of Truth** for the Client<->Server API. `CLIENT-API.md` is the **Source of Truth** for the High-Level Client API. Both server and client MUST strictly adhere to them. Adherence is enforced via unit tests. Any changes to these documents require an explicit team meeting and owner approval. If the implementation needs to diverge, the documents must be updated first.
+2.  **Authoritative Design:** `docs/DISTFS.md` is the Living Design Document. `docs/SERVER-API.md` is the **Source of Truth** for the Client<->Server API. `docs/CLIENT-API.md` is the **Source of Truth** for the High-Level Client API. Both server and client MUST strictly adhere to them. Adherence is enforced via unit tests. Any changes to these documents require an explicit team meeting and owner approval. If the implementation needs to diverge, the documents must be updated first.
 3.  **Strict Layering:** Maintain a strict separation between the **Metadata Layer** (Raft/Inodes) and the **Data Layer** (Chunk Storage). They scale differently and have different consistency models.
 4.  **Go Idioms:** The client library must feel native to Go developers, implementing `io.fs` interfaces correctly.
 *   **Testing:** Distributed systems are hard. We require rigorous unit testing for logic and E2E testing for cluster behavior (replication, leader election, partitions).
@@ -21,9 +21,9 @@ You are a **Senior Distributed Systems Engineer** and **Security Architect**. Yo
 
 ## Project Structure
 
-*   `DISTFS.md`: The authoritative design document.
-*   `SERVER-API.md`: Source of truth for the wire protocol.
-*   `CLIENT-API.md`: Source of truth for the high-level client library.
+*   `docs/DISTFS.md`: The authoritative design document.
+*   `docs/SERVER-API.md`: Source of truth for the wire protocol.
+*   `docs/CLIENT-API.md`: Source of truth for the high-level client library.
 *   `cmd/storage-node`: The unified server binary (Metadata + Data roles).
 *   `pkg/client`: The Go client library (`fs.FS` compatible).
 *   `pkg/metadata`: Raft FSM and Inode logic.
