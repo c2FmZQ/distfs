@@ -4,8 +4,8 @@ DistFS is a high-performance, distributed file system built on a **Zero-Knowledg
 
 ## Known Issues and Work in Progress
 
-*   **Verifiable Timeline (Fork-Resistance):** The system currently requires a decentralized transparency log or client gossip mechanism to detect server equivocation and history forking (see `DISTFS-RAFT.md`).
-*   **Replay / Rollback Attacks (Stale Manifests):** The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry (see `DISTFS-FILESYSTEM.md`).
+*   **Verifiable Timeline (Fork-Resistance):** The system currently requires a decentralized transparency log or client gossip mechanism to detect server equivocation and history forking (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Replay / Rollback Attacks (Stale Manifests):** The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
 
 ## 1. Architectural Pillars
 
@@ -32,36 +32,36 @@ While DistFS prioritizes PQC, it is architected for **Hybrid Resilience**. Ident
 The DistFS security model is defined by a series of formal theorems and proofs distributed across the technical documentation.
 
 ### 3.1 Trust & Identity
-*   **Theorem 1 (Identity Spoofing):** Secure against unauthorized identity injection (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 3 (Metadata Attribution):** All mutations are cryptographically attributable (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 5 (TOFU Join):** Cluster join protocol is MITM-resistant (see `DISTFS-RAFT.md`).
-*   **Theorem 7 (Identity Privacy):** User PII is protected via a Dark Registry (see `DISTFS-RAFT.md`).
-*   **Theorem 11 (Anonymous Membership):** AnonymousLockbox members are mathematically hidden from the server (see `DISTFS-RAFT.md`).
-*   **Theorem 14 (Verifiable Timeline):** Server cannot fork history without detection (see `DISTFS-RAFT.md`).
-*   **Theorem 20 (Hierarchical Ownership):** Authority propagates correctly (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 21 (Move-Resistance):** Bind delegation to group context (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 24 (Optimistic Safety):** Caches do not weaken security (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 25 (Identity Possession):** Login requires private key proof (see `DISTFS-RAFT.md`).
-*   **Theorem 27 (Byzantine Registry):** Registry is immune to server manipulation (see `DISTFS.md`).
+*   **Theorem 1 (Identity Spoofing):** Secure against unauthorized identity injection (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 3 (Metadata Attribution):** All mutations are cryptographically attributable (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 5 (TOFU Join):** Cluster join protocol is MITM-resistant (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 7 (Identity Privacy):** User PII is protected via a Dark Registry (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 11 (Anonymous Membership):** AnonymousLockbox members are mathematically hidden from the server (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 14 (Verifiable Timeline):** Server cannot fork history without detection (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 20 (Hierarchical Ownership):** Authority propagates correctly (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 21 (Move-Resistance):** Bind delegation to group context (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 24 (Optimistic Safety):** Caches do not weaken security (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 25 (Identity Possession):** Login requires private key proof (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 27 (Byzantine Registry):** Registry is immune to server manipulation (see [`DISTFS.md`](DISTFS.md)).
 
 ### 3.2 Data Confidentiality & Integrity
-*   **Theorem 2 (Data Integrity):** Detection of malicious tampering (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 4 (Zero-Knowledge):** Server cannot access plaintext data (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 6 (FSM Confidentiality):** Metadata is encrypted at rest (see `DISTFS-RAFT.md`).
-*   **Theorem 12 (Forward Secrecy):** Revoked users cannot access new data (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 15 (Path Privacy):** Directory hierarchy is hidden from the server (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 16 (Secure KeySync):** Device recovery is zero-knowledge (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 18 (Byzantine-Resistant Metadata):** Server cannot modify file content (see `DISTFS.md`).
-*   **Theorem 22 (Cryptographic ACLs):** Permissions are bound to owner signature (see `DISTFS-FILESYSTEM.md`).
-*   **Theorem 23 (Chunk Unlinkability):** Isolated storage blocks (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 2 (Data Integrity):** Detection of malicious tampering (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 4 (Zero-Knowledge):** Server cannot access plaintext data (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 6 (FSM Confidentiality):** Metadata is encrypted at rest (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 12 (Forward Secrecy):** Revoked users cannot access new data (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 15 (Path Privacy):** Directory hierarchy is hidden from the server (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 16 (Secure KeySync):** Device recovery is zero-knowledge (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 18 (Byzantine-Resistant Metadata):** Server cannot modify file content (see [`DISTFS.md`](DISTFS.md)).
+*   **Theorem 22 (Cryptographic ACLs):** Permissions are bound to owner signature (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
+*   **Theorem 23 (Chunk Unlinkability):** Isolated storage blocks (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
 
 ### 3.3 Network & Resource Security
-*   **Theorem 8 (Layer 7 E2EE):** Traffic is protected against analysis (see `DISTFS-RAFT.md`).
-*   **Theorem 9 (Linearizability):** POSIX atomicity is guaranteed (see `DISTFS-RAFT.md`).
-*   **Theorem 10 (Quota Safety):** Multi-tenant resource protection (see `DISTFS-RAFT.md`).
-*   **Theorem 17 (Session PFS):** Ephemeral keys protect past traffic (see `DISTFS-RAFT.md`).
-*   **Theorem 19 (Batch Atomicity):** Multi-inode updates are all-or-nothing (see `DISTFS-RAFT.md`).
-*   **Theorem 26 (Capability Delegation):** Storage access is cluster-authorized (see `DISTFS-FILESYSTEM.md`).
+*   **Theorem 8 (Layer 7 E2EE):** Traffic is protected against analysis (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 9 (Linearizability):** POSIX atomicity is guaranteed (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 10 (Quota Safety):** Multi-tenant resource protection (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 17 (Session PFS):** Ephemeral keys protect past traffic (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 19 (Batch Atomicity):** Multi-inode updates are all-or-nothing (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
+*   **Theorem 26 (Capability Delegation):** Storage access is cluster-authorized (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
 
 ### 3.4 Theorem 13: Quantum-Resistant Hybrid Resilience
 **Theorem:** The core security properties of DistFS (Confidentiality and Integrity) are preserved against a Quantum Adversary $\mathcal{A}_Q$.
