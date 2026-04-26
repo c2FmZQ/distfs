@@ -41,9 +41,8 @@ func TestGetTimeline(t *testing.T) {
 	json.Unmarshal(rr.Body.Bytes(), &resp)
 
 	// On first boot, index might be 0 or log-entry 1 depending on bootstrap
-	// But it should have a valid URLs list
-	if len(resp.ClusterURLs) == 0 {
-		t.Errorf("Expected at least one cluster URL")
+	if resp.NodeID == "" {
+		t.Errorf("Expected valid NodeID in response")
 	}
 
 	// 2. Perform a mutation to advance timeline

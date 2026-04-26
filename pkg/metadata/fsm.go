@@ -313,7 +313,10 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		}
 
 		// Update timeline hash
-		prevHash, _ := fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		prevHash, err := fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		if err != nil {
+			return fmt.Errorf("failed to fetch timeline hash: %w", err)
+		}
 		if len(prevHash) == 0 {
 			prevHash = make([]byte, 32) // Use 32 bytes of zeros as genesis
 		}

@@ -870,9 +870,9 @@ type SealedResponse struct {
 
 // TimelineResponse contains the latest Raft log index and the deterministic state hash.
 type TimelineResponse struct {
-	Index       uint64   `json:"index"`
-	Hash        []byte   `json:"hash"`
-	ClusterURLs []string `json:"cluster_urls"`
+	NodeID string `json:"node_id"`
+	Index  uint64 `json:"index"`
+	Hash   []byte `json:"hash"`
 }
 
 // SealedEnvelope represents the decrypted inner payload, containing the action to perform.

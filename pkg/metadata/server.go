@@ -769,7 +769,11 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet:
 		s.handleGetMetrics(w, r)
 	case r.URL.Path == "/v1/node":
-		if s.checkRaftSecret(r) {
+		isAuth := false
+		if _, ok := r.Context().Value(userContextKey).(*User); ok {
+			isAuth = true
+		}
+		if s.checkRaftSecret(r) || isAuth {
 			if r.Method == http.MethodPost {
 				s.handleRegisterNode(w, r)
 			} else {
@@ -3677,30 +3681,17 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 
 	var index uint64
 	var hash []byte
-	var urls []string
 
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
-		idxBytes, _ := s.fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+		idxBytes, err := s.fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+		if err != nil {
+			return err
+		}
 		if len(idxBytes) == 8 {
 			index = binary.BigEndian.Uint64(idxBytes)
 		}
-		hash, _ = s.fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
-
-		// Fetch active node URLs
-		_ = s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
-			var n Node
-			if err := json.Unmarshal(v, &n); err == nil && n.Status == NodeStatusActive && n.RaftAddress != "" {
-				addr := n.Address
-				if addr == "" {
-					addr = n.ClusterAddress
-				}
-				if addr != "" {
-					urls = append(urls, addr)
-				}
-			}
-			return nil
-		})
-		return nil
+		hash, err = s.fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		return err
 	})
 
 	if err != nil {
@@ -3709,9 +3700,9 @@ func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := TimelineResponse{
-		Index:       index,
-		Hash:        hash,
-		ClusterURLs: urls,
+		NodeID: s.nodeID,
+		Index:  index,
+		Hash:   hash,
 	}
 
 	w.Header().Set("Content-Type", "application/json")

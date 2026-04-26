@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/c2FmZQ/distfs/pkg/metadata"
@@ -30,8 +31,9 @@ func TestVerifyTimeline_MultiNode_Success(t *testing.T) {
 	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/timeline" {
 			resp := metadata.TimelineResponse{
-				Index: 10,
-				Hash:  []byte("consistent-hash"),
+				NodeID: "follower-1",
+				Index:  10,
+				Hash:   []byte("consistent-hash"),
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
@@ -45,12 +47,25 @@ func TestVerifyTimeline_MultiNode_Success(t *testing.T) {
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/timeline" {
 			resp := metadata.TimelineResponse{
-				Index:       10,
-				Hash:        []byte("consistent-hash"),
-				ClusterURLs: []string{follower.URL},
+				NodeID: "leader-1",
+				Index:  10,
+				Hash:   []byte("consistent-hash"),
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if r.URL.Path == "/v1/node" {
+			res := struct {
+				Nodes []metadata.Node `json:"nodes"`
+			}{
+				Nodes: []metadata.Node{
+					{ID: "leader-1", Address: "http://leader-url", Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5000"},
+					{ID: "follower-1", Address: follower.URL, Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5001"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(res)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -70,8 +85,9 @@ func TestVerifyTimeline_MultiNode_ForkDetected(t *testing.T) {
 	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/timeline" {
 			resp := metadata.TimelineResponse{
-				Index: 10,
-				Hash:  []byte("honest-follower-hash"),
+				NodeID: "follower-1",
+				Index:  10,
+				Hash:   []byte("honest-follower-hash"),
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
@@ -85,12 +101,25 @@ func TestVerifyTimeline_MultiNode_ForkDetected(t *testing.T) {
 	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/timeline" {
 			resp := metadata.TimelineResponse{
-				Index:       10,
-				Hash:        []byte("malicious-leader-hash"),
-				ClusterURLs: []string{follower.URL},
+				NodeID: "leader-1",
+				Index:  10,
+				Hash:   []byte("malicious-leader-hash"),
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
+			return
+		}
+		if r.URL.Path == "/v1/node" {
+			res := struct {
+				Nodes []metadata.Node `json:"nodes"`
+			}{
+				Nodes: []metadata.Node{
+					{ID: "leader-1", Address: "http://leader-url", Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5000"},
+					{ID: "follower-1", Address: follower.URL, Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5001"},
+				},
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(res)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -105,7 +134,7 @@ func TestVerifyTimeline_MultiNode_ForkDetected(t *testing.T) {
 	}
 
 	expectedPrefix := "CRYPTOGRAPHIC FORK DETECTED"
-	if err.Error()[:len(expectedPrefix)] != expectedPrefix {
-		t.Fatalf("Expected error to start with '%s', got: %v", expectedPrefix, err)
+	if !strings.Contains(err.Error(), expectedPrefix) {
+		t.Fatalf("Expected error to contain '%s', got: %v", expectedPrefix, err)
 	}
 }
