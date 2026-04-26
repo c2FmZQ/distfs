@@ -50,6 +50,9 @@ done
 echo "Waiting for cluster stability..."
 sleep 5
 
+echo "Anchoring cluster topology in /registry..."
+distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" registry-update-cluster
+
 echo "Creating directory..."
 distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" mkdir /testdir || echo "testdir already exists"
 

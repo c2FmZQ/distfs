@@ -8,7 +8,6 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
-	"strings"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/metadata"
@@ -17,29 +16,33 @@ import (
 // VerifyTimeline checks that the Leader's timeline is not isolated by verifying its hash against a Follower node.
 // This prevents Split-View/Equivocation attacks.
 func (c *Client) VerifyTimeline(ctx context.Context) error {
+	// Fetch anchored node list from registry
+	nodes, err := c.getRegistryNodes(ctx)
+	if err != nil {
+		// If registry is not available, we can't perform Byzantine-resistant quorum check.
+		// For now, we allow fallback to single node if no registry is found, or return error.
+		return fmt.Errorf("failed to fetch anchored cluster nodes from registry: %w", err)
+	}
+
+	return c.VerifyTimelineWithNodes(ctx, nodes)
+}
+
+// VerifyTimelineWithNodes performs the timeline verification against a specific list of nodes.
+func (c *Client) VerifyTimelineWithNodes(ctx context.Context, nodes []metadata.ClusterNode) error {
 	var leaderResp metadata.TimelineResponse
 	_, _, err := c.doRequest(ctx, "GET", "/v1/timeline", nil, requestOptions{skipControl: true, retry: true}, &leaderResp)
 	if err != nil {
 		return fmt.Errorf("failed to fetch timeline from leader: %w", err)
 	}
 
-	var res struct {
-		Nodes []metadata.Node `json:"nodes"`
-	}
-	_, _, err = c.doRequest(ctx, "GET", "/v1/node", nil, requestOptions{skipControl: true, retry: true}, &res)
-	if err != nil {
-		return fmt.Errorf("failed to fetch cluster nodes: %w", err)
-	}
-	nodes := res.Nodes
-
 	c.sessionMu.RLock()
 	st := c.sessionToken
 	c.sessionMu.RUnlock()
 
-	// Filter and shuffle followers
-	var followers []metadata.Node
+	// Filter followers from anchored list
+	var followers []metadata.ClusterNode
 	for _, n := range nodes {
-		if n.ID != leaderResp.NodeID && n.Status == metadata.NodeStatusActive && n.RaftAddress != "" {
+		if n.ID != leaderResp.NodeID {
 			followers = append(followers, n)
 		}
 	}
@@ -69,11 +72,28 @@ func (c *Client) VerifyTimeline(ctx context.Context) error {
 	return nil
 }
 
-func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.Node, leaderResp metadata.TimelineResponse, sessionToken string) error {
-	addrStr := node.Address
-	if addrStr == "" {
-		addrStr = node.ClusterAddress
+func (c *Client) getRegistryNodes(ctx context.Context) ([]metadata.ClusterNode, error) {
+	regDir := c.registryDir
+	if regDir == "" {
+		return nil, fmt.Errorf("registry not configured")
 	}
+
+	path := regDir + "/cluster.json"
+	rc, err := c.OpenBlobRead(ctx, path)
+	if err != nil {
+		return nil, err
+	}
+	defer rc.Close()
+
+	var cfg metadata.ClusterConfig
+	if err := json.NewDecoder(rc).Decode(&cfg); err != nil {
+		return nil, err
+	}
+	return cfg.Nodes, nil
+}
+
+func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.ClusterNode, leaderResp metadata.TimelineResponse, sessionToken string) error {
+	addrStr := node.Address
 	if addrStr == "" {
 		return nil
 	}
@@ -99,9 +119,6 @@ func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.Node, 
 			fURL.Scheme = "https"
 		}
 	}
-	fURL.Path = strings.TrimRight(fURL.Path, "/")
-
-	followerAddr := fURL.String()
 
 	maxRetries := 20
 	for i := 0; i < maxRetries; i++ {
@@ -109,7 +126,9 @@ func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.Node, 
 			return err
 		}
 
-		req, err := http.NewRequestWithContext(ctx, "GET", followerAddr+"/v1/timeline", nil)
+		checkURL := fURL.JoinPath("/v1/timeline")
+
+		req, err := http.NewRequestWithContext(ctx, "GET", checkURL.String(), nil)
 		if err != nil {
 			return err
 		}
@@ -151,5 +170,5 @@ func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.Node, 
 		time.Sleep(100 * time.Millisecond)
 	}
 
-	return fmt.Errorf("follower %s (%s) failed to synchronize with leader index %d within timeout", node.ID, followerAddr, leaderResp.Index)
+	return fmt.Errorf("follower %s (%s) failed to synchronize with leader index %d within timeout", node.ID, addrStr, leaderResp.Index)
 }

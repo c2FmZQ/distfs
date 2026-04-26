@@ -1181,3 +1181,14 @@ type AddReplicaRequest struct {
 	ChunkID string   `json:"chunk_id"`
 	NodeIDs []string `json:"node_ids"`
 }
+
+// ClusterNode represents a node's public identity and address in the registry.
+type ClusterNode struct {
+	ID      string `json:"id"`
+	Address string `json:"address"`
+}
+
+// ClusterConfig represents the cluster topology anchored in the registry.
+type ClusterConfig struct {
+	Nodes []ClusterNode `json:"nodes"`
+}

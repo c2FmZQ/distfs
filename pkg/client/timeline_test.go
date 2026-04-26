@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/c2FmZQ/distfs/pkg/metadata"
+	bolt "go.etcd.io/bbolt"
 )
 
 func TestVerifyTimeline_SingleNode(t *testing.T) {
@@ -20,8 +21,39 @@ func TestVerifyTimeline_SingleNode(t *testing.T) {
 	ctx := context.Background()
 
 	// It should return nil (vacuously true) on a single node cluster
-	err := c.VerifyTimeline(ctx)
+	err := c.VerifyTimelineWithNodes(ctx, []metadata.ClusterNode{
+		{ID: "node-1", Address: ts.URL},
+	})
 	if err != nil {
+		t.Fatalf("VerifyTimeline failed: %v", err)
+	}
+}
+
+func TestVerifyTimeline_Registry(t *testing.T) {
+	c, rn, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	// Register metadata node so it can be anchored
+	rn.FSM.DB().Update(func(tx *bolt.Tx) error {
+		node := metadata.Node{
+			ID:          rn.NodeID,
+			Address:     ts.URL,
+			Status:      metadata.NodeStatusActive,
+			RaftAddress: string(rn.Transport.LocalAddr()),
+		}
+		rn.FSM.Put(tx, []byte("nodes"), []byte(rn.NodeID), metadata.MustMarshalJSON(node))
+		return nil
+	})
+
+	// 1. Anchor the cluster
+	if err := c.AnchorClusterInRegistry(ctx); err != nil {
+		t.Fatalf("AnchorClusterInRegistry failed: %v", err)
+	}
+
+	// 2. Verify timeline using the anchored list
+	if err := c.VerifyTimeline(ctx); err != nil {
 		t.Fatalf("VerifyTimeline failed: %v", err)
 	}
 }
@@ -73,8 +105,10 @@ func TestVerifyTimeline_MultiNode_Success(t *testing.T) {
 	defer leader.Close()
 
 	c := NewClient(leader.URL)
-	c.sessionToken = "dummy-token"
-	err := c.VerifyTimeline(context.Background())
+	err := c.VerifyTimelineWithNodes(context.Background(), []metadata.ClusterNode{
+		{ID: "leader-1", Address: "http://leader-url"},
+		{ID: "follower-1", Address: follower.URL},
+	})
 	if err != nil {
 		t.Fatalf("Expected success, got error: %v", err)
 	}
@@ -127,8 +161,10 @@ func TestVerifyTimeline_MultiNode_ForkDetected(t *testing.T) {
 	defer leader.Close()
 
 	c := NewClient(leader.URL)
-	c.sessionToken = "dummy-token"
-	err := c.VerifyTimeline(context.Background())
+	err := c.VerifyTimelineWithNodes(context.Background(), []metadata.ClusterNode{
+		{ID: "leader-1", Address: "http://leader-url"},
+		{ID: "follower-1", Address: follower.URL},
+	})
 	if err == nil {
 		t.Fatal("Expected error due to fork, but got nil")
 	}

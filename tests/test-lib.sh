@@ -41,6 +41,12 @@ global_setup() {
         echo "GLOBAL SETUP FAILED: admin-create-root failed"
         exit 1
     fi
+
+    echo "Anchoring initial cluster topology in /registry..."
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$1/config.json" registry-update-cluster; then
+        echo "GLOBAL SETUP FAILED: registry-update-cluster failed"
+        exit 1
+    fi
 }
 
 provision_user() {

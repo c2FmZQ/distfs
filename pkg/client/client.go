@@ -945,7 +945,8 @@ func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) err
 	if strings.HasSuffix(req.URL.Path, "/v1/user/register") ||
 		strings.HasSuffix(req.URL.Path, "/v1/auth/challenge") ||
 		strings.HasSuffix(req.URL.Path, "/v1/login") ||
-		strings.HasSuffix(req.URL.Path, "/v1/meta/key") {
+		strings.HasSuffix(req.URL.Path, "/v1/meta/key") ||
+		strings.HasSuffix(req.URL.Path, "/v1/timeline") {
 		return nil
 	}
 
@@ -1377,7 +1378,7 @@ func (c *Client) getNodes(ctx context.Context) ([]metadata.Node, error) {
 	var res struct {
 		Nodes []metadata.Node `json:"nodes"`
 	}
-	_, _, err := c.doRequest(ctx, "GET", "/v1/node", nil, requestOptions{skipAuth: true, skipControl: true, retry: true}, &res)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/node", nil, requestOptions{skipControl: true, retry: true}, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -5062,6 +5063,49 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 	}
 	_, _, err := c.doRequest(ctx, "GET", "/v1/group/gid/allocate", nil, requestOptions{action: metadata.ActionAllocateGID, unseal: true, retry: true}, &res)
 	return res.GID, err
+}
+
+// AnchorClusterInRegistry writes the current cluster topology to the registry.
+func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
+	regDir := c.registryDir
+	if regDir == "" {
+		return nil // Registry not configured
+	}
+	
+	var clusterNodes []metadata.ClusterNode
+	for n := range c.AdminListNodes(ctx) {
+		if n.Status == metadata.NodeStatusActive && n.RaftAddress != "" {
+			clusterNodes = append(clusterNodes, metadata.ClusterNode{
+				ID:      n.ID,
+				Address: n.Address,
+			})
+		}
+	}
+
+	if len(clusterNodes) == 0 {
+		return fmt.Errorf("no active nodes found to anchor")
+	}
+
+	cfg := metadata.ClusterConfig{
+		Nodes: clusterNodes,
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+
+	path := regDir + "/cluster.json"
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	wc, err := c.OpenBlobWrite(ctx, path)
+	if err != nil {
+		return fmt.Errorf("failed to open registry cluster config for writing: %w", err)
+	}
+	defer wc.Close()
+
+	if _, err := wc.Write(data); err != nil {
+		return fmt.Errorf("failed to write cluster config to registry: %w", err)
+	}
+	return nil
 }
 
 // AnchorGroupInRegistry creates a signed attestation for a group in the registry.

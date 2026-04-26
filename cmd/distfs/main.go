@@ -746,6 +746,18 @@ func main() {
 				},
 			},
 			{
+				Name:  "registry-update-cluster",
+				Usage: "Update the anchored cluster topology in the registry",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					if err := c.AnchorClusterInRegistry(ctx); err != nil {
+						return err
+					}
+					fmt.Println("Cluster topology successfully anchored in /registry/cluster.json")
+					return nil
+				},
+			},
+			{
 				Name:  "verify-timeline",
 				Usage: "Verify the cluster timeline consistency across nodes",
 				Action: func(ctx context.Context, cmd *cli.Command) error {

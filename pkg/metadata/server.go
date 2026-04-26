@@ -663,7 +663,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world", "/v1/meta/key/cluster/sign",
 		"/v1/user/register", "/v1/login", "/v1/auth/config", "/v1/auth/challenge",
-		"/v1/cluster/stats", "/v1/user/keysync", "/v1/node/info":
+		"/v1/cluster/stats", "/v1/user/keysync", "/v1/node/info", "/v1/timeline":
 		isPublic = true
 	}
 
@@ -769,11 +769,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/system/metrics" && r.Method == http.MethodGet:
 		s.handleGetMetrics(w, r)
 	case r.URL.Path == "/v1/node":
-		isAuth := false
-		if _, ok := r.Context().Value(userContextKey).(*User); ok {
-			isAuth = true
-		}
-		if s.checkRaftSecret(r) || (isAuth && r.Method == http.MethodGet) {
+		if s.checkRaftSecret(r) {
 			if r.Method == http.MethodPost {
 				s.handleRegisterNode(w, r)
 			} else {
@@ -3512,6 +3508,20 @@ func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	isAdmin := false
+	if user, ok := r.Context().Value(userContextKey).(*User); ok && s.fsm.IsAdmin(user.ID) {
+		isAdmin = true
+	}
+
+	if !isAdmin {
+		// Redact internal network topology for non-admins
+		for i := range nodes {
+			nodes[i].ClusterAddress = ""
+			nodes[i].RaftAddress = ""
+		}
+	}
+
 	resp := map[string]interface{}{
 		"id":     s.nodeID,
 		"state":  s.raft.State().String(),
