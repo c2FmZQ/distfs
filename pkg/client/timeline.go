@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -69,27 +70,38 @@ func (c *Client) VerifyTimeline(ctx context.Context) error {
 }
 
 func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.Node, leaderResp metadata.TimelineResponse, sessionToken string) error {
-	followerAddr := strings.TrimRight(node.Address, "/")
-	if followerAddr == "" {
-		followerAddr = strings.TrimRight(node.ClusterAddress, "/")
+	addrStr := node.Address
+	if addrStr == "" {
+		addrStr = node.ClusterAddress
 	}
-	if followerAddr == "" {
+	if addrStr == "" {
 		return nil
 	}
 
-	// Ensure correct scheme
-	if strings.HasPrefix(c.serverAddr, "https://") && !strings.HasPrefix(followerAddr, "https://") {
-		followerAddr = strings.Replace(followerAddr, "http://", "https://", 1)
-		if !strings.HasPrefix(followerAddr, "https://") {
-			followerAddr = "https://" + followerAddr
+	// Parse follower URL
+	fURL, err := url.Parse(addrStr)
+	if err != nil {
+		return fmt.Errorf("invalid follower address %q: %w", addrStr, err)
+	}
+
+	// Reconstruct based on leader scheme if missing or inconsistent
+	leaderURL, err := url.Parse(c.serverAddr)
+	if err == nil {
+		if fURL.Scheme == "" {
+			fURL.Scheme = leaderURL.Scheme
 		}
-	} else if !strings.Contains(followerAddr, "://") {
-		if strings.HasPrefix(c.serverAddr, "https://") {
-			followerAddr = "https://" + followerAddr
-		} else {
-			followerAddr = "http://" + followerAddr
+		if fURL.Host == "" {
+			fURL.Host = fURL.Path
+			fURL.Path = ""
+		}
+		// If leader is HTTPS, follower must be HTTPS
+		if leaderURL.Scheme == "https" {
+			fURL.Scheme = "https"
 		}
 	}
+	fURL.Path = strings.TrimRight(fURL.Path, "/")
+
+	followerAddr := fURL.String()
 
 	maxRetries := 20
 	for i := 0; i < maxRetries; i++ {

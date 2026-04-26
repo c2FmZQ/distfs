@@ -773,7 +773,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if _, ok := r.Context().Value(userContextKey).(*User); ok {
 			isAuth = true
 		}
-		if s.checkRaftSecret(r) || isAuth {
+		if s.checkRaftSecret(r) || (isAuth && r.Method == http.MethodGet) {
 			if r.Method == http.MethodPost {
 				s.handleRegisterNode(w, r)
 			} else {
