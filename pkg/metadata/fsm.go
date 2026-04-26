@@ -80,6 +80,8 @@ type MetadataFSM struct {
 	userCache *lru.TwoQueueCache[string, *User]
 
 	metrics *MetricsCollector
+
+	timelineHistory *lru.TwoQueueCache[uint64, []byte]
 }
 
 func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*MetadataFSM, error) {
@@ -99,14 +101,16 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		return nil, err
 	}
 	uc, _ := lru.New2Q[string, *User](1024)
+	th, _ := lru.New2Q[uint64, []byte](1024) // Store last 1024 state hashes
 
 	fsm := &MetadataFSM{
-		nodeID:        nodeID,
-		db:            db,
-		path:          path,
-		clusterSecret: clusterSecret,
-		userCache:     uc,
-		metrics:       NewMetricsCollector(),
+		nodeID:          nodeID,
+		db:              db,
+		path:            path,
+		clusterSecret:   clusterSecret,
+		userCache:       uc,
+		metrics:         NewMetricsCollector(),
+		timelineHistory: th,
 	}
 	db.Update(func(tx *bolt.Tx) error {
 		krData, _ := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
@@ -331,6 +335,10 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		timelineHash := h.Sum(nil)
 		fsm.Put(tx, []byte("system"), []byte("timeline_hash"), timelineHash)
 		fsm.Put(tx, []byte("system"), []byte("timeline_index"), indexBytes)
+
+		if fsm.timelineHistory != nil {
+			fsm.timelineHistory.Add(l.Index, timelineHash)
+		}
 
 		return nil
 	})
@@ -2500,6 +2508,14 @@ func (fsm *MetadataFSM) GetTimeline() (uint64, []byte, error) {
 		return err
 	})
 	return index, hash, err
+}
+
+// GetTimelineAt returns the state hash at a specific Raft index if it is in the history.
+func (fsm *MetadataFSM) GetTimelineAt(index uint64) ([]byte, bool) {
+	if fsm.timelineHistory == nil {
+		return nil, false
+	}
+	return fsm.timelineHistory.Get(index)
 }
 
 func generateID32() uint32 {

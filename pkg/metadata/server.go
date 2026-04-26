@@ -3729,39 +3729,36 @@ func (s *Server) handleVerifyTimeline(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// 2. Check FSM consistency
-		err := s.fsm.db.View(func(tx *bolt.Tx) error {
-			idxBytes, err := s.fsm.Get(tx, []byte("system"), []byte("timeline_index"))
-			if err != nil {
-				return err
-			}
-			currentIndex := uint64(0)
-			if len(idxBytes) == 8 {
-				currentIndex = binary.BigEndian.Uint64(idxBytes)
-			}
-
-			if currentIndex < req.TimelineIndex {
-				return fmt.Errorf("follower is lagging (current=%d, target=%d)", currentIndex, req.TimelineIndex)
-			}
-
-			// For now, we only store the latest hash.
-			// TODO: In a production system, we might store a ring buffer of recent hashes.
-			// Since we can't verify historical hashes yet, we only check if the index matches.
-			if currentIndex == req.TimelineIndex {
-				currentHash, _ := s.fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
-				if !bytes.Equal(currentHash, req.ClusterStateHash) {
-					return ErrCryptographicFork
-				}
-			}
-			return nil
-		})
-
+		currentIndex, _, err := s.fsm.GetTimeline()
 		if err != nil {
-			if errors.Is(err, ErrCryptographicFork) {
-				s.writeError(w, r, ErrCodeCryptographicFork, err.Error(), http.StatusConflict)
-			} else {
-				s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusTooEarly)
-			}
+			s.writeError(w, r, ErrCodeInternal, "failed to read current timeline", http.StatusInternalServerError)
 			return
+		}
+
+		if currentIndex < req.TimelineIndex {
+			s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("follower is lagging (current=%d, target=%d)", currentIndex, req.TimelineIndex), http.StatusTooEarly)
+			return
+		}
+
+		// Try to find the exact historical hash
+		hash, found := s.fsm.GetTimelineAt(req.TimelineIndex)
+		if !found && currentIndex == req.TimelineIndex {
+			// Fallback to current state if cache missed but indexes match
+			_, currentHash, err := s.fsm.GetTimeline()
+			if err == nil {
+				hash = currentHash
+				found = true
+			}
+		}
+
+		if found {
+			if !bytes.Equal(hash, req.ClusterStateHash) {
+				s.writeError(w, r, ErrCodeCryptographicFork, "CRYPTOGRAPHIC FORK DETECTED", http.StatusConflict)
+				return
+			}
+		} else {
+			// Receipt is too old to verify against history
+			// We skip verification rather than returning a false positive fork.
 		}
 
 		w.WriteHeader(http.StatusOK)
