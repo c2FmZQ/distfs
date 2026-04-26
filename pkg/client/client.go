@@ -5071,7 +5071,7 @@ func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
 	if regDir == "" {
 		return nil // Registry not configured
 	}
-	
+
 	var clusterNodes []metadata.ClusterNode
 	for n := range c.AdminListNodes(ctx) {
 		if n.Status == metadata.NodeStatusActive && n.RaftAddress != "" {

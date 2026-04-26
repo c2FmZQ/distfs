@@ -133,12 +133,13 @@ While standard group membership is pseudonymized via $R = HMAC(GroupID, UserID)$
 **Theorem:** A single compromised metadata node (including the Leader) cannot "fork" the history (presenting different consistent states to different clients) without being detected by the client.
 
 **Proof Sketch:**
-To prevent a malicious leader from presenting a fabricated, isolated timeline (Equivocation/Split-View Attack), the system relies on the deterministic nature of the Raft FSM and **Client-Side Quorum Verification**.
+To prevent a malicious leader from presenting a fabricated, isolated timeline (Equivocation/Split-View Attack), the system relies on the deterministic nature of the Raft FSM, **Client-Side Quorum Verification**, and **Registry Anchoring**.
 1.  **The Running Hash:** Every node in the Raft cluster maintains a continuous, cryptographically verifiable `ClusterStateHash` that is updated deterministically with every applied log entry: $H_n = SHA256(H_{n-1} || Mutation_n)$.
 2.  **The Commitment:** When a client $c$ performs a critical operation or periodically validates its timeline, the Leader provides its current Raft log index $i_{leader}$ and the corresponding state hash $H_{leader}$.
-3.  **The Verification (Hedged Reads):** The client $c$ queries $k$ randomly selected Follower nodes for their state hash at index $i_{leader}$.
-4.  **Eventual Consistency:** If a Follower is lagging ($i_{follower} < i_{leader}$), the client can either poll or wait until the Follower catches up to $i_{leader}$.
-5.  **The Guarantee:** Because the Raft FSM is strictly deterministic, all honest nodes that have applied the log up to index $i_{leader}$ must compute the exact same $H$. If the Leader is lying and has constructed a forged history $H'$, the honest Followers will return $H_{true}$.
+3.  **Anchored Discovery:** To prevent the Leader from providing a biased list of malicious nodes, the client $c$ retrieves the cluster topology from `/registry/cluster.json`. This file is an **anchored trust root**, cryptographically signed and verified back to the Sovereign Anchor (Alice).
+4.  **The Verification (Hedged Reads):** The client $c$ queries $k$ randomly selected Follower nodes from the anchored list for their state hash at index $i_{leader}$.
+5.  **Eventual Consistency:** If a Follower is lagging ($i_{follower} < i_{leader}$), the client can either poll or wait until the Follower catches up to $i_{leader}$.
+6.  **The Guarantee:** Because the Raft FSM is strictly deterministic, all honest nodes that have applied the log up to index $i_{leader}$ must compute the exact same $H$. If the Leader is lying and has constructed a forged history $H'$, the honest Followers will return $H_{true}$.
 Therefore, $c$ will observe $H' \neq H_{true}$ and immediately detect the Byzantine fault. To successfully fork the timeline and deceive the client, an adversary would have to compromise a full quorum of the Raft cluster simultaneously to return matching fabricated hashes.
 
 ### 5.10 Theorem 17: Perfect Forward Secrecy (Sessions)
