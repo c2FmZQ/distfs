@@ -2005,11 +2005,6 @@ func (c *Client) prepareUpdate(ctx context.Context, inode *metadata.Inode) (meta
 	return metadata.LogCommand{Type: metadata.CmdUpdateInode, Data: data, UserID: c.userID}, nil
 }
 
-func (c *Client) prepareDelete(id string) (metadata.LogCommand, error) {
-	data, _ := json.Marshal(id)
-	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: data, UserID: c.userID}, nil
-}
-
 // DeleteInode deletes an inode by ID. It performs an atomic update setting NLink to 0.
 func (c *Client) deleteInode(ctx context.Context, id string) error {
 	_, err := c.updateInode(ctx, id, func(i *metadata.Inode) error {
@@ -3211,11 +3206,22 @@ func (w *FileWriter) Close() error {
 				cmds = append(cmds, cmdParent)
 			}
 
-			// 3. Optional: Delete Old Inode (Decrement NLink)
+			// 3. Optional: Unlink Old Inode (Decrement NLink)
 			if w.oldInodeID != "" && w.oldInodeID != w.inode.ID {
-				cmdOld, err := w.client.prepareDelete(w.oldInodeID)
+				oldInode, err := w.client.getInode(w.ctx, w.oldInodeID)
 				if err != nil {
-					return err
+					return fmt.Errorf("failed to fetch old inode for swap: %w", err)
+				}
+				if oldInode.NLink > 0 {
+					oldInode.NLink--
+				}
+				// We update the old inode with NLink=0 (if it was 1).
+				// If we don't have permission to sign the update, the batch will fail.
+				// In DistFS, overwriting a file you don't own is only possible if you
+				// have permission to modify its metadata.
+				cmdOld, err := w.client.prepareUpdate(w.ctx, oldInode)
+				if err != nil {
+					return fmt.Errorf("failed to sign old inode for swap: %w", err)
 				}
 				cmds = append(cmds, cmdOld)
 			}
