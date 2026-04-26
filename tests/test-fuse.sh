@@ -15,7 +15,7 @@ until wget -qO- --timeout=2 http://storage-node-1:8080/v1/meta/key > /dev/null 2
 done
 
 # User ID was provisioned by test-all-e2e.sh
-FUSE_USER_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" whoami)
+FUSE_USER_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" whoami)
 echo "FUSE User ID: $FUSE_USER_ID"
 
 echo "Mounting FUSE..."

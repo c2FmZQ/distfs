@@ -1,12 +1,15 @@
 package metadata
 
 import (
+	"bytes"
+	"encoding/binary"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -71,5 +74,67 @@ func TestGetTimeline(t *testing.T) {
 	}
 	if len(resp2.Hash) != 32 {
 		t.Errorf("Expected 32-byte SHA256 hash, got %d bytes", len(resp2.Hash))
+	}
+}
+
+func TestVerifyTimelineReceipt(t *testing.T) {
+	tc := SetupRawCluster(t)
+	defer tc.Node.Shutdown()
+
+	token := LoginSessionForTest(t, tc.TS, tc.AdminID, tc.AdminSK)
+
+	// 1. Get a valid receipt
+	req, _ := http.NewRequest("GET", "/v1/timeline", nil)
+	req.Header.Set("Session-Token", token)
+	rr := httptest.NewRecorder()
+	tc.Server.ServeHTTP(rr, req)
+
+	var tr TimelineResponse
+	json.Unmarshal(rr.Body.Bytes(), &tr)
+
+	// In a real scenario, the binding sig would cover a payload.
+	// For this test, we'll just mock a receipt.
+	vReq := VerifyTimelineRequest{
+		SealedResponse:   []byte("fake-payload"),
+		TimelineIndex:    tr.Index,
+		ClusterStateHash: tr.Hash,
+		BindingSignature: []byte("invalid-sig"), // We haven't signed it properly here
+	}
+	body, _ := json.Marshal(vReq)
+
+	// 2. Verify receipt (should fail due to signature)
+	vreq, _ := http.NewRequest("POST", "/v1/timeline", bytes.NewReader(body))
+	vreq.Header.Set("Session-Token", token)
+	vrr := httptest.NewRecorder()
+	tc.Server.ServeHTTP(vrr, vreq)
+
+	if vrr.Code != http.StatusBadRequest {
+		t.Errorf("Expected 400 for invalid signature, got %d", vrr.Code)
+	}
+
+	// 3. Test fork detection (mocking a mismatch)
+	// We need a valid signature to pass the first check
+	h := crypto.NewHash()
+	h.Write(vReq.SealedResponse)
+	idxBuf := make([]byte, 8)
+	binary.BigEndian.PutUint64(idxBuf, vReq.TimelineIndex)
+	h.Write(idxBuf)
+	h.Write([]byte("evil-hash"))
+	
+	cskData := GetClusterSignKey(tc.Node.FSM)
+	sk, _ := tc.Node.FSM.SystemKey()
+	decPriv, _ := crypto.DecryptDEM(sk, cskData.EncryptedPrivate)
+	csk := crypto.UnmarshalIdentityKey(decPriv)
+	vReq.BindingSignature = csk.Sign(h.Sum(nil))
+	vReq.ClusterStateHash = []byte("evil-hash")
+	
+	body, _ = json.Marshal(vReq)
+	vreq2, _ := http.NewRequest("POST", "/v1/timeline", bytes.NewReader(body))
+	vreq2.Header.Set("Session-Token", token)
+	vrr2 := httptest.NewRecorder()
+	tc.Server.ServeHTTP(vrr2, vreq2)
+
+	if vrr2.Code != http.StatusConflict {
+		t.Errorf("Expected 409 for fork detection, got %d", vrr2.Code)
 	}
 }

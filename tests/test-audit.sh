@@ -9,17 +9,17 @@ export DISTFS_CONFIG_DIR="${DISTFS_CONFIG_DIR:-/root/.distfs}"
 echo "Starting System Audit E2E..."
 
 echo "1. Creating complex tree structure..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" mkdir /audit-test
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" mkdir /audit-test/subdir1
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" mkdir /audit-test/subdir2
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" mkdir /audit-test
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" mkdir /audit-test/subdir1
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" mkdir /audit-test/subdir2
 echo "file1" > /tmp/f1.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" put /tmp/f1.txt /audit-test/subdir1/file1.bin
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" put /tmp/f1.txt /audit-test/subdir1/file1.bin
 
 echo "2. Creating a secondary root tree..."
 # Use admin-create-root to initialize a completely separate root ID
 # The command will dynamically generate a valid ID based on the user ID and nonce.
 # Provide a dummy string, the CLI overrides it and prints the final ID.
-OUTPUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-create-root --secondary)
+OUTPUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-create-root --secondary)
 SECOND_ROOT=$(echo "$OUTPUT" | grep "Root inode" | awk '{print $3}')
 if [ -z "$SECOND_ROOT" ]; then
     echo "FAIL: Could not extract generated secondary root ID"
@@ -27,10 +27,10 @@ if [ -z "$SECOND_ROOT" ]; then
 fi
 echo "Generated Secondary Root: $SECOND_ROOT"
 
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" --root "$SECOND_ROOT" mkdir /sec-dir
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" --root "$SECOND_ROOT" mkdir /sec-dir
 
 echo "3. Running Admin Audit..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-audit > /tmp/audit.out
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-audit > /tmp/audit.out
 cat /tmp/audit.out
 
 echo "4. Verifying output..."

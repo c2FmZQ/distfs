@@ -5,9 +5,9 @@ package client
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
 	"github.com/c2FmZQ/distfs/pkg/metadata"
@@ -55,6 +55,61 @@ func TestVerifyTimeline_Registry(t *testing.T) {
 	// 2. Verify timeline using the anchored list
 	if err := c.VerifyTimeline(ctx); err != nil {
 		t.Fatalf("VerifyTimeline failed: %v", err)
+	}
+}
+
+func TestVerifyTimelineReceipt(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+
+	// Mock Follower
+	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/timeline" && r.Method == http.MethodPost {
+			var req metadata.VerifyTimelineRequest
+			json.NewDecoder(r.Body).Decode(&req)
+
+			if req.TimelineIndex == 10 && string(req.ClusterStateHash) == "consistent-hash" {
+				w.WriteHeader(http.StatusOK)
+				return
+			}
+			w.WriteHeader(http.StatusConflict)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer follower.Close()
+
+	ctx := context.Background()
+
+	// 1. Manually write the cluster config to /registry/cluster.json
+	cfg := metadata.ClusterConfig{
+		Nodes: []metadata.ClusterNode{
+			{ID: "follower-1", Address: follower.URL},
+		},
+	}
+	data, _ := json.Marshal(cfg)
+	wc, _ := c.OpenBlobWrite(ctx, "/registry/cluster.json")
+	wc.Write(data)
+	wc.Close()
+
+	receipt := metadata.SealedResponse{
+		Sealed:           []byte("sealed-data"),
+		TimelineIndex:    10,
+		ClusterStateHash: []byte("consistent-hash"),
+		BindingSignature: []byte("fake-sig"),
+	}
+
+	// 2. Perform verification
+	// We use the follower.URL directly for the test, but VerifyTimelineReceipt will find it in the registry.
+	if err := c.VerifyTimelineReceipt(ctx, receipt); err != nil {
+		t.Fatalf("VerifyTimelineReceipt failed: %v", err)
+	}
+
+	// 3. Test failure case (hash mismatch)
+	receipt.ClusterStateHash = []byte("evil-hash")
+	err := c.VerifyTimelineReceipt(ctx, receipt)
+	if !errors.Is(err, metadata.ErrCryptographicFork) {
+		t.Fatalf("Expected ErrCryptographicFork, got: %v", err)
 	}
 }
 
@@ -165,12 +220,7 @@ func TestVerifyTimeline_MultiNode_ForkDetected(t *testing.T) {
 		{ID: "leader-1", Address: "http://leader-url"},
 		{ID: "follower-1", Address: follower.URL},
 	})
-	if err == nil {
-		t.Fatal("Expected error due to fork, but got nil")
-	}
-
-	expectedPrefix := "CRYPTOGRAPHIC FORK DETECTED"
-	if !strings.Contains(err.Error(), expectedPrefix) {
-		t.Fatalf("Expected error to contain '%s', got: %v", expectedPrefix, err)
+	if !errors.Is(err, metadata.ErrCryptographicFork) {
+		t.Fatalf("Expected ErrCryptographicFork, got: %v", err)
 	}
 }

@@ -18,24 +18,24 @@ CONFIG="/tmp/hedge-config.json"
 echo "Initializing Account..."
 JWT=$(wget -qO- "$AUTH_URL/mint?email=hedge-user@example.com")
 # We'll use a new identity for this test to ensure clean state
-INIT_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" init --new --server "$SERVER_URL" --jwt "$JWT")
+INIT_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" init --new --server "$SERVER_URL" --jwt "$JWT")
 USER_ID=$(echo "$INIT_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 echo "Admin: Anchoring and unlocking $USER_ID..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock hedge-user "$USER_ID"
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add users "$USER_ID"
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock hedge-user "$USER_ID"
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add users "$USER_ID"
 
 # Admin: Provision Home
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$USER_ID" "/users/hedge-$USER_ID" || true
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner "$USER_ID" "/users/hedge-$USER_ID" || true
 
 # 2. Write a file
 echo "Uploading test file..."
 echo "Hedged read test data" > /tmp/hedge.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" put /tmp/hedge.txt "/users/hedge-$USER_ID/hedge-test.txt"
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" put /tmp/hedge.txt "/users/hedge-$USER_ID/hedge-test.txt"
 
 # 3. Verify normal read
 echo "Verifying normal read..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" get "/users/hedge-$USER_ID/hedge-test.txt" /tmp/hedge-back.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" get "/users/hedge-$USER_ID/hedge-test.txt" /tmp/hedge-back.txt
 grep -q "Hedged read test data" /tmp/hedge-back.txt
 
 # 4. SIMULATE SLOW/DEAD NODE
@@ -47,7 +47,7 @@ sleep 2
 # 5. Perform Hedged Read
 echo "Performing hedged read (should be fast)..."
 start=$(date +%s)
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" get "/users/hedge-$USER_ID/hedge-test.txt" /tmp/hedge-failover.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" get "/users/hedge-$USER_ID/hedge-test.txt" /tmp/hedge-failover.txt
 end=$(date +%s)
 duration=$((end - start))
 

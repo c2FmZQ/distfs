@@ -747,7 +747,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.URL.Path == "/v1/node/info":
 		s.handleNodeInfo(w, r)
 	case r.URL.Path == "/v1/timeline":
-		s.handleGetTimeline(w, r)
+		s.handleVerifyTimeline(w, r)
 	case r.URL.Path == "/v1/auth/config":
 		s.handleGetAuthConfig(w, r)
 	case r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost:
@@ -2295,32 +2295,52 @@ func (s *Server) flushBatchLocked() {
 }
 
 func (s *Server) sealResponse(r *http.Request, user *User, payload []byte) ([]byte, error) {
+	var sealed []byte
+
 	// Phase 53.1: Try symmetric sealing if session key is present in context (Forward Secrecy)
 	if r != nil {
 		if sessionKey, ok := r.Context().Value(sessionKeyContextKey).([]byte); ok && len(sessionKey) > 0 {
-			sealed, err := crypto.SealResponseSymmetric(sessionKey, s.signKey, payload)
-			if err == nil {
-				res := SealedResponse{
-					Sealed: sealed,
-				}
-				return json.Marshal(res)
+			var err error
+			sealed, err = crypto.SealResponseSymmetric(sessionKey, s.signKey, payload)
+			if err != nil {
+				// Fallback to asymmetric if symmetric fails
+				sealed = nil
 			}
 		}
 	}
 
-	uk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal user public key")
-	}
-
-	sealed, err := crypto.SealResponse(uk, s.signKey, payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to seal response: %w", err)
+	if sealed == nil {
+		uk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal user public key")
+		}
+		sealed, err = crypto.SealResponse(uk, s.signKey, payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to seal response: %w", err)
+		}
 	}
 
 	res := SealedResponse{
 		Sealed: sealed,
 	}
+
+	// Phase 71: Response Binding (Verifiable Timeline)
+	// Bind every metadata response to the current deterministic cluster state.
+	if index, hash, err := s.fsm.GetTimeline(); err == nil {
+		res.TimelineIndex = index
+		res.ClusterStateHash = hash
+
+		if csk := s.getClusterSignKey(); csk != nil {
+			h := crypto.NewHash()
+			h.Write(sealed)
+			idxBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(idxBuf, index)
+			h.Write(idxBuf)
+			h.Write(hash)
+			res.BindingSignature = csk.Sign(h.Sum(nil))
+		}
+	}
+
 	return json.Marshal(res)
 }
 
@@ -2392,6 +2412,8 @@ func (s *Server) sanitizeResponse(res interface{}) interface{} {
 			code = ErrCodeVersionConflict
 		} else if errors.Is(err, ErrExists) {
 			code = ErrCodeExists
+		} else if errors.Is(err, ErrCryptographicFork) {
+			code = ErrCodeCryptographicFork
 		} else if errors.Is(err, ErrNotFound) {
 			code = ErrCodeNotFound
 		} else if errors.Is(err, ErrLeaseRequired) {
@@ -3683,7 +3705,69 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleVerifyTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req VerifyTimelineRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, r, ErrCodeInvalid, "invalid request", http.StatusBadRequest)
+			return
+		}
+
+		// 1. Verify the receipt was signed by the cluster
+		pub := s.getClusterSignPubKey()
+		if pub != nil {
+			h := crypto.NewHash()
+			h.Write(req.SealedResponse)
+			idxBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(idxBuf, req.TimelineIndex)
+			h.Write(idxBuf)
+			h.Write(req.ClusterStateHash)
+			if !crypto.VerifySignature(pub, h.Sum(nil), req.BindingSignature) {
+				s.writeError(w, r, ErrCodeInvalid, "invalid cluster signature on receipt", http.StatusBadRequest)
+				return
+			}
+		}
+
+		// 2. Check FSM consistency
+		err := s.fsm.db.View(func(tx *bolt.Tx) error {
+			idxBytes, err := s.fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+			if err != nil {
+				return err
+			}
+			currentIndex := uint64(0)
+			if len(idxBytes) == 8 {
+				currentIndex = binary.BigEndian.Uint64(idxBytes)
+			}
+
+			if currentIndex < req.TimelineIndex {
+				return fmt.Errorf("follower is lagging (current=%d, target=%d)", currentIndex, req.TimelineIndex)
+			}
+
+			// For now, we only store the latest hash.
+			// TODO: In a production system, we might store a ring buffer of recent hashes.
+			// Since we can't verify historical hashes yet, we only check if the index matches.
+			if currentIndex == req.TimelineIndex {
+				currentHash, _ := s.fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+				if !bytes.Equal(currentHash, req.ClusterStateHash) {
+					return ErrCryptographicFork
+				}
+			}
+			return nil
+		})
+
+		if err != nil {
+			if errors.Is(err, ErrCryptographicFork) {
+				s.writeError(w, r, ErrCodeCryptographicFork, err.Error(), http.StatusConflict)
+			} else {
+				s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusTooEarly)
+			}
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	if r.Method != http.MethodGet {
 		s.writeError(w, r, ErrCodeInvalid, "method not allowed", http.StatusMethodNotAllowed)
 		return

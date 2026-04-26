@@ -617,6 +617,8 @@ type Client struct {
 
 	registryDir string
 
+	timelineSampleRate float64
+
 	allocCache  []metadata.Node
 	allocExpiry time.Time
 	allocMu     *sync.RWMutex
@@ -634,7 +636,8 @@ func NewClient(serverAddr string) *Client {
 	transport := getDefaultTransport(serverAddr)
 
 	return &Client{
-		serverAddr: serverAddr,
+		serverAddr:         serverAddr,
+		timelineSampleRate: 0.01,
 		httpCli: &http.Client{
 			Transport: transport,
 			Timeout:   5 * time.Minute,
@@ -777,6 +780,14 @@ func (c *Client) WithAllowInsecure(allow bool) *Client {
 	clonedClient := *c.httpCli
 	c2.httpCli = &clonedClient
 	c2.httpCli.Transport = applyAllowInsecure(c2.httpCli.Transport, allow)
+	return &c2
+}
+
+// WithTimelineSampleRate configures the probability (0.0 to 1.0) of performing
+// Byzantine-resistant timeline verification on every metadata response.
+func (c *Client) WithTimelineSampleRate(v float64) *Client {
+	c2 := *c
+	c2.timelineSampleRate = v
 	return &c2
 }
 
@@ -1112,6 +1123,33 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 	var sealed metadata.SealedResponse
 	if err := json.NewDecoder(limitBody).Decode(&sealed); err != nil {
 		return nil, fmt.Errorf("failed to decode sealed response: %w", err)
+	}
+
+	// Phase 71: Response Binding (Verifiable Timeline)
+	if len(sealed.BindingSignature) > 0 {
+		cPK, err := c.getClusterSignKey(ctx)
+		if err == nil && len(cPK) > 0 {
+			h := crypto.NewHash()
+			h.Write(sealed.Sealed)
+			idxBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(idxBuf, sealed.TimelineIndex)
+			h.Write(idxBuf)
+			h.Write(sealed.ClusterStateHash)
+			if !crypto.VerifySignature(cPK, h.Sum(nil), sealed.BindingSignature) {
+				return nil, fmt.Errorf("INVALID CLUSTER BINDING: response signature mismatch")
+			}
+
+			// Byzantine-resistant Quorum Verification (Probabilistic)
+			if mrand.Float64() < c.timelineSampleRate {
+				if err := c.VerifyTimelineReceipt(ctx, sealed); err != nil {
+					// We only fail if it was a legitimate fork detection.
+					// Discovery failures (e.g. during bootstrap) are ignored.
+					if errors.Is(err, metadata.ErrCryptographicFork) {
+						return nil, err
+					}
+				}
+			}
+		}
 	}
 
 	serverSignPK, err := c.getServerSignKey(ctx)

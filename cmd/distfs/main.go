@@ -40,14 +40,15 @@ import (
 )
 
 var (
-	appConfigPath    string
-	appUsePinentry   bool
-	appUseTPM        bool
-	appAdminFlag     bool
-	appDisableDoH    bool
-	appAllowInsecure bool
-	appRootID        string
-	appRegistryDir   string
+	appConfigPath         string
+	appUsePinentry        bool
+	appUseTPM             bool
+	appAdminFlag          bool
+	appDisableDoH         bool
+	appAllowInsecure      bool
+	appTimelineSampleRate float64
+	appRootID             string
+	appRegistryDir        string
 )
 
 func setupTPMHasher() {
@@ -129,6 +130,12 @@ func main() {
 				Value:       false,
 				Usage:       "Allow insecure TLS connections (skip verification)",
 				Destination: &appAllowInsecure,
+			},
+			&cli.FloatFlag{
+				Name:        "timeline-sample-rate",
+				Value:       0.01,
+				Usage:       "Probability (0.0-1.0) of performing background timeline consistency checks",
+				Destination: &appTimelineSampleRate,
 			},
 			&cli.StringFlag{
 				Name:        "root",
@@ -793,7 +800,8 @@ func loadClient() *client.Client {
 
 	c := client.NewClient(conf.ServerURL).
 		WithAllowInsecure(appAllowInsecure).
-		WithDisableDoH(appDisableDoH)
+		WithDisableDoH(appDisableDoH).
+		WithTimelineSampleRate(appTimelineSampleRate)
 
 	dkBytes, _ := hex.DecodeString(conf.EncKey)
 	skBytes, _ := hex.DecodeString(conf.SignKey)

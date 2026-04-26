@@ -28,22 +28,22 @@ global_setup() {
     # GLOBAL SETUP: Create Admin
     echo "PERFORMING GLOBAL SETUP..."
     local JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$1/config.json" init --new --server http://storage-node-1:8080 --jwt "$JWT"; then
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" init --new --server http://storage-node-1:8080 --jwt "$JWT"; then
         echo "GLOBAL SETUP FAILED: Admin initialization failed"
         exit 1
     fi
 
-    ADMIN_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$1/config.json" whoami)
+    ADMIN_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" whoami)
     echo "Global Admin ID: $ADMIN_ID"
 
     echo "Initializing canonical root and system backbone..."
-    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$1/config.json" admin-create-root; then
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" admin-create-root; then
         echo "GLOBAL SETUP FAILED: admin-create-root failed"
         exit 1
     fi
 
     echo "Anchoring initial cluster topology in /registry..."
-    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --config "$1/config.json" registry-update-cluster; then
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" registry-update-cluster; then
         echo "GLOBAL SETUP FAILED: registry-update-cluster failed"
         exit 1
     fi
@@ -57,12 +57,12 @@ provision_user() {
     echo "Provisioning ${name} ($email) at ${path}..."
     
     local U_JWT=$(wget -qO- "http://test-auth:8080/mint?email=$email")
-    local U_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "$conf" init --new --server http://storage-node-1:8080 --jwt "$U_JWT")
+    local U_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$conf" init --new --server http://storage-node-1:8080 --jwt "$U_JWT")
     local U_ID=$(echo "$U_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
     
     # Provision directory and unlock via Global Admin
-    distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$U_ID"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --quota 100000000,5000 --home "$name" "$U_ID"
     
     # Add to users group to allow traversal
-    distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "users" "$name"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "users" "$name"
 }

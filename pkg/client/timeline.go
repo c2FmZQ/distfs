@@ -8,12 +8,105 @@ import (
 	"math/rand"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 )
 
-// VerifyTimeline checks that the Leader's timeline is not isolated by verifying its hash against a Follower node.
+// VerifyTimelineReceipt checks a signed response receipt against a random follower node.
+func (c *Client) VerifyTimelineReceipt(ctx context.Context, res metadata.SealedResponse) error {
+	// Fetch anchored node list from registry
+	nodes, err := c.getRegistryNodes(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to fetch anchored cluster nodes from registry: %w", err)
+	}
+
+	// Filter followers
+	var followers []metadata.ClusterNode
+	for _, n := range nodes {
+		// We can verify against any node, but usually we choose one that is NOT the current leader.
+		// However, in our system, c.serverAddr is the leader.
+		cleanU := strings.TrimRight(n.Address, "/")
+		if cleanU != strings.TrimRight(c.serverAddr, "/") {
+			followers = append(followers, n)
+		}
+	}
+
+	if len(followers) == 0 {
+		return nil // Vacuously true
+	}
+
+	// Pick a random follower
+	target := followers[rand.Intn(len(followers))]
+
+	req := metadata.VerifyTimelineRequest{
+		SealedResponse:   res.Sealed,
+		TimelineIndex:    res.TimelineIndex,
+		ClusterStateHash: res.ClusterStateHash,
+		BindingSignature: res.BindingSignature,
+	}
+	body, _ := json.Marshal(req)
+
+	// Construct URL
+	targetURL, err := url.Parse(target.Address)
+	if err != nil {
+		return err
+	}
+	// Ensure consistent scheme with leader
+	leaderURL, _ := url.Parse(c.serverAddr)
+	if targetURL.Scheme == "" {
+		targetURL.Scheme = leaderURL.Scheme
+	}
+
+	verifyURL := targetURL.JoinPath("/v1/timeline")
+
+	maxRetries := 5
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+
+		hreq, err := http.NewRequestWithContext(ctx, "POST", verifyURL.String(), bytes.NewReader(body))
+		if err != nil {
+			return err
+		}
+		hreq.Header.Set("Content-Type", "application/json")
+
+		resp, err := c.httpCli.Do(hreq)
+		if err != nil {
+			lastErr = err
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == http.StatusOK {
+			return nil // Verified!
+		}
+		if resp.StatusCode == http.StatusTooEarly {
+			// Lagging follower, retry
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
+		if resp.StatusCode == http.StatusConflict {
+			var apiErr metadata.APIErrorResponse
+			if err := json.NewDecoder(resp.Body).Decode(&apiErr); err == nil && apiErr.Code == metadata.ErrCodeCryptographicFork {
+				return metadata.ErrCryptographicFork
+			}
+			return metadata.ErrCryptographicFork // Fallback if decoding fails but status is 409
+		}
+
+		var apiErr metadata.APIErrorResponse
+		json.NewDecoder(resp.Body).Decode(&apiErr)
+		return fmt.Errorf("timeline verification failed at node %s: %s", target.ID, apiErr.Message)
+	}
+
+	return fmt.Errorf("failed to verify timeline receipt against %s: %v", target.ID, lastErr)
+}
+
+// VerifyTimeline checks that the Leader's current timeline is not isolated.
 // This prevents Split-View/Equivocation attacks.
 func (c *Client) VerifyTimeline(ctx context.Context) error {
 	// Fetch anchored node list from registry
@@ -81,7 +174,7 @@ func (c *Client) getRegistryNodes(ctx context.Context) ([]metadata.ClusterNode, 
 	path := regDir + "/cluster.json"
 	rc, err := c.OpenBlobRead(ctx, path)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("anchored cluster list not found in %s: %w", path, err)
 	}
 	defer rc.Close()
 
@@ -145,7 +238,7 @@ func (c *Client) verifyAgainstFollower(ctx context.Context, node metadata.Cluste
 			if decodeErr == nil && resp.StatusCode == 200 {
 				if followerResp.Index == leaderResp.Index {
 					if !bytes.Equal(followerResp.Hash, leaderResp.Hash) {
-						return fmt.Errorf("CRYPTOGRAPHIC FORK DETECTED: leader hash at index %d does not match follower %s hash", leaderResp.Index, node.ID)
+						return fmt.Errorf("%w: leader hash at index %d does not match follower %s hash", metadata.ErrCryptographicFork, leaderResp.Index, node.ID)
 					}
 					return nil
 				}

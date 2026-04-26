@@ -2485,6 +2485,23 @@ func (fsm *MetadataFSM) DumpInodes(tx *bolt.Tx) {
 	log.Printf("--- END DUMP [%s] ---", fsm.nodeID)
 }
 
+func (fsm *MetadataFSM) GetTimeline() (uint64, []byte, error) {
+	var index uint64
+	var hash []byte
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		idxBytes, err := fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+		if err != nil {
+			return err
+		}
+		if len(idxBytes) == 8 {
+			index = binary.BigEndian.Uint64(idxBytes)
+		}
+		hash, err = fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		return err
+	})
+	return index, hash, err
+}
+
 func generateID32() uint32 {
 	b := make([]byte, 4)
 	rand.Read(b)

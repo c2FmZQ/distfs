@@ -33,24 +33,24 @@ echo "Initializing First Config..."
 # to avoid conflicts if needed, or just re-init.
 # Let's use a unique email for this test.
 JWT_SYNC=$(wget -qO- "$AUTH_URL/mint?email=sync-test-unique@example.com")
-OUT=$(/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG1" init --new --server "$SERVER_URL" --jwt "$JWT_SYNC")
+OUT=$(/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG1" init --new --server "$SERVER_URL" --jwt "$JWT_SYNC")
 USER_ID=$(echo "$OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$USER_ID"
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-unlock-user "$USER_ID"
 
 echo "Admin: Provisioning home directory for $USER_ID via registry..."
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --home "$USER_ID" "$USER_ID"
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add users "$USER_ID"
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock --home "$USER_ID" "$USER_ID"
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add users "$USER_ID"
 
 # 3. Pull Keys to Config 2 (New Device simulation)
 echo "Pulling Keys to Config 2 (New Device simulation)..."
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG2" init --server "$SERVER_URL" --jwt "$JWT_SYNC"
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG2" init --server "$SERVER_URL" --jwt "$JWT_SYNC"
 
 # 4. Verify Config 2 works
 echo "Verifying Config 2 works..."
 # Write to user directory
 echo "synced" > /tmp/sync.txt
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG2" put /tmp/sync.txt "/users/$USER_ID/sync.txt"
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG2" ls "/users/$USER_ID"
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG2" put /tmp/sync.txt "/users/$USER_ID/sync.txt"
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG2" ls "/users/$USER_ID"
 
 echo "KeySync E2E Test Passed!"

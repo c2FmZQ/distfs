@@ -13,8 +13,8 @@ run_stress() {
     echo "Worker $ID: Starting..."
     # Each worker uploads and downloads a unique file
     echo "worker-$ID data" > "/tmp/stress-in/f-$ID"
-    distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" put "/tmp/stress-in/f-$ID" "/users/stress-user/file-$ID"
-    distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" get "/users/stress-user/file-$ID" "/tmp/stress-out/f-$ID"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" put "/tmp/stress-in/f-$ID" "/users/stress-user/file-$ID"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" get "/users/stress-user/file-$ID" "/tmp/stress-out/f-$ID"
     if ! grep -q "worker-$ID data" "/tmp/stress-out/f-$ID"; then
         echo "Worker $ID: FAILED integrity check"
         exit 1
