@@ -746,6 +746,18 @@ func main() {
 				},
 			},
 			{
+				Name:  "verify-timeline",
+				Usage: "Verify the cluster timeline consistency across nodes",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					if err := c.VerifyTimeline(ctx); err != nil {
+						return err
+					}
+					fmt.Println("Timeline verified successfully. Quorum consistency confirmed.")
+					return nil
+				},
+			},
+			{
 				Name:  "dump-inodes",
 				Usage: "Recursively dump inode metadata for debugging",
 				Action: func(ctx context.Context, cmd *cli.Command) error {

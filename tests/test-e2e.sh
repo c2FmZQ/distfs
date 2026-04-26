@@ -60,6 +60,9 @@ distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CON
 echo "Listing directory..."
 distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" ls /testdir
 
+echo "Verifying timeline consistency across nodes..."
+distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" verify-timeline
+
 echo "Downloading file..."
 distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" get /testdir/world.txt /tmp/hello-back.txt
 

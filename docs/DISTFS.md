@@ -4,7 +4,6 @@ DistFS is a high-performance, distributed file system built on a **Zero-Knowledg
 
 ## Known Issues and Work in Progress
 
-*   **Verifiable Timeline (Fork-Resistance):** The system currently requires a decentralized transparency log or client gossip mechanism to detect server equivocation and history forking (see [`DISTFS-RAFT.md`](DISTFS-RAFT.md)).
 *   **Replay / Rollback Attacks (Stale Manifests):** The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
 
 ## 1. Architectural Pillars

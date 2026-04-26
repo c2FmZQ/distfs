@@ -23,6 +23,9 @@ sleep 5
 echo "Verifying cluster state..."
 distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" whoami > /dev/null
 
+echo "Verifying timeline consistency across remaining nodes..."
+distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" verify-timeline
+
 echo "Verifying file is STILL readable from remaining nodes..."
 distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" get /ha/ha-test.bin /tmp/ha-back.txt
 if grep -q "ha-resilience-data" /tmp/ha-back.txt; then

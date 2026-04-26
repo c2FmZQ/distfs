@@ -311,6 +311,24 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 			}
 			return ErrAtomicRollback
 		}
+
+		// Update timeline hash
+		prevHash, _ := fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		if len(prevHash) == 0 {
+			prevHash = make([]byte, 32) // Use 32 bytes of zeros as genesis
+		}
+		h := sha256.New()
+		h.Write(prevHash)
+
+		indexBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(indexBytes, l.Index)
+		h.Write(indexBytes)
+		h.Write(l.Data)
+
+		timelineHash := h.Sum(nil)
+		fsm.Put(tx, []byte("system"), []byte("timeline_hash"), timelineHash)
+		fsm.Put(tx, []byte("system"), []byte("timeline_index"), indexBytes)
+
 		return nil
 	})
 	if err != nil && cmd.Atomic {

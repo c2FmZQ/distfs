@@ -130,15 +130,16 @@ If $S$ is only transmitted over mTLS channels (protected by Theorem 5) and only 
 While standard group membership is pseudonymized via $R = HMAC(GroupID, UserID)$, the server could perform a dictionary attack against known $UserID$s to resolve membership. However, users provisioned via the `AnonymousLockbox` receive the Group Epoch Seed encapsulated directly for their ephemeral ML-KEM public key, without any reference to a registered `UserID`. Since the server does not know the owner of the public key, the identity of these members remains mathematically anonymous to both the server and other group members.
 
 ### 5.9 Theorem 14: Verifiable Timeline (Fork-Resistance)
-**Theorem:** A compromised metadata cluster cannot "fork" the history (presenting different consistent states to different clients) without being detected by an anchored client backed by a transparency log.
+**Theorem:** A single compromised metadata node (including the Leader) cannot "fork" the history (presenting different consistent states to different clients) without being detected by the client.
 
 **Proof Sketch:**
-Let a client $c$ have an anchored version $V_a$ of an Inode $I$.
-1.  **Monotonicity:** The FSM only commits mutations where the new version $V_{new} > V_{old}$.
-2.  **Notarization:** Every state update is signed as $Sign(SK_{cluster}, Hash(I || V_{new}))$.
-3.  **Anchoring:** When $c$ fetches $I$, it verifies the signature and ensures $V \ge V_a$. To prevent equivocation, clients must periodically cross-check their highest anchored `ClusterSig` against an immutable Transparency Log or through client gossip, ensuring all clients share the same linearizable timeline.
-
-<!-- TODO: Implement a decentralized transparency log or client gossip mechanism to detect server equivocation and history forking. -->
+To prevent a malicious leader from presenting a fabricated, isolated timeline (Equivocation/Split-View Attack), the system relies on the deterministic nature of the Raft FSM and **Client-Side Quorum Verification**.
+1.  **The Running Hash:** Every node in the Raft cluster maintains a continuous, cryptographically verifiable `ClusterStateHash` that is updated deterministically with every applied log entry: $H_n = SHA256(H_{n-1} || Mutation_n)$.
+2.  **The Commitment:** When a client $c$ performs a critical operation or periodically validates its timeline, the Leader provides its current Raft log index $i_{leader}$ and the corresponding state hash $H_{leader}$.
+3.  **The Verification (Hedged Reads):** The client $c$ queries $k$ randomly selected Follower nodes for their state hash at index $i_{leader}$.
+4.  **Eventual Consistency:** If a Follower is lagging ($i_{follower} < i_{leader}$), the client can either poll or wait until the Follower catches up to $i_{leader}$.
+5.  **The Guarantee:** Because the Raft FSM is strictly deterministic, all honest nodes that have applied the log up to index $i_{leader}$ must compute the exact same $H$. If the Leader is lying and has constructed a forged history $H'$, the honest Followers will return $H_{true}$.
+Therefore, $c$ will observe $H' \neq H_{true}$ and immediately detect the Byzantine fault. To successfully fork the timeline and deceive the client, an adversary would have to compromise a full quorum of the Raft cluster simultaneously to return matching fabricated hashes.
 
 ### 5.10 Theorem 17: Perfect Forward Secrecy (Sessions)
 **Theorem:** A compromise of the cluster's long-term identity keys does not allow an adversary to decrypt past client-server sessions.

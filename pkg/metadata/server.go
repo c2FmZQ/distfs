@@ -674,7 +674,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Leader Forwarding (Redirect mutations to leader)
 	// Some routes are local-only or handle their own forwarding.
-	if r.URL.Path == "/v1/system/bootstrap" || r.URL.Path == "/v1/health" || r.URL.Path == "/v1/node/info" {
+	if r.URL.Path == "/v1/system/bootstrap" || r.URL.Path == "/v1/health" || r.URL.Path == "/v1/node/info" || r.URL.Path == "/v1/timeline" {
 		// Bypass forwarding
 	} else if s.forwardIfNecessary(w, r) {
 		return
@@ -746,6 +746,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleGetWorldPublicKey(w, r)
 	case r.URL.Path == "/v1/node/info":
 		s.handleNodeInfo(w, r)
+	case r.URL.Path == "/v1/timeline":
+		s.handleGetTimeline(w, r)
 	case r.URL.Path == "/v1/auth/config":
 		s.handleGetAuthConfig(w, r)
 	case r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost:
@@ -3665,6 +3667,55 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 		newBody, _ := json.Marshal(req)
 		s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, newBody, http.StatusOK)
 	}
+}
+
+func (s *Server) handleGetTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		s.writeError(w, r, ErrCodeInvalid, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var index uint64
+	var hash []byte
+	var urls []string
+
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		idxBytes, _ := s.fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+		if len(idxBytes) == 8 {
+			index = binary.BigEndian.Uint64(idxBytes)
+		}
+		hash, _ = s.fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+
+		// Fetch active node URLs
+		_ = s.fsm.ForEach(tx, []byte("nodes"), func(k, v []byte) error {
+			var n Node
+			if err := json.Unmarshal(v, &n); err == nil && n.Status == NodeStatusActive && n.RaftAddress != "" {
+				addr := n.Address
+				if addr == "" {
+					addr = n.ClusterAddress
+				}
+				if addr != "" {
+					urls = append(urls, addr)
+				}
+			}
+			return nil
+		})
+		return nil
+	})
+
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to read timeline", http.StatusInternalServerError)
+		return
+	}
+
+	resp := TimelineResponse{
+		Index:       index,
+		Hash:        hash,
+		ClusterURLs: urls,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {
