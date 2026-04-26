@@ -67,12 +67,13 @@ func TestVerifyTimelineReceipt(t *testing.T) {
 		if r.URL.Path == "/v1/timeline" && r.Method == http.MethodPost {
 			var req metadata.VerifyTimelineRequest
 			json.NewDecoder(r.Body).Decode(&req)
-
+			
 			if req.TimelineIndex == 10 && string(req.ClusterStateHash) == "consistent-hash" {
 				w.WriteHeader(http.StatusOK)
 				return
 			}
 			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(metadata.APIErrorResponse{Code: metadata.ErrCodeCryptographicFork})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
@@ -100,7 +101,6 @@ func TestVerifyTimelineReceipt(t *testing.T) {
 	}
 
 	// 2. Perform verification
-	// We use the follower.URL directly for the test, but VerifyTimelineReceipt will find it in the registry.
 	if err := c.VerifyTimelineReceipt(ctx, receipt); err != nil {
 		t.Fatalf("VerifyTimelineReceipt failed: %v", err)
 	}
@@ -114,112 +114,74 @@ func TestVerifyTimelineReceipt(t *testing.T) {
 }
 
 func TestVerifyTimeline_MultiNode_Success(t *testing.T) {
+	c, rn, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	// Get real index/hash from leader
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/timeline", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	var lResp metadata.TimelineResponse
+	json.NewDecoder(resp.Body).Decode(&lResp)
+	resp.Body.Close()
+
 	// Mock Follower
 	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/timeline" {
-			resp := metadata.TimelineResponse{
-				NodeID: "follower-1",
-				Index:  10,
-				Hash:   []byte("consistent-hash"),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
+		if r.URL.Path == "/v1/timeline" && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusOK)
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer follower.Close()
 
-	// Mock Leader
-	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/timeline" {
-			resp := metadata.TimelineResponse{
-				NodeID: "leader-1",
-				Index:  10,
-				Hash:   []byte("consistent-hash"),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-		if r.URL.Path == "/v1/node" {
-			res := struct {
-				Nodes []metadata.Node `json:"nodes"`
-			}{
-				Nodes: []metadata.Node{
-					{ID: "leader-1", Address: "http://leader-url", Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5000"},
-					{ID: "follower-1", Address: follower.URL, Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5001"},
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(res)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer leader.Close()
-
-	c := NewClient(leader.URL)
-	err := c.VerifyTimelineWithNodes(context.Background(), []metadata.ClusterNode{
-		{ID: "leader-1", Address: "http://leader-url"},
+	// Inject follower into anchored nodes cache
+	c.anchoredNodesMu.Lock()
+	c.anchoredNodes = []metadata.ClusterNode{
+		{ID: rn.NodeID, Address: ts.URL},
 		{ID: "follower-1", Address: follower.URL},
-	})
-	if err != nil {
+	}
+	c.anchoredNodesMu.Unlock()
+
+	if err := c.VerifyTimeline(ctx); err != nil {
 		t.Fatalf("Expected success, got error: %v", err)
 	}
 }
 
 func TestVerifyTimeline_MultiNode_ForkDetected(t *testing.T) {
-	// Mock Follower returning a different hash
+	c, rn, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+
+	ctx := context.Background()
+
+	// Get real index/hash from leader
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/timeline", nil)
+	resp, _ := http.DefaultClient.Do(req)
+	var lResp metadata.TimelineResponse
+	json.NewDecoder(resp.Body).Decode(&lResp)
+	resp.Body.Close()
+
+	// Mock Follower
 	follower := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/timeline" {
-			resp := metadata.TimelineResponse{
-				NodeID: "follower-1",
-				Index:  10,
-				Hash:   []byte("honest-follower-hash"),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
+		if r.URL.Path == "/v1/timeline" && r.Method == http.MethodPost {
+			w.WriteHeader(http.StatusConflict)
+			json.NewEncoder(w).Encode(metadata.APIErrorResponse{Code: metadata.ErrCodeCryptographicFork})
 			return
 		}
 		w.WriteHeader(http.StatusNotFound)
 	}))
 	defer follower.Close()
 
-	// Mock Leader lying about the hash
-	leader := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/timeline" {
-			resp := metadata.TimelineResponse{
-				NodeID: "leader-1",
-				Index:  10,
-				Hash:   []byte("malicious-leader-hash"),
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(resp)
-			return
-		}
-		if r.URL.Path == "/v1/node" {
-			res := struct {
-				Nodes []metadata.Node `json:"nodes"`
-			}{
-				Nodes: []metadata.Node{
-					{ID: "leader-1", Address: "http://leader-url", Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5000"},
-					{ID: "follower-1", Address: follower.URL, Status: metadata.NodeStatusActive, RaftAddress: "127.0.0.1:5001"},
-				},
-			}
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(res)
-			return
-		}
-		w.WriteHeader(http.StatusNotFound)
-	}))
-	defer leader.Close()
-
-	c := NewClient(leader.URL)
-	err := c.VerifyTimelineWithNodes(context.Background(), []metadata.ClusterNode{
-		{ID: "leader-1", Address: "http://leader-url"},
+	// Inject follower into anchored nodes cache
+	c.anchoredNodesMu.Lock()
+	c.anchoredNodes = []metadata.ClusterNode{
+		{ID: rn.NodeID, Address: ts.URL},
 		{ID: "follower-1", Address: follower.URL},
-	})
+	}
+	c.anchoredNodesMu.Unlock()
+
+	err := c.VerifyTimeline(ctx)
 	if !errors.Is(err, metadata.ErrCryptographicFork) {
 		t.Fatalf("Expected ErrCryptographicFork, got: %v", err)
 	}

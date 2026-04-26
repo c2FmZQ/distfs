@@ -766,13 +766,13 @@ func main() {
 			},
 			{
 				Name:  "verify-timeline",
-				Usage: "Verify the cluster timeline consistency across nodes",
+				Usage: "Perform a deep cryptographic audit of the cluster's linear history",
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					c := loadClient()
 					if err := c.VerifyTimeline(ctx); err != nil {
 						return err
 					}
-					fmt.Println("Timeline verified successfully. Quorum consistency confirmed.")
+					fmt.Println("Deep audit successful. Cluster timeline is linear and consistent across quorum.")
 					return nil
 				},
 			},

@@ -618,6 +618,8 @@ type Client struct {
 	registryDir string
 
 	timelineSampleRate float64
+	anchoredNodes      []metadata.ClusterNode
+	anchoredNodesMu    sync.RWMutex
 
 	allocCache  []metadata.Node
 	allocExpiry time.Time
@@ -5175,6 +5177,11 @@ func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
 	if err := c.Setfacl(ctx, path, acl); err != nil {
 		return fmt.Errorf("failed to set ACL for %s: %w", path, err)
 	}
+
+	// 3. Clear cache
+	c.anchoredNodesMu.Lock()
+	c.anchoredNodes = nil
+	c.anchoredNodesMu.Unlock()
 
 	return nil
 }
