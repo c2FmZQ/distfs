@@ -168,4 +168,3 @@ func (c *Client) getRegistryNodes(ctx context.Context) ([]metadata.ClusterNode, 
 
 	return cfg.Nodes, nil
 }
-

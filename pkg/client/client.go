@@ -619,7 +619,7 @@ type Client struct {
 
 	timelineSampleRate float64
 	anchoredNodes      []metadata.ClusterNode
-	anchoredNodesMu    sync.RWMutex
+	anchoredNodesMu    *sync.RWMutex
 
 	allocCache  []metadata.Node
 	allocExpiry time.Time
@@ -639,7 +639,7 @@ func NewClient(serverAddr string) *Client {
 
 	return &Client{
 		serverAddr:         serverAddr,
-		timelineSampleRate: 0.01,
+		timelineSampleRate: 0.0,
 		httpCli: &http.Client{
 			Transport: transport,
 			Timeout:   5 * time.Minute,
@@ -664,6 +664,7 @@ func NewClient(serverAddr string) *Client {
 		rootMu:               &sync.RWMutex{},
 		allocMu:              &sync.RWMutex{},
 		registryDir:          "/registry",
+		anchoredNodesMu:      &sync.RWMutex{},
 	}
 }
 

@@ -120,14 +120,14 @@ func TestVerifyTimelineReceipt(t *testing.T) {
 	binary.BigEndian.PutUint64(idxBuf, vReq.TimelineIndex)
 	h.Write(idxBuf)
 	h.Write([]byte("evil-hash"))
-	
+
 	cskData := GetClusterSignKey(tc.Node.FSM)
 	sk, _ := tc.Node.FSM.SystemKey()
 	decPriv, _ := crypto.DecryptDEM(sk, cskData.EncryptedPrivate)
 	csk := crypto.UnmarshalIdentityKey(decPriv)
 	vReq.BindingSignature = csk.Sign(h.Sum(nil))
 	vReq.ClusterStateHash = []byte("evil-hash")
-	
+
 	body, _ = json.Marshal(vReq)
 	vreq2, _ := http.NewRequest("POST", "/v1/timeline", bytes.NewReader(body))
 	vreq2.Header.Set("Session-Token", token)

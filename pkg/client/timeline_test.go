@@ -67,7 +67,7 @@ func TestVerifyTimelineReceipt(t *testing.T) {
 		if r.URL.Path == "/v1/timeline" && r.Method == http.MethodPost {
 			var req metadata.VerifyTimelineRequest
 			json.NewDecoder(r.Body).Decode(&req)
-			
+
 			if req.TimelineIndex == 10 && string(req.ClusterStateHash) == "consistent-hash" {
 				w.WriteHeader(http.StatusOK)
 				return
