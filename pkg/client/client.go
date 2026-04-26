@@ -5100,11 +5100,38 @@ func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to open registry cluster config for writing: %w", err)
 	}
-	defer wc.Close()
 
 	if _, err := wc.Write(data); err != nil {
+		wc.Close()
 		return fmt.Errorf("failed to write cluster config to registry: %w", err)
 	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("failed to close registry cluster config: %w", err)
+	}
+
+	// 2. Set Permissions: writable by 'admin' group, readable by 'users' group
+	adminGID, _, err := c.ResolveGroupName(ctx, "admin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve admin group: %w", err)
+	}
+	usersGID, _, err := c.ResolveGroupName(ctx, "users")
+	if err != nil {
+		return fmt.Errorf("failed to resolve users group: %w", err)
+	}
+
+	if err := c.Chgrp(ctx, path, adminGID); err != nil {
+		return fmt.Errorf("failed to set group for %s: %w", path, err)
+	}
+
+	acl := ACL{
+		Groups: map[string]uint32{
+			usersGID: 0004, // Read-only
+		},
+	}
+	if err := c.Setfacl(ctx, path, acl); err != nil {
+		return fmt.Errorf("failed to set ACL for %s: %w", path, err)
+	}
+
 	return nil
 }
 
