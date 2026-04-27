@@ -131,6 +131,9 @@ const (
 	WorldID = "world"
 	// InlineLimit is the maximum size of a file that can be inlined in metadata.
 	InlineLimit = 4096
+	// MaxDirectoryChildren is the maximum number of children allowed in a single directory
+	// to prevent OOM/CPU DoS (Phase 75).
+	MaxDirectoryChildren = 100000
 	// InodeIDLength is the expected length of a hex-encoded Inode ID (16 random bytes).
 	InodeIDLength = 32
 )
@@ -164,8 +167,9 @@ type ChunkPage struct {
 
 // UserUsage tracks the resource usage of a user.
 type UserUsage struct {
-	InodeCount int64 `json:"inodes"`
-	TotalBytes int64 `json:"bytes"`
+	InodeCount   int64 `json:"inodes"`
+	TotalBytes   int64 `json:"bytes"`
+	PendingBytes int64 `json:"pending_bytes"` // Uncommitted but authorized chunk uploads
 }
 
 // UserQuota defines the resource limits for a user.
@@ -817,6 +821,7 @@ type SessionResponse struct {
 
 type LeaseInfo struct {
 	InodeID   string    `json:"inode_id"`
+	UserID    string    `json:"user_id"`
 	SessionID string    `json:"session_id"`
 	Nonce     string    `json:"nonce,omitempty"`
 	Expiry    int64     `json:"expiry"`
@@ -1136,31 +1141,33 @@ const (
 type CommandType uint8
 
 const (
-	CmdCreateInode        CommandType = 1
-	CmdUpdateInode        CommandType = 2
-	CmdDeleteInode        CommandType = 3
-	CmdRegisterNode       CommandType = 4
-	CmdCreateUser         CommandType = 5
-	CmdCreateGroup        CommandType = 6
-	CmdUpdateGroup        CommandType = 7
-	CmdAddChunkReplica    CommandType = 8
-	CmdGCRemove           CommandType = 9
-	CmdSetUserQuota       CommandType = 10
-	CmdRotateKey          CommandType = 11
-	CmdInitWorld          CommandType = 12
-	CmdStoreKeySync       CommandType = 13
-	CmdBatch              CommandType = 14
-	CmdAcquireLeases      CommandType = 15
-	CmdReleaseLeases      CommandType = 16
-	CmdPromoteAdmin       CommandType = 17
-	CmdStoreMetrics       CommandType = 18
-	CmdSetGroupQuota      CommandType = 19
-	CmdSetClusterSignKey  CommandType = 20
-	CmdRemoveNode         CommandType = 21
-	CmdRotateFSMKey       CommandType = 22
-	CmdReencryptValue     CommandType = 23
-	CmdAdminSetUserLock   CommandType = 24
-	CmdRemoveChunkReplica CommandType = 25
+	CmdCreateInode         CommandType = 1
+	CmdUpdateInode         CommandType = 2
+	CmdDeleteInode         CommandType = 3
+	CmdRegisterNode        CommandType = 4
+	CmdCreateUser          CommandType = 5
+	CmdCreateGroup         CommandType = 6
+	CmdUpdateGroup         CommandType = 7
+	CmdAddChunkReplica     CommandType = 8
+	CmdGCRemove            CommandType = 9
+	CmdSetUserQuota        CommandType = 10
+	CmdRotateKey           CommandType = 11
+	CmdInitWorld           CommandType = 12
+	CmdStoreKeySync        CommandType = 13
+	CmdBatch               CommandType = 14
+	CmdAcquireLeases       CommandType = 15
+	CmdReleaseLeases       CommandType = 16
+	CmdPromoteAdmin        CommandType = 17
+	CmdStoreMetrics        CommandType = 18
+	CmdSetGroupQuota       CommandType = 19
+	CmdSetClusterSignKey   CommandType = 20
+	CmdRemoveNode          CommandType = 21
+	CmdRotateFSMKey        CommandType = 22
+	CmdReencryptValue      CommandType = 23
+	CmdAdminSetUserLock    CommandType = 24
+	CmdRemoveChunkReplica  CommandType = 25
+	CmdReservePendingBytes CommandType = 26
+	CmdReconcilePending    CommandType = 28
 )
 
 type LogCommand struct {
@@ -1224,4 +1231,16 @@ type ClusterNode struct {
 // ClusterConfig represents the cluster topology anchored in the registry.
 type ClusterConfig struct {
 	Nodes []ClusterNode `json:"nodes"`
+}
+
+type QuotaReservationRequest struct {
+	UserID string `json:"user_id"`
+	Bytes  int64  `json:"bytes"`
+}
+
+type PendingReservation struct {
+	ID     string `json:"id"`
+	UserID string `json:"user_id"`
+	Bytes  int64  `json:"bytes"`
+	Expiry int64  `json:"expiry"`
 }

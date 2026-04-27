@@ -666,7 +666,7 @@ func TestAccounting(t *testing.T) {
 	nonce1 := make([]byte, 16)
 	rand.Read(nonce1)
 	id1 := GenerateInodeID(userID, nonce1)
-	inode := Inode{ID: id1, Nonce: nonce1, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644}
+	inode := Inode{ID: id1, Nonce: nonce1, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644, ChunkManifest: []ChunkEntry{{ID: "dummy"}}}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd := LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
@@ -746,7 +746,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	nonce1 := make([]byte, 16)
 	rand.Read(nonce1)
 	id1 := GenerateInodeID(userID, nonce1)
-	inode := Inode{ID: id1, Nonce: nonce1, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644}
+	inode := Inode{ID: id1, Nonce: nonce1, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644, ChunkManifest: []ChunkEntry{{ID: "dummy"}}}
 	inode.SignInodeForTest(userID, sk)
 	inodeBytes, _ := json.Marshal(inode)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}
@@ -759,7 +759,7 @@ func TestQuotaEnforcement(t *testing.T) {
 	nonce2 := make([]byte, 16)
 	rand.Read(nonce2)
 	id2 := GenerateInodeID(userID, nonce2)
-	inode2 := Inode{ID: id2, Nonce: nonce2, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644}
+	inode2 := Inode{ID: id2, Nonce: nonce2, OwnerID: userID, Size: 100, NLink: 1, Type: FileType, Mode: 0644, ChunkManifest: []ChunkEntry{{ID: "dummy"}}}
 	inode2.SignInodeForTest(userID, sk)
 	inodeBytes, _ = json.Marshal(inode2)
 	cmd = LogCommand{Type: CmdCreateInode, Data: inodeBytes, UserID: userID}

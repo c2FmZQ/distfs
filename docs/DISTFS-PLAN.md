@@ -1656,3 +1656,30 @@ This document outlines the comprehensive, step-by-step plan to build **DistFS**,
         *   **Action:** Add unit tests for `NativeStore`.
         *   **Action:** Add integration tests for offline read-only behavior.
 
+
+## Phase 75: Resilience and Load Management
+
+### 3.1. HTTP Server Hardening
+Configure all `http.Server` instances in `cmd/storage-node/main.go` with strict timeouts:
+- `ReadTimeout: 30s`
+- `WriteTimeout: 60s`
+- `IdleTimeout: 120s`
+
+### 3.2. Adaptive Concurrency Limits (AIMD Rate Limiting)
+Implement an HTTP middleware that dynamically adjusts the maximum number of concurrent requests based on observed server latency (e.g., P95 response time).
+- Uses Additive Increase, Multiplicative Decrease (AIMD).
+- If the moving average latency stays below a target threshold (e.g., 200ms), the concurrency limit slowly increases (+1).
+- If latency exceeds the threshold, the limit is drastically reduced (e.g., halved).
+- Requests exceeding the concurrency limit immediately receive `HTTP 429 Too Many Requests`.
+
+### 3.3. Mitigation: Unaccounted Storage DoS
+Introduce a `PendingBytes` field to the `UserQuota` in the Raft state.
+- Deduct requested chunk sizes from the user's available quota by incrementing `PendingBytes` during `IssueToken`.
+- `PendingBytes` are cleared when chunks are committed or tokens expire.
+
+### 3.4. Mitigation: Large Directory OOM DoS
+Enforce a structural bound on directory children (e.g., `MaxDirectoryChildren = 100000`).
+
+### 3.5. Mitigation: Lease Exhaustion DoS
+- Hardcap lease duration to 5 minutes.
+- Limit concurrent active leases per user/session (e.g., 100).

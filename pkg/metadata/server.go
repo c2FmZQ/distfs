@@ -252,6 +252,7 @@ func NewServer(nodeID string, r *raft.Raft, fsm *MetadataFSM, oidcDiscoveryURL s
 
 	s.loadClusterSignKey()
 	go s.clusterKeyLoader()
+	go s.pendingReconciler()
 
 	return s
 }
@@ -435,6 +436,22 @@ func (s *Server) metricsFlusher() {
 				snap := s.fsm.metrics.SnapshotAndReset()
 				data, _ := json.Marshal(snap)
 				s.applyRaftDirect(context.Background(), CmdStoreMetrics, data, "")
+			}
+		case <-s.stopCh:
+			return
+		}
+	}
+}
+
+func (s *Server) pendingReconciler() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if s.raft.State() == raft.Leader {
+				s.applyRaftDirect(context.Background(), CmdReconcilePending, nil, "")
 			}
 		case <-s.stopCh:
 			return
@@ -1203,6 +1220,35 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		if req.Mode != "W" {
 			s.writeError(w, r, ErrCodeNotFound, "inode not found", http.StatusNotFound)
 			return
+		}
+	}
+
+	// Phase 75: Reserve PendingBytes for Write mode to prevent uncommitted storage DoS
+	if req.Mode == "W" {
+		reservation := QuotaReservationRequest{
+			UserID: user.ID,
+			Bytes:  int64(len(req.Chunks)) * crypto.ChunkSize,
+		}
+		if len(req.Chunks) == 0 {
+			reservation.Bytes = crypto.ChunkSize // Reserve at least one chunk for new files
+		}
+		data, _ := json.Marshal(reservation)
+		cmd := LogCommand{Type: CmdReservePendingBytes, Data: data}
+		cmdBytes, _ := cmd.Marshal()
+		f := s.raft.Apply(cmdBytes, 5*time.Second)
+		if err := f.Error(); err != nil {
+			s.writeError(w, r, ErrCodeInternal, "failed to reserve quota: "+err.Error(), http.StatusServiceUnavailable)
+			return
+		}
+		if res := f.Response(); res != nil {
+			if err, ok := res.(error); ok && err != nil {
+				if errors.Is(err, ErrQuotaExceeded) {
+					s.writeError(w, r, ErrCodeQuotaExceeded, "storage quota exceeded (including pending)", http.StatusForbidden)
+					return
+				}
+				s.writeError(w, r, ErrCodeInternal, "failed to reserve quota: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 	}
 

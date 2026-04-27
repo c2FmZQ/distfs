@@ -533,6 +533,7 @@ func main() {
 			log.Printf("Storage Node %s starting Public API on %s, Cluster API on %s", nodeID, apiAddr, clusterAddr)
 
 			// Start Public Server
+			publicACL := metadata.NewConcurrencyLimiter(10, 1000, 500*time.Millisecond)
 			corsHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Access-Control-Allow-Origin", "*")
 				w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
@@ -542,10 +543,16 @@ func main() {
 					w.WriteHeader(http.StatusOK)
 					return
 				}
-				publicMux.ServeHTTP(w, r)
+				publicACL.Wrap(publicMux).ServeHTTP(w, r)
 			})
 
-			publicSrv := &http.Server{Addr: apiAddr, Handler: corsHandler}
+			publicSrv := &http.Server{
+				Addr:         apiAddr,
+				Handler:      corsHandler,
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 60 * time.Second,
+				IdleTimeout:  120 * time.Second,
+			}
 			go func() {
 				var err error
 				if tlsCert != "" && tlsKey != "" {
@@ -559,10 +566,14 @@ func main() {
 			}()
 
 			// Start Cluster Server (mTLS if configured)
+			clusterACL := metadata.NewConcurrencyLimiter(10, 5000, 100*time.Millisecond)
 			clusterSrv := &http.Server{
-				Addr:      clusterAddr,
-				Handler:   clusterMux,
-				TLSConfig: rn.ServerTLSConfig,
+				Addr:         clusterAddr,
+				Handler:      clusterACL.Wrap(clusterMux),
+				TLSConfig:    rn.ServerTLSConfig,
+				ReadTimeout:  30 * time.Second,
+				WriteTimeout: 60 * time.Second,
+				IdleTimeout:  120 * time.Second,
 			}
 
 			go func() {

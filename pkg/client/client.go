@@ -2405,6 +2405,14 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 		r = bytes.NewReader(nil)
 	}
 
+	// 1. Handle Content FIRST
+	// This ensures that when we create or update the inode, the ChunkManifest is already populated,
+	// satisfying the server-side structural size bounds check.
+	inlineData, chunkEntries, err := c.uploadDataInternal(ctx, id, fileKey, r, size)
+	if err != nil {
+		return err
+	}
+
 	var inode metadata.Inode
 	// Try to get existing inode
 	existing, err := c.getInode(ctx, id)
@@ -2479,7 +2487,7 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 			Links:         links,
 			Mode:          mode,
 			Size:          uint64(size),
-			ChunkManifest: nil,
+			ChunkManifest: chunkEntries,
 			Lockbox:       lb,
 			OwnerID:       c.userID,
 			GroupID:       groupID,
@@ -2488,6 +2496,10 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 			NLink:         1,
 			Version:       1,
 		}
+		if size == 0 {
+			inode.Size = uint64(len(inlineData))
+		}
+		inode.SetInlineData(inlineData)
 		inode.SetUID(uid)
 		inode.SetGID(gid)
 		inode.SetMTime(time.Now().UnixNano())
@@ -2502,40 +2514,36 @@ func (c *Client) writeInodeContent(ctx context.Context, id string, nonce []byte,
 		return err
 	}
 
-	// 1. Handle Content
-	inlineData, chunkEntries, err := c.uploadDataInternal(ctx, id, fileKey, r, size)
-	if err != nil {
-		return err
-	}
-
-	// 3. Atomic Inode Update
-	updated, err := c.updateInode(ctx, id, func(i *metadata.Inode) error {
-		i.SetInlineData(inlineData)
-		i.ChunkManifest = chunkEntries
-		i.Size = uint64(size)
-		if size == 0 {
-			i.Size = uint64(len(inlineData))
+	// 3. Atomic Inode Update (only if it already existed, otherwise we're done as we created it with content)
+	if err == nil && existing != nil {
+		updated, err := c.updateInode(ctx, id, func(i *metadata.Inode) error {
+			i.SetInlineData(inlineData)
+			i.ChunkManifest = chunkEntries
+			i.Size = uint64(size)
+			if size == 0 {
+				i.Size = uint64(len(inlineData))
+			}
+			return nil
+		})
+		if err != nil {
+			// Phase 53.3: Cleanup orphans if metadata update failed
+			if len(chunkEntries) > 0 {
+				go c.cleanupChunks(ctx, id, chunkEntries)
+			}
+			return fmt.Errorf("writeInodeContent UpdateInode failed for %s: %w", id, err)
 		}
-		return nil
-	})
-	if err == nil {
-		c.keyMu.Lock()
-		c.keyCache[id] = fileMetadata{
-			key:     fileKey,
-			groupID: groupID,
-			linkTag: parentID + ":" + nameHMAC,
-			inlined: updated.GetInlineData() != nil,
-		}
-		c.keyMu.Unlock()
-		return nil
+		inode = *updated
 	}
 
-	// Phase 53.3: Cleanup orphans if metadata update failed
-	if len(chunkEntries) > 0 {
-		go c.cleanupChunks(ctx, id, chunkEntries)
+	c.keyMu.Lock()
+	c.keyCache[id] = fileMetadata{
+		key:     fileKey,
+		groupID: groupID,
+		linkTag: parentID + ":" + nameHMAC,
+		inlined: inode.GetInlineData() != nil,
 	}
-
-	return fmt.Errorf("writeInodeContent UpdateInode failed for %s: %w", id, err)
+	c.keyMu.Unlock()
+	return nil
 }
 
 func (c *Client) uploadDataInternal(ctx context.Context, id string, fileKey []byte, r io.Reader, size int64) ([]byte, []metadata.ChunkEntry, error) {
