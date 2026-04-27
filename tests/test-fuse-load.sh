@@ -27,7 +27,7 @@ global_setup "$DISTFS_CONFIG_DIR"
 echo "Initializing load worker account..."
 provision_user "load-worker" "load-worker@example.com"
 
-/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-user-quota load-worker $((2*1024*1024*1024)) 10000
+/bin/distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-user-quota load-worker $((2*1024*1024*1024)) 10000
 
 echo "Mounting DistFS to $MOUNT_POINT..."
 /bin/distfs-fuse --config /tmp/load-worker-config.json --server $DISTFS_SERVER_URL --mount $MOUNT_POINT &

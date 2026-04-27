@@ -663,7 +663,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
 	case "/v1/health", "/v1/meta/key", "/v1/meta/key/sign", "/v1/meta/key/world", "/v1/meta/key/cluster/sign",
 		"/v1/user/register", "/v1/login", "/v1/auth/config", "/v1/auth/challenge",
-		"/v1/cluster/stats", "/v1/user/keysync", "/v1/node/info":
+		"/v1/cluster/stats", "/v1/user/keysync", "/v1/node/info", "/v1/timeline":
 		isPublic = true
 	}
 
@@ -674,7 +674,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// 3. Leader Forwarding (Redirect mutations to leader)
 	// Some routes are local-only or handle their own forwarding.
-	if r.URL.Path == "/v1/system/bootstrap" || r.URL.Path == "/v1/health" || r.URL.Path == "/v1/node/info" {
+	if r.URL.Path == "/v1/system/bootstrap" || r.URL.Path == "/v1/health" || r.URL.Path == "/v1/node/info" || r.URL.Path == "/v1/timeline" {
 		// Bypass forwarding
 	} else if s.forwardIfNecessary(w, r) {
 		return
@@ -746,6 +746,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.handleGetWorldPublicKey(w, r)
 	case r.URL.Path == "/v1/node/info":
 		s.handleNodeInfo(w, r)
+	case r.URL.Path == "/v1/timeline":
+		s.handleVerifyTimeline(w, r)
 	case r.URL.Path == "/v1/auth/config":
 		s.handleGetAuthConfig(w, r)
 	case r.URL.Path == "/v1/auth/challenge" && r.Method == http.MethodPost:
@@ -2293,32 +2295,52 @@ func (s *Server) flushBatchLocked() {
 }
 
 func (s *Server) sealResponse(r *http.Request, user *User, payload []byte) ([]byte, error) {
+	var sealed []byte
+
 	// Phase 53.1: Try symmetric sealing if session key is present in context (Forward Secrecy)
 	if r != nil {
 		if sessionKey, ok := r.Context().Value(sessionKeyContextKey).([]byte); ok && len(sessionKey) > 0 {
-			sealed, err := crypto.SealResponseSymmetric(sessionKey, s.signKey, payload)
-			if err == nil {
-				res := SealedResponse{
-					Sealed: sealed,
-				}
-				return json.Marshal(res)
+			var err error
+			sealed, err = crypto.SealResponseSymmetric(sessionKey, s.signKey, payload)
+			if err != nil {
+				// Fallback to asymmetric if symmetric fails
+				sealed = nil
 			}
 		}
 	}
 
-	uk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to unmarshal user public key")
-	}
-
-	sealed, err := crypto.SealResponse(uk, s.signKey, payload)
-	if err != nil {
-		return nil, fmt.Errorf("failed to seal response: %w", err)
+	if sealed == nil {
+		uk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to unmarshal user public key")
+		}
+		sealed, err = crypto.SealResponse(uk, s.signKey, payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to seal response: %w", err)
+		}
 	}
 
 	res := SealedResponse{
 		Sealed: sealed,
 	}
+
+	// Phase 71: Response Binding (Verifiable Timeline)
+	// Bind every metadata response to the current deterministic cluster state.
+	if index, hash, err := s.fsm.GetTimeline(); err == nil {
+		res.TimelineIndex = index
+		res.ClusterStateHash = hash
+
+		if csk := s.getClusterSignKey(); csk != nil {
+			h := crypto.NewHash()
+			h.Write(sealed)
+			idxBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(idxBuf, index)
+			h.Write(idxBuf)
+			h.Write(hash)
+			res.BindingSignature = csk.Sign(h.Sum(nil))
+		}
+	}
+
 	return json.Marshal(res)
 }
 
@@ -2390,6 +2412,8 @@ func (s *Server) sanitizeResponse(res interface{}) interface{} {
 			code = ErrCodeVersionConflict
 		} else if errors.Is(err, ErrExists) {
 			code = ErrCodeExists
+		} else if errors.Is(err, ErrCryptographicFork) {
+			code = ErrCodeCryptographicFork
 		} else if errors.Is(err, ErrNotFound) {
 			code = ErrCodeNotFound
 		} else if errors.Is(err, ErrLeaseRequired) {
@@ -3506,6 +3530,20 @@ func (s *Server) handleGetNodes(w http.ResponseWriter, r *http.Request) {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	isAdmin := false
+	if user, ok := r.Context().Value(userContextKey).(*User); ok && s.fsm.IsAdmin(user.ID) {
+		isAdmin = true
+	}
+
+	if !isAdmin {
+		// Redact internal network topology for non-admins
+		for i := range nodes {
+			nodes[i].ClusterAddress = ""
+			nodes[i].RaftAddress = ""
+		}
+	}
+
 	resp := map[string]interface{}{
 		"id":     s.nodeID,
 		"state":  s.raft.State().String(),
@@ -3665,6 +3703,101 @@ func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
 		newBody, _ := json.Marshal(req)
 		s.ApplyRaftCommandRaw(w, r, CmdReleaseLeases, newBody, http.StatusOK)
 	}
+}
+
+func (s *Server) handleVerifyTimeline(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodPost {
+		var req VerifyTimelineRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, r, ErrCodeInvalid, "invalid request", http.StatusBadRequest)
+			return
+		}
+
+		// 1. Verify the receipt was signed by the cluster
+		pub := s.getClusterSignPubKey()
+		if pub != nil {
+			h := crypto.NewHash()
+			h.Write(req.SealedResponse)
+			idxBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(idxBuf, req.TimelineIndex)
+			h.Write(idxBuf)
+			h.Write(req.ClusterStateHash)
+			if !crypto.VerifySignature(pub, h.Sum(nil), req.BindingSignature) {
+				s.writeError(w, r, ErrCodeInvalid, "invalid cluster signature on receipt", http.StatusBadRequest)
+				return
+			}
+		}
+
+		// 2. Check FSM consistency
+		currentIndex, _, err := s.fsm.GetTimeline()
+		if err != nil {
+			s.writeError(w, r, ErrCodeInternal, "failed to read current timeline", http.StatusInternalServerError)
+			return
+		}
+
+		if currentIndex < req.TimelineIndex {
+			s.writeError(w, r, ErrCodeInternal, fmt.Sprintf("follower is lagging (current=%d, target=%d)", currentIndex, req.TimelineIndex), http.StatusTooEarly)
+			return
+		}
+
+		// Try to find the exact historical hash
+		hash, found := s.fsm.GetTimelineAt(req.TimelineIndex)
+		if !found && currentIndex == req.TimelineIndex {
+			// Fallback to current state if cache missed but indexes match
+			_, currentHash, err := s.fsm.GetTimeline()
+			if err == nil {
+				hash = currentHash
+				found = true
+			}
+		}
+
+		if found {
+			if !bytes.Equal(hash, req.ClusterStateHash) {
+				s.writeError(w, r, ErrCodeCryptographicFork, "CRYPTOGRAPHIC FORK DETECTED", http.StatusConflict)
+				return
+			}
+		} else {
+			// Receipt is too old to verify against history
+			// We skip verification rather than returning a false positive fork.
+		}
+
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if r.Method != http.MethodGet {
+		s.writeError(w, r, ErrCodeInvalid, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var index uint64
+	var hash []byte
+
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		idxBytes, err := s.fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+		if err != nil {
+			return err
+		}
+		if len(idxBytes) == 8 {
+			index = binary.BigEndian.Uint64(idxBytes)
+		}
+		hash, err = s.fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		return err
+	})
+
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to read timeline", http.StatusInternalServerError)
+		return
+	}
+
+	resp := TimelineResponse{
+		NodeID: s.nodeID,
+		Index:  index,
+		Hash:   hash,
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) handleGetMetrics(w http.ResponseWriter, r *http.Request) {

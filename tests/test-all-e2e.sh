@@ -36,7 +36,7 @@ global_setup "$DISTFS_CONFIG_DIR"
 # The 'admin' group already exists from admin-create-root, but we create an 'administrators' one
 # for the test to verify that anchoring works for newly created groups.
 echo "Creating Administrators group..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" group-create administrators > /tmp/admin-group.txt
 ADMIN_GID=$(grep "^ID:" /tmp/admin-group.txt | awk '{print $2}')
 echo "Administrators GID: $ADMIN_GID"
 
@@ -54,22 +54,22 @@ echo "Provisioning benchmark workspace..."
 BENCH_JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
 # Benchmark uses a persistent config at /tmp/bench-dir/config.json
 mkdir -p /tmp/bench-dir
-BENCH_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --config "/tmp/bench-dir/config.json" init --new --server http://storage-node-1:8080 --jwt "$BENCH_JWT")
+BENCH_OUT=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "/tmp/bench-dir/config.json" init --new --server http://storage-node-1:8080 --jwt "$BENCH_JWT")
 BENCH_ID=$(echo "$BENCH_OUT" | grep "User ID:" | cut -d: -f2 | tr -d ' ')
 
 # Provision, unlock, and assign to admin group
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user "$BENCH_ID"
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" registry-add --yes --unlock bench-user "$BENCH_ID"
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir --owner bench-user /bench-workspace
 
 # Promote and add to Administrators group
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "users" bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" admin-promote bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "$ADMIN_GID" bench-user
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" group-add "users" bench-user
 
 # Provision HA directory (world-writable for test flexibility)
 echo "Provisioning /ha..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
-distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" mkdir /ha
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" chmod 0777 /ha
 
 FAILED=0
 
