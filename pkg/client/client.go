@@ -7055,9 +7055,6 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 		}
 
 		// Invalidate cache on conflict to ensure we fetch fresh data on retry
-		if c.store != nil {
-			c.store.Delete("groups", id)
-		}
 		c.cacheMu.Lock()
 		delete(c.verifiedGroupCache, id)
 		delete(c.unverifiedGroupCache, id)
