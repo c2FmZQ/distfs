@@ -57,6 +57,10 @@ func (c *Client) VerifyTimelineReceipt(ctx context.Context, res metadata.SealedR
 	leaderURL, _ := url.Parse(c.serverAddr)
 	if targetURL.Scheme == "" {
 		targetURL.Scheme = leaderURL.Scheme
+		if targetURL.Host == "" {
+			targetURL.Host = targetURL.Path
+			targetURL.Path = ""
+		}
 	}
 
 	verifyURL := targetURL.JoinPath("/v1/timeline")

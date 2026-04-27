@@ -28,22 +28,22 @@ global_setup() {
     # GLOBAL SETUP: Create Admin
     echo "PERFORMING GLOBAL SETUP..."
     local JWT=$(wget -qO- "http://test-auth:8080/mint?email=admin@example.com")
-    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" init --new --server http://storage-node-1:8080 --jwt "$JWT"; then
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$1/config.json" init --new --server http://storage-node-1:8080 --jwt "$JWT"; then
         echo "GLOBAL SETUP FAILED: Admin initialization failed"
         exit 1
     fi
 
-    ADMIN_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" whoami)
+    ADMIN_ID=$(distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$1/config.json" whoami)
     echo "Global Admin ID: $ADMIN_ID"
 
     echo "Initializing canonical root and system backbone..."
-    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" admin-create-root; then
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$1/config.json" admin-create-root; then
         echo "GLOBAL SETUP FAILED: admin-create-root failed"
         exit 1
     fi
 
     echo "Anchoring initial cluster topology in /registry..."
-    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$1/config.json" registry-update-cluster; then
+    if ! distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$1/config.json" registry-update-cluster; then
         echo "GLOBAL SETUP FAILED: registry-update-cluster failed"
         exit 1
     fi
