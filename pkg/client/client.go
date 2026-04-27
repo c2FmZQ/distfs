@@ -1804,7 +1804,6 @@ func (c *Client) flushValidationQueue() {
 
 	if c.store != nil {
 		for _, id := range resp.StaleInodes {
-			c.store.Delete("inodes", id)
 			c.pathMu.Lock()
 			// Find and remove from pathCache
 			for path, entry := range c.pathCache {
@@ -2263,6 +2262,9 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				return nil, err
 			}
 		} else {
+			if cacheHit && inode != nil && fetchedInode.Version < inode.Version {
+				return nil, fmt.Errorf("STALE MANIFEST ROLLBACK DETECTED: expected version >= %d, got %d", inode.Version, fetchedInode.Version)
+			}
 			inode = &fetchedInode
 			// Update cache
 			if c.store != nil {
@@ -5075,7 +5077,7 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 		}
 	}
 
-	if !cacheHit {
+	if !cacheHit || !c.offline {
 		var fetchedGroup metadata.Group
 		req := metadata.GetGroupRequest{ID: id}
 		data, _ := json.Marshal(req)
@@ -5087,6 +5089,9 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 				return nil, err
 			}
 		} else {
+			if cacheHit && group != nil && fetchedGroup.Version < group.Version {
+				return nil, fmt.Errorf("STALE MANIFEST ROLLBACK DETECTED: expected version >= %d, got %d", group.Version, fetchedGroup.Version)
+			}
 			group = &fetchedGroup
 			// Update cache
 			if c.store != nil {
@@ -5095,7 +5100,7 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 				}
 			}
 		}
-	} else {
+	} else if group != nil {
 		c.triggerValidation("groups", id, group.Version)
 	}
 

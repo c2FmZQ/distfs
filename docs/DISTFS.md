@@ -2,10 +2,6 @@
 
 DistFS is a high-performance, distributed file system built on a **Zero-Knowledge** foundation. It prioritizes data privacy, end-to-end encryption, and post-quantum security.
 
-## Known Issues and Work in Progress
-
-*   **Replay / Rollback Attacks (Stale Manifests):** The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry (see [`DISTFS-FILESYSTEM.md`](DISTFS-FILESYSTEM.md)).
-
 ## 1. Architectural Pillars
 
 *   **Zero-Knowledge:** The server never possesses plaintext data or encryption keys.

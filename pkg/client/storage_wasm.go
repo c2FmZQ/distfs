@@ -279,4 +279,3 @@ func (s *WASMStore) Prune() {
 		}
 	}
 }
-
