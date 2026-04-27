@@ -250,6 +250,21 @@ func initClient(args []js.Value) (interface{}, error) {
 	}
 	c = c.WithDisableDoH(true)
 
+	// Phase 74: Universal Caching (WASM)
+	// For WASM, we limit to 1000 entries (mostly chunks)
+	store, err := client.NewWASMStore(1000)
+	if err != nil {
+		fmt.Printf("Warning: failed to initialize WASM cache: %v\n", err)
+	} else {
+		// Use decKeyBytes as a deterministic key for the local cache if no separate passphrase is provided
+		// (In the web UI, the decKey is effectively the master secret)
+		cacheKey := decKeyBytes
+		if len(cacheKey) > 32 {
+			cacheKey = cacheKey[:32]
+		}
+		c = c.WithSecureStore(store, cacheKey)
+	}
+
 	return true, nil
 }
 

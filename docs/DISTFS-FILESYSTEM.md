@@ -211,5 +211,8 @@ DataNode access requires a `CapabilityToken` signed by the cluster's `ClusterSig
 3.  **Session Binding:** Tokens can be cryptographically bound to the client's session identifier.
 By the EUF-CMA security of the cluster key, an adversary cannot self-issue access tokens. Access is strictly delegated by the metadata layer, enforcing global consistency and permissions at the storage layer.
 
-**Known Weakness: Replay / Rollback Attacks (Stale Manifests)**
-*TODO: The DistFS implementation must be updated to incorporate a monotonic version number within the Inode signature that the client verifies against a strictly linearizable registry.*
+### 5.4 Replay / Rollback Attacks (Stale Manifests)
+A malicious server could attempt to serve an older, cryptographically valid version of a file's inode (a Stale Manifest). To prevent this, DistFS implements **Version Monotonicity Checks** backed by the persistent `KVStore`.
+1.  **Monotonic Counters:** Every mutation to an Inode or Group increments its internal `Version` counter.
+2.  **Persistent Anchoring:** The client records the highest seen `Version` for every ID in its local encrypted `KVStore`.
+3.  **Client-Side Rejection:** When fetching metadata from the server, the client compares the received `Version` against its local anchor. If the server provides an older version, the client rejects the payload with a `STALE MANIFEST ROLLBACK DETECTED` error, preserving the linear progression of the filesystem state across sessions.

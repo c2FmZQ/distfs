@@ -3973,7 +3973,65 @@ func (s *Server) handleInvoke(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		s.handleAudit(w, r)
+	case ActionValidateMetadata:
+		var req ValidateMetadataRequest
+		if err := json.Unmarshal(env.Payload, &req); err != nil {
+			s.writeError(w, r, ErrCodeInternal, "invalid payload", http.StatusBadRequest)
+			return
+		}
+		s.handleValidateMetadata(w, r, req)
 	default:
 		s.writeError(w, r, ErrCodeInvalid, "unknown action", http.StatusBadRequest)
 	}
+}
+
+func (s *Server) handleValidateMetadata(w http.ResponseWriter, r *http.Request, req ValidateMetadataRequest) {
+	if len(req.Inodes) > 1000 || len(req.Groups) > 1000 {
+		s.writeError(w, r, ErrCodeInvalid, "batch size too large", http.StatusBadRequest)
+		return
+	}
+	resp := ValidateMetadataResponse{}
+
+	err := s.fsm.db.View(func(tx *bolt.Tx) error {
+		// Validate Inodes
+		for _, v := range req.Inodes {
+			plain, _ := s.fsm.Get(tx, []byte("inodes"), []byte(v.ID))
+			if plain == nil {
+				resp.StaleInodes = append(resp.StaleInodes, v.ID)
+				continue
+			}
+			var inode Inode
+			if err := json.Unmarshal(plain, &inode); err != nil {
+				continue
+			}
+			if inode.Version != v.Version {
+				resp.StaleInodes = append(resp.StaleInodes, v.ID)
+			}
+		}
+
+		// Validate Groups
+		for _, v := range req.Groups {
+			plain, _ := s.fsm.Get(tx, []byte("groups"), []byte(v.ID))
+			if plain == nil {
+				resp.StaleGroups = append(resp.StaleGroups, v.ID)
+				continue
+			}
+			var group Group
+			if err := json.Unmarshal(plain, &group); err != nil {
+				continue
+			}
+			if group.Version != v.Version {
+				resp.StaleGroups = append(resp.StaleGroups, v.ID)
+			}
+		}
+		return nil
+	})
+
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
 }

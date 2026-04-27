@@ -40,13 +40,34 @@ type RootAnchor struct {
 
 // Config represents the client-side configuration.
 type Config struct {
-	ServerURL     string                `json:"server_url"`
-	UserID        string                `json:"user_id"`
-	EncKey        string                `json:"enc_key"`
-	SignKey       string                `json:"sign_key"`
-	ServerKey     string                `json:"server_key"`
-	DefaultRootID string                `json:"default_root_id,omitempty"`
-	Roots         map[string]RootAnchor `json:"roots,omitempty"`
+	ServerURL            string                `json:"server_url"`
+	UserID               string                `json:"user_id"`
+	EncKey               string                `json:"enc_key"`
+	SignKey              string                `json:"sign_key"`
+	ServerKey            string                `json:"server_key"`
+	DefaultRootID        string                `json:"default_root_id,omitempty"`
+	Roots                map[string]RootAnchor `json:"roots,omitempty"`
+	CacheDir             string                `json:"cache_dir,omitempty"`
+	CacheMaxBytes        int64                 `json:"cache_max_bytes,omitempty"`
+	MetadataCacheEnabled bool                  `json:"metadata_cache_enabled,omitempty"`
+
+	// Unexported
+	passphrase []byte
+}
+
+// DeriveCacheKey derives a 32-byte key for local cache encryption from the passphrase.
+func (c *Config) DeriveCacheKey() []byte {
+	if len(c.passphrase) == 0 {
+		return nil
+	}
+	// Use a fixed salt for local cache key derivation (deterministic per user passphrase)
+	salt := []byte("distfs-local-cache-salt-v1")
+	return argon2.IDKey(c.passphrase, salt, 1, 64*1024, 4, 32)
+}
+
+func (c *Config) SetPassphrase(p []byte) {
+	c.passphrase = make([]byte, len(p))
+	copy(c.passphrase, p)
 }
 
 // Encrypt wraps a config into an encrypted blob.
@@ -91,6 +112,7 @@ func Decrypt(blob metadata.KeySyncBlob, password []byte) (*Config, error) {
 	if err := json.Unmarshal(plaintext, &c); err != nil {
 		return nil, err
 	}
+	c.SetPassphrase(password)
 	return &c, nil
 }
 
