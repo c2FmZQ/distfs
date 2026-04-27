@@ -14,17 +14,17 @@ until wget -qO- --timeout=2 http://storage-node-1:8080/v1/meta/key > /dev/null 2
 # Setup Test Data
 echo "small" > /tmp/small
 echo "this is a much larger file" > /tmp/large
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" put /tmp/small /users/ls-user/a-small.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" put /tmp/large /users/ls-user/z-large.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" mkdir /users/ls-user/d-dir
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" put /tmp/small /users/ls-user/a-small.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" put /tmp/large /users/ls-user/z-large.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" mkdir /users/ls-user/d-dir
 
 # Set modes to match expectations (rwx)
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" chmod 0777 /users/ls-user/a-small.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" chmod 0777 /users/ls-user/z-large.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" chmod 0777 /users/ls-user/d-dir
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" chmod 0777 /users/ls-user/a-small.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" chmod 0777 /users/ls-user/z-large.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" chmod 0777 /users/ls-user/d-dir
 
 echo "TEST: Standard LS (Alpha Sort)"
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" ls --1 /users/ls-user > /tmp/ls-std
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" ls --1 /users/ls-user > /tmp/ls-std
 if head -n 1 /tmp/ls-std | grep -q "a-small.txt"; then
     echo "PASS: Standard Alpha Sort"
 else
@@ -34,7 +34,7 @@ else
 fi
 
 echo "TEST: Reverse Sort (-r)"
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" ls --1 --r /users/ls-user > /tmp/ls-rev
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" ls --1 --r /users/ls-user > /tmp/ls-rev
 if head -n 1 /tmp/ls-rev | grep -q "z-large.txt"; then
     echo "PASS: Reverse Sort"
 else
@@ -44,7 +44,7 @@ else
 fi
 
 echo "TEST: Size Sort (-S)"
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" ls --1 --S /users/ls-user > /tmp/ls-size
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" ls --1 --S /users/ls-user > /tmp/ls-size
 if head -n 1 /tmp/ls-size | grep -q "z-large.txt"; then
     echo "PASS: Size Sort"
 else
@@ -54,7 +54,7 @@ else
 fi
 
 echo "TEST: Long Format (-l)"
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" ls --l /users/ls-user > /tmp/ls-long
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" ls --l /users/ls-user > /tmp/ls-long
 if grep -q "rwxrwx" /tmp/ls-long; then
     echo "PASS: Long Format"
 else
@@ -64,7 +64,7 @@ else
 fi
 
 echo "TEST: Classification (-F)"
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$CONFIG" ls --F /users/ls-user > /tmp/ls-class
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config "$CONFIG" ls --F /users/ls-user > /tmp/ls-class
 if grep -q "d-dir/" /tmp/ls-class; then
     echo "PASS: Classification"
 else

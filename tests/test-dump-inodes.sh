@@ -8,7 +8,7 @@ echo "Waiting for client configuration..."
 until [ -f "$DISTFS_CONFIG_DIR/config.json" ]; do sleep 1; done
 
 echo "Dumping inodes via Admin CLI..."
-if distfs --disable-doh --allow-insecure --use-pinentry=false --admin --config "$DISTFS_CONFIG_DIR/config.json" dump-inodes / > /tmp/dump.log; then
+if distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --admin --config "$DISTFS_CONFIG_DIR/config.json" dump-inodes / > /tmp/dump.log; then
 
     echo "dump-inodes executed successfully."
 else

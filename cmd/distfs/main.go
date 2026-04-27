@@ -40,14 +40,15 @@ import (
 )
 
 var (
-	appConfigPath    string
-	appUsePinentry   bool
-	appUseTPM        bool
-	appAdminFlag     bool
-	appDisableDoH    bool
-	appAllowInsecure bool
-	appRootID        string
-	appRegistryDir   string
+	appConfigPath         string
+	appUsePinentry        bool
+	appUseTPM             bool
+	appAdminFlag          bool
+	appDisableDoH         bool
+	appAllowInsecure      bool
+	appTimelineSampleRate float64
+	appRootID             string
+	appRegistryDir        string
 )
 
 func setupTPMHasher() {
@@ -129,6 +130,12 @@ func main() {
 				Value:       false,
 				Usage:       "Allow insecure TLS connections (skip verification)",
 				Destination: &appAllowInsecure,
+			},
+			&cli.FloatFlag{
+				Name:        "timeline-sample-rate",
+				Value:       0.01,
+				Usage:       "Probability (0.0-1.0) of performing background timeline consistency checks",
+				Destination: &appTimelineSampleRate,
 			},
 			&cli.StringFlag{
 				Name:        "root",
@@ -746,6 +753,30 @@ func main() {
 				},
 			},
 			{
+				Name:  "registry-update-cluster",
+				Usage: "Update the anchored cluster topology in the registry",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					if err := c.AnchorClusterInRegistry(ctx); err != nil {
+						return err
+					}
+					fmt.Println("Cluster topology successfully anchored in /registry/cluster.json")
+					return nil
+				},
+			},
+			{
+				Name:  "verify-timeline",
+				Usage: "Perform a deep cryptographic audit of the cluster's linear history",
+				Action: func(ctx context.Context, cmd *cli.Command) error {
+					c := loadClient()
+					if err := c.VerifyTimeline(ctx); err != nil {
+						return err
+					}
+					fmt.Println("Deep audit successful. Cluster timeline is linear and consistent across quorum.")
+					return nil
+				},
+			},
+			{
 				Name:  "dump-inodes",
 				Usage: "Recursively dump inode metadata for debugging",
 				Action: func(ctx context.Context, cmd *cli.Command) error {
@@ -769,7 +800,8 @@ func loadClient() *client.Client {
 
 	c := client.NewClient(conf.ServerURL).
 		WithAllowInsecure(appAllowInsecure).
-		WithDisableDoH(appDisableDoH)
+		WithDisableDoH(appDisableDoH).
+		WithTimelineSampleRate(appTimelineSampleRate)
 
 	// Phase 74: Initialize Universal Caching
 	cacheDir := conf.CacheDir

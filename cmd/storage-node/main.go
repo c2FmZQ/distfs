@@ -423,6 +423,8 @@ func main() {
 			publicMux.Handle("/v1/invoke", metaServer)
 			publicMux.Handle("/v1/health", metaServer)
 			publicMux.Handle("/v1/node", metaServer)
+			publicMux.Handle("/v1/node/info", metaServer)
+			publicMux.Handle("/v1/timeline", metaServer)
 
 			publicMux.Handle("/v1/user/", metaServer)
 			publicMux.Handle("/v1/cluster/", metaServer)
@@ -445,6 +447,7 @@ func main() {
 			clusterMux.Handle("/v1/node", metaServer) // Registration
 			clusterMux.Handle("/v1/node/info", metaServer)
 			clusterMux.Handle("/v1/health", metaServer)
+			clusterMux.Handle("/v1/timeline", metaServer)
 			clusterMux.Handle("/v1/cluster/", metaServer) // Management
 			clusterMux.Handle("/v1/meta/", metaServer)
 			clusterMux.Handle("/v1/user/", metaServer) // Forwarded writes

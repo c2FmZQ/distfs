@@ -94,6 +94,8 @@ const (
 	ErrCodeTooBig = "DISTFS_TOO_BIG"
 	// ErrCodeRange indicates a provided buffer is too small.
 	ErrCodeRange = "DISTFS_RANGE"
+	// ErrCodeCryptographicFork indicates a Byzantine fault was detected in the cluster state.
+	ErrCodeCryptographicFork = "DISTFS_CRYPTOGRAPHIC_FORK"
 )
 
 // OIDCConfig represents the OpenID Connect configuration needed by clients for authentication.
@@ -863,9 +865,27 @@ type SealedRequest struct {
 	Sealed []byte `json:"sealed"`
 }
 
-// SealedResponse wraps an encrypted response payload.
+// SealedResponse wraps an encrypted response payload and binds it to the cluster timeline.
 type SealedResponse struct {
-	Sealed []byte `json:"sealed"`
+	Sealed           []byte `json:"sealed"`
+	TimelineIndex    uint64 `json:"timeline_index,omitempty"`
+	ClusterStateHash []byte `json:"cluster_state_hash,omitempty"`
+	BindingSignature []byte `json:"binding_sig,omitempty"`
+}
+
+// TimelineResponse contains the latest Raft log index and the deterministic state hash.
+type TimelineResponse struct {
+	NodeID string `json:"node_id"`
+	Index  uint64 `json:"index"`
+	Hash   []byte `json:"hash"`
+}
+
+// VerifyTimelineRequest allows a client to verify a signed timeline receipt against any node.
+type VerifyTimelineRequest struct {
+	SealedResponse   []byte `json:"sealed_response"`
+	TimelineIndex    uint64 `json:"timeline_index"`
+	ClusterStateHash []byte `json:"cluster_state_hash"`
+	BindingSignature []byte `json:"binding_sig"`
 }
 
 // SealedEnvelope represents the decrypted inner payload, containing the action to perform.
@@ -1101,6 +1121,7 @@ var (
 	ErrNotSupp                 = errors.New("operation not supported")
 	ErrTooBig                  = errors.New("argument list too long")
 	ErrRange                   = errors.New("result too large")
+	ErrCryptographicFork       = errors.New("CRYPTOGRAPHIC FORK DETECTED")
 )
 
 const (
@@ -1192,4 +1213,15 @@ type AddReplicaRequest struct {
 	InodeID string   `json:"inode_id"`
 	ChunkID string   `json:"chunk_id"`
 	NodeIDs []string `json:"node_ids"`
+}
+
+// ClusterNode represents a node's public identity and address in the registry.
+type ClusterNode struct {
+	ID      string `json:"id"`
+	Address string `json:"address"`
+}
+
+// ClusterConfig represents the cluster topology anchored in the registry.
+type ClusterConfig struct {
+	Nodes []ClusterNode `json:"nodes"`
 }

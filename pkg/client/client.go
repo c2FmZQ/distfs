@@ -624,6 +624,10 @@ type Client struct {
 	valQueueMu    *sync.Mutex
 	valQueueTimer *time.Timer
 
+	timelineSampleRate float64
+	anchoredNodes      []metadata.ClusterNode
+	anchoredNodesMu    *sync.RWMutex
+
 	allocCache  []metadata.Node
 	allocExpiry time.Time
 	allocMu     *sync.RWMutex
@@ -641,7 +645,8 @@ func NewClient(serverAddr string) *Client {
 	transport := getDefaultTransport(serverAddr)
 
 	return &Client{
-		serverAddr: serverAddr,
+		serverAddr:         serverAddr,
+		timelineSampleRate: 0.0,
 		httpCli: &http.Client{
 			Transport: transport,
 			Timeout:   5 * time.Minute,
@@ -668,6 +673,7 @@ func NewClient(serverAddr string) *Client {
 		rootMu:               &sync.RWMutex{},
 		allocMu:              &sync.RWMutex{},
 		registryDir:          "/registry",
+		anchoredNodesMu:      &sync.RWMutex{},
 	}
 }
 
@@ -814,6 +820,14 @@ func (c *Client) WithAllowInsecure(allow bool) *Client {
 	clonedClient := *c.httpCli
 	c2.httpCli = &clonedClient
 	c2.httpCli.Transport = applyAllowInsecure(c2.httpCli.Transport, allow)
+	return &c2
+}
+
+// WithTimelineSampleRate configures the probability (0.0 to 1.0) of performing
+// Byzantine-resistant timeline verification on every metadata response.
+func (c *Client) WithTimelineSampleRate(v float64) *Client {
+	c2 := *c
+	c2.timelineSampleRate = v
 	return &c2
 }
 
@@ -982,7 +996,8 @@ func (c *Client) authenticateRequest(ctx context.Context, req *http.Request) err
 	if strings.HasSuffix(req.URL.Path, "/v1/user/register") ||
 		strings.HasSuffix(req.URL.Path, "/v1/auth/challenge") ||
 		strings.HasSuffix(req.URL.Path, "/v1/login") ||
-		strings.HasSuffix(req.URL.Path, "/v1/meta/key") {
+		strings.HasSuffix(req.URL.Path, "/v1/meta/key") ||
+		strings.HasSuffix(req.URL.Path, "/v1/timeline") {
 		return nil
 	}
 
@@ -1148,6 +1163,33 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 	var sealed metadata.SealedResponse
 	if err := json.NewDecoder(limitBody).Decode(&sealed); err != nil {
 		return nil, fmt.Errorf("failed to decode sealed response: %w", err)
+	}
+
+	// Phase 71: Response Binding (Verifiable Timeline)
+	if len(sealed.BindingSignature) > 0 {
+		cPK, err := c.getClusterSignKey(ctx)
+		if err == nil && len(cPK) > 0 {
+			h := crypto.NewHash()
+			h.Write(sealed.Sealed)
+			idxBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(idxBuf, sealed.TimelineIndex)
+			h.Write(idxBuf)
+			h.Write(sealed.ClusterStateHash)
+			if !crypto.VerifySignature(cPK, h.Sum(nil), sealed.BindingSignature) {
+				return nil, fmt.Errorf("INVALID CLUSTER BINDING: response signature mismatch")
+			}
+
+			// Byzantine-resistant Quorum Verification (Probabilistic)
+			if mrand.Float64() < c.timelineSampleRate {
+				if err := c.VerifyTimelineReceipt(ctx, sealed); err != nil {
+					// We only fail if it was a legitimate fork detection.
+					// Discovery failures (e.g. during bootstrap) are ignored.
+					if errors.Is(err, metadata.ErrCryptographicFork) {
+						return nil, err
+					}
+				}
+			}
+		}
 	}
 
 	serverSignPK, err := c.getServerSignKey(ctx)
@@ -1420,7 +1462,7 @@ func (c *Client) getNodes(ctx context.Context) ([]metadata.Node, error) {
 	var res struct {
 		Nodes []metadata.Node `json:"nodes"`
 	}
-	_, _, err := c.doRequest(ctx, "GET", "/v1/node", nil, requestOptions{skipAuth: true, skipControl: true, retry: true}, &res)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/node", nil, requestOptions{skipControl: true, retry: true}, &res)
 	if err != nil {
 		return nil, err
 	}
@@ -2177,11 +2219,6 @@ func (c *Client) prepareUpdate(ctx context.Context, inode *metadata.Inode) (meta
 		return metadata.LogCommand{}, err
 	}
 	return metadata.LogCommand{Type: metadata.CmdUpdateInode, Data: data, UserID: c.userID}, nil
-}
-
-func (c *Client) prepareDelete(id string) (metadata.LogCommand, error) {
-	data, _ := json.Marshal(id)
-	return metadata.LogCommand{Type: metadata.CmdDeleteInode, Data: data, UserID: c.userID}, nil
 }
 
 // DeleteInode deletes an inode by ID. It performs an atomic update setting NLink to 0.
@@ -3414,11 +3451,22 @@ func (w *FileWriter) Close() error {
 				cmds = append(cmds, cmdParent)
 			}
 
-			// 3. Optional: Delete Old Inode (Decrement NLink)
+			// 3. Optional: Unlink Old Inode (Decrement NLink)
 			if w.oldInodeID != "" && w.oldInodeID != w.inode.ID {
-				cmdOld, err := w.client.prepareDelete(w.oldInodeID)
+				oldInode, err := w.client.getInode(w.ctx, w.oldInodeID)
 				if err != nil {
-					return err
+					return fmt.Errorf("failed to fetch old inode for swap: %w", err)
+				}
+				if oldInode.NLink > 0 {
+					oldInode.NLink--
+				}
+				// We update the old inode with NLink=0 (if it was 1).
+				// If we don't have permission to sign the update, the batch will fail.
+				// In DistFS, overwriting a file you don't own is only possible if you
+				// have permission to modify its metadata.
+				cmdOld, err := w.client.prepareUpdate(w.ctx, oldInode)
+				if err != nil {
+					return fmt.Errorf("failed to sign old inode for swap: %w", err)
 				}
 				cmds = append(cmds, cmdOld)
 			}
@@ -5298,6 +5346,81 @@ func (c *Client) allocateGID(ctx context.Context) (uint32, error) {
 	return res.GID, err
 }
 
+// AnchorClusterInRegistry writes the current cluster topology to the registry.
+func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
+	regDir := c.registryDir
+	if regDir == "" {
+		return nil // Registry not configured
+	}
+
+	var clusterNodes []metadata.ClusterNode
+	for n := range c.AdminListNodes(ctx) {
+		if n.Status == metadata.NodeStatusActive && n.RaftAddress != "" {
+			clusterNodes = append(clusterNodes, metadata.ClusterNode{
+				ID:      n.ID,
+				Address: n.Address,
+			})
+		}
+	}
+
+	if len(clusterNodes) == 0 {
+		return fmt.Errorf("no active nodes found to anchor")
+	}
+
+	cfg := metadata.ClusterConfig{
+		Nodes: clusterNodes,
+	}
+	data, _ := json.MarshalIndent(cfg, "", "  ")
+
+	path := regDir + "/cluster.json"
+	if !strings.HasPrefix(path, "/") {
+		path = "/" + path
+	}
+
+	wc, err := c.OpenBlobWrite(ctx, path)
+	if err != nil {
+		return fmt.Errorf("failed to open registry cluster config for writing: %w", err)
+	}
+
+	if _, err := wc.Write(data); err != nil {
+		wc.Close()
+		return fmt.Errorf("failed to write cluster config to registry: %w", err)
+	}
+	if err := wc.Close(); err != nil {
+		return fmt.Errorf("failed to close registry cluster config: %w", err)
+	}
+
+	// 2. Set Permissions: writable by 'admin' group, readable by 'users' group
+	adminGID, _, err := c.ResolveGroupName(ctx, "admin")
+	if err != nil {
+		return fmt.Errorf("failed to resolve admin group: %w", err)
+	}
+	usersGID, _, err := c.ResolveGroupName(ctx, "users")
+	if err != nil {
+		return fmt.Errorf("failed to resolve users group: %w", err)
+	}
+
+	if err := c.Chgrp(ctx, path, adminGID); err != nil {
+		return fmt.Errorf("failed to set group for %s: %w", path, err)
+	}
+
+	acl := ACL{
+		Groups: map[string]uint32{
+			usersGID: 0004, // Read-only
+		},
+	}
+	if err := c.Setfacl(ctx, path, acl); err != nil {
+		return fmt.Errorf("failed to set ACL for %s: %w", path, err)
+	}
+
+	// 3. Clear cache
+	c.anchoredNodesMu.Lock()
+	c.anchoredNodes = nil
+	c.anchoredNodesMu.Unlock()
+
+	return nil
+}
+
 // AnchorGroupInRegistry creates a signed attestation for a group in the registry.
 func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID string) error {
 	group, err := c.getGroupUnverifiedCached(ctx, groupID)
@@ -6937,11 +7060,10 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 
 		// On conflict, wait a bit and retry
 		time.Sleep(time.Duration(i*50) * time.Millisecond)
-		}
+	}
 
-		return nil, metadata.ErrConflict
-		}
-
+	return nil, metadata.ErrConflict
+}
 
 // getGroupMembers retrieves the list of members for a group.
 // If the requester is an authorized manager, it returns emails. Otherwise, only UserIDs.

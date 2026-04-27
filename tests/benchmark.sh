@@ -15,8 +15,8 @@ JWT=$(wget -qO- "http://test-auth:8080/mint?email=bench-user@example.com")
 export DISTFS_CONFIG_DIR="/tmp/bench-dir"
 
 if [ ! -f "$DISTFS_CONFIG_DIR/config.json" ]; then
-    distfs --disable-doh --allow-insecure --use-pinentry=false init --server http://storage-node-1:8080 --jwt "$JWT" || \
-    distfs --disable-doh --allow-insecure --use-pinentry=false init --new --server http://storage-node-1:8080 --jwt "$JWT"
+    distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 init --server http://storage-node-1:8080 --jwt "$JWT" || \
+    distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 init --new --server http://storage-node-1:8080 --jwt "$JWT"
 fi
 
 echo "Stressing Metadata Layer (Raft)..."

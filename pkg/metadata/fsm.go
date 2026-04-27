@@ -80,6 +80,8 @@ type MetadataFSM struct {
 	userCache *lru.TwoQueueCache[string, *User]
 
 	metrics *MetricsCollector
+
+	timelineHistory *lru.TwoQueueCache[uint64, []byte]
 }
 
 func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*MetadataFSM, error) {
@@ -99,14 +101,16 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		return nil, err
 	}
 	uc, _ := lru.New2Q[string, *User](1024)
+	th, _ := lru.New2Q[uint64, []byte](1024) // Store last 1024 state hashes
 
 	fsm := &MetadataFSM{
-		nodeID:        nodeID,
-		db:            db,
-		path:          path,
-		clusterSecret: clusterSecret,
-		userCache:     uc,
-		metrics:       NewMetricsCollector(),
+		nodeID:          nodeID,
+		db:              db,
+		path:            path,
+		clusterSecret:   clusterSecret,
+		userCache:       uc,
+		metrics:         NewMetricsCollector(),
+		timelineHistory: th,
 	}
 	db.Update(func(tx *bolt.Tx) error {
 		krData, _ := fsm.Get(tx, []byte("system"), []byte("fsm_keyring"))
@@ -311,6 +315,31 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 			}
 			return ErrAtomicRollback
 		}
+
+		// Update timeline hash
+		prevHash, err := fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		if err != nil {
+			return fmt.Errorf("failed to fetch timeline hash: %w", err)
+		}
+		if len(prevHash) == 0 {
+			prevHash = make([]byte, 32) // Use 32 bytes of zeros as genesis
+		}
+		h := sha256.New()
+		h.Write(prevHash)
+
+		indexBytes := make([]byte, 8)
+		binary.BigEndian.PutUint64(indexBytes, l.Index)
+		h.Write(indexBytes)
+		h.Write(l.Data)
+
+		timelineHash := h.Sum(nil)
+		fsm.Put(tx, []byte("system"), []byte("timeline_hash"), timelineHash)
+		fsm.Put(tx, []byte("system"), []byte("timeline_index"), indexBytes)
+
+		if fsm.timelineHistory != nil {
+			fsm.timelineHistory.Add(l.Index, timelineHash)
+		}
+
 		return nil
 	})
 	if err != nil && cmd.Atomic {
@@ -2462,6 +2491,31 @@ func (fsm *MetadataFSM) DumpInodes(tx *bolt.Tx) {
 	}
 
 	log.Printf("--- END DUMP [%s] ---", fsm.nodeID)
+}
+
+func (fsm *MetadataFSM) GetTimeline() (uint64, []byte, error) {
+	var index uint64
+	var hash []byte
+	err := fsm.db.View(func(tx *bolt.Tx) error {
+		idxBytes, err := fsm.Get(tx, []byte("system"), []byte("timeline_index"))
+		if err != nil {
+			return err
+		}
+		if len(idxBytes) == 8 {
+			index = binary.BigEndian.Uint64(idxBytes)
+		}
+		hash, err = fsm.Get(tx, []byte("system"), []byte("timeline_hash"))
+		return err
+	})
+	return index, hash, err
+}
+
+// GetTimelineAt returns the state hash at a specific Raft index if it is in the history.
+func (fsm *MetadataFSM) GetTimelineAt(index uint64) ([]byte, bool) {
+	if fsm.timelineHistory == nil {
+		return nil, false
+	}
+	return fsm.timelineHistory.Get(index)
 }
 
 func generateID32() uint32 {

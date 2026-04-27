@@ -24,7 +24,7 @@ echo "Joining nodes to cluster via Admin CLI..."
 COUNT=0
 while true; do
   echo "DEBUG: Joining node-2..."
-  if distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" admin-join "https://storage-node-2:9090"; then
+  if distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" admin-join "https://storage-node-2:9090"; then
     echo "node-2 joined"
     break
   fi
@@ -37,7 +37,7 @@ done
 COUNT=0
 while true; do
   echo "DEBUG: Joining node-3..."
-  if distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" admin-join "https://storage-node-3:9090"; then
+  if distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" admin-join "https://storage-node-3:9090"; then
     echo "node-3 joined"
     break
   fi
@@ -50,18 +50,24 @@ done
 echo "Waiting for cluster stability..."
 sleep 5
 
+echo "Anchoring cluster topology in /registry..."
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" registry-update-cluster
+
 echo "Creating directory..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" mkdir /testdir || echo "testdir already exists"
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" mkdir /testdir || echo "testdir already exists"
 
 echo "Uploading file..."
 echo "hello from e2e test" > /tmp/hello.txt
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" put /tmp/hello.txt /testdir/world.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" put /tmp/hello.txt /testdir/world.txt
 
 echo "Listing directory..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" ls /testdir
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" ls /testdir
+
+echo "Verifying timeline consistency across nodes..."
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" verify-timeline
 
 echo "Downloading file..."
-distfs --disable-doh --allow-insecure --use-pinentry=false --config "$DISTFS_CONFIG_DIR/config.json" get /testdir/world.txt /tmp/hello-back.txt
+distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --timeline-sample-rate=1.0 --config "$DISTFS_CONFIG_DIR/config.json" get /testdir/world.txt /tmp/hello-back.txt
 
 echo "Verifying content..."
 if grep -q "hello from e2e test" /tmp/hello-back.txt; then

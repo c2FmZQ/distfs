@@ -81,6 +81,7 @@ func main() {
 			&cli.BoolFlag{Name: "qr", Value: false, Usage: "Show a QR code of the verification URL"},
 			&cli.StringFlag{Name: "browser", Value: os.Getenv("BROWSER"), Usage: "The command to use to open the verification URL"},
 			&cli.StringFlag{Name: "root-id", Value: "", Usage: "Root inode ID to mount (chroot)"},
+			&cli.FloatFlag{Name: "timeline-sample-rate", Value: 0.01, Usage: "Probability (0.0-1.0) of performing background timeline consistency checks"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			mountpoint := cmd.String("mount")
@@ -98,6 +99,7 @@ func main() {
 			qrCode := cmd.Bool("qr")
 			browser := cmd.String("browser")
 			rootID := cmd.String("root-id")
+			timelineSampleRate := cmd.Float("timeline-sample-rate")
 
 			startPprofServer()
 
@@ -133,7 +135,7 @@ func main() {
 			if err != nil {
 				return err
 			}
-			c := loadClient(conf, rootID, disableDoH)
+			c := loadClient(conf, rootID, disableDoH, timelineSampleRate)
 
 			conn, err := fuse.Mount(
 				mountpoint,
@@ -175,9 +177,10 @@ func main() {
 	}
 }
 
-func loadClient(conf *config.Config, rootID string, disableDoH bool) *client.Client {
+func loadClient(conf *config.Config, rootID string, disableDoH bool, timelineSampleRate float64) *client.Client {
 	c := client.NewClient(conf.ServerURL).
-		WithDisableDoH(disableDoH)
+		WithDisableDoH(disableDoH).
+		WithTimelineSampleRate(timelineSampleRate)
 
 	// Phase 74: Initialize Universal Caching
 	cacheDir := conf.CacheDir

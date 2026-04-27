@@ -3,7 +3,7 @@ set -e
 export DISTFS_PASSWORD=testpassword
 export DISTFS_CONFIG_DIR="/tmp"
 # Use the provisioned fuse-user config
-CLI="distfs --disable-doh --allow-insecure --use-pinentry=false --config /tmp/fuse-user-config.json"
+CLI="distfs --disable-doh --allow-insecure --use-pinentry=false --timeline-sample-rate=1.0 --config /tmp/fuse-user-config.json"
 
 echo "Running FileUtils E2E..."
 
