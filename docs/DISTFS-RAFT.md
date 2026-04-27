@@ -134,8 +134,8 @@ While standard group membership is pseudonymized via $R = HMAC(GroupID, UserID)$
 
 **Proof Sketch:**
 To prevent a malicious leader from presenting a fabricated, isolated timeline (Equivocation/Split-View Attack), the system relies on **Response Binding** and **Byzantine-Resistant Auditing**.
-1.  **The Running Hash:** Every node in the Raft cluster maintains a continuous, cryptographically verifiable `ClusterStateHash` ($H_n = SHA256(H_{n-1} || Mutation_n)$).
-2.  **Response Binding:** Every metadata response $R$ is cryptographically bound to the current timeline: $Sig_{cluster}(Hash(R) || Index || ClusterStateHash)$. The Leader cannot serve data without "signing onto" a specific cluster state.
+1.  **The Running Hash:** Every node in the Raft cluster maintains a continuous, cryptographically verifiable `ClusterStateHash` ($H_n = SHA256(H_{n-1} || Index_n || Mutation_n)$).
+2.  **Response Binding:** Every metadata response $R$ is cryptographically bound to the current timeline: $Sig_{cluster}(Hash(R_{sealed} || Index_n || H_n))$. The Leader cannot serve data without "signing onto" a specific cluster state.
 3.  **Anchored Discovery:** Clients retrieve the cluster topology from the cryptographically secured `/registry/cluster.json`, ensuring the list of verifiers (Followers) is trusted and cannot be manipulated by the Leader.
 4.  **Auditing:** Clients probabilistically (or on-demand) present these signed response receipts to a randomly selected Follower node via the `/v1/timeline` (POST) endpoint.
 5.  **Deterministic Verification:** Because the Raft FSM is strictly deterministic, any honest Follower can verify the Leader's signature on the receipt and check if the reported `ClusterStateHash` matches its own history at that `Index`. 
