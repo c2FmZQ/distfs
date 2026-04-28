@@ -173,6 +173,7 @@ type UserUsage struct {
 	InodeCount   int64 `json:"inodes"`
 	TotalBytes   int64 `json:"bytes"`
 	PendingBytes int64 `json:"pending_bytes"` // Uncommitted but authorized chunk uploads
+	ActiveLeases int   `json:"active_leases"` // Current number of active leases (Phase 75)
 }
 
 // UserQuota defines the resource limits for a user.
@@ -1170,7 +1171,7 @@ const (
 	CmdAdminSetUserLock    CommandType = 24
 	CmdRemoveChunkReplica  CommandType = 25
 	CmdReservePendingBytes CommandType = 26
-	CmdReconcilePending    CommandType = 28
+	CmdReconcilePending    CommandType = 27
 )
 
 type LogCommand struct {

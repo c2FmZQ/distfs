@@ -747,8 +747,13 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 		return fmt.Errorf("inode size exceeds maximum allowed size")
 	}
 
-	if inode.Type == DirType && inode.Size > 0 {
-		return fmt.Errorf("directory size must be 0")
+	if inode.Type == DirType {
+		if inode.Size > 0 {
+			return fmt.Errorf("directory size must be 0")
+		}
+		if len(inode.Children) > MaxDirectoryChildren {
+			return fmt.Errorf("%w: directory exceeds maximum children limit", ErrStructuralInconsistency)
+		}
 	}
 
 	if inode.Type == FileType {
@@ -841,8 +846,13 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	var inode Inode
 	json.Unmarshal(plain, &inode)
 
-	if inode.Type == DirType && update.Size > 0 {
-		return fmt.Errorf("directory size must be 0")
+	if inode.Type == DirType {
+		if update.Size > 0 {
+			return fmt.Errorf("directory size must be 0")
+		}
+		if len(update.Children) > MaxDirectoryChildren {
+			return fmt.Errorf("%w: directory exceeds maximum children limit", ErrStructuralInconsistency)
+		}
 	}
 
 	if inode.Type == FileType {
@@ -1874,21 +1884,19 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 
 	now := time.Now().UnixNano()
 
-	// Phase 75: Limit concurrent active leases per user to prevent exhaustion DoS
-	activeLeasesCount := 0
+	// Phase 75: Limit concurrent active leases per user to prevent exhaustion DoS (O(1) Check)
+	var user *User
 	if req.UserID != "" {
-		ub := tx.Bucket([]byte("user_active_leases"))
-		if ub != nil {
-			c := ub.Cursor()
-			prefix := []byte(req.UserID + ":")
-			for k, _ := c.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = c.Next() {
-				// We still need to verify if it's expired or released
-				// Actually, we should clean up the index on release.
-				// For now, just counting the index entries is a good proxy.
-				activeLeasesCount++
-			}
+		plain, _ := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+		if plain != nil {
+			var u User
+			json.Unmarshal(plain, &u)
+			user = &u
 		}
-		if activeLeasesCount+len(req.InodeIDs) > 100 {
+	}
+
+	if user != nil {
+		if user.Usage.ActiveLeases+len(req.InodeIDs) > 100 {
 			return fmt.Errorf("%w: user lease limit exceeded (max 100 active leases)", ErrQuotaExceeded)
 		}
 	}
@@ -1983,8 +1991,15 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 		}
 		if req.UserID != "" {
 			indexKey := fmt.Sprintf("%s:%s:%s", req.UserID, id, nonce)
-			fsm.Put(tx, []byte("user_active_leases"), []byte(indexKey), []byte("1"))
+			expiryBuf := make([]byte, 8)
+			binary.BigEndian.PutUint64(expiryBuf, uint64(expiry))
+			fsm.Put(tx, []byte("user_active_leases"), []byte(indexKey), expiryBuf)
 		}
+	}
+	if user != nil {
+		user.Usage.ActiveLeases += len(req.InodeIDs)
+		userData, _ := json.Marshal(user)
+		fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 	}
 	return nil
 }
@@ -1997,7 +2012,18 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 		req.SessionID = sessionNonce
 	}
 
+	var user *User
+	if req.UserID != "" {
+		plain, _ := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+		if plain != nil {
+			var u User
+			json.Unmarshal(plain, &u)
+			user = &u
+		}
+	}
+
 	now := time.Now().UnixNano()
+	releasedCount := 0
 	for _, id := range req.InodeIDs {
 		nonce := req.Nonce
 		if nonce == "" {
@@ -2029,6 +2055,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 						indexKey := fmt.Sprintf("%s:%s:%s", req.UserID, id, nonce)
 						fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
 					}
+					releasedCount++
 				}
 			}
 			if isPath {
@@ -2054,6 +2081,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 						indexKey := fmt.Sprintf("%s:%s:%s", req.UserID, id, nonce)
 						fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
 					}
+					releasedCount++
 					if inode.Unlinked {
 						active := false
 						for _, l := range inode.Leases {
@@ -2071,6 +2099,14 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 				}
 			}
 		}
+	}
+	if user != nil && releasedCount > 0 {
+		user.Usage.ActiveLeases -= releasedCount
+		if user.Usage.ActiveLeases < 0 {
+			user.Usage.ActiveLeases = 0
+		}
+		userData, _ := json.Marshal(user)
+		fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 	}
 	return nil
 }
@@ -2728,6 +2764,46 @@ func (fsm *MetadataFSM) executeReconcilePending(tx *bolt.Tx) interface{} {
 
 	if len(toDelete) > 0 {
 		log.Printf("ACL: Reconciled %d expired quota reservations", len(toDelete))
+	}
+
+	// 2. Reconcile Expired Leases
+	lb := tx.Bucket([]byte("user_active_leases"))
+	if lb != nil {
+		c := lb.Cursor()
+		var expiredLeases []string
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			if len(v) != 8 {
+				expiredLeases = append(expiredLeases, string(k))
+				continue
+			}
+			expiry := int64(binary.BigEndian.Uint64(v))
+			if expiry < now {
+				expiredLeases = append(expiredLeases, string(k))
+
+				// Extract UserID
+				parts := strings.Split(string(k), ":")
+				if len(parts) > 0 {
+					uid := parts[0]
+					userPlain, _ := fsm.Get(tx, []byte("users"), []byte(uid))
+					if userPlain != nil {
+						var user User
+						json.Unmarshal(userPlain, &user)
+						user.Usage.ActiveLeases--
+						if user.Usage.ActiveLeases < 0 {
+							user.Usage.ActiveLeases = 0
+						}
+						userData, _ := json.Marshal(user)
+						fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
+					}
+				}
+			}
+		}
+		for _, k := range expiredLeases {
+			lb.Delete([]byte(k))
+		}
+		if len(expiredLeases) > 0 {
+			log.Printf("ACL: Reconciled %d expired leases", len(expiredLeases))
+		}
 	}
 
 	return nil

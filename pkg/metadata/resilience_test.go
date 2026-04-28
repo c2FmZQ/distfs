@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/crypto"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -81,10 +82,57 @@ func TestMaxDirectoryChildren(t *testing.T) {
 	fsm, _ := NewMetadataFSM("n1", tmpDir+"/db", []byte("secret"))
 	defer fsm.Close()
 
-	// Use a small limit for testing if possible, but we hardcoded 100k.
-	// I'll temporarily override it or just test that it blocks when reached.
-	// Since it's a constant, I'll trust the logic if I can't easily change it.
-	// Wait, I can't change a constant. I'll just check if the logic is there.
+	userID := "owner"
+	sk, _ := crypto.GenerateIdentityKey()
+
+	// Register user
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		user := User{ID: userID, SignKey: sk.Public()}
+		data, _ := json.Marshal(user)
+		return fsm.Put(tx, []byte("users"), []byte(userID), data)
+	})
+
+	// 1. Create a directory with MaxDirectoryChildren entries.
+	dirID := "00000000000000000000000000000001"
+	children := make(map[string]ChildEntry)
+	for i := 0; i < MaxDirectoryChildren; i++ {
+		name := fmt.Sprintf("file-%d", i)
+		children[name] = ChildEntry{ID: fmt.Sprintf("%032x", i+100)}
+	}
+
+	dir := Inode{
+		ID:       dirID,
+		Type:     DirType,
+		Children: children,
+		NLink:    1,
+		IsRoot:   true,
+		OwnerID:  userID,
+		Version:  1,
+	}
+	dir.SignInodeForTest(userID, sk)
+
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		data, _ := json.Marshal(dir)
+		return fsm.Put(tx, []byte("inodes"), []byte(dirID), data)
+	})
+
+	// 2. Attempt to add one more child via executeUpdateInode
+	dir.Children["one-too-many"] = ChildEntry{ID: "0000000000000000000000000000ffff"}
+	dir.Version = 2
+	dir.SignInodeForTest(userID, sk)
+	data, _ := json.Marshal(dir)
+
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		res := fsm.executeUpdateInode(tx, data, userID, "sess1", nil)
+		if err, ok := res.(error); ok && err != nil {
+			if !errors.Is(err, ErrStructuralInconsistency) {
+				t.Errorf("expected ErrStructuralInconsistency, got %v", err)
+			}
+		} else {
+			t.Errorf("expected update to fail due to MaxDirectoryChildren limit")
+		}
+		return nil
+	})
 }
 
 func TestPendingBytesReservation(t *testing.T) {
@@ -209,13 +257,21 @@ func TestLeaseLimits(t *testing.T) {
 	fsm, _ := NewMetadataFSM("n1", tmpDir+"/db", []byte("secret"))
 	defer fsm.Close()
 
+	userID := "u1"
+	// Register User
+	fsm.db.Update(func(tx *bolt.Tx) error {
+		user := User{ID: userID}
+		data, _ := json.Marshal(user)
+		return fsm.Put(tx, []byte("users"), []byte(userID), data)
+	})
+
 	// 1. Pre-create 110 inodes
 	fsm.db.Update(func(tx *bolt.Tx) error {
 		for i := 0; i < 110; i++ {
 			id := fmt.Sprintf("%032x", i)
 			inode := Inode{
 				ID:      id,
-				OwnerID: "u1",
+				OwnerID: userID,
 				Mode:    0644,
 				Type:    FileType,
 			}
@@ -232,7 +288,7 @@ func TestLeaseLimits(t *testing.T) {
 			InodeIDs:  []string{id},
 			SessionID: "sess1",
 			Duration:  int64(1 * time.Minute),
-			UserID:    "u1",
+			UserID:    userID,
 		}
 		data, _ := json.Marshal(req)
 		fsm.db.Update(func(tx *bolt.Tx) error {
@@ -250,7 +306,7 @@ func TestLeaseLimits(t *testing.T) {
 		InodeIDs:  []string{id101},
 		SessionID: "sess1",
 		Duration:  int64(1 * time.Minute),
-		UserID:    "u1",
+		UserID:    userID,
 	}
 	data, _ := json.Marshal(req)
 	fsm.db.Update(func(tx *bolt.Tx) error {
@@ -271,7 +327,7 @@ func TestLeaseLimits(t *testing.T) {
 		InodeIDs:  []string{idLong},
 		SessionID: "sess2",
 		Duration:  int64(10 * time.Minute), // Over 5 min limit
-		UserID:    "u1",
+		UserID:    userID,
 	}
 	dataLong, _ := json.Marshal(reqLong)
 	fsm.db.Update(func(tx *bolt.Tx) error {
