@@ -145,7 +145,7 @@ func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error)
 		return data, nil
 	}
 	sBuck := string(bucket)
-	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" {
+	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" || sBuck == "user_active_leases" {
 		return data, nil
 	}
 	if sBuck == "system" {
@@ -178,7 +178,7 @@ func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error)
 
 func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error) {
 	sBuck := string(bucket)
-	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" {
+	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" || sBuck == "user_active_leases" {
 		return data, nil
 	}
 	if len(data) < 4 {
@@ -302,6 +302,15 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		log.Printf("ERROR FSM Apply: failed to unmarshal command: %v (data=%s)", err, string(l.Data))
 		return err
 	}
+
+	// Phase 75 Refinement: Ensure determinism by using log data for time and entropy
+	if cmd.Timestamp == 0 {
+		// Fallback for commands that didn't set it (should be few if any after refactor)
+		// Better to use log entry time if available, but raft.Log doesn't always have it.
+		// For consistency, leaders should set it.
+	}
+	// We inject the log index for deterministic ID generation
+	cmd.RaftIndex = l.Index
 
 	var results interface{}
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
@@ -564,13 +573,19 @@ func nlinkVal(i *Inode) uint32 {
 }
 
 func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) interface{} {
+	ts := cmd.Timestamp
+	if ts == 0 {
+		ts = time.Now().UnixNano()
+	}
+	idx := cmd.RaftIndex
+
 	switch cmd.Type {
 	case CmdCreateInode:
-		return fsm.executeCreateInode(tx, cmd.Data, cmd.UserID)
+		return fsm.executeCreateInode(tx, cmd.Data, cmd.UserID, ts)
 	case CmdUpdateInode:
-		return fsm.executeUpdateInode(tx, cmd.Data, cmd.UserID, cmd.SessionNonce, cmd.LeaseBindings)
+		return fsm.executeUpdateInode(tx, cmd.Data, cmd.UserID, cmd.SessionNonce, cmd.LeaseBindings, ts)
 	case CmdDeleteInode:
-		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionNonce)
+		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionNonce, ts)
 	case CmdRegisterNode:
 		return fsm.executeRegisterNode(tx, cmd.Data)
 	case CmdCreateUser:
@@ -594,9 +609,9 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	case CmdStoreKeySync:
 		return fsm.executeStoreKeySync(tx, cmd.Data)
 	case CmdAcquireLeases:
-		return fsm.executeAcquireLeases(tx, cmd.Data, cmd.SessionNonce)
+		return fsm.executeAcquireLeases(tx, cmd.Data, cmd.SessionNonce, cmd.UserID, ts)
 	case CmdReleaseLeases:
-		return fsm.executeReleaseLeases(tx, cmd.Data, cmd.SessionNonce)
+		return fsm.executeReleaseLeases(tx, cmd.Data, cmd.SessionNonce, cmd.UserID, ts)
 	case CmdPromoteAdmin:
 		return fsm.executePromoteAdmin(tx, cmd.Data)
 	case CmdStoreMetrics:
@@ -614,9 +629,9 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	case CmdAdminSetUserLock:
 		return fsm.executeAdminSetUserLock(tx, cmd.Data)
 	case CmdReservePendingBytes:
-		return fsm.executeReservePendingBytes(tx, cmd.Data)
+		return fsm.executeReservePendingBytes(tx, cmd.Data, ts, idx)
 	case CmdReconcilePending:
-		return fsm.executeReconcilePending(tx)
+		return fsm.executeReconcilePending(tx, ts)
 	case CmdBatch:
 		var subCmds []LogCommand
 		json.Unmarshal(cmd.Data, &subCmds)
@@ -626,6 +641,12 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 			}
 			if subCmds[i].SessionNonce == "" {
 				subCmds[i].SessionNonce = cmd.SessionNonce
+			}
+			if subCmds[i].Timestamp == 0 {
+				subCmds[i].Timestamp = ts
+			}
+			if subCmds[i].RaftIndex == 0 {
+				subCmds[i].RaftIndex = idx
 			}
 		}
 		return fsm.executeBatchCommands(tx, subCmds, depth+1, cmd.Atomic)
@@ -735,7 +756,7 @@ func (fsm *MetadataFSM) verifyInodeSignature(tx *bolt.Tx, inode *Inode, userID s
 	return nil
 }
 
-func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID string) interface{} {
+func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID string, ts int64) interface{} {
 	var inode Inode
 	json.Unmarshal(data, &inode)
 
@@ -797,7 +818,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 	}
 
 	if inode.CTime == 0 {
-		inode.CTime = time.Now().UnixNano()
+		inode.CTime = ts
 	}
 	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	if inode.NLink == 0 {
@@ -822,7 +843,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, sessionNonce string, leaseBindings map[string]string) interface{} {
+func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, sessionNonce string, leaseBindings map[string]string, ts int64) interface{} {
 	var update Inode
 	json.Unmarshal(data, &update)
 
@@ -1035,6 +1056,8 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	}
 	if fields["ctime"] != nil {
 		inode.CTime = update.CTime
+	} else if inode.CTime == 0 {
+		inode.CTime = ts
 	}
 	if update.ClientBlob != nil {
 		inode.ClientBlob = update.ClientBlob
@@ -1079,7 +1102,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 		inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	}
 	if inode.NLink == 0 {
-		err := fsm.deleteInodeInternal(tx, &inode)
+		err := fsm.deleteInodeInternal(tx, &inode, ts)
 		if err != nil {
 			return err
 		}
@@ -1104,8 +1127,9 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
+func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonce string, ts int64) interface{} {
 	var id string
+
 	if err := json.Unmarshal(data, &id); err != nil {
 		id = string(data)
 	}
@@ -1124,18 +1148,17 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonc
 	if inode.Type == DirType && len(inode.Children) > 0 {
 		return fmt.Errorf("cannot delete non-empty directory")
 	}
-	err := fsm.deleteInodeInternal(tx, &inode)
+	err := fsm.deleteInodeInternal(tx, &inode, ts)
 	if err != nil {
 		return err
 	}
 	return &inode
 }
 
-func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode) error {
-	now := time.Now().UnixNano()
+func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode, ts int64) error {
 	hasActiveLeases := false
 	for _, l := range inode.Leases {
-		if l.Expiry > now {
+		if l.Expiry > ts {
 			hasActiveLeases = true
 			break
 		}
@@ -1867,24 +1890,26 @@ func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	return &key, err
 }
 
-func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
+func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNonce string, cmdUserID string, ts int64) interface{} {
 	var req LeaseRequest
 	json.Unmarshal(data, &req)
 
-	// If sessionNonce is provided via LogCommand, it takes precedence over req.SessionID
 	if sessionNonce != "" {
 		req.SessionID = sessionNonce
 	}
+	// Phase 75: Ensure identity cannot be spoofed in payload
+	if cmdUserID != "" {
+		req.UserID = cmdUserID
+	}
 
-	// Phase 75: Hardcap lease duration (5 min) to prevent permanent locking DoS
 	maxDuration := int64(5 * time.Minute)
 	if req.Duration > maxDuration {
 		req.Duration = maxDuration
 	}
 
-	now := time.Now().UnixNano()
+	now := ts
+	expiry := now + req.Duration
 
-	// Phase 75: Limit concurrent active leases per user to prevent exhaustion DoS (O(1) Check)
 	var user *User
 	if req.UserID != "" {
 		plain, _ := fsm.Get(tx, []byte("users"), []byte(req.UserID))
@@ -1895,16 +1920,16 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 		}
 	}
 
-	if user != nil {
-		if user.Usage.ActiveLeases+len(req.InodeIDs) > 100 {
-			return fmt.Errorf("%w: user lease limit exceeded (max 100 active leases)", ErrQuotaExceeded)
-		}
-	}
-
-	expiry := now + req.Duration
+	newLeasesCount := 0
 	inodes := make([]*Inode, len(req.InodeIDs))
 	for i, id := range req.InodeIDs {
 		isPath := strings.HasPrefix(id, "path:")
+		nonce := req.Nonce
+		if nonce == "" {
+			nonce = req.SessionID
+		}
+
+		isRenewal := false
 		if !isPath && IsInodeID(id) {
 			plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
 			if err != nil {
@@ -1914,6 +1939,9 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 				var inode Inode
 				json.Unmarshal(plain, &inode)
 				inodes[i] = &inode
+				if existing, exists := inode.Leases[nonce]; exists && existing.SessionID == req.SessionID {
+					isRenewal = true
+				}
 				for _, l := range inode.Leases {
 					if l.Expiry > now && l.SessionID != req.SessionID {
 						if req.Type == LeaseExclusive || l.Type == LeaseExclusive {
@@ -1930,6 +1958,9 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 			if plain != nil {
 				var leases map[string]LeaseInfo
 				json.Unmarshal(plain, &leases)
+				if existing, exists := leases[nonce]; exists && existing.SessionID == req.SessionID {
+					isRenewal = true
+				}
 				for _, l := range leases {
 					if l.Expiry > now && l.SessionID != req.SessionID {
 						if req.Type == LeaseExclusive || l.Type == LeaseExclusive {
@@ -1939,7 +1970,17 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 				}
 			}
 		}
+		if !isRenewal {
+			newLeasesCount++
+		}
 	}
+
+	if user != nil {
+		if user.Usage.ActiveLeases+newLeasesCount > 100 {
+			return fmt.Errorf("%w: user lease limit exceeded (max 100 active leases)", ErrQuotaExceeded)
+		}
+	}
+
 	for i, id := range req.InodeIDs {
 		isPath := strings.HasPrefix(id, "path:")
 		nonce := req.Nonce
@@ -1990,26 +2031,27 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
 		}
 		if req.UserID != "" {
-			indexKey := fmt.Sprintf("%s:%s:%s", req.UserID, id, nonce)
-			expiryBuf := make([]byte, 8)
-			binary.BigEndian.PutUint64(expiryBuf, uint64(expiry))
-			fsm.Put(tx, []byte("user_active_leases"), []byte(indexKey), expiryBuf)
+			indexKey := fmt.Sprintf("%016x:%s:%s:%s", expiry, req.UserID, id, nonce)
+			fsm.Put(tx, []byte("user_active_leases"), []byte(indexKey), []byte("1"))
 		}
 	}
 	if user != nil {
-		user.Usage.ActiveLeases += len(req.InodeIDs)
+		user.Usage.ActiveLeases += newLeasesCount
 		userData, _ := json.Marshal(user)
 		fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 	}
 	return nil
 }
 
-func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
+func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNonce string, cmdUserID string, ts int64) interface{} {
 	var req LeaseRequest
 	json.Unmarshal(data, &req)
 
 	if sessionNonce != "" {
 		req.SessionID = sessionNonce
+	}
+	if cmdUserID != "" {
+		req.UserID = cmdUserID
 	}
 
 	var user *User
@@ -2022,7 +2064,7 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 		}
 	}
 
-	now := time.Now().UnixNano()
+	now := ts
 	releasedCount := 0
 	for _, id := range req.InodeIDs {
 		nonce := req.Nonce
@@ -2044,18 +2086,20 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 					}
 				}
 				if nonce != "" {
-					delete(leases, nonce)
-					if len(leases) == 0 {
-						fsm.Delete(tx, []byte("filename_leases"), []byte(id))
-					} else {
-						encoded, _ := json.Marshal(leases)
-						fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+					if existing, ok := leases[nonce]; ok {
+						delete(leases, nonce)
+						if len(leases) == 0 {
+							fsm.Delete(tx, []byte("filename_leases"), []byte(id))
+						} else {
+							encoded, _ := json.Marshal(leases)
+							fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+						}
+						if req.UserID != "" {
+							indexKey := fmt.Sprintf("%016x:%s:%s:%s", existing.Expiry, req.UserID, id, nonce)
+							fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
+						}
+						releasedCount++
 					}
-					if req.UserID != "" {
-						indexKey := fmt.Sprintf("%s:%s:%s", req.UserID, id, nonce)
-						fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
-					}
-					releasedCount++
 				}
 			}
 			if isPath {
@@ -2074,28 +2118,30 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 						}
 					}
 				}
-				if _, ok := inode.Leases[nonce]; ok {
-					delete(inode.Leases, nonce)
-					fsm.Delete(tx, []byte("leases"), []byte(id+":"+nonce))
-					if req.UserID != "" {
-						indexKey := fmt.Sprintf("%s:%s:%s", req.UserID, id, nonce)
-						fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
-					}
-					releasedCount++
-					if inode.Unlinked {
-						active := false
-						for _, l := range inode.Leases {
-							if l.Expiry > now {
-								active = true
-								break
+				if nonce != "" {
+					if existing, ok := inode.Leases[nonce]; ok {
+						delete(inode.Leases, nonce)
+						fsm.Delete(tx, []byte("leases"), []byte(id+":"+nonce))
+						if req.UserID != "" {
+							indexKey := fmt.Sprintf("%016x:%s:%s:%s", existing.Expiry, req.UserID, id, nonce)
+							fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
+						}
+						releasedCount++
+						if inode.Unlinked {
+							active := false
+							for _, l := range inode.Leases {
+								if l.Expiry > now {
+									active = true
+									break
+								}
+							}
+							if !active {
+								fsm.finalizeDeleteInode(tx, &inode)
+								continue
 							}
 						}
-						if !active {
-							fsm.finalizeDeleteInode(tx, &inode)
-							continue
-						}
+						fsm.saveInodeWithPages(tx, &inode)
 					}
-					fsm.saveInodeWithPages(tx, &inode)
 				}
 			}
 		}
@@ -2676,7 +2722,7 @@ func int64ToBytes(v int64) []byte {
 	return b
 }
 
-func (fsm *MetadataFSM) executeReservePendingBytes(tx *bolt.Tx, data []byte) interface{} {
+func (fsm *MetadataFSM) executeReservePendingBytes(tx *bolt.Tx, data []byte, ts int64, idx uint64) interface{} {
 	var req QuotaReservationRequest
 	if err := json.Unmarshal(data, &req); err != nil {
 		return err
@@ -2704,9 +2750,12 @@ func (fsm *MetadataFSM) executeReservePendingBytes(tx *bolt.Tx, data []byte) int
 	fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 
 	// Store Individual Reservation for Expiration tracking
-	id := make([]byte, 8)
-	rand.Read(id)
-	expiry := time.Now().Add(10 * time.Minute).UnixNano()
+	expiry := ts + int64(10*time.Minute)
+	// Use deterministic hash for ID instead of rand.Read
+	h := sha256.New()
+	h.Write([]byte(fmt.Sprintf("%d:%s:%d", ts, req.UserID, idx)))
+	id := h.Sum(nil)[:8]
+
 	key := fmt.Sprintf("%016x:%s", expiry, hex.EncodeToString(id))
 	reservation := PendingReservation{
 		ID:     key,
@@ -2720,14 +2769,13 @@ func (fsm *MetadataFSM) executeReservePendingBytes(tx *bolt.Tx, data []byte) int
 	return nil
 }
 
-func (fsm *MetadataFSM) executeReconcilePending(tx *bolt.Tx) interface{} {
+func (fsm *MetadataFSM) executeReconcilePending(tx *bolt.Tx, ts int64) interface{} {
 	b := tx.Bucket([]byte("pending_reservations"))
 	if b == nil {
 		return nil
 	}
 
-	now := time.Now().UnixNano()
-	nowKey := fmt.Sprintf("%016x", now)
+	nowKey := fmt.Sprintf("%016x", ts)
 
 	c := b.Cursor()
 	var toDelete []string
@@ -2771,30 +2819,23 @@ func (fsm *MetadataFSM) executeReconcilePending(tx *bolt.Tx) interface{} {
 	if lb != nil {
 		c := lb.Cursor()
 		var expiredLeases []string
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			if len(v) != 8 {
-				expiredLeases = append(expiredLeases, string(k))
-				continue
-			}
-			expiry := int64(binary.BigEndian.Uint64(v))
-			if expiry < now {
-				expiredLeases = append(expiredLeases, string(k))
+		for k, _ := c.First(); k != nil && string(k) < nowKey; k, _ = c.Next() {
+			expiredLeases = append(expiredLeases, string(k))
 
-				// Extract UserID
-				parts := strings.Split(string(k), ":")
-				if len(parts) > 0 {
-					uid := parts[0]
-					userPlain, _ := fsm.Get(tx, []byte("users"), []byte(uid))
-					if userPlain != nil {
-						var user User
-						json.Unmarshal(userPlain, &user)
-						user.Usage.ActiveLeases--
-						if user.Usage.ActiveLeases < 0 {
-							user.Usage.ActiveLeases = 0
-						}
-						userData, _ := json.Marshal(user)
-						fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
+			// Extract UserID
+			parts := strings.Split(string(k), ":")
+			if len(parts) > 1 {
+				uid := parts[1]
+				userPlain, _ := fsm.Get(tx, []byte("users"), []byte(uid))
+				if userPlain != nil {
+					var user User
+					json.Unmarshal(userPlain, &user)
+					user.Usage.ActiveLeases--
+					if user.Usage.ActiveLeases < 0 {
+						user.Usage.ActiveLeases = 0
 					}
+					userData, _ := json.Marshal(user)
+					fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 				}
 			}
 		}

@@ -439,7 +439,7 @@ func TestFSMRestore(t *testing.T) {
 	inode.SignInodeForTest("u1", sk)
 	data, _ := json.Marshal(inode)
 	err = fsm.db.Update(func(tx *bolt.Tx) error {
-		resp := fsm.executeCreateInode(tx, data, "u1")
+		resp := fsm.executeCreateInode(tx, data, "u1", time.Now().UnixNano())
 		if err, ok := resp.(error); ok {
 			return err
 		}

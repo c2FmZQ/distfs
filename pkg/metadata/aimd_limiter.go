@@ -53,6 +53,14 @@ func NewConcurrencyLimiter(min, max int32, target time.Duration) *ConcurrencyLim
 func (l *ConcurrencyLimiter) Wrap(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		limit := atomic.LoadInt32(&l.currentLimit)
+
+		// Optimization: Check limit before incrementing (best effort)
+		if atomic.LoadInt32(&l.inFlight) >= limit {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte("Too Many Requests: Adaptive Concurrency Limit Exceeded\n"))
+			return
+		}
+
 		inFlight := atomic.AddInt32(&l.inFlight, 1)
 		defer atomic.AddInt32(&l.inFlight, -1)
 

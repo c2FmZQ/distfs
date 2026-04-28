@@ -48,12 +48,12 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 		}
 		p.SignInodeForTest("u1", sk)
 		pb, _ := json.Marshal(p)
-		fsm.executeCreateInode(tx, pb, "u1")
+		fsm.executeCreateInode(tx, pb, "u1", time.Now().UnixNano())
 
 		c := Inode{ID: childID, Type: FileType, Version: 1, OwnerID: "u1", NLink: 1}
 		c.SignInodeForTest("u1", sk)
 		cb, _ := json.Marshal(c)
-		fsm.executeCreateInode(tx, cb, "u1")
+		fsm.executeCreateInode(tx, cb, "u1", time.Now().UnixNano())
 		return nil
 	})
 	if err != nil {
@@ -72,7 +72,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 			}
 			update.SignInodeForTest("u1", sk)
 			data, _ := json.Marshal(update)
-			res := fsm.executeUpdateInode(tx, data, "u1", "session1", nil)
+			res := fsm.executeUpdateInode(tx, data, "u1", "session1", nil, time.Now().UnixNano())
 			if err, ok := res.(error); !ok || err == nil {
 				return fmt.Errorf("expected error for missing path lease, got %v", res)
 			}
@@ -94,7 +94,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:      LeaseExclusive,
 			}
 			lb, _ := json.Marshal(lReq)
-			resL := fsm.executeAcquireLeases(tx, lb, "session2")
+			resL := fsm.executeAcquireLeases(tx, lb, "session2", "u1", time.Now().UnixNano())
 			if err, ok := resL.(error); ok && err != nil {
 				return err
 			}
@@ -110,7 +110,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 			update.SignInodeForTest("u1", sk)
 			data, _ := json.Marshal(update)
 			bindings := map[string]string{nameHMAC: pathID}
-			res := fsm.executeUpdateInode(tx, data, "u1", "session1", bindings)
+			res := fsm.executeUpdateInode(tx, data, "u1", "session1", bindings, time.Now().UnixNano())
 			if err, ok := res.(error); !ok || err == nil {
 				return fmt.Errorf("expected error for wrong session lease, got %v", res)
 			}
@@ -130,7 +130,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				SessionID: "session2",
 			}
 			relB, _ := json.Marshal(relReq)
-			fsm.executeReleaseLeases(tx, relB, "session2")
+			fsm.executeReleaseLeases(tx, relB, "session2", "u1", time.Now().UnixNano())
 
 			// Acquire lease for session1
 			lReq := LeaseRequest{
@@ -141,7 +141,7 @@ func TestFSM_ZKPathLeaseEnforcement(t *testing.T) {
 				Type:      LeaseExclusive,
 			}
 			lb, _ := json.Marshal(lReq)
-			fsm.executeAcquireLeases(tx, lb, "session1")
+			fsm.executeAcquireLeases(tx, lb, "session1", "u1", time.Now().UnixNano())
 
 			// Prepare Parent Update (adding child)
 			pUpdate := Inode{
@@ -246,7 +246,7 @@ func TestFSM_MultiInodeLeases(t *testing.T) {
 			inode := Inode{ID: id, Type: FileType, Version: 1, OwnerID: "u1", NLink: 1}
 			inode.SignInodeForTest("u1", sk)
 			ib, _ := json.Marshal(inode)
-			fsm.executeCreateInode(tx, ib, "u1")
+			fsm.executeCreateInode(tx, ib, "u1", time.Now().UnixNano())
 		}
 		return nil
 	})
@@ -265,7 +265,7 @@ func TestFSM_MultiInodeLeases(t *testing.T) {
 				Nonce:     "n1",
 			}
 			data, _ := json.Marshal(req)
-			res := fsm.executeAcquireLeases(tx, data, req.SessionID)
+			res := fsm.executeAcquireLeases(tx, data, req.SessionID, "u1", time.Now().UnixNano())
 			if err, ok := res.(error); ok && err != nil {
 				return err
 			}
@@ -297,7 +297,7 @@ func TestFSM_MultiInodeLeases(t *testing.T) {
 				Nonce:     "n2",
 			}
 			data, _ := json.Marshal(req)
-			res := fsm.executeAcquireLeases(tx, data, req.SessionID)
+			res := fsm.executeAcquireLeases(tx, data, req.SessionID, "u1", time.Now().UnixNano())
 			if err, ok := res.(error); !ok || err == nil {
 				return fmt.Errorf("expected conflict error, got %v", res)
 			}

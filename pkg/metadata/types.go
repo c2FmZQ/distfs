@@ -1181,6 +1181,8 @@ type LogCommand struct {
 	SessionNonce  string            `json:"sid,omitempty"`
 	LeaseBindings map[string]string `json:"lease_bindings,omitempty"` // nameHMAC -> pathID
 	Atomic        bool              `json:"atomic,omitempty"`         // Roll back entire transaction on any sub-command error
+	Timestamp     int64             `json:"ts,omitempty"`             // Deterministic time for FSM (Phase 75 Refinement)
+	RaftIndex     uint64            `json:"idx,omitempty"`            // Optional index for deterministic IDs
 }
 
 func (c LogCommand) Marshal() ([]byte, error) {

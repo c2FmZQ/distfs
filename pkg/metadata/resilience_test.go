@@ -123,7 +123,7 @@ func TestMaxDirectoryChildren(t *testing.T) {
 	data, _ := json.Marshal(dir)
 
 	fsm.db.Update(func(tx *bolt.Tx) error {
-		res := fsm.executeUpdateInode(tx, data, userID, "sess1", nil)
+		res := fsm.executeUpdateInode(tx, data, userID, "sess1", nil, time.Now().UnixNano())
 		if err, ok := res.(error); ok && err != nil {
 			if !errors.Is(err, ErrStructuralInconsistency) {
 				t.Errorf("expected ErrStructuralInconsistency, got %v", err)
@@ -156,7 +156,7 @@ func TestPendingBytesReservation(t *testing.T) {
 	req := QuotaReservationRequest{UserID: "u1", Bytes: 6 * 1024 * 1024}
 	data, _ := json.Marshal(req)
 	fsm.db.Update(func(tx *bolt.Tx) error {
-		res := fsm.executeReservePendingBytes(tx, data)
+		res := fsm.executeReservePendingBytes(tx, data, time.Now().UnixNano(), 0)
 		if err, ok := res.(error); ok && err != nil {
 			t.Fatalf("reserve failed: %v", err)
 		}
@@ -176,7 +176,7 @@ func TestPendingBytesReservation(t *testing.T) {
 
 	// 4. Try to reserve another 6MB -> should fail
 	fsm.db.Update(func(tx *bolt.Tx) error {
-		res := fsm.executeReservePendingBytes(tx, data)
+		res := fsm.executeReservePendingBytes(tx, data, time.Now().UnixNano(), 0)
 		if err, ok := res.(error); ok && err != nil {
 			if !errors.Is(err, ErrQuotaExceeded) {
 				t.Errorf("expected ErrQuotaExceeded, got %v", err)
@@ -234,7 +234,7 @@ func TestPendingBytesReservation(t *testing.T) {
 	})
 
 	fsm.db.Update(func(tx *bolt.Tx) error {
-		fsm.executeReconcilePending(tx)
+		fsm.executeReconcilePending(tx, time.Now().UnixNano())
 		return nil
 	})
 
@@ -292,7 +292,7 @@ func TestLeaseLimits(t *testing.T) {
 		}
 		data, _ := json.Marshal(req)
 		fsm.db.Update(func(tx *bolt.Tx) error {
-			res := fsm.executeAcquireLeases(tx, data, "sess1")
+			res := fsm.executeAcquireLeases(tx, data, "sess1", userID, time.Now().UnixNano())
 			if err, ok := res.(error); ok && err != nil {
 				t.Fatalf("failed to acquire lease %d: %v", i, err)
 			}
@@ -310,7 +310,7 @@ func TestLeaseLimits(t *testing.T) {
 	}
 	data, _ := json.Marshal(req)
 	fsm.db.Update(func(tx *bolt.Tx) error {
-		res := fsm.executeAcquireLeases(tx, data, "sess1")
+		res := fsm.executeAcquireLeases(tx, data, "sess1", userID, time.Now().UnixNano())
 		if err, ok := res.(error); ok && err != nil {
 			if !errors.Is(err, ErrQuotaExceeded) {
 				t.Errorf("expected ErrQuotaExceeded, got %v", err)
@@ -331,7 +331,7 @@ func TestLeaseLimits(t *testing.T) {
 	}
 	dataLong, _ := json.Marshal(reqLong)
 	fsm.db.Update(func(tx *bolt.Tx) error {
-		fsm.executeAcquireLeases(tx, dataLong, "sess2")
+		fsm.executeAcquireLeases(tx, dataLong, "sess2", userID, time.Now().UnixNano())
 		return nil
 	})
 
