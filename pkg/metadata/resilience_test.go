@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -64,12 +65,10 @@ func TestAIMDLimiter(t *testing.T) {
 		limiter.recordLatency(100 * time.Millisecond)
 	}
 	// Force adjustment by moving time forward or waiting
-	limiter.mu.Lock()
-	limiter.lastAdjusted = time.Now().Add(-2 * time.Second)
-	limiter.mu.Unlock()
+	atomic.StoreInt64(&limiter.lastAdjustedNanos, time.Now().Add(-2*time.Second).UnixNano())
 	limiter.recordLatency(100 * time.Millisecond)
 
-	newLimit := limiter.currentLimit
+	newLimit := atomic.LoadInt32(&limiter.currentLimit)
 	if newLimit >= 10 {
 		t.Errorf("expected limit to decrease, got %d", newLimit)
 	}

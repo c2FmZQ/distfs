@@ -134,6 +134,9 @@ const (
 	// MaxDirectoryChildren is the maximum number of children allowed in a single directory
 	// to prevent OOM/CPU DoS (Phase 75).
 	MaxDirectoryChildren = 100000
+
+	// MaxChunksPerPage is the maximum number of chunks stored in a single ChunkPage (Phase 75).
+	MaxChunksPerPage = 100
 	// InodeIDLength is the expected length of a hex-encoded Inode ID (16 random bytes).
 	InodeIDLength = 32
 )

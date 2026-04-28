@@ -7,6 +7,7 @@ package metadata
 import (
 	"log"
 	"net/http"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,26 +26,26 @@ type ConcurrencyLimiter struct {
 	decreaseFactor float64
 
 	// State
-	currentLimit int32
-	inFlight     int32
-	lastAdjusted time.Time
-	latencies    []time.Duration
-	latencyIndex int
-	windowSize   int
+	currentLimit      int32
+	inFlight          int32
+	lastAdjustedNanos int64
+	latencies         []time.Duration
+	latencyIndex      int
+	windowSize        int
 }
 
 // NewConcurrencyLimiter initializes a new AIMD limiter.
 func NewConcurrencyLimiter(min, max int32, target time.Duration) *ConcurrencyLimiter {
 	windowSize := 100
 	return &ConcurrencyLimiter{
-		minLimit:       min,
-		maxLimit:       max,
-		currentLimit:   max, // Start at max, let it degrade
-		latencyTarget:  target,
-		decreaseFactor: 0.5,
-		lastAdjusted:   time.Now(),
-		latencies:      make([]time.Duration, windowSize),
-		windowSize:     windowSize,
+		minLimit:          min,
+		maxLimit:          max,
+		currentLimit:      max, // Start at max, let it degrade
+		latencyTarget:     target,
+		decreaseFactor:    0.5,
+		lastAdjustedNanos: time.Now().UnixNano(),
+		latencies:         make([]time.Duration, windowSize),
+		windowSize:        windowSize,
 	}
 }
 
@@ -70,50 +71,63 @@ func (l *ConcurrencyLimiter) Wrap(next http.Handler) http.Handler {
 }
 
 func (l *ConcurrencyLimiter) recordLatency(d time.Duration) {
+	// Optimization: Check if we need to adjust before acquiring the lock
+	now := time.Now().UnixNano()
+	last := atomic.LoadInt64(&l.lastAdjustedNanos)
+	if now-last < int64(time.Second) {
+		// Just record latency if we're in the same window (best effort under lock)
+		l.mu.Lock()
+		l.latencies[l.latencyIndex] = d
+		l.latencyIndex = (l.latencyIndex + 1) % l.windowSize
+		l.mu.Unlock()
+		return
+	}
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	l.latencies[l.latencyIndex] = d
 	l.latencyIndex = (l.latencyIndex + 1) % l.windowSize
 
-	// Adjust every 1 second or every windowSize requests
-	if time.Since(l.lastAdjusted) < 1*time.Second {
+	// Re-check under lock
+	if now-l.lastAdjustedNanos < int64(time.Second) {
 		return
 	}
 
-	// Calculate P95 latency (simple version: average of recent for now, or sort window)
-	// For better P95, we should sort but for a small window average is a proxy or we can find max.
-	var max time.Duration
-	var count int
+	// Calculate P95 latency
+	var samples []time.Duration
 	for _, lat := range l.latencies {
 		if lat > 0 {
-			if lat > max {
-				max = lat
-			}
-			count++
+			samples = append(samples, lat)
 		}
 	}
 
-	if count < 10 {
+	if len(samples) < 10 {
 		return // Not enough data
 	}
 
-	oldLimit := l.currentLimit
-	if max > l.latencyTarget {
+	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+	p95 := samples[int(float64(len(samples))*0.95)]
+
+	oldLimit := atomic.LoadInt32(&l.currentLimit)
+	newLimit := oldLimit
+	if p95 > l.latencyTarget {
 		// Multiplicative Decrease
-		l.currentLimit = int32(float64(l.currentLimit) * l.decreaseFactor)
-		if l.currentLimit < l.minLimit {
-			l.currentLimit = l.minLimit
+		newLimit = int32(float64(oldLimit) * l.decreaseFactor)
+		if newLimit < l.minLimit {
+			newLimit = l.minLimit
 		}
 	} else {
 		// Additive Increase
-		if l.currentLimit < l.maxLimit {
-			l.currentLimit++
+		if oldLimit < l.maxLimit {
+			newLimit = oldLimit + 1
 		}
 	}
 
-	if oldLimit != l.currentLimit {
-		log.Printf("ACL: Latency observed=%v (Target=%v), adjusting concurrency limit: %d -> %d", max, l.latencyTarget, oldLimit, l.currentLimit)
+	if oldLimit != newLimit {
+		atomic.StoreInt32(&l.currentLimit, newLimit)
+		log.Printf("ACL: Latency P95=%v (Target=%v), adjusting concurrency limit: %d -> %d", p95, l.latencyTarget, oldLimit, newLimit)
 	}
-	l.lastAdjusted = time.Now()
+	atomic.StoreInt64(&l.lastAdjustedNanos, now)
 }
+
