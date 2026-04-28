@@ -130,4 +130,3 @@ func (l *ConcurrencyLimiter) recordLatency(d time.Duration) {
 	}
 	atomic.StoreInt64(&l.lastAdjustedNanos, now)
 }
-
