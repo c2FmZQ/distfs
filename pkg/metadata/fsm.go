@@ -2822,8 +2822,8 @@ func (fsm *MetadataFSM) executeReconcilePending(tx *bolt.Tx, ts int64) interface
 		for k, _ := c.First(); k != nil && string(k) < nowKey; k, _ = c.Next() {
 			expiredLeases = append(expiredLeases, string(k))
 
-			// Extract UserID
-			parts := strings.Split(string(k), ":")
+			// Extract UserID (Key format: Expiry:UserID:InodeID:Nonce)
+			parts := strings.SplitN(string(k), ":", 3)
 			if len(parts) > 1 {
 				uid := parts[1]
 				userPlain, _ := fsm.Get(tx, []byte("users"), []byte(uid))

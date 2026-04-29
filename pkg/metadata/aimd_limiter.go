@@ -103,7 +103,7 @@ func (l *ConcurrencyLimiter) recordLatency(d time.Duration) {
 	}
 
 	// Calculate P95 latency
-	var samples []time.Duration
+	samples := make([]time.Duration, 0, len(l.latencies))
 	for _, lat := range l.latencies {
 		if lat > 0 {
 			samples = append(samples, lat)
