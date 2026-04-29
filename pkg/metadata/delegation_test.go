@@ -74,6 +74,7 @@ func TestFSM_OwnerDelegationSig_Enforcement(t *testing.T) {
 	// This should FAIL now.
 	inode.Version = 2
 	inode.Size = 1024
+	inode.ChunkManifest = []ChunkEntry{{ID: "dummy-chunk-id"}}
 	inode.GroupSignerID = "g1"
 	inode.GroupSig = groupSK.Sign(inode.ManifestHash()) // Provide valid GroupSig
 	inode.SignInodeForTest("signer", signerSK)

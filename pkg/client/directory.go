@@ -1412,6 +1412,9 @@ func (c *Client) addEntryByPath(ctx context.Context, path string, iType metadata
 			if err != nil {
 				return err
 			}
+			if childInode.Type != metadata.FileType {
+				return metadata.ErrIsDirectory
+			}
 			_, err = c.updateInode(ctx, childInode.ID, func(inode *metadata.Inode) error {
 				// Upload new content
 				inlineData, chunks, err := c.uploadDataInternal(ctx, inode.ID, childKey, r, size)

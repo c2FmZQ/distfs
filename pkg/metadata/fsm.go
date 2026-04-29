@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -90,7 +91,7 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases", "pending_reservations", "user_active_leases"}
 		for _, b := range buckets {
 			tx.CreateBucketIfNotExists([]byte(b))
 		}
@@ -144,7 +145,7 @@ func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error)
 		return data, nil
 	}
 	sBuck := string(bucket)
-	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" {
+	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" || sBuck == "user_active_leases" {
 		return data, nil
 	}
 	if sBuck == "system" {
@@ -177,7 +178,7 @@ func (fsm *MetadataFSM) EncryptValue(bucket []byte, data []byte) ([]byte, error)
 
 func (fsm *MetadataFSM) DecryptValue(bucket []byte, data []byte) ([]byte, error) {
 	sBuck := string(bucket)
-	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" {
+	if sBuck == "admins" || sBuck == "gids" || sBuck == "users" || sBuck == "user_active_leases" {
 		return data, nil
 	}
 	if len(data) < 4 {
@@ -301,6 +302,15 @@ func (fsm *MetadataFSM) Apply(l *raft.Log) interface{} {
 		log.Printf("ERROR FSM Apply: failed to unmarshal command: %v (data=%s)", err, string(l.Data))
 		return err
 	}
+
+	// Phase 75 Refinement: Ensure determinism by using log data for time and entropy
+	if cmd.Timestamp == 0 {
+		// Fallback for commands that didn't set it (should be few if any after refactor)
+		// Better to use log entry time if available, but raft.Log doesn't always have it.
+		// For consistency, leaders should set it.
+	}
+	// We inject the log index for deterministic ID generation
+	cmd.RaftIndex = l.Index
 
 	var results interface{}
 	err := fsm.db.Update(func(tx *bolt.Tx) error {
@@ -444,6 +454,9 @@ func (fsm *MetadataFSM) validateStructuralConsistency(tx *bolt.Tx, modifiedIDs m
 		pre := preInodes[id]
 
 		if post.Type == DirType {
+			if len(post.Children) > MaxDirectoryChildren {
+				return fmt.Errorf("%w: directory %s exceeds maximum children limit (%d > %d)", ErrStructuralInconsistency, id, len(post.Children), MaxDirectoryChildren)
+			}
 			preChildren := make(map[string]ChildEntry)
 			if pre != nil && pre.Children != nil {
 				for k, v := range pre.Children {
@@ -560,13 +573,19 @@ func nlinkVal(i *Inode) uint32 {
 }
 
 func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) interface{} {
+	ts := cmd.Timestamp
+	if ts == 0 {
+		ts = time.Now().UnixNano()
+	}
+	idx := cmd.RaftIndex
+
 	switch cmd.Type {
 	case CmdCreateInode:
-		return fsm.executeCreateInode(tx, cmd.Data, cmd.UserID)
+		return fsm.executeCreateInode(tx, cmd.Data, cmd.UserID, ts)
 	case CmdUpdateInode:
-		return fsm.executeUpdateInode(tx, cmd.Data, cmd.UserID, cmd.SessionNonce, cmd.LeaseBindings)
+		return fsm.executeUpdateInode(tx, cmd.Data, cmd.UserID, cmd.SessionNonce, cmd.LeaseBindings, ts)
 	case CmdDeleteInode:
-		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionNonce)
+		return fsm.executeDeleteInode(tx, cmd.Data, cmd.SessionNonce, ts)
 	case CmdRegisterNode:
 		return fsm.executeRegisterNode(tx, cmd.Data)
 	case CmdCreateUser:
@@ -590,9 +609,9 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	case CmdStoreKeySync:
 		return fsm.executeStoreKeySync(tx, cmd.Data)
 	case CmdAcquireLeases:
-		return fsm.executeAcquireLeases(tx, cmd.Data, cmd.SessionNonce)
+		return fsm.executeAcquireLeases(tx, cmd.Data, cmd.SessionNonce, cmd.UserID, ts)
 	case CmdReleaseLeases:
-		return fsm.executeReleaseLeases(tx, cmd.Data, cmd.SessionNonce)
+		return fsm.executeReleaseLeases(tx, cmd.Data, cmd.SessionNonce, cmd.UserID, ts)
 	case CmdPromoteAdmin:
 		return fsm.executePromoteAdmin(tx, cmd.Data)
 	case CmdStoreMetrics:
@@ -609,6 +628,10 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 		return fsm.executeReencryptValue(tx, cmd.Data)
 	case CmdAdminSetUserLock:
 		return fsm.executeAdminSetUserLock(tx, cmd.Data)
+	case CmdReservePendingBytes:
+		return fsm.executeReservePendingBytes(tx, cmd.Data, ts, idx)
+	case CmdReconcilePending:
+		return fsm.executeReconcilePending(tx, ts)
 	case CmdBatch:
 		var subCmds []LogCommand
 		json.Unmarshal(cmd.Data, &subCmds)
@@ -618,6 +641,12 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 			}
 			if subCmds[i].SessionNonce == "" {
 				subCmds[i].SessionNonce = cmd.SessionNonce
+			}
+			if subCmds[i].Timestamp == 0 {
+				subCmds[i].Timestamp = ts
+			}
+			if subCmds[i].RaftIndex == 0 {
+				subCmds[i].RaftIndex = idx
 			}
 		}
 		return fsm.executeBatchCommands(tx, subCmds, depth+1, cmd.Atomic)
@@ -727,7 +756,7 @@ func (fsm *MetadataFSM) verifyInodeSignature(tx *bolt.Tx, inode *Inode, userID s
 	return nil
 }
 
-func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID string) interface{} {
+func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID string, ts int64) interface{} {
 	var inode Inode
 	json.Unmarshal(data, &inode)
 
@@ -735,9 +764,41 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 		return err
 	}
 
+	if inode.Size > math.MaxInt64 {
+		return fmt.Errorf("inode size exceeds maximum allowed size")
+	}
+
+	if inode.Type == DirType {
+		if inode.Size > 0 {
+			return fmt.Errorf("directory size must be 0")
+		}
+		if len(inode.Children) > MaxDirectoryChildren {
+			return fmt.Errorf("%w: directory exceeds maximum children limit", ErrStructuralInconsistency)
+		}
+	}
+
+	if inode.Type == FileType {
+		// Limit maximum size claim to prevent quota theft via inflation
+		maxPossibleSize := uint64(len(inode.ChunkManifest)) * crypto.ChunkSize
+		if len(inode.ChunkPages) > 0 {
+			maxPossibleSize += uint64(len(inode.ChunkPages)) * uint64(MaxChunksPerPage) * crypto.ChunkSize
+		}
+		// Allow small files that are likely inlined in ClientBlob
+		if inode.Size > maxPossibleSize && inode.Size > InlineLimit {
+			return fmt.Errorf("claimed size %d exceeds structural limits of chunk manifest (max %d)", inode.Size, maxPossibleSize)
+		}
+	}
+
 	// Phase 47: Admin creation bypass. Only admins can create inodes for other users.
 	if inode.OwnerID != userID && !fsm.IsAdmin(userID) {
 		return fmt.Errorf("user %s is not authorized to create inodes for %s", userID, inode.OwnerID)
+	}
+
+	if inode.GroupID != "" {
+		inGroup, err := fsm.IsUserInGroup(userID, inode.GroupID)
+		if err != nil || !inGroup {
+			return fmt.Errorf("%w: user %s is not authorized to assign files to group %s", ErrForbidden, userID, inode.GroupID)
+		}
 	}
 
 	// Phase 69: Enforce Root Integrity (including secondary roots)
@@ -757,7 +818,7 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 	}
 
 	if inode.CTime == 0 {
-		inode.CTime = time.Now().UnixNano()
+		inode.CTime = ts
 	}
 	inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	if inode.NLink == 0 {
@@ -782,12 +843,16 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, sessionNonce string, leaseBindings map[string]string) interface{} {
+func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, sessionNonce string, leaseBindings map[string]string, ts int64) interface{} {
 	var update Inode
 	json.Unmarshal(data, &update)
 
 	if err := fsm.verifyInodeSignature(tx, &update, userID); err != nil {
 		return err
+	}
+
+	if update.Size > math.MaxInt64 {
+		return fmt.Errorf("inode size exceeds maximum allowed size")
 	}
 
 	var fields map[string]json.RawMessage
@@ -801,6 +866,27 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	}
 	var inode Inode
 	json.Unmarshal(plain, &inode)
+
+	if inode.Type == DirType {
+		if update.Size > 0 {
+			return fmt.Errorf("directory size must be 0")
+		}
+		if len(update.Children) > MaxDirectoryChildren {
+			return fmt.Errorf("%w: directory exceeds maximum children limit", ErrStructuralInconsistency)
+		}
+	}
+
+	if inode.Type == FileType {
+		// Limit maximum size claim to prevent quota theft via inflation
+		maxPossibleSize := uint64(len(update.ChunkManifest)) * crypto.ChunkSize
+		if len(update.ChunkPages) > 0 {
+			maxPossibleSize += uint64(len(update.ChunkPages)) * uint64(MaxChunksPerPage) * crypto.ChunkSize
+		}
+		// Allow small files that are likely inlined in ClientBlob
+		if update.Size > maxPossibleSize && update.Size > InlineLimit {
+			return fmt.Errorf("claimed size %d exceeds structural limits of chunk manifest (max %d)", update.Size, maxPossibleSize)
+		}
+	}
 
 	if update.Version != inode.Version+1 {
 		fmt.Printf("FSM Conflict on inode %s: update.Version=%d, inode.Version=%d\n", update.ID, update.Version, inode.Version)
@@ -970,6 +1056,8 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	}
 	if fields["ctime"] != nil {
 		inode.CTime = update.CTime
+	} else if inode.CTime == 0 {
+		inode.CTime = ts
 	}
 	if update.ClientBlob != nil {
 		inode.ClientBlob = update.ClientBlob
@@ -1014,7 +1102,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 		inode.Mode = SanitizeMode(inode.Mode, inode.Type)
 	}
 	if inode.NLink == 0 {
-		err := fsm.deleteInodeInternal(tx, &inode)
+		err := fsm.deleteInodeInternal(tx, &inode, ts)
 		if err != nil {
 			return err
 		}
@@ -1039,8 +1127,9 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 	return &inode
 }
 
-func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
+func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonce string, ts int64) interface{} {
 	var id string
+
 	if err := json.Unmarshal(data, &id); err != nil {
 		id = string(data)
 	}
@@ -1059,18 +1148,17 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonc
 	if inode.Type == DirType && len(inode.Children) > 0 {
 		return fmt.Errorf("cannot delete non-empty directory")
 	}
-	err := fsm.deleteInodeInternal(tx, &inode)
+	err := fsm.deleteInodeInternal(tx, &inode, ts)
 	if err != nil {
 		return err
 	}
 	return &inode
 }
 
-func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode) error {
-	now := time.Now().UnixNano()
+func (fsm *MetadataFSM) deleteInodeInternal(tx *bolt.Tx, inode *Inode, ts int64) error {
 	hasActiveLeases := false
 	for _, l := range inode.Leases {
-		if l.Expiry > now {
+		if l.Expiry > ts {
 			hasActiveLeases = true
 			break
 		}
@@ -1608,13 +1696,12 @@ func (fsm *MetadataFSM) saveInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 		}
 	}
 
-	const maxManifest = 100
-	if len(inode.ChunkManifest) > maxManifest {
-		pages := (len(inode.ChunkManifest) + maxManifest - 1) / maxManifest
+	if len(inode.ChunkManifest) > MaxChunksPerPage {
+		pages := (len(inode.ChunkManifest) + MaxChunksPerPage - 1) / MaxChunksPerPage
 		inode.ChunkPages = make([]string, pages)
 		for i := 0; i < pages; i++ {
-			start := i * maxManifest
-			end := (i + 1) * maxManifest
+			start := i * MaxChunksPerPage
+			end := (i + 1) * MaxChunksPerPage
 			if end > len(inode.ChunkManifest) {
 				end = len(inode.ChunkManifest)
 			}
@@ -1686,13 +1773,13 @@ func (fsm *MetadataFSM) checkQuota(tx *bolt.Tx, userID, groupID string, inodes, 
 	}
 
 	// 2. Check Byte Quota
-	if bytes != 0 {
+	if bytes > 0 {
 		if g != nil && g.QuotaEnabled {
-			if g.Quota.MaxBytes > 0 && g.Usage.TotalBytes+bytes > g.Quota.MaxBytes {
+			if g.Quota.MaxBytes > 0 && bytes > g.Quota.MaxBytes-g.Usage.TotalBytes-g.Usage.PendingBytes {
 				return fmt.Errorf("%w: group storage quota exceeded", ErrQuotaExceeded)
 			}
 		} else if u != nil {
-			if u.Quota.MaxBytes > 0 && u.Usage.TotalBytes+bytes > u.Quota.MaxBytes {
+			if u.Quota.MaxBytes > 0 && bytes > u.Quota.MaxBytes-u.Usage.TotalBytes-u.Usage.PendingBytes {
 				return fmt.Errorf("%w: user storage quota exceeded", ErrQuotaExceeded)
 			}
 		}
@@ -1735,8 +1822,20 @@ func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes,
 	if bytes != 0 {
 		if g != nil && g.QuotaEnabled {
 			g.Usage.TotalBytes += bytes
+			if bytes > 0 {
+				g.Usage.PendingBytes -= bytes
+				if g.Usage.PendingBytes < 0 {
+					g.Usage.PendingBytes = 0
+				}
+			}
 		} else if u != nil {
 			u.Usage.TotalBytes += bytes
+			if bytes > 0 {
+				u.Usage.PendingBytes -= bytes
+				if u.Usage.PendingBytes < 0 {
+					u.Usage.PendingBytes = 0
+				}
+			}
 		}
 	}
 
@@ -1791,20 +1890,46 @@ func (fsm *MetadataFSM) GetActiveKey() (*ClusterKey, error) {
 	return &key, err
 }
 
-func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
+func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNonce string, cmdUserID string, ts int64) interface{} {
 	var req LeaseRequest
 	json.Unmarshal(data, &req)
 
-	// If sessionNonce is provided via LogCommand, it takes precedence over req.SessionID
 	if sessionNonce != "" {
 		req.SessionID = sessionNonce
 	}
+	// Phase 75: Ensure identity cannot be spoofed in payload
+	if cmdUserID != "" {
+		req.UserID = cmdUserID
+	}
 
-	now := time.Now().UnixNano()
+	maxDuration := int64(5 * time.Minute)
+	if req.Duration > maxDuration {
+		req.Duration = maxDuration
+	}
+
+	now := ts
 	expiry := now + req.Duration
+
+	var user *User
+	if req.UserID != "" {
+		plain, _ := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+		if plain != nil {
+			var u User
+			json.Unmarshal(plain, &u)
+			user = &u
+		}
+	}
+
+	newLeasesCount := 0
 	inodes := make([]*Inode, len(req.InodeIDs))
 	for i, id := range req.InodeIDs {
 		isPath := strings.HasPrefix(id, "path:")
+		nonce := req.Nonce
+		if nonce == "" {
+			nonce = req.SessionID
+		}
+
+		isRenewal := false
 		if !isPath && IsInodeID(id) {
 			plain, err := fsm.Get(tx, []byte("inodes"), []byte(id))
 			if err != nil {
@@ -1814,6 +1939,9 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 				var inode Inode
 				json.Unmarshal(plain, &inode)
 				inodes[i] = &inode
+				if existing, exists := inode.Leases[nonce]; exists && existing.SessionID == req.SessionID {
+					isRenewal = true
+				}
 				for _, l := range inode.Leases {
 					if l.Expiry > now && l.SessionID != req.SessionID {
 						if req.Type == LeaseExclusive || l.Type == LeaseExclusive {
@@ -1830,6 +1958,9 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 			if plain != nil {
 				var leases map[string]LeaseInfo
 				json.Unmarshal(plain, &leases)
+				if existing, exists := leases[nonce]; exists && existing.SessionID == req.SessionID {
+					isRenewal = true
+				}
 				for _, l := range leases {
 					if l.Expiry > now && l.SessionID != req.SessionID {
 						if req.Type == LeaseExclusive || l.Type == LeaseExclusive {
@@ -1839,14 +1970,24 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 				}
 			}
 		}
+		if !isRenewal {
+			newLeasesCount++
+		}
 	}
+
+	if user != nil {
+		if user.Usage.ActiveLeases+newLeasesCount > 100 {
+			return fmt.Errorf("%w: user lease limit exceeded (max 100 active leases)", ErrQuotaExceeded)
+		}
+	}
+
 	for i, id := range req.InodeIDs {
 		isPath := strings.HasPrefix(id, "path:")
-		info := LeaseInfo{InodeID: id, SessionID: req.SessionID, Nonce: req.Nonce, Expiry: expiry, Type: req.Type}
 		nonce := req.Nonce
 		if nonce == "" {
 			nonce = req.SessionID
 		}
+		info := LeaseInfo{InodeID: id, UserID: req.UserID, SessionID: req.SessionID, Nonce: nonce, Expiry: expiry, Type: req.Type}
 		if !isPath && IsInodeID(id) {
 			inode := inodes[i]
 			if inode == nil {
@@ -1877,31 +2018,54 @@ func (fsm *MetadataFSM) executeAcquireLeases(tx *bolt.Tx, data []byte, sessionNo
 			encoded, _ := json.Marshal(info)
 			fsm.Put(tx, []byte("leases"), []byte(id+":"+nonce), encoded)
 		} else {
-			plain, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
+			plainLeases, err := fsm.Get(tx, []byte("filename_leases"), []byte(id))
 			if err != nil {
 				return err
 			}
 			leases := make(map[string]LeaseInfo)
-			if plain != nil {
-				json.Unmarshal(plain, &leases)
+			if plainLeases != nil {
+				json.Unmarshal(plainLeases, &leases)
 			}
 			leases[nonce] = info
 			encoded, _ := json.Marshal(leases)
 			fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
 		}
+		if req.UserID != "" {
+			indexKey := fmt.Sprintf("%016x:%s:%s:%s", expiry, req.UserID, id, nonce)
+			fsm.Put(tx, []byte("user_active_leases"), []byte(indexKey), []byte("1"))
+		}
+	}
+	if user != nil {
+		user.Usage.ActiveLeases += newLeasesCount
+		userData, _ := json.Marshal(user)
+		fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 	}
 	return nil
 }
 
-func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNonce string) interface{} {
+func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNonce string, cmdUserID string, ts int64) interface{} {
 	var req LeaseRequest
 	json.Unmarshal(data, &req)
 
 	if sessionNonce != "" {
 		req.SessionID = sessionNonce
 	}
+	if cmdUserID != "" {
+		req.UserID = cmdUserID
+	}
 
-	now := time.Now().UnixNano()
+	var user *User
+	if req.UserID != "" {
+		plain, _ := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+		if plain != nil {
+			var u User
+			json.Unmarshal(plain, &u)
+			user = &u
+		}
+	}
+
+	now := ts
+	releasedCount := 0
 	for _, id := range req.InodeIDs {
 		nonce := req.Nonce
 		if nonce == "" {
@@ -1922,12 +2086,19 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 					}
 				}
 				if nonce != "" {
-					delete(leases, nonce)
-					if len(leases) == 0 {
-						fsm.Delete(tx, []byte("filename_leases"), []byte(id))
-					} else {
-						encoded, _ := json.Marshal(leases)
-						fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+					if existing, ok := leases[nonce]; ok {
+						delete(leases, nonce)
+						if len(leases) == 0 {
+							fsm.Delete(tx, []byte("filename_leases"), []byte(id))
+						} else {
+							encoded, _ := json.Marshal(leases)
+							fsm.Put(tx, []byte("filename_leases"), []byte(id), encoded)
+						}
+						if req.UserID != "" {
+							indexKey := fmt.Sprintf("%016x:%s:%s:%s", existing.Expiry, req.UserID, id, nonce)
+							fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
+						}
+						releasedCount++
 					}
 				}
 			}
@@ -1947,26 +2118,41 @@ func (fsm *MetadataFSM) executeReleaseLeases(tx *bolt.Tx, data []byte, sessionNo
 						}
 					}
 				}
-				if _, ok := inode.Leases[nonce]; ok {
-					delete(inode.Leases, nonce)
-					fsm.Delete(tx, []byte("leases"), []byte(id+":"+nonce))
-					if inode.Unlinked {
-						active := false
-						for _, l := range inode.Leases {
-							if l.Expiry > now {
-								active = true
-								break
+				if nonce != "" {
+					if existing, ok := inode.Leases[nonce]; ok {
+						delete(inode.Leases, nonce)
+						fsm.Delete(tx, []byte("leases"), []byte(id+":"+nonce))
+						if req.UserID != "" {
+							indexKey := fmt.Sprintf("%016x:%s:%s:%s", existing.Expiry, req.UserID, id, nonce)
+							fsm.Delete(tx, []byte("user_active_leases"), []byte(indexKey))
+						}
+						releasedCount++
+						if inode.Unlinked {
+							active := false
+							for _, l := range inode.Leases {
+								if l.Expiry > now {
+									active = true
+									break
+								}
+							}
+							if !active {
+								fsm.finalizeDeleteInode(tx, &inode)
+								continue
 							}
 						}
-						if !active {
-							fsm.finalizeDeleteInode(tx, &inode)
-							continue
-						}
+						fsm.saveInodeWithPages(tx, &inode)
 					}
-					fsm.saveInodeWithPages(tx, &inode)
 				}
 			}
 		}
+	}
+	if user != nil && releasedCount > 0 {
+		user.Usage.ActiveLeases -= releasedCount
+		if user.Usage.ActiveLeases < 0 {
+			user.Usage.ActiveLeases = 0
+		}
+		userData, _ := json.Marshal(user)
+		fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
 	}
 	return nil
 }
@@ -2534,4 +2720,132 @@ func int64ToBytes(v int64) []byte {
 	b := make([]byte, 8)
 	binary.BigEndian.PutUint64(b, uint64(v))
 	return b
+}
+
+func (fsm *MetadataFSM) executeReservePendingBytes(tx *bolt.Tx, data []byte, ts int64, idx uint64) interface{} {
+	var req QuotaReservationRequest
+	if err := json.Unmarshal(data, &req); err != nil {
+		return err
+	}
+	if req.Bytes <= 0 {
+		return nil
+	}
+
+	// Fetch User
+	plain, _ := fsm.Get(tx, []byte("users"), []byte(req.UserID))
+	if plain == nil {
+		return ErrNotFound
+	}
+	var user User
+	json.Unmarshal(plain, &user)
+
+	// Check Quota
+	if user.Quota.MaxBytes > 0 && req.Bytes > user.Quota.MaxBytes-user.Usage.TotalBytes-user.Usage.PendingBytes {
+		return ErrQuotaExceeded
+	}
+
+	// Update User Pending Pool
+	user.Usage.PendingBytes += req.Bytes
+	userData, _ := json.Marshal(user)
+	fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
+
+	// Store Individual Reservation for Expiration tracking
+	expiry := ts + int64(10*time.Minute)
+	// Use deterministic hash for ID instead of rand.Read
+	h := sha256.New()
+	h.Write([]byte(fmt.Sprintf("%d:%s:%d", ts, req.UserID, idx)))
+	id := h.Sum(nil)[:8]
+
+	key := fmt.Sprintf("%016x:%s", expiry, hex.EncodeToString(id))
+	reservation := PendingReservation{
+		ID:     key,
+		UserID: req.UserID,
+		Bytes:  req.Bytes,
+		Expiry: expiry,
+	}
+	resData, _ := json.Marshal(reservation)
+	fsm.Put(tx, []byte("pending_reservations"), []byte(key), resData)
+
+	return nil
+}
+
+func (fsm *MetadataFSM) executeReconcilePending(tx *bolt.Tx, ts int64) interface{} {
+	b := tx.Bucket([]byte("pending_reservations"))
+	if b == nil {
+		return nil
+	}
+
+	nowKey := fmt.Sprintf("%016x", ts)
+
+	c := b.Cursor()
+	var toDelete []string
+
+	// PendingBytes are keyed by "expiry:random"
+	for k, v := c.First(); k != nil && string(k) < nowKey; k, v = c.Next() {
+		toDelete = append(toDelete, string(k))
+		plain, err := fsm.DecryptValue([]byte("pending_reservations"), v)
+		if err != nil {
+			continue
+		}
+		var res PendingReservation
+		if err := json.Unmarshal(plain, &res); err != nil {
+			continue
+		}
+
+		// Release from User Pool
+		userPlain, _ := fsm.Get(tx, []byte("users"), []byte(res.UserID))
+		if userPlain != nil {
+			var user User
+			json.Unmarshal(userPlain, &user)
+			user.Usage.PendingBytes -= res.Bytes
+			if user.Usage.PendingBytes < 0 {
+				user.Usage.PendingBytes = 0
+			}
+			userData, _ := json.Marshal(user)
+			fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
+		}
+	}
+
+	for _, k := range toDelete {
+		b.Delete([]byte(k))
+	}
+
+	if len(toDelete) > 0 {
+		log.Printf("ACL: Reconciled %d expired quota reservations", len(toDelete))
+	}
+
+	// 2. Reconcile Expired Leases
+	lb := tx.Bucket([]byte("user_active_leases"))
+	if lb != nil {
+		c := lb.Cursor()
+		var expiredLeases []string
+		for k, _ := c.First(); k != nil && string(k) < nowKey; k, _ = c.Next() {
+			expiredLeases = append(expiredLeases, string(k))
+
+			// Extract UserID (Key format: Expiry:UserID:InodeID:Nonce)
+			parts := strings.SplitN(string(k), ":", 3)
+			if len(parts) > 1 {
+				uid := parts[1]
+				userPlain, _ := fsm.Get(tx, []byte("users"), []byte(uid))
+				if userPlain != nil {
+					var user User
+					json.Unmarshal(userPlain, &user)
+					user.Usage.ActiveLeases--
+					if user.Usage.ActiveLeases < 0 {
+						user.Usage.ActiveLeases = 0
+					}
+					userData, _ := json.Marshal(user)
+					fsm.Put(tx, []byte("users"), []byte(user.ID), userData)
+				}
+			}
+		}
+		for _, k := range expiredLeases {
+			lb.Delete([]byte(k))
+		}
+		if len(expiredLeases) > 0 {
+			log.Printf("ACL: Reconciled %d expired leases", len(expiredLeases))
+		}
+	}
+
+	return nil
 }
