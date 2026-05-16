@@ -4,6 +4,24 @@ This document serves as a repository for highly experimental, theoretical, or "c
 
 ---
 
+## Not-So-Crazy Ideas (Pragmatic Performance Optimizations)
+
+These ideas address identified performance bottlenecks in small-file workloads (like Go build caches) with minimal architectural risk.
+
+### 1. Dynamic Inline Data Threshold
+**Concept:** Increase the `InlineLimit` (currently 4KB) to something larger like 128KB, possibly making it dynamic based on system load.
+**Benefit:** Small artifacts (object files, segment hashes) stay entirely within the Raft metadata layer. This eliminates the multi-step "Write Token -> Upload Chunk -> Update Manifest" dance for 90% of development artifacts, reducing network roundtrips significantly.
+
+### 2. Client-Side Metadata Batching
+**Concept:** Buffer FUSE metadata operations (Create, Rename, Mkdir) for a small window (e.g., 50ms) and commit them using the existing `ApplyBatch` API.
+**Benefit:** Compilers often perform many sequential renames or creates. Batching these into a single Raft proposal reduces the consensus overhead from $O(N)$ to $O(1)$ per batch.
+
+### 3. Local Hot-Data Cache (Decrypted LRU)
+**Concept:** Implement a small, encrypted local disk or memory cache on the client for recently written/read chunks.
+**Benefit:** Workloads like `go build` frequently write a file and immediately read it back for linking. Serving these from a local "hot" cache avoids the Data Node roundtrip and the decryption CPU cost on every repeat access.
+
+---
+
 ## 1. GroupSig-Only Authentication (The "Dark Directory")
 
 **Concept:** 

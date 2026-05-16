@@ -6557,7 +6557,10 @@ func (c *Client) acquireLeases(ctx context.Context, ids []string, duration time.
 	}
 	data, _ := json.Marshal(req)
 
-	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/acquire", data, requestOptions{action: metadata.ActionAcquireLeases, sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/acquire", data, requestOptions{action: metadata.ActionAcquireLeases, sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	if err == nil && rc != nil {
+		rc.Close()
+	}
 	return err
 }
 
@@ -6578,7 +6581,10 @@ func (c *Client) releaseLeases(ctx context.Context, ids []string, nonce string) 
 	}
 	data, _ := json.Marshal(req)
 
-	_, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/release", data, requestOptions{action: metadata.ActionReleaseLeases, sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/meta/lease/release", data, requestOptions{action: metadata.ActionReleaseLeases, sealed: true, unseal: true, retry: true, conflict: false}, nil)
+	if err == nil && rc != nil {
+		rc.Close()
+	}
 	return err
 }
 
@@ -6876,8 +6882,11 @@ func (c *Client) AdminAuditForest(ctx context.Context) (roots []*metadata.Redact
 // AdminPromote grants administrative privileges to a user.
 func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 	payload, _ := json.Marshal(map[string]string{"user_id": userID})
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/promote", payload, requestOptions{action: metadata.ActionAdminPromote, unseal: true, retry: true}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/admin/promote", payload, requestOptions{action: metadata.ActionAdminPromote, unseal: true, retry: true}, nil)
 	if err == nil {
+		if rc != nil {
+			rc.Close()
+		}
 		c.invalidateUserCache(userID)
 	}
 	return err
@@ -6886,14 +6895,20 @@ func (c *Client) AdminPromote(ctx context.Context, userID string) error {
 // AdminJoinNode adds a new storage node to the cluster.
 func (c *Client) AdminJoinNode(ctx context.Context, address string) error {
 	payload, _ := json.Marshal(map[string]string{"address": address})
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/join", payload, requestOptions{action: metadata.ActionAdminClusterJoin, unseal: true, retry: true}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/admin/join", payload, requestOptions{action: metadata.ActionAdminClusterJoin, unseal: true, retry: true}, nil)
+	if err == nil && rc != nil {
+		rc.Close()
+	}
 	return err
 }
 
 // AdminRemoveNode removes a storage node from the cluster by ID.
 func (c *Client) AdminRemoveNode(ctx context.Context, id string) error {
 	payload, _ := json.Marshal(map[string]string{"id": id})
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/remove", payload, requestOptions{action: metadata.ActionAdminClusterRem, unseal: true, retry: true}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/admin/remove", payload, requestOptions{action: metadata.ActionAdminClusterRem, unseal: true, retry: true}, nil)
+	if err == nil && rc != nil {
+		rc.Close()
+	}
 	return err
 }
 
@@ -6904,8 +6919,11 @@ func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked boo
 		Locked: locked,
 	}
 	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/lock", data, requestOptions{action: metadata.ActionAdminUserLock, unseal: true, retry: true}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/admin/lock", data, requestOptions{action: metadata.ActionAdminUserLock, unseal: true, retry: true}, nil)
 	if err == nil {
+		if rc != nil {
+			rc.Close()
+		}
 		c.invalidateUserCache(userID)
 	}
 	return err
@@ -6914,8 +6932,11 @@ func (c *Client) AdminSetUserLock(ctx context.Context, userID string, locked boo
 // AdminSetUserQuota updates the resource limits for a user.
 func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuotaRequest) error {
 	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/user", data, requestOptions{action: metadata.ActionAdminUserQuota, unseal: true, retry: true}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/user", data, requestOptions{action: metadata.ActionAdminUserQuota, unseal: true, retry: true}, nil)
 	if err == nil {
+		if rc != nil {
+			rc.Close()
+		}
 		c.invalidateUserCache(req.UserID)
 	}
 	return err
@@ -6924,8 +6945,11 @@ func (c *Client) AdminSetUserQuota(ctx context.Context, req metadata.SetUserQuot
 // AdminSetGroupQuota updates the resource limits for a group.
 func (c *Client) AdminSetGroupQuota(ctx context.Context, req metadata.SetGroupQuotaRequest) error {
 	data, _ := json.Marshal(req)
-	_, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/group", data, requestOptions{action: metadata.ActionAdminGroupQuota, unseal: true, retry: true}, nil)
+	rc, _, err := c.doRequest(ctx, "POST", "/v1/admin/quota/group", data, requestOptions{action: metadata.ActionAdminGroupQuota, unseal: true, retry: true}, nil)
 	if err == nil {
+		if rc != nil {
+			rc.Close()
+		}
 		c.invalidateGroupCache(req.GroupID)
 	}
 	return err
