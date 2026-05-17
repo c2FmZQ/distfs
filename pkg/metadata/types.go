@@ -1132,7 +1132,6 @@ var (
 	ErrRange                   = errors.New("result too large")
 	ErrCryptographicFork       = errors.New("CRYPTOGRAPHIC FORK DETECTED")
 	ErrUnauthorized            = errors.New("unauthorized")
-	ErrNotLeader               = errors.New("not leader")
 )
 
 const (

@@ -17,6 +17,8 @@
 package metadata
 
 import (
+	"log"
+
 	"github.com/c2FmZQ/storage"
 )
 
@@ -46,7 +48,11 @@ func (v *NodeVault) LoadKey(name string) ([]byte, error) {
 // SaveKey persists a named secret to the local vault.
 func (v *NodeVault) SaveKey(name string, secret []byte) error {
 	kd := KeyData{Bytes: secret}
-	return v.st.SaveDataFile(name, kd)
+	err := v.st.SaveDataFile(name, kd)
+	if err != nil {
+		log.Printf("ERROR: SaveDataFile(%q): %v", name, err)
+	}
+	return err
 }
 
 // HasKey returns true if the named secret is already present in the vault.

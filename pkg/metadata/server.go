@@ -2469,6 +2469,12 @@ func ErrorToCode(err error) string {
 	if err == nil {
 		return ""
 	}
+
+	// Support decentralized error code mapping via an interface.
+	if coder, ok := err.(interface{ ErrorCode() string }); ok {
+		return coder.ErrorCode()
+	}
+
 	if errors.Is(err, ErrNotFound) {
 		return ErrCodeNotFound
 	}
@@ -2490,7 +2496,7 @@ func ErrorToCode(err error) string {
 	if errors.Is(err, ErrForbidden) {
 		return ErrCodeForbidden
 	}
-	if errors.Is(err, ErrNotLeader) || errors.Is(err, raft.ErrNotLeader) {
+	if errors.Is(err, raft.ErrNotLeader) {
 		return ErrCodeNotLeader
 	}
 	if errors.Is(err, ErrStructuralInconsistency) {
