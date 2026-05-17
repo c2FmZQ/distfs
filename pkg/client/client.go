@@ -138,7 +138,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 				user, err := c.getUserRaw(ctx, id)
 				if err != nil {
 					// Fallback: it might be a group that wasn't in the cache yet
-					if isNotFound(err) {
+					if IsNotFound(err) {
 						group, gerr := c.getGroupRaw(ctx, id)
 						if gerr == nil {
 							if err := c.verifyGroup(ctx, group); err != nil {
@@ -2117,7 +2117,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 
 		results, err := c.applyBatch(ctx, []metadata.LogCommand{cmd})
 		if err != nil {
-			if isConflict(err) {
+			if IsConflict(err) {
 				if c.store != nil {
 					c.store.Delete("inodes", id)
 				}
@@ -5488,7 +5488,7 @@ func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID
 	exists := true
 	_, _, err = c.resolvePath(ctx, attestationPath)
 	if err != nil {
-		if isNotFound(err) {
+		if IsNotFound(err) {
 			exists = false
 		} else {
 			return fmt.Errorf("failed to resolve attestation path %s: %w", attestationPath, err)
@@ -5528,11 +5528,11 @@ func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID
 		}
 
 		opts := MkdirOptions{
-			Mode:      ptr(uint32(0640)), // Owner RW, Group R
+			Mode:      Ptr(uint32(0640)), // Owner RW, Group R
 			AccessACL: acl,
 		}
 		if err := c.CreateFileExtended(ctx, attestationPath, bytes.NewReader(attestationBytes), int64(len(attestationBytes)), opts); err != nil {
-			if !isConflict(err) {
+			if !IsConflict(err) {
 				return fmt.Errorf("failed to create group attestation file %s: %w", attestationPath, err)
 			}
 		}
@@ -5541,8 +5541,8 @@ func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID
 	// 4. Update the name link (if it doesn't exist)
 	namePath := regDir + name + ".group"
 	_, _, err = c.resolvePath(ctx, namePath)
-	if err != nil && isNotFound(err) {
-		if err := c.Link(ctx, attestationPath, namePath); err != nil && !isConflict(err) {
+	if err != nil && IsNotFound(err) {
+		if err := c.Link(ctx, attestationPath, namePath); err != nil && !IsConflict(err) {
 			logger.Debugf("AnchorGroupInRegistry: failed to create group attestation link %s: %v", namePath, err)
 		}
 	}
@@ -5586,7 +5586,7 @@ func (c *Client) AnchorUserInRegistry(ctx context.Context, username string, user
 	exists := true
 	_, _, err = c.resolvePath(ctx, attestationPath)
 	if err != nil {
-		if isNotFound(err) {
+		if IsNotFound(err) {
 			exists = false
 		} else {
 			return fmt.Errorf("failed to resolve user attestation path %s: %w", attestationPath, err)
@@ -5609,26 +5609,26 @@ func (c *Client) AnchorUserInRegistry(ctx context.Context, username string, user
 
 		// Ensure ownership and mode is correct
 		if err := c.setAttr(ctx, attestationPath, metadata.SetAttrRequest{
-			Mode: ptr(uint32(0640)),
+			Mode: Ptr(uint32(0640)),
 		}); err != nil {
 			return fmt.Errorf("failed to update attributes on existing user attestation: %w", err)
 		}
 	} else {
 		// Create new with restricted permissions (inherits users group access from /registry)
 		opts := MkdirOptions{
-			Mode:    ptr(uint32(0640)),
+			Mode:    Ptr(uint32(0640)),
 			OwnerID: c.userID,
 		}
 		if err := c.CreateFileExtended(ctx, attestationPath, bytes.NewReader(data), int64(len(data)), opts); err != nil {
-			if !isConflict(err) {
+			if !IsConflict(err) {
 				return fmt.Errorf("failed to create user attestation file %s: %w", attestationPath, err)
 			}
 		}
 	}
 	namePath := regDir + username + ".user"
 	_, _, err = c.resolvePath(ctx, namePath)
-	if err != nil && isNotFound(err) {
-		if err := c.Link(ctx, attestationPath, namePath); err != nil && !isConflict(err) {
+	if err != nil && IsNotFound(err) {
+		if err := c.Link(ctx, attestationPath, namePath); err != nil && !IsConflict(err) {
 			logger.Debugf("AnchorUserInRegistry: failed to create user attestation link %s: %v", namePath, err)
 		}
 	}
@@ -6410,7 +6410,7 @@ func (c *Client) withRetryInternal(ctx context.Context, opts withRetryOptions, o
 			}
 		}
 
-		isConflict := opts.isConflict && isConflict(err)
+		isConflict := opts.isConflict && IsConflict(err)
 
 		if isConflict || c.isRetryable(err) {
 			select {
@@ -6705,7 +6705,7 @@ func (c *Client) ResolveUsername(ctx context.Context, username string) (string, 
 	var entry DirectoryEntry
 	err := c.readDataFile(ctx, filePath, &entry)
 	if err != nil {
-		if isNotFound(err) {
+		if IsNotFound(err) {
 			return "", nil, fmt.Errorf("user '%s' not found in registry %s", username, regPath)
 		}
 		return "", nil, fmt.Errorf("failed to read registry entry for %s: %w", username, err)
@@ -6741,7 +6741,7 @@ func (c *Client) ResolveGroupName(ctx context.Context, name string) (string, *Gr
 	var entry GroupDirectoryEntry
 	err := c.readDataFile(ctx, filePath, &entry)
 	if err != nil {
-		if isNotFound(err) {
+		if IsNotFound(err) {
 			return "", nil, fmt.Errorf("group '%s' not found in registry %s", name, regPath)
 		}
 		return "", nil, fmt.Errorf("failed to read registry entry for %s: %w", name, err)
@@ -7082,7 +7082,7 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 
 			return &updated, nil
 		}
-		if !isConflict(err) {
+		if !IsConflict(err) {
 			return nil, err
 		}
 

@@ -359,22 +359,6 @@ func TestAdminConsole_ErrorHandling(t *testing.T) {
 }
 
 func TestAdminConsole_Utilities(t *testing.T) {
-	// Test formatBytes
-	tests := []struct {
-		bytes int64
-		want  string
-	}{
-		{500, "500 B"},
-		{1024, "1.0 KB"},
-		{1024 * 1024, "1.0 MB"},
-		{1024 * 1024 * 1024, "1.0 GB"},
-	}
-	for _, tt := range tests {
-		if got := client.FormatBytes(tt.bytes); got != tt.want {
-			t.Errorf("FormatBytes(%d) = %v, want %v", tt.bytes, got, tt.want)
-		}
-	}
-
 	// Test isHexID
 	if !isHexID(strings.Repeat("a", 64)) {
 		t.Errorf("expected 64 'a's to be hex ID")

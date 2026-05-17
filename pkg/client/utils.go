@@ -23,7 +23,8 @@ func FormatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func isNotFound(err error) bool {
+// IsNotFound returns true if the error indicates a 404 Not Found response or metadata.ErrNotFound.
+func IsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -37,7 +38,8 @@ func isNotFound(err error) bool {
 	return false
 }
 
-func isConflict(err error) bool {
+// IsConflict returns true if the error indicates a 409 Conflict response or metadata.ErrConflict/ErrExists.
+func IsConflict(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -54,6 +56,7 @@ func isConflict(err error) bool {
 	return false
 }
 
-func ptr[T any](v T) *T {
+// Ptr returns a pointer to the provided value.
+func Ptr[T any](v T) *T {
 	return &v
 }
