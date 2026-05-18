@@ -203,7 +203,7 @@ func (c *Client) BootstrapFileSystem(ctx context.Context) error {
 			AccessACL:  regACL,
 			DefaultACL: regDefaultACL,
 		}); err != nil {
-			if !isConflict(err) {
+			if !IsConflict(err) {
 				return fmt.Errorf("bootstrap: Mkdir %s failed: %w", originalRegDir, err)
 			}
 		}
@@ -319,7 +319,7 @@ func (c *Client) resolvePathExtended(ctx context.Context, path string, followFin
 			}
 			return inode, key, nil
 		}
-		if !isNotFound(err) {
+		if !IsNotFound(err) {
 			return nil, nil, err
 		}
 		lastErr = err
@@ -333,7 +333,7 @@ func (c *Client) resolvePathInternal(ctx context.Context, path string, followFin
 		// Fast path for root
 		inode, err := c.getInode(ctx, c.rootID)
 		if err != nil {
-			if isNotFound(err) {
+			if IsNotFound(err) {
 				return nil, nil, fmt.Errorf("root inode %s not found; has it been initialized with 'admin-create-root'?", c.rootID)
 			}
 			return nil, nil, fmt.Errorf("failed to get root inode %s: %w", c.rootID, err)
@@ -356,7 +356,7 @@ func (c *Client) resolvePathInternal(ctx context.Context, path string, followFin
 				var err error
 				inode, err = c.getInode(ctx, entry.inodeID)
 				if err != nil {
-					if isNotFound(err) {
+					if IsNotFound(err) {
 						c.invalidatePathCache(prefix)
 					}
 					continue
@@ -397,7 +397,7 @@ func (c *Client) resolvePathInternal(ctx context.Context, path string, followFin
 	// 2. Sequential Resolution from root
 	rootInode, err := c.getInode(ctx, c.rootID)
 	if err != nil {
-		if isNotFound(err) {
+		if IsNotFound(err) {
 			return nil, nil, fmt.Errorf("root inode %s not found; has it been initialized with 'admin-create-root'?", c.rootID)
 		}
 		return nil, nil, fmt.Errorf("failed to get root inode %s: %w", c.rootID, err)
@@ -828,7 +828,7 @@ func (c *Client) SetMTime(ctx context.Context, path string, mtime int64) error {
 // Chmod changes the permission bits of the file or directory at the given stdpath.
 func (c *Client) Chmod(ctx context.Context, path string, mode fs.FileMode) error {
 	return c.setAttr(ctx, path, metadata.SetAttrRequest{
-		Mode: ptr(uint32(mode)),
+		Mode: Ptr(uint32(mode)),
 	})
 }
 
@@ -1180,7 +1180,7 @@ func (c *Client) removeEntryRaw(ctx context.Context, parentID string, parentKey 
 		// Decrement NLink / Update Child Links
 		child, err := c.getInode(ctx, childID)
 		if err != nil {
-			if isNotFound(err) {
+			if IsNotFound(err) {
 				// Child inode already gone? Just finish removing from parent.
 				_, err := c.applyBatch(ctx, []metadata.LogCommand{cmdParent})
 				return err

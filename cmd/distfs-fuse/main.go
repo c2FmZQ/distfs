@@ -17,6 +17,7 @@ import (
 	"bazil.org/fuse/fs"
 	"github.com/c2FmZQ/distfs/pkg/client"
 	"github.com/c2FmZQ/distfs/pkg/config"
+	"github.com/c2FmZQ/distfs/pkg/debug"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/tpm"
 	"github.com/urfave/cli/v3"
@@ -101,7 +102,7 @@ func main() {
 			rootID := cmd.String("root-id")
 			timelineSampleRate := cmd.Float("timeline-sample-rate")
 
-			startPprofServer()
+			debug.StartServer(6061)
 
 			config.UsePinentry = usePinentry
 

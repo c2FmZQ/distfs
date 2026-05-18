@@ -23,7 +23,10 @@ func FormatBytes(bytes int64) string {
 	return fmt.Sprintf("%.1f %cB", float64(bytes)/float64(div), "KMGTPE"[exp])
 }
 
-func isNotFound(err error) bool {
+// IsNotFound returns true if the error indicates a 404 Not Found response from the server
+// or is wrapping a metadata.ErrNotFound sentinel. This should be used for logic that
+// needs to handle missing resources gracefully (e.g. cache invalidation on delete).
+func IsNotFound(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -37,7 +40,10 @@ func isNotFound(err error) bool {
 	return false
 }
 
-func isConflict(err error) bool {
+// IsConflict returns true if the error indicates a 409 Conflict response (e.g. version mismatch),
+// metadata.ErrConflict, or metadata.ErrExists. This is commonly used to trigger retries
+// in optimistic concurrency control loops.
+func IsConflict(err error) bool {
 	if err == nil {
 		return false
 	}
@@ -54,6 +60,8 @@ func isConflict(err error) bool {
 	return false
 }
 
-func ptr[T any](v T) *T {
+// Ptr returns a pointer to the provided value. It is a convenience helper for
+// initializing fields in structs that require pointers to primitive types or constants.
+func Ptr[T any](v T) *T {
 	return &v
 }

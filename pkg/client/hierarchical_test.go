@@ -96,7 +96,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 		if err == nil {
 			t.Fatalf("Expected permission denied for %s, but got success", desc)
 		}
-		if isNotFound(err) {
+		if IsNotFound(err) {
 			t.Fatalf("Expected permission denied for %s, but got not found: %v", desc, err)
 		}
 	}
@@ -168,7 +168,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 
 	// Charlie should be able to write a file in the shared dir
 	err = charlieClient.CreateFileExtended(ctx, "/bob-home/shared/charlie.txt", bytes.NewReader([]byte("charlie was here")), 16, MkdirOptions{
-		Mode: ptr(uint32(0660)), // rw-rw----
+		Mode: Ptr(uint32(0660)), // rw-rw----
 	})
 	if err != nil {
 		t.Fatalf("Charlie failed to write to shared dir: %v", err)
@@ -199,7 +199,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 	// Scenario 3: World read permission
 	// ========================================================================
 	err = bobClient.CreateFileExtended(ctx, "/bob-home/public.txt", bytes.NewReader([]byte("public info")), 11, MkdirOptions{
-		Mode: ptr(uint32(0644)), // rw-r--r--
+		Mode: Ptr(uint32(0644)), // rw-r--r--
 	})
 	if err != nil {
 		t.Fatalf("Bob failed to create public file: %v", err)
@@ -226,7 +226,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 	// Scenario 4: ACL read and write permission
 	// ========================================================================
 	err = bobClient.CreateFileExtended(ctx, "/bob-home/acl-test.txt", bytes.NewReader([]byte("acl data")), 8, MkdirOptions{
-		Mode: ptr(uint32(0600)),
+		Mode: Ptr(uint32(0600)),
 	})
 	if err != nil {
 		t.Fatalf("Bob failed to create acl test file: %v", err)
@@ -385,7 +385,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 
 	err = bobClient.CreateFileExtended(ctx, "/bob-home/admin-shared.txt", bytes.NewReader([]byte("admin eyes only")), 15, MkdirOptions{
 		GroupID: groupAdmin.ID,
-		Mode:    ptr(uint32(0660)),
+		Mode:    Ptr(uint32(0660)),
 	})
 	if err != nil {
 		t.Fatalf("Bob failed to create file for project-admin: %v", err)
@@ -441,7 +441,7 @@ func TestAccessControls_Comprehensive(t *testing.T) {
 	// Alice creates a file for 'secret-group'
 	err = adminClient.CreateFileExtended(ctx, "/secret-file.txt", bytes.NewReader([]byte("anonymous access works")), 22, MkdirOptions{
 		GroupID: secretGroup.ID,
-		Mode:    ptr(uint32(0660)),
+		Mode:    Ptr(uint32(0660)),
 	})
 	if err != nil {
 		t.Fatalf("Admin failed to create secret file: %v", err)

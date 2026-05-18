@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/c2FmZQ/distfs/pkg/debug"
 	"github.com/urfave/cli/v3"
 )
 
@@ -122,7 +123,7 @@ func main() {
 			workers := int(cmd.Int("workers"))
 			maxSize := cmd.Int("max-total-size")
 
-			startPprofServer()
+			debug.StartServer(6060)
 
 			state := NewState()
 			m := &metrics{}

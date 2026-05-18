@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"iter"
 	"log"
-	"net/http"
 	"os"
 	"sort"
 	"strconv"
@@ -1004,13 +1003,13 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 		homePath := "/users/" + username
 		// Ensure /users exists
 		err = c.Mkdir(ctx, "/users", 0755)
-		if err != nil && !isConflict(err) {
+		if err != nil && !client.IsConflict(err) {
 			return fmt.Errorf("failed to access /users directory: %w", err)
 		}
 
 		opts := client.MkdirOptions{OwnerID: userID}
 		err = c.MkdirExtended(ctx, homePath, 0700, opts)
-		if err != nil && !isConflict(err) {
+		if err != nil && !client.IsConflict(err) {
 			return fmt.Errorf("failed to provision home directory: %w", err)
 		}
 		fmt.Printf("Provisioned home directory: %s\n", homePath)
@@ -1032,22 +1031,6 @@ func cmdRegistryAddGroup(ctx context.Context, name, groupID string) error {
 
 	fmt.Printf("SUCCESS: Group %s successfully added to registry.\n", name)
 	return nil
-}
-
-func isConflict(err error) bool {
-	if err == nil {
-		return false
-	}
-	if errors.Is(err, metadata.ErrConflict) || errors.Is(err, metadata.ErrExists) {
-		return true
-	}
-	var apiErr *client.APIError
-	if errors.As(err, &apiErr) {
-		return apiErr.StatusCode == http.StatusConflict ||
-			apiErr.Code == metadata.ErrCodeVersionConflict ||
-			apiErr.Code == metadata.ErrCodeExists
-	}
-	return false
 }
 
 func cmdAdminLockUser(ctx context.Context, identifier string, lock bool) error {

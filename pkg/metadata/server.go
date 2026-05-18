@@ -2451,48 +2451,7 @@ func (s *Server) writeError(w http.ResponseWriter, r *http.Request, code string,
 
 func (s *Server) sanitizeResponse(res interface{}) interface{} {
 	if err, ok := res.(error); ok {
-		code := ErrCodeInternal
-		if errors.Is(err, ErrQuotaExceeded) {
-			code = ErrCodeQuotaExceeded
-		} else if errors.Is(err, ErrConflict) {
-			code = ErrCodeVersionConflict
-		} else if errors.Is(err, ErrExists) {
-			code = ErrCodeExists
-		} else if errors.Is(err, ErrCryptographicFork) {
-			code = ErrCodeCryptographicFork
-		} else if errors.Is(err, ErrNotFound) {
-			code = ErrCodeNotFound
-		} else if errors.Is(err, ErrLeaseRequired) {
-			code = ErrCodeLeaseRequired
-		} else if errors.Is(err, ErrStructuralInconsistency) {
-			code = ErrCodeStructuralInconsistency
-		} else if errors.Is(err, ErrAtomicRollback) {
-			code = ErrCodeAtomicRollback
-		} else if errors.Is(err, ErrQuotaDisabled) {
-			code = ErrCodeQuotaDisabled
-		} else if errors.Is(err, ErrForbidden) {
-			code = ErrCodeForbidden
-		} else if errors.Is(err, ErrNotDirectory) {
-			code = ErrCodeNotDirectory
-		} else if errors.Is(err, ErrIsDirectory) {
-			code = ErrCodeIsDirectory
-		} else if errors.Is(err, ErrNotEmpty) {
-			code = ErrCodeNotEmpty
-		} else if errors.Is(err, ErrNameTooLong) {
-			code = ErrCodeNameTooLong
-		} else if errors.Is(err, ErrInvalid) {
-			code = ErrCodeInvalid
-		} else if errors.Is(err, ErrPerm) {
-			code = ErrCodePerm
-		} else if errors.Is(err, ErrNoData) {
-			code = ErrCodeNoData
-		} else if errors.Is(err, ErrNotSupp) {
-			code = ErrCodeNotSupp
-		} else if errors.Is(err, ErrTooBig) {
-			code = ErrCodeTooBig
-		} else if errors.Is(err, ErrRange) {
-			code = ErrCodeRange
-		}
+		code := ErrorToCode(err)
 		return APIErrorResponse{Code: code, Message: err.Error()}
 	}
 	if slice, ok := res.([]interface{}); ok {
@@ -2503,6 +2462,86 @@ func (s *Server) sanitizeResponse(res interface{}) interface{} {
 		return sanitized
 	}
 	return res
+}
+
+// ErrorToCode maps a metadata error to its corresponding stable error code string.
+func ErrorToCode(err error) string {
+	if err == nil {
+		return ""
+	}
+
+	// Support decentralized error code mapping via an interface.
+	if coder, ok := err.(interface{ ErrorCode() string }); ok {
+		return coder.ErrorCode()
+	}
+
+	if errors.Is(err, ErrNotFound) {
+		return ErrCodeNotFound
+	}
+	if errors.Is(err, ErrExists) {
+		return ErrCodeExists
+	}
+	if errors.Is(err, ErrConflict) {
+		return ErrCodeVersionConflict
+	}
+	if errors.Is(err, ErrLeaseRequired) {
+		return ErrCodeLeaseRequired
+	}
+	if errors.Is(err, ErrQuotaExceeded) {
+		return ErrCodeQuotaExceeded
+	}
+	if errors.Is(err, ErrUnauthorized) {
+		return ErrCodeUnauthorized
+	}
+	if errors.Is(err, ErrForbidden) {
+		return ErrCodeForbidden
+	}
+	if errors.Is(err, raft.ErrNotLeader) {
+		return ErrCodeNotLeader
+	}
+	if errors.Is(err, ErrStructuralInconsistency) {
+		return ErrCodeStructuralInconsistency
+	}
+	if errors.Is(err, ErrQuotaDisabled) {
+		return ErrCodeQuotaDisabled
+	}
+	if errors.Is(err, ErrNotDirectory) {
+		return ErrCodeNotDirectory
+	}
+	if errors.Is(err, ErrIsDirectory) {
+		return ErrCodeIsDirectory
+	}
+	if errors.Is(err, ErrNotEmpty) {
+		return ErrCodeNotEmpty
+	}
+	if errors.Is(err, ErrNameTooLong) {
+		return ErrCodeNameTooLong
+	}
+	if errors.Is(err, ErrInvalid) {
+		return ErrCodeInvalid
+	}
+	if errors.Is(err, ErrPerm) {
+		return ErrCodePerm
+	}
+	if errors.Is(err, ErrNoData) {
+		return ErrCodeNoData
+	}
+	if errors.Is(err, ErrNotSupp) {
+		return ErrCodeNotSupp
+	}
+	if errors.Is(err, ErrTooBig) {
+		return ErrCodeTooBig
+	}
+	if errors.Is(err, ErrRange) {
+		return ErrCodeRange
+	}
+	if errors.Is(err, ErrCryptographicFork) {
+		return ErrCodeCryptographicFork
+	}
+	if errors.Is(err, ErrAtomicRollback) {
+		return ErrCodeAtomicRollback
+	}
+	return ErrCodeInternal
 }
 
 func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interface{}, status int) {

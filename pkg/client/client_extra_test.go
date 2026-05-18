@@ -322,8 +322,8 @@ func TestClient_AdminMethods(t *testing.T) {
 	// 5. AdminSetUserQuota
 	err = c.WithAdmin(true).AdminSetUserQuota(ctx, metadata.SetUserQuotaRequest{
 		UserID:    "u1",
-		MaxInodes: ptr(uint64(100)),
-		MaxBytes:  ptr(uint64(1000)),
+		MaxInodes: Ptr(uint64(100)),
+		MaxBytes:  Ptr(uint64(1000)),
 	})
 	if err != nil {
 		t.Fatalf("AdminSetUserQuota failed: %v", err)
@@ -332,8 +332,8 @@ func TestClient_AdminMethods(t *testing.T) {
 	// 7. AdminSetGroupQuota
 	err = c.WithAdmin(true).AdminSetGroupQuota(ctx, metadata.SetGroupQuotaRequest{
 		GroupID:   g1.ID,
-		MaxInodes: ptr(uint64(50)),
-		MaxBytes:  ptr(uint64(500)),
+		MaxInodes: Ptr(uint64(50)),
+		MaxBytes:  Ptr(uint64(500)),
 	})
 	if err != nil {
 		// Might fail if g1 not created yet
@@ -800,7 +800,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 		t.Fatalf("Mkdir /shared failed: %v", err)
 	}
 
-	err = c1.setAttr(ctx, "/shared", metadata.SetAttrRequest{Mode: ptr(uint32(0770)), GroupID: &group.ID})
+	err = c1.setAttr(ctx, "/shared", metadata.SetAttrRequest{Mode: Ptr(uint32(0770)), GroupID: &group.ID})
 	if err != nil {
 		t.Fatalf("SetAttr /shared failed: %v", err)
 	}
@@ -812,7 +812,7 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 	wc.Write([]byte("secret"))
 	wc.Close()
 
-	c1.setAttr(ctx, "/shared/f1", metadata.SetAttrRequest{Mode: ptr(uint32(0660))})
+	c1.setAttr(ctx, "/shared/f1", metadata.SetAttrRequest{Mode: Ptr(uint32(0660))})
 
 	_, _, _ = c1.resolvePath(ctx, "/shared/f1")
 
@@ -829,9 +829,9 @@ func TestClient_UnlockInode_GroupAndWorld(t *testing.T) {
 
 	// 5. Create File f2 with World access
 	c1.Mkdir(ctx, "/public", 0755)
-	c1.setAttr(ctx, "/public", metadata.SetAttrRequest{Mode: ptr(uint32(0777))})
+	c1.setAttr(ctx, "/public", metadata.SetAttrRequest{Mode: Ptr(uint32(0777))})
 	c1.CreateFile(ctx, "/public/f2", bytes.NewReader([]byte("public")), 6)
-	c1.setAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: ptr(uint32(0664))})
+	c1.setAttr(ctx, "/public/f2", metadata.SetAttrRequest{Mode: Ptr(uint32(0664))})
 
 	// Create u3
 	usk3, _ := crypto.GenerateIdentityKey()

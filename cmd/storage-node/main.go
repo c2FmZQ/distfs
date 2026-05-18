@@ -37,6 +37,7 @@ import (
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 	"github.com/c2FmZQ/distfs/pkg/data"
+	"github.com/c2FmZQ/distfs/pkg/debug"
 	"github.com/c2FmZQ/distfs/pkg/metadata"
 	"github.com/c2FmZQ/storage"
 	storage_crypto "github.com/c2FmZQ/storage/crypto"
@@ -70,10 +71,11 @@ func loadOrGenerateClusterSecret(st *storage.Storage, bootstrap bool) ([]byte, e
 }
 
 func loadOrGenerateEncryptionKey(st *storage.Storage) (*mlkem.DecapsulationKey768, error) {
+	vault := metadata.NewNodeVault(st)
 	encKeyName := "enc.key"
-	var encData KeyData
-	if err := st.ReadDataFile(encKeyName, &encData); err == nil {
-		return mlkem.NewDecapsulationKey768(encData.Bytes)
+
+	if b, err := vault.LoadKey(encKeyName); err == nil {
+		return mlkem.NewDecapsulationKey768(b)
 	}
 
 	dk, err := mlkem.GenerateKey768()
@@ -81,16 +83,11 @@ func loadOrGenerateEncryptionKey(st *storage.Storage) (*mlkem.DecapsulationKey76
 		return nil, err
 	}
 
-	encData.Bytes = dk.Bytes()
-	if err := st.SaveDataFile(encKeyName, encData); err != nil {
+	if err := vault.SaveKey(encKeyName, dk.Bytes()); err != nil {
 		return nil, err
 	}
 
 	return dk, nil
-}
-
-type KeyData struct {
-	Bytes []byte `json:"bytes"`
 }
 
 func main() {
@@ -440,7 +437,7 @@ func main() {
 			}))
 			publicMux.Handle("/api/debug/", metaServer)
 
-			registerDebugHandlers(publicMux)
+			debug.RegisterHandlers(publicMux)
 
 			// 6. Internal Router (Cluster)
 			clusterMux := http.NewServeMux()
@@ -602,17 +599,17 @@ func main() {
 }
 
 func loadOrGenerateSignKey(st *storage.Storage) (*crypto.IdentityKey, error) {
+	vault := metadata.NewNodeVault(st)
 	signKeyName := "sign.key"
 
 	var signKey *crypto.IdentityKey
 
 	// Load Sign Key
-	var signData KeyData
-	if err := st.ReadDataFile(signKeyName, &signData); err == nil {
-		signKey = crypto.UnmarshalIdentityKey(signData.Bytes)
+	if b, err := vault.LoadKey(signKeyName); err == nil {
+		signKey = crypto.UnmarshalIdentityKey(b)
 	} else {
 		signKey, _ = crypto.GenerateIdentityKey()
-		if err := st.SaveDataFile(signKeyName, KeyData{Bytes: signKey.MarshalPrivate()}); err != nil {
+		if err := vault.SaveKey(signKeyName, signKey.MarshalPrivate()); err != nil {
 			return nil, err
 		}
 	}
