@@ -51,6 +51,15 @@ type Config struct {
 	CacheMaxBytes        int64                 `json:"cache_max_bytes,omitempty"`
 	MetadataCacheEnabled bool                  `json:"metadata_cache_enabled,omitempty"`
 
+	// Phase 76: Client Latency Optimization knobs.
+	// HedgeDelay is the hedge stagger duration for replica chunk reads (e.g. "150ms").
+	// Empty string retains the 150ms default. Set to "0" for maximum parallelism.
+	HedgeDelay string `json:"hedge_delay,omitempty"`
+	// MaxPrefetch is the upper bound on the auto-tuning sequential read-ahead window (chunks).
+	MaxPrefetch int `json:"max_prefetch,omitempty"`
+	// WritePipeline is the number of concurrent chunk upload goroutines per file write.
+	WritePipeline int `json:"write_pipeline,omitempty"`
+
 	// Unexported
 	passphrase []byte
 }

@@ -146,6 +146,19 @@ func main() {
 			}
 
 			c := client.NewClient(conf.ServerURL)
+			if conf.HedgeDelay != "" {
+				if d, err := time.ParseDuration(conf.HedgeDelay); err == nil {
+					c = c.WithHedgeDelay(d)
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid hedge_delay %q: %v\n", conf.HedgeDelay, err)
+				}
+			}
+			if conf.MaxPrefetch > 0 {
+				c = c.WithMaxPrefetch(conf.MaxPrefetch)
+			}
+			if conf.WritePipeline > 0 {
+				c = c.WithWritePipeline(conf.WritePipeline)
+			}
 			dkBytes, _ := hex.DecodeString(conf.EncKey)
 			skBytes, _ := hex.DecodeString(conf.SignKey)
 			svKeyBytes, _ := hex.DecodeString(conf.ServerKey)

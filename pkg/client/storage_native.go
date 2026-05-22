@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -19,6 +20,17 @@ type NativeStore struct {
 	maxBytes int64
 	db       *bbolt.DB
 	mu       sync.RWMutex
+
+	// Phase 76.3: Throttled & estimated cache pruning.
+	// estimatedBytes tracks the approximate on-disk chunk usage atomically,
+	// updated on every put/delete so we can skip Prune when under the limit.
+	estimatedBytes atomic.Int64
+	// pruning is a single-flight flag: 0=idle, 1=running.
+	pruning atomic.Int32
+	// lastPrune records when the last prune completed (guarded by mu).
+	lastPrune time.Time
+	// pruneInterval is the rate-limit interval for auto-pruning.
+	pruneInterval time.Duration
 }
 
 func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
@@ -31,11 +43,34 @@ func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
 		return nil, fmt.Errorf("failed to open metadata db: %w", err)
 	}
 
-	return &NativeStore{
-		baseDir:  baseDir,
-		maxBytes: maxBytes,
-		db:       db,
-	}, nil
+	s := &NativeStore{
+		baseDir:       baseDir,
+		maxBytes:      maxBytes,
+		db:            db,
+		pruneInterval: 30 * time.Second,
+	}
+
+	// Phase 76.3: Initialise the byte estimate in the background to avoid
+	// blocking NewNativeStore on potentially large directory walks.
+	go s.initEstimatedBytes()
+
+	return s, nil
+}
+
+// initEstimatedBytes performs a one-time directory walk to seed estimatedBytes.
+func (s *NativeStore) initEstimatedBytes() {
+	var total int64
+	chunksDir := filepath.Join(s.baseDir, "chunks")
+	_ = filepath.WalkDir(chunksDir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	s.estimatedBytes.Store(total)
 }
 
 func (s *NativeStore) Get(bucket, key string) ([]byte, error) {
@@ -141,9 +176,10 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 		return err
 	}
 
-	// Trigger pruning if limit is set
-	if s.maxBytes > 0 {
-		go s.Prune()
+	// Phase 76.3: Update estimated byte count and conditionally prune.
+	s.estimatedBytes.Add(int64(len(value)))
+	if s.maxBytes > 0 && s.estimatedBytes.Load() > s.maxBytes {
+		s.maybeSchedulePrune()
 	}
 
 	return nil
@@ -151,11 +187,50 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 
 func (s *NativeStore) deleteChunk(key string) error {
 	path := s.getChunkPath(key)
+
+	// Phase 76.3: Stat before removal so we can update the byte estimate.
+	if info, err := os.Stat(path); err == nil {
+		s.estimatedBytes.Add(-info.Size())
+	}
+
 	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
 	return nil
+}
+
+// SetPruneInterval sets the rate-limit interval for background auto-pruning.
+// Set to 0 to run auto-pruning on every limit breach without rate-limiting.
+func (s *NativeStore) SetPruneInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneInterval = d
+}
+
+// maybeSchedulePrune schedules a single background Prune run if:
+//   - No prune is already running (single-flight via atomic CAS), and
+//   - At least pruneInterval has elapsed since the last prune run.
+func (s *NativeStore) maybeSchedulePrune() {
+	// Single-flight: only one prune goroutine at a time.
+	if !s.pruning.CompareAndSwap(0, 1) {
+		return
+	}
+	s.mu.RLock()
+	since := time.Since(s.lastPrune)
+	interval := s.pruneInterval
+	s.mu.RUnlock()
+	if interval > 0 && since < interval {
+		s.pruning.Store(0)
+		return
+	}
+	go func() {
+		defer s.pruning.Store(0)
+		s.mu.Lock()
+		s.lastPrune = time.Now()
+		s.mu.Unlock()
+		_ = s.Prune()
+	}()
 }
 
 type chunkInfo struct {
@@ -195,6 +270,9 @@ func (s *NativeStore) Prune() error {
 		return err
 	}
 
+	// Phase 76.3: Refresh the atomic estimate from the actual walk result.
+	s.estimatedBytes.Store(totalSize)
+
 	if totalSize <= s.maxBytes {
 		return nil
 	}
@@ -213,6 +291,9 @@ func (s *NativeStore) Prune() error {
 			totalSize -= c.size
 		}
 	}
+
+	// Refresh estimate one final time after deletions.
+	s.estimatedBytes.Store(totalSize)
 
 	return nil
 }

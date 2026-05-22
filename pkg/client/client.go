@@ -37,6 +37,7 @@ import (
 	stdpath "path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -631,6 +632,15 @@ type Client struct {
 	allocCache  []metadata.Node
 	allocExpiry time.Time
 	allocMu     *sync.RWMutex
+
+	// Phase 76: Client Latency Optimization
+	// hedgeDelay is the stagger delay before launching a replica download.
+	// 0 = fire all replicas simultaneously; <0 = conservative 1s fallback.
+	hedgeDelay time.Duration
+	// maxPrefetch is the upper bound for the auto-tuning sequential prefetch window.
+	maxPrefetch int
+	// writePipeline is the number of concurrent chunk uploads during writes.
+	writePipeline int
 }
 
 // GetRootID returns the ID of the root directory.
@@ -674,6 +684,10 @@ func NewClient(serverAddr string) *Client {
 		allocMu:              &sync.RWMutex{},
 		registryDir:          "/registry",
 		anchoredNodesMu:      &sync.RWMutex{},
+		// Phase 76: Client Latency Optimization defaults
+		hedgeDelay:    150 * time.Millisecond,
+		maxPrefetch:   8,
+		writePipeline: 4,
 	}
 }
 
@@ -753,6 +767,38 @@ func (c *Client) withRootAnchor(id, owner string, pk, ek []byte, version uint64)
 func (c *Client) WithStore(store KVStore) *Client {
 	c2 := *c
 	c2.store = store
+	return &c2
+}
+
+// WithHedgeDelay sets the stagger delay before launching a parallel replica download.
+// A value of 0 fires all replicas simultaneously (maximum throughput).
+// A negative value falls back to the conservative 1-second default.
+// Default: 150ms.
+func (c *Client) WithHedgeDelay(d time.Duration) *Client {
+	c2 := *c
+	c2.hedgeDelay = d
+	return &c2
+}
+
+// WithMaxPrefetch sets the upper bound for the auto-tuning sequential read-ahead
+// prefetch window, in chunks (each chunk is 1 MB). Default: 8.
+func (c *Client) WithMaxPrefetch(n int) *Client {
+	if n < 0 {
+		return c
+	}
+	c2 := *c
+	c2.maxPrefetch = n
+	return &c2
+}
+
+// WithWritePipeline sets the maximum number of concurrent chunk uploads during
+// a file write. Default: 4.
+func (c *Client) WithWritePipeline(n int) *Client {
+	if n <= 0 {
+		return c
+	}
+	c2 := *c
+	c2.writePipeline = n
 	return &c2
 }
 
@@ -1506,22 +1552,44 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 		for i, url := range urls {
 			started++
 			if i > 0 {
-				// Staggered start: Wait for timeout OR a result from previous attempts
-				wait := time.NewTimer(1 * time.Second)
-				select {
-				case <-lctx.Done():
-					wait.Stop()
-					return lctx.Err()
-				case res := <-resCh:
-					wait.Stop()
-					consumed++
-					if res.err == nil {
-						data = res.data
-						return nil
+				// Phase 76.2: Configurable hedge delay.
+				// delay==0: fire all replicas simultaneously.
+				// delay<0:  fall back to conservative 1s.
+				delay := c.hedgeDelay
+				if delay < 0 {
+					delay = time.Second
+				}
+				if delay == 0 {
+					// No stagger — launch immediately, but still check for early success.
+					select {
+					case <-lctx.Done():
+						return lctx.Err()
+					case res := <-resCh:
+						consumed++
+						if res.err == nil {
+							data = res.data
+							return nil
+						}
+					default:
 					}
-					// If it was an error, we continue to start the next staggered request immediately
-				case <-wait.C:
-					// Timeout reached, start next replica
+				} else {
+					// Staggered start: Wait for timeout OR a result from previous attempts.
+					wait := time.NewTimer(delay)
+					select {
+					case <-lctx.Done():
+						wait.Stop()
+						return lctx.Err()
+					case res := <-resCh:
+						wait.Stop()
+						consumed++
+						if res.err == nil {
+							data = res.data
+							return nil
+						}
+						// Error on previous attempt — launch next replica immediately.
+					case <-wait.C:
+						// Timeout reached, start next replica.
+					}
 				}
 			}
 			go func(targetURL string) {
@@ -2732,6 +2800,13 @@ type FileReader struct {
 	lastChunkIdx   int64
 	sequentialHits int
 
+	// Phase 76.5: Auto-tuning prefetch window.
+	// prefetchWindow is the current number of chunks to prefetch ahead.
+	// It scales up on cache hits and down on sequential misses; resets on seeks.
+	prefetchWindow int
+	// maxPrefetch is the configured upper bound (inherited from Client.maxPrefetch).
+	maxPrefetch int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -2801,6 +2876,10 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 	}
 
 	lctx, cancel := context.WithCancel(context.Background())
+	maxPrefetch := c.maxPrefetch
+	if maxPrefetch <= 0 {
+		maxPrefetch = 8
+	}
 	r := &FileReader{
 		client:          c,
 		inode:           inode,
@@ -2811,6 +2890,8 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 		token:           token,
 		leaseNonce:      nonce,
 		readAhead:       make(map[int64]*readAheadResult),
+		prefetchWindow:  1,
+		maxPrefetch:     maxPrefetch,
 		ctx:             lctx,
 		cancel:          cancel,
 		onExpired:       c.onLeaseExpired,
@@ -2960,6 +3041,8 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 				delete(r.readAhead, k)
 			}
 			r.readAheadMu.Unlock()
+			// Phase 76.5: Reset prefetch window on seek/random access.
+			r.prefetchWindow = 1
 		}
 
 		var pt []byte
@@ -2981,9 +3064,10 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 			}
 			r.lastChunkIdx = chunkIdx
 
-			// Only trigger aggressive network pre-fetching if the last N reads were strictly sequential
-			if r.sequentialHits >= 1 { // After reading 2 consecutive chunks
-				for i := int64(1); i <= 3; i++ {
+			// Phase 76.5: Trigger prefetch using the dynamic window.
+			// Only prefetch after reading at least 2 consecutive chunks.
+			if r.sequentialHits >= 1 {
+				for i := int64(1); i <= int64(r.prefetchWindow); i++ {
 					r.triggerPrefetch(chunkIdx + i)
 				}
 			}
@@ -3006,6 +3090,10 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 					}
 				} else {
 					pt = res.data
+					// Phase 76.5: Cache hit — scale up the prefetch window.
+					if r.prefetchWindow < r.maxPrefetch {
+						r.prefetchWindow++
+					}
 				}
 			}
 
@@ -3048,6 +3136,10 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 				pt, err = crypto.DecryptChunk(r.fileKey, uint64(chunkIdx), ct)
 				if err != nil {
 					return totalRead, err
+				}
+				// Phase 76.5: On-demand sequential fetch — gently shrink the window.
+				if r.sequentialHits >= 1 && r.prefetchWindow > 1 {
+					r.prefetchWindow--
 				}
 			}
 
@@ -3280,6 +3372,18 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 	}
 
 	lctx, cancel := context.WithCancel(context.Background())
+
+	// Phase 76.1: Eagerly warm the node allocation cache so the first chunk
+	// doesn't have to wait for an allocate round-trip.
+	if _, err := c.allocateNodes(lctx); err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to pre-allocate nodes: %w", err)
+	}
+
+	pipelineSize := c.writePipeline
+	if pipelineSize <= 0 {
+		pipelineSize = 4
+	}
 	w := &FileWriter{
 		client:     c,
 		ctx:        lctx,
@@ -3297,6 +3401,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 		oldInodeID: oldInodeID,
 		isNew:      true, // It's "new" because it's a new InodeID
 		onExpired:  c.onLeaseExpired,
+		uploadSem:  make(chan struct{}, pipelineSize),
 	}
 
 	w.wg.Add(1)
@@ -3330,11 +3435,25 @@ type FileWriter struct {
 	oldInodeID string
 	onExpired  func(id string, err error)
 	nodes      []metadata.Node
+
+	// Phase 76.1: Pipelined upload fields.
+	// uploadSem is a semaphore (buffered channel) bounding concurrent uploads.
+	uploadSem chan struct{}
+	// uploadWg tracks all in-flight upload goroutines.
+	uploadWg sync.WaitGroup
+	// uploadErr holds the first error reported by any upload goroutine.
+	uploadErr atomic.Pointer[error]
+	// manifestMu guards concurrent slot writes into manifest.
+	manifestMu sync.Mutex
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, io.ErrClosedPipe
+	}
+	// Phase 76.1: Surface any background upload error immediately.
+	if errPtr := w.uploadErr.Load(); errPtr != nil {
+		return 0, *errPtr
 	}
 	n := len(p)
 	for len(p) > 0 {
@@ -3344,7 +3463,7 @@ func (w *FileWriter) Write(p []byte) (int, error) {
 			break
 		}
 		w.buf = append(w.buf, p[:space]...)
-		if err := w.flushChunk(); err != nil {
+		if err := w.flushChunkAsync(); err != nil {
 			return 0, err
 		}
 		p = p[space:]
@@ -3353,20 +3472,32 @@ func (w *FileWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (w *FileWriter) flushChunk() error {
+// flushChunkAsync encrypts the current buffer synchronously on the caller goroutine,
+// then uploads the resulting ciphertext asynchronously. It pre-allocates a slot in
+// w.manifest so the chunk order is preserved regardless of upload completion order.
+// The buffer w.buf is reset immediately after encryption so the caller can continue
+// filling it for the next chunk without waiting for the network.
+func (w *FileWriter) flushChunkAsync() error {
 	if len(w.buf) == 0 {
 		return nil
 	}
-	// Use next chunk index (current manifest length)
+
+	// 1. Pre-allocate a manifest slot in order (caller goroutine only, no race).
+	w.manifestMu.Lock()
 	chunkIndex := uint64(len(w.manifest))
+	w.manifest = append(w.manifest, metadata.ChunkEntry{}) // empty placeholder
+	slotIdx := int(chunkIndex)
+	w.manifestMu.Unlock()
+
+	// 2. Encrypt synchronously. EncryptChunk reads w.buf and returns independent
+	//    allocations for cid and ct, so it is safe to reset w.buf after this call.
 	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf, chunkIndex)
 	if err != nil {
 		return err
 	}
-	token, err := w.client.issueToken(w.ctx, w.inode.ID, []string{cid}, "W")
-	if err != nil {
-		return err
-	}
+	w.buf = w.buf[:0] // reset immediately; goroutine uses ct, not w.buf
+
+	// 3. Ensure we have node allocations (cached in client for 1 minute).
 	if len(w.nodes) == 0 {
 		nodes, err := w.client.allocateNodes(w.ctx)
 		if err != nil {
@@ -3374,17 +3505,55 @@ func (w *FileWriter) flushChunk() error {
 		}
 		w.nodes = nodes
 	}
+	nodes := w.nodes // capture; read-only in goroutine
 
-	if err := w.client.uploadChunk(w.ctx, cid, ct, w.nodes, token); err != nil {
-		return err
+	// 4. Acquire semaphore (blocks if pipeline is full).
+	select {
+	case w.uploadSem <- struct{}{}:
+	case <-w.ctx.Done():
+		return w.ctx.Err()
 	}
-	var nodeIDs []string
-	for _, node := range w.nodes {
-		nodeIDs = append(nodeIDs, node.ID)
-	}
-	w.manifest = append(w.manifest, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
-	w.buf = w.buf[:0]
+
+	// 5. Launch upload goroutine.
+	w.uploadWg.Add(1)
+	go func() {
+		defer w.uploadWg.Done()
+		defer func() { <-w.uploadSem }()
+
+		// Bail early if a previous goroutine already failed.
+		if w.uploadErr.Load() != nil {
+			return
+		}
+
+		token, err := w.client.issueToken(w.ctx, w.inode.ID, []string{cid}, "W")
+		if err != nil {
+			w.storeUploadErr(err)
+			return
+		}
+
+		if err := w.client.uploadChunk(w.ctx, cid, ct, nodes, token); err != nil {
+			w.storeUploadErr(err)
+			return
+		}
+
+		var nodeIDs []string
+		for _, n := range nodes {
+			nodeIDs = append(nodeIDs, n.ID)
+		}
+
+		// 6. Write into the pre-allocated slot.
+		w.manifestMu.Lock()
+		w.manifest[slotIdx] = metadata.ChunkEntry{ID: cid, Nodes: nodeIDs}
+		w.manifestMu.Unlock()
+	}()
+
 	return nil
+}
+
+// storeUploadErr stores the first upload error (subsequent errors are silently dropped).
+func (w *FileWriter) storeUploadErr(err error) {
+	errCopy := err
+	w.uploadErr.CompareAndSwap(nil, &errCopy)
 }
 
 // Finish finalizes the file data (flushing chunks, updating manifest) but does NOT commit metadata to Raft.
@@ -3399,8 +3568,15 @@ func (w *FileWriter) Finish() error {
 		w.inode.ChunkManifest = nil
 		w.inode.Size = uint64(len(w.buf))
 	} else {
-		if err := w.flushChunk(); err != nil {
+		// Phase 76.1: Flush the final (possibly partial) buffer asynchronously.
+		if err := w.flushChunkAsync(); err != nil {
 			return err
+		}
+		// Drain all in-flight upload goroutines.
+		w.uploadWg.Wait()
+		// Surface any upload error.
+		if errPtr := w.uploadErr.Load(); errPtr != nil {
+			return *errPtr
 		}
 		w.inode.SetInlineData(nil)
 		w.inode.ChunkManifest = w.manifest
@@ -3568,8 +3744,9 @@ func (w *FileWriter) Abort() {
 		return
 	}
 	w.closed = true
-	w.cancel()
-	w.wg.Wait()
+	w.cancel()        // cancels w.ctx, causing in-flight upload goroutines to exit early
+	w.uploadWg.Wait() // drain upload goroutines before releasing the lease
+	w.wg.Wait()       // drain leaseRenewalLoop
 
 	leaseTarget := w.inode.ID
 	if w.swapMode {

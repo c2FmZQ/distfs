@@ -183,6 +183,20 @@ func loadClient(conf *config.Config, rootID string, disableDoH bool, timelineSam
 		WithDisableDoH(disableDoH).
 		WithTimelineSampleRate(timelineSampleRate)
 
+	if conf.HedgeDelay != "" {
+		if d, err := time.ParseDuration(conf.HedgeDelay); err == nil {
+			c = c.WithHedgeDelay(d)
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid hedge_delay %q: %v\n", conf.HedgeDelay, err)
+		}
+	}
+	if conf.MaxPrefetch > 0 {
+		c = c.WithMaxPrefetch(conf.MaxPrefetch)
+	}
+	if conf.WritePipeline > 0 {
+		c = c.WithWritePipeline(conf.WritePipeline)
+	}
+
 	// Phase 74: Initialize Universal Caching
 	cacheDir := conf.CacheDir
 	if cacheDir == "" {
