@@ -162,6 +162,7 @@ func (s *NativeStore) Delete(bucket, key string) error {
 }
 
 func (s *NativeStore) Close() error {
+	s.saveEstimatedBytes()
 	return s.db.Close()
 }
 
@@ -216,7 +217,6 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 
 	// Phase 76.3: Update estimated byte count and conditionally prune.
 	s.estimatedBytes.Add(int64(len(value)))
-	s.saveEstimatedBytes()
 	if s.maxBytes > 0 && s.estimatedBytes.Load() > s.maxBytes {
 		s.maybeSchedulePrune()
 	}
@@ -232,7 +232,6 @@ func (s *NativeStore) deleteChunk(key string) error {
 	err := os.Remove(path)
 	if err == nil && statErr == nil {
 		s.estimatedBytes.Add(-info.Size())
-		s.saveEstimatedBytes()
 	}
 
 	if err != nil && !os.IsNotExist(err) {
@@ -311,10 +310,6 @@ func (s *NativeStore) Prune() error {
 		return err
 	}
 
-	// Phase 76.3: Refresh the atomic estimate from the actual walk result.
-	s.estimatedBytes.Store(totalSize)
-	s.saveEstimatedBytes()
-
 	if totalSize <= s.maxBytes {
 		return nil
 	}
@@ -325,18 +320,21 @@ func (s *NativeStore) Prune() error {
 	})
 
 	// Delete until under limit
+	var removedBytes int64
 	for _, c := range chunks {
 		if totalSize <= s.maxBytes {
 			break
 		}
 		if err := os.Remove(c.path); err == nil {
 			totalSize -= c.size
+			removedBytes += c.size
 		}
 	}
 
-	// Refresh estimate one final time after deletions.
-	s.estimatedBytes.Store(totalSize)
-	s.saveEstimatedBytes()
+	if removedBytes > 0 {
+		s.estimatedBytes.Add(-removedBytes)
+		s.saveEstimatedBytes()
+	}
 
 	return nil
 }

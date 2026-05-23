@@ -3047,6 +3047,9 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 			r.readAheadMu.Unlock()
 			// Phase 76.5: Reset prefetch window on seek/random access.
 			r.prefetchWindow = 1
+			if r.maxPrefetch < 1 {
+				r.prefetchWindow = 0
+			}
 		}
 
 		var pt []byte
