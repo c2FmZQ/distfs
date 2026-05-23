@@ -810,8 +810,8 @@ func loadClient() *client.Client {
 			fmt.Fprintf(os.Stderr, "Warning: invalid hedge_delay %q: %v\n", conf.HedgeDelay, err)
 		}
 	}
-	if conf.MaxPrefetch > 0 {
-		c = c.WithMaxPrefetch(conf.MaxPrefetch)
+	if conf.MaxPrefetch != nil {
+		c = c.WithMaxPrefetch(*conf.MaxPrefetch)
 	}
 	if conf.WritePipeline > 0 {
 		c = c.WithWritePipeline(conf.WritePipeline)

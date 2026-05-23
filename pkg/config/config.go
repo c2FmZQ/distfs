@@ -56,7 +56,7 @@ type Config struct {
 	// Empty string retains the 150ms default. Set to "0" for maximum parallelism.
 	HedgeDelay string `json:"hedge_delay,omitempty"`
 	// MaxPrefetch is the upper bound on the auto-tuning sequential read-ahead window (chunks).
-	MaxPrefetch int `json:"max_prefetch,omitempty"`
+	MaxPrefetch *int `json:"max_prefetch,omitempty"`
 	// WritePipeline is the number of concurrent chunk upload goroutines per file write.
 	WritePipeline int `json:"write_pipeline,omitempty"`
 

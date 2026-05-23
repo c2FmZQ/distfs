@@ -2877,8 +2877,12 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 
 	lctx, cancel := context.WithCancel(context.Background())
 	maxPrefetch := c.maxPrefetch
-	if maxPrefetch <= 0 {
+	if maxPrefetch < 0 {
 		maxPrefetch = 8
+	}
+	prefetchWindow := 1
+	if maxPrefetch == 0 {
+		prefetchWindow = 0
 	}
 	r := &FileReader{
 		client:          c,
@@ -2890,7 +2894,7 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 		token:           token,
 		leaseNonce:      nonce,
 		readAhead:       make(map[int64]*readAheadResult),
-		prefetchWindow:  1,
+		prefetchWindow:  prefetchWindow,
 		maxPrefetch:     maxPrefetch,
 		ctx:             lctx,
 		cancel:          cancel,
@@ -3493,6 +3497,7 @@ func (w *FileWriter) flushChunkAsync() error {
 	//    allocations for cid and ct, so it is safe to reset w.buf after this call.
 	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf, chunkIndex)
 	if err != nil {
+		w.storeUploadErr(err)
 		return err
 	}
 	w.buf = w.buf[:0] // reset immediately; goroutine uses ct, not w.buf
@@ -3511,7 +3516,9 @@ func (w *FileWriter) flushChunkAsync() error {
 	select {
 	case w.uploadSem <- struct{}{}:
 	case <-w.ctx.Done():
-		return w.ctx.Err()
+		err := w.ctx.Err()
+		w.storeUploadErr(err)
+		return err
 	}
 
 	// 5. Launch upload goroutine.

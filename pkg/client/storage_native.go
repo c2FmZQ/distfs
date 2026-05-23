@@ -188,12 +188,13 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 func (s *NativeStore) deleteChunk(key string) error {
 	path := s.getChunkPath(key)
 
-	// Phase 76.3: Stat before removal so we can update the byte estimate.
-	if info, err := os.Stat(path); err == nil {
+	// Phase 76.3: Stat before removal so we can update the byte estimate only on successful removal.
+	info, statErr := os.Stat(path)
+	err := os.Remove(path)
+	if err == nil && statErr == nil {
 		s.estimatedBytes.Add(-info.Size())
 	}
 
-	err := os.Remove(path)
 	if err != nil && !os.IsNotExist(err) {
 		return err
 	}
