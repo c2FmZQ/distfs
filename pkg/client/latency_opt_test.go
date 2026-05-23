@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -455,3 +456,50 @@ func TestBenchmark_LatencyOptimization(t *testing.T) {
 		t.Logf("Read speedup: %.2fx", float64(noPrefetchDuration)/float64(prefetchDuration))
 	})
 }
+
+// TestNativeStore_EstimatedBytesPersistence verifies that estimatedBytes is persisted
+// to BoltDB on updates and loaded on startup without running a directory walk fallback.
+func TestNativeStore_EstimatedBytesPersistence(t *testing.T) {
+	dir := t.TempDir()
+
+	// 1. Create native store, write a chunk.
+	store, err := NewNativeStore(dir, 1000)
+	if err != nil {
+		t.Fatalf("failed to create NativeStore: %v", err)
+	}
+
+	chunkData := []byte("hello-world-chunk-data")
+	err = store.Put("chunks", "chunk1", chunkData)
+	if err != nil {
+		t.Fatalf("failed to put chunk: %v", err)
+	}
+
+	expectedSize := int64(len(chunkData))
+	if size := store.estimatedBytes.Load(); size != expectedSize {
+		t.Errorf("expected estimatedBytes in memory to be %d, got %d", expectedSize, size)
+	}
+
+	// Close database file to release BoltDB lock
+	store.Close()
+
+	// 2. Modify physical filesystem by deleting the chunk file.
+	// If the startup performs a directory walk, the size will compute to 0.
+	// If it successfully loads the persisted count from BoltDB, it will compute to expectedSize.
+	chunkPath := store.getChunkPath("chunk1")
+	err = os.Remove(chunkPath)
+	if err != nil {
+		t.Fatalf("failed to remove chunk file: %v", err)
+	}
+
+	// 3. Re-open NativeStore on same directory.
+	store2, err := NewNativeStore(dir, 1000)
+	if err != nil {
+		t.Fatalf("failed to re-open NativeStore: %v", err)
+	}
+	defer store2.Close()
+
+	if size := store2.estimatedBytes.Load(); size != expectedSize {
+		t.Errorf("expected loaded estimatedBytes from BoltDB to be %d, got %d", expectedSize, size)
+	}
+}
+

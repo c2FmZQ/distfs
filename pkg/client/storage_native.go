@@ -4,6 +4,7 @@
 package client
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -57,8 +58,31 @@ func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
 	return s, nil
 }
 
-// initEstimatedBytes performs a one-time directory walk to seed estimatedBytes.
+// initEstimatedBytes loads the estimatedBytes from BoltDB on startup,
+// falling back to a full directory walk only if it is missing or invalid.
 func (s *NativeStore) initEstimatedBytes() {
+	var persisted int64
+	var found bool
+
+	_ = s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("sys_config"))
+		if b == nil {
+			return nil
+		}
+		v := b.Get([]byte("estimated_bytes"))
+		if len(v) == 8 {
+			persisted = int64(binary.BigEndian.Uint64(v))
+			found = true
+		}
+		return nil
+	})
+
+	if found && persisted >= 0 {
+		s.estimatedBytes.Store(persisted)
+		return
+	}
+
+	// Fallback to directory walk
 	var total int64
 	chunksDir := filepath.Join(s.baseDir, "chunks")
 	_ = filepath.WalkDir(chunksDir, func(_ string, d os.DirEntry, err error) error {
@@ -71,6 +95,20 @@ func (s *NativeStore) initEstimatedBytes() {
 		return nil
 	})
 	s.estimatedBytes.Store(total)
+	s.saveEstimatedBytes()
+}
+
+// saveEstimatedBytes writes the current atomic estimatedBytes to BoltDB.
+func (s *NativeStore) saveEstimatedBytes() {
+	_ = s.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("sys_config"))
+		if err != nil {
+			return err
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(s.estimatedBytes.Load()))
+		return b.Put([]byte("estimated_bytes"), buf[:])
+	})
 }
 
 func (s *NativeStore) Get(bucket, key string) ([]byte, error) {
@@ -178,6 +216,7 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 
 	// Phase 76.3: Update estimated byte count and conditionally prune.
 	s.estimatedBytes.Add(int64(len(value)))
+	s.saveEstimatedBytes()
 	if s.maxBytes > 0 && s.estimatedBytes.Load() > s.maxBytes {
 		s.maybeSchedulePrune()
 	}
@@ -193,6 +232,7 @@ func (s *NativeStore) deleteChunk(key string) error {
 	err := os.Remove(path)
 	if err == nil && statErr == nil {
 		s.estimatedBytes.Add(-info.Size())
+		s.saveEstimatedBytes()
 	}
 
 	if err != nil && !os.IsNotExist(err) {
@@ -273,6 +313,7 @@ func (s *NativeStore) Prune() error {
 
 	// Phase 76.3: Refresh the atomic estimate from the actual walk result.
 	s.estimatedBytes.Store(totalSize)
+	s.saveEstimatedBytes()
 
 	if totalSize <= s.maxBytes {
 		return nil
@@ -295,6 +336,7 @@ func (s *NativeStore) Prune() error {
 
 	// Refresh estimate one final time after deletions.
 	s.estimatedBytes.Store(totalSize)
+	s.saveEstimatedBytes()
 
 	return nil
 }
