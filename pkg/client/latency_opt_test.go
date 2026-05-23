@@ -455,4 +455,3 @@ func TestBenchmark_LatencyOptimization(t *testing.T) {
 		t.Logf("Read speedup: %.2fx", float64(noPrefetchDuration)/float64(prefetchDuration))
 	})
 }
-
