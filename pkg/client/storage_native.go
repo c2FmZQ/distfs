@@ -50,9 +50,9 @@ func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
 		pruneInterval: 30 * time.Second,
 	}
 
-	// Phase 76.3: Initialise the byte estimate in the background to avoid
-	// blocking NewNativeStore on potentially large directory walks.
-	go s.initEstimatedBytes()
+	// Initialize the byte estimate synchronously on startup to prevent any
+	// race conditions with concurrent puts/deletes.
+	s.initEstimatedBytes()
 
 	return s, nil
 }

@@ -3591,11 +3591,15 @@ func (w *FileWriter) Close() error {
 	if w.closed {
 		return nil
 	}
+	defer func() {
+		w.closed = true
+		w.cancel()
+		w.wg.Wait()
+	}()
 
 	if err := w.Finish(); err != nil {
 		return err
 	}
-	w.closed = true
 
 	// Final Metadata Update
 	var err error
@@ -3731,9 +3735,6 @@ func (w *FileWriter) Close() error {
 			w.client.pathMu.Unlock()
 		}
 	}
-
-	w.cancel()
-	w.wg.Wait()
 
 	return err
 }
