@@ -269,3 +269,190 @@ func TestFileWriter_PipelinedWritesErrorPropagation(t *testing.T) {
 		t.Errorf("expected upload error 'network upload failure', got: %v", err)
 	}
 }
+
+// TestBenchmark_LatencyOptimization compares performance of sequential vs pipelined writes,
+// and no-prefetch vs dynamic prefetch reads under simulated latency.
+func TestBenchmark_LatencyOptimization(t *testing.T) {
+	// Mock server that introduces 50ms of network latency for chunk uploads/downloads.
+	var uploadCalls, downloadCalls int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(50 * time.Millisecond) // simulate 50ms RTT
+
+		if r.URL.Path == "/v1/auth/challenge" {
+			chal := make([]byte, 32)
+			res := metadata.AuthChallengeResponse{Challenge: chal, Signature: make([]byte, 64)}
+			b, _ := json.Marshal(res)
+			w.WriteHeader(http.StatusOK)
+			w.Write(b)
+			return
+		}
+		if r.URL.Path == "/v1/login" {
+			res := metadata.SessionResponse{Token: "fake-token"}
+			b, _ := json.Marshal(res)
+			w.WriteHeader(http.StatusOK)
+			w.Write(b)
+			return
+		}
+		if r.URL.Path == "/v1/meta/key/sign" {
+			sk, _ := crypto.GenerateIdentityKey()
+			w.WriteHeader(http.StatusOK)
+			w.Write(sk.Public())
+			return
+		}
+		if r.URL.Path == "/v1/meta/key" {
+			dk, _ := crypto.GenerateEncryptionKey()
+			w.WriteHeader(http.StatusOK)
+			w.Write(crypto.MarshalEncapsulationKey(dk.EncapsulationKey()))
+			return
+		}
+		if r.URL.Path == "/v1/meta/token" || r.URL.Path == "/v1/invoke" {
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte("fake-token"))
+			return
+		}
+		if r.URL.Path == "/v1/meta/allocate" {
+			nodes := []metadata.Node{
+				{ID: "node-1", Address: "http://dummy1"},
+				{ID: "node-2", Address: "http://dummy2"},
+			}
+			b, _ := json.Marshal(nodes)
+			w.WriteHeader(http.StatusOK)
+			w.Write(b)
+			return
+		}
+
+		if r.Method == "PUT" {
+			atomic.AddInt64(&uploadCalls, 1)
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.Method == "GET" && bytes.Contains([]byte(r.URL.Path), []byte("chunk")) {
+			atomic.AddInt64(&downloadCalls, 1)
+			w.WriteHeader(http.StatusOK)
+			// Return encrypted empty chunk with the correct index.
+			var idx uint64
+			fmt.Sscanf(r.URL.Path, "/v1/data/chunk-%d", &idx)
+			fileKey := make([]byte, 32)
+			_, ct, _ := crypto.EncryptChunk(fileKey, make([]byte, crypto.ChunkSize), idx)
+			w.Write(ct)
+			return
+		}
+
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	// 1. Measure Pipelined Writes (Sequential vs Pipelined)
+	t.Run("PipelinedWrites", func(t *testing.T) {
+		sk, _ := crypto.GenerateIdentityKey()
+
+		// Run sequential (WritePipeline=1)
+		cSeq := NewClient(server.URL).WithWritePipeline(1).withSignKey(sk)
+		wSeq := &FileWriter{
+			client:    cSeq,
+			ctx:       context.Background(),
+			fileKey:   make([]byte, 32),
+			inode:     metadata.Inode{ID: "inode-seq"},
+			uploadSem: make(chan struct{}, 1),
+			nodes:     []metadata.Node{{ID: "n1", Address: server.URL}},
+		}
+
+		// 5 chunks
+		largeData := make([]byte, 5*crypto.ChunkSize)
+		atomic.StoreInt64(&uploadCalls, 0)
+		start := time.Now()
+		if _, err := wSeq.Write(largeData); err != nil {
+			t.Fatalf("wSeq.Write failed: %v", err)
+		}
+		if err := wSeq.Finish(); err != nil {
+			t.Fatalf("wSeq.Finish failed: %v", err)
+		}
+		seqDuration := time.Since(start)
+		seqUploads := atomic.LoadInt64(&uploadCalls)
+
+		// Run pipelined (WritePipeline=4)
+		cPipe := NewClient(server.URL).WithWritePipeline(4).withSignKey(sk)
+		wPipe := &FileWriter{
+			client:    cPipe,
+			ctx:       context.Background(),
+			fileKey:   make([]byte, 32),
+			inode:     metadata.Inode{ID: "inode-pipe"},
+			uploadSem: make(chan struct{}, 4),
+			nodes:     []metadata.Node{{ID: "n1", Address: server.URL}},
+		}
+
+		atomic.StoreInt64(&uploadCalls, 0)
+		start = time.Now()
+		if _, err := wPipe.Write(largeData); err != nil {
+			t.Fatalf("wPipe.Write failed: %v", err)
+		}
+		if err := wPipe.Finish(); err != nil {
+			t.Fatalf("wPipe.Finish failed: %v", err)
+		}
+		pipeDuration := time.Since(start)
+		pipeUploads := atomic.LoadInt64(&uploadCalls)
+
+		t.Logf("Sequential Writes (Pipeline=1) took: %v (uploads: %d)", seqDuration, seqUploads)
+		t.Logf("Pipelined Writes (Pipeline=4) took: %v (uploads: %d)", pipeDuration, pipeUploads)
+		t.Logf("Write speedup: %.2fx", float64(seqDuration)/float64(pipeDuration))
+	})
+
+	// 2. Measure Prefetching (No-prefetch vs Auto-tuning Prefetch)
+	t.Run("Prefetching", func(t *testing.T) {
+		manifest := make([]metadata.ChunkEntry, 10)
+		for i := range manifest {
+			manifest[i] = metadata.ChunkEntry{ID: fmt.Sprintf("chunk-%d", i), URLs: []string{server.URL}}
+		}
+		fileKey := make([]byte, 32)
+
+		// Run No-prefetch (MaxPrefetch=0)
+		cNoPrefetch := NewClient(server.URL).WithMaxPrefetch(0)
+		rNoPrefetch := &FileReader{
+			client:         cNoPrefetch,
+			inode:          &metadata.Inode{ChunkManifest: manifest, Size: 10 * crypto.ChunkSize},
+			fileKey:        fileKey,
+			readAhead:      make(map[int64]*readAheadResult),
+			prefetchWindow: 0,
+			maxPrefetch:    0,
+			ctx:            context.Background(),
+		}
+
+		p := make([]byte, crypto.ChunkSize)
+		atomic.StoreInt64(&downloadCalls, 0)
+		start := time.Now()
+		for i := 0; i < 10; i++ {
+			if _, err := rNoPrefetch.Read(p); err != nil {
+				t.Fatalf("rNoPrefetch.Read chunk %d failed: %v", i, err)
+			}
+		}
+		noPrefetchDuration := time.Since(start)
+		noPrefetchDownloads := atomic.LoadInt64(&downloadCalls)
+
+		// Run Auto-tuning Prefetch (MaxPrefetch=4)
+		cPrefetch := NewClient(server.URL).WithMaxPrefetch(4)
+		rPrefetch := &FileReader{
+			client:         cPrefetch,
+			inode:          &metadata.Inode{ChunkManifest: manifest, Size: 10 * crypto.ChunkSize},
+			fileKey:        fileKey,
+			readAhead:      make(map[int64]*readAheadResult),
+			prefetchWindow: 1,
+			maxPrefetch:    4,
+			ctx:            context.Background(),
+		}
+
+		atomic.StoreInt64(&downloadCalls, 0)
+		start = time.Now()
+		for i := 0; i < 10; i++ {
+			if _, err := rPrefetch.Read(p); err != nil {
+				t.Fatalf("rPrefetch.Read chunk %d failed: %v", i, err)
+			}
+		}
+		prefetchDuration := time.Since(start)
+		prefetchDownloads := atomic.LoadInt64(&downloadCalls)
+
+		t.Logf("No Prefetch took: %v (downloads: %d)", noPrefetchDuration, noPrefetchDownloads)
+		t.Logf("Dynamic Prefetch took: %v (downloads: %d)", prefetchDuration, prefetchDownloads)
+		t.Logf("Read speedup: %.2fx", float64(noPrefetchDuration)/float64(prefetchDuration))
+	})
+}
+
