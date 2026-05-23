@@ -502,4 +502,3 @@ func TestNativeStore_EstimatedBytesPersistence(t *testing.T) {
 		t.Errorf("expected loaded estimatedBytes from BoltDB to be %d, got %d", expectedSize, size)
 	}
 }
-
