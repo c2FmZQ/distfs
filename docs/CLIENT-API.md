@@ -17,7 +17,9 @@ This document describes the exported API of the `pkg/client` and `pkg/fuse` pack
 - `(c *Client) WithHedgeDelay(d time.Duration) *Client`: Configures the stagger delay for concurrent replica hedged reads.
 - `(c *Client) WithMaxPrefetch(n int) *Client`: Configures the maximum chunk prefetch read-ahead window (set to `0` to disable).
 - `(c *Client) WithWritePipeline(n int) *Client`: Configures the concurrency limit for the background chunk upload pipeline.
+- `(c *Client) WithMetadataTTL(d time.Duration) *Client`: Configures the short-lived in-memory metadata Time-To-Live (TTL) cache duration (set to `0` to disable).
 - `(c *Client) WithLeaseExpiredCallback(fn func(id string, err error)) *Client`: Sets a callback to be invoked when a lease expires or its renewal fails.
+
 
 ### 1.2 Authentication & Session
 - `(c *Client) Login(ctx context.Context) error`: Performs challenge-response authentication.

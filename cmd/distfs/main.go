@@ -49,6 +49,7 @@ var (
 	appTimelineSampleRate float64
 	appRootID             string
 	appRegistryDir        string
+	appMetadataTTL        string
 )
 
 func setupTPMHasher() {
@@ -148,6 +149,12 @@ func main() {
 				Value:       "/registry",
 				Usage:       "Directory to use for identity verification",
 				Destination: &appRegistryDir,
+			},
+			&cli.StringFlag{
+				Name:        "metadata-ttl",
+				Value:       "",
+				Usage:       "Time-to-live for cached metadata (e.g. 5s, 10s; set to 0 to disable)",
+				Destination: &appMetadataTTL,
 			},
 		},
 		Before: func(ctx context.Context, cmd *cli.Command) (context.Context, error) {
@@ -816,6 +823,23 @@ func loadClient() *client.Client {
 	if conf.WritePipeline > 0 {
 		c = c.WithWritePipeline(conf.WritePipeline)
 	}
+
+	ttl := 5 * time.Second
+	if conf.MetadataTTL != "" {
+		if d, err := time.ParseDuration(conf.MetadataTTL); err == nil {
+			ttl = d
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid metadata_ttl in config %q: %v\n", conf.MetadataTTL, err)
+		}
+	}
+	if appMetadataTTL != "" {
+		if d, err := time.ParseDuration(appMetadataTTL); err == nil {
+			ttl = d
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid --metadata-ttl flag %q: %v\n", appMetadataTTL, err)
+		}
+	}
+	c = c.WithMetadataTTL(ttl)
 
 	// Phase 74: Initialize Universal Caching
 	cacheDir := conf.CacheDir

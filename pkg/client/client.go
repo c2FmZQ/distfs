@@ -399,6 +399,11 @@ type pathCacheEntry struct {
 	inode   *metadata.Inode // Optional: Cached full inode
 }
 
+type cachedInode struct {
+	inode    *metadata.Inode
+	cachedAt time.Time
+}
+
 // InodeInfo provides a safe, exported representation of an inode's public metadata.
 type InodeInfo struct {
 	ID            string
@@ -641,6 +646,12 @@ type Client struct {
 	maxPrefetch int
 	// writePipeline is the number of concurrent chunk uploads during writes.
 	writePipeline int
+
+	// metadataTTL is the time-to-live for cached metadata.
+	metadataTTL time.Duration
+	// inodeMemCache caches decrypted Inodes in memory.
+	inodeMemCache map[string]cachedInode
+	inodeMemMu    *sync.RWMutex
 }
 
 // GetRootID returns the ID of the root directory.
@@ -688,6 +699,10 @@ func NewClient(serverAddr string) *Client {
 		hedgeDelay:    150 * time.Millisecond,
 		maxPrefetch:   8,
 		writePipeline: 4,
+
+		metadataTTL:   0,
+		inodeMemCache: make(map[string]cachedInode),
+		inodeMemMu:    &sync.RWMutex{},
 	}
 }
 
@@ -799,6 +814,14 @@ func (c *Client) WithWritePipeline(n int) *Client {
 	}
 	c2 := *c
 	c2.writePipeline = n
+	return &c2
+}
+
+// WithMetadataTTL sets the metadata Time-To-Live (TTL) cache duration.
+// A value of 0 (default) disables metadata caching.
+func (c *Client) WithMetadataTTL(ttl time.Duration) *Client {
+	c2 := *c
+	c2.metadataTTL = ttl
 	return &c2
 }
 
@@ -2209,6 +2232,11 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			if key := inode.GetFileKey(); len(key) > 0 {
 				updated.SetFileKey(key)
 			}
+			updated.SetSymlinkTarget(inode.GetSymlinkTarget())
+			updated.SetInlineData(inode.GetInlineData())
+			updated.SetMTime(inode.GetMTime())
+			updated.SetUID(inode.GetUID())
+			updated.SetGID(inode.GetGID())
 
 			// Phase 31: Root Anchoring
 			if updated.ID == c.rootID {
@@ -2227,6 +2255,23 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 				}
 			}
 			c.pathMu.Unlock()
+
+			// Write-through to BoltDB cache
+			if c.store != nil {
+				if idata, err := json.Marshal(&updated); err == nil {
+					c.store.Put("inodes", id, idata)
+				}
+			}
+
+			// Write-through to memory cache
+			if c.metadataTTL > 0 {
+				c.inodeMemMu.Lock()
+				c.inodeMemCache[id] = cachedInode{
+					inode:    &updated,
+					cachedAt: time.Now(),
+				}
+				c.inodeMemMu.Unlock()
+			}
 
 			return &updated, nil
 		}
@@ -2260,6 +2305,11 @@ func (c *Client) applyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 		return nil, err
 	}
 	c.clearPathCache()
+	if c.metadataTTL > 0 {
+		c.inodeMemMu.Lock()
+		clear(c.inodeMemCache)
+		c.inodeMemMu.Unlock()
+	}
 	return results, nil
 }
 
@@ -2303,6 +2353,20 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 
 func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (*metadata.Inode, error) {
 	ctx, state, created := withVerificationState(ctx)
+
+	if c.metadataTTL > 0 {
+		c.inodeMemMu.RLock()
+		entry, found := c.inodeMemCache[id]
+		c.inodeMemMu.RUnlock()
+		if found && time.Since(entry.cachedAt) < c.metadataTTL {
+			if created {
+				if err := c.processVerificationQueue(ctx, state); err != nil {
+					return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
+				}
+			}
+			return entry.inode, nil
+		}
+	}
 
 	// Phase 74: Metadata Cache
 	var inode *metadata.Inode
@@ -2402,6 +2466,15 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		if err := c.processVerificationQueue(ctx, state); err != nil {
 			return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
 		}
+	}
+
+	if c.metadataTTL > 0 && inode != nil {
+		c.inodeMemMu.Lock()
+		c.inodeMemCache[id] = cachedInode{
+			inode:    inode,
+			cachedAt: time.Now(),
+		}
+		c.inodeMemMu.Unlock()
 	}
 
 	return inode, nil

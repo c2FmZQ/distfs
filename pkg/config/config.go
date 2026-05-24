@@ -59,6 +59,9 @@ type Config struct {
 	MaxPrefetch *int `json:"max_prefetch,omitempty"`
 	// WritePipeline is the number of concurrent chunk upload goroutines per file write.
 	WritePipeline int `json:"write_pipeline,omitempty"`
+	// MetadataTTL is the time-to-live for cached metadata.
+	// Empty string retains the 0 default. (e.g. "5s")
+	MetadataTTL string `json:"metadata_ttl,omitempty"`
 
 	// Unexported
 	passphrase []byte

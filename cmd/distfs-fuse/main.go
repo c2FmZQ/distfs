@@ -83,6 +83,7 @@ func main() {
 			&cli.StringFlag{Name: "browser", Value: os.Getenv("BROWSER"), Usage: "The command to use to open the verification URL"},
 			&cli.StringFlag{Name: "root-id", Value: "", Usage: "Root inode ID to mount (chroot)"},
 			&cli.FloatFlag{Name: "timeline-sample-rate", Value: 0.01, Usage: "Probability (0.0-1.0) of performing background timeline consistency checks"},
+			&cli.StringFlag{Name: "metadata-ttl", Value: "", Usage: "Time-to-live for cached metadata (e.g. 5s, 10s; set to 0 to disable)"},
 		},
 		Action: func(ctx context.Context, cmd *cli.Command) error {
 			mountpoint := cmd.String("mount")
@@ -101,6 +102,7 @@ func main() {
 			browser := cmd.String("browser")
 			rootID := cmd.String("root-id")
 			timelineSampleRate := cmd.Float("timeline-sample-rate")
+			metadataTTL := cmd.String("metadata-ttl")
 
 			debug.StartServer(6061)
 
@@ -136,7 +138,7 @@ func main() {
 			if err != nil {
 				return err
 			}
-			c := loadClient(conf, rootID, disableDoH, timelineSampleRate)
+			c := loadClient(conf, rootID, disableDoH, timelineSampleRate, metadataTTL)
 
 			conn, err := fuse.Mount(
 				mountpoint,
@@ -178,7 +180,7 @@ func main() {
 	}
 }
 
-func loadClient(conf *config.Config, rootID string, disableDoH bool, timelineSampleRate float64) *client.Client {
+func loadClient(conf *config.Config, rootID string, disableDoH bool, timelineSampleRate float64, cliMetadataTTL string) *client.Client {
 	c := client.NewClient(conf.ServerURL).
 		WithDisableDoH(disableDoH).
 		WithTimelineSampleRate(timelineSampleRate)
@@ -196,6 +198,23 @@ func loadClient(conf *config.Config, rootID string, disableDoH bool, timelineSam
 	if conf.WritePipeline > 0 {
 		c = c.WithWritePipeline(conf.WritePipeline)
 	}
+
+	ttl := 5 * time.Second
+	if conf.MetadataTTL != "" {
+		if d, err := time.ParseDuration(conf.MetadataTTL); err == nil {
+			ttl = d
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid metadata_ttl in config %q: %v\n", conf.MetadataTTL, err)
+		}
+	}
+	if cliMetadataTTL != "" {
+		if d, err := time.ParseDuration(cliMetadataTTL); err == nil {
+			ttl = d
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: invalid --metadata-ttl flag %q: %v\n", cliMetadataTTL, err)
+		}
+	}
+	c = c.WithMetadataTTL(ttl)
 
 	// Phase 74: Initialize Universal Caching
 	cacheDir := conf.CacheDir

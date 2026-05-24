@@ -159,6 +159,11 @@ func main() {
 			if conf.WritePipeline > 0 {
 				c = c.WithWritePipeline(conf.WritePipeline)
 			}
+			if conf.MetadataTTL != "" {
+				if d, err := time.ParseDuration(conf.MetadataTTL); err == nil {
+					c = c.WithMetadataTTL(d)
+				}
+			}
 			dkBytes, _ := hex.DecodeString(conf.EncKey)
 			skBytes, _ := hex.DecodeString(conf.SignKey)
 			svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
