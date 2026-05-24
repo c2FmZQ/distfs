@@ -2307,7 +2307,27 @@ func (c *Client) applyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 	c.clearPathCache()
 	if c.metadataTTL > 0 {
 		c.inodeMemMu.Lock()
-		clear(c.inodeMemCache)
+		for _, cmd := range cmds {
+			if cmd.Type == metadata.CmdCreateInode || cmd.Type == metadata.CmdUpdateInode {
+				var inode metadata.Inode
+				if json.Unmarshal(cmd.Data, &inode) == nil {
+					delete(c.inodeMemCache, inode.ID)
+					for linkKey := range inode.Links {
+						parts := strings.Split(linkKey, ":")
+						if len(parts) > 0 {
+							parentID := parts[0]
+							delete(c.inodeMemCache, parentID)
+						}
+					}
+				} else {
+					clear(c.inodeMemCache)
+					break
+				}
+			} else {
+				clear(c.inodeMemCache)
+				break
+			}
+		}
 		c.inodeMemMu.Unlock()
 	}
 	return results, nil
