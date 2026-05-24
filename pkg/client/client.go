@@ -3382,7 +3382,8 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 
 	// Phase 76.1: Eagerly warm the node allocation cache so the first chunk
 	// doesn't have to wait for an allocate round-trip.
-	if _, err := c.allocateNodes(lctx); err != nil {
+	nodes, err := c.allocateNodes(lctx)
+	if err != nil {
 		cancel()
 		return nil, fmt.Errorf("failed to pre-allocate nodes: %w", err)
 	}
@@ -3408,6 +3409,7 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 		oldInodeID: oldInodeID,
 		isNew:      true, // It's "new" because it's a new InodeID
 		onExpired:  c.onLeaseExpired,
+		nodes:      nodes,
 		uploadSem:  make(chan struct{}, pipelineSize),
 	}
 
@@ -3506,14 +3508,20 @@ func (w *FileWriter) flushChunkAsync() error {
 	w.buf = w.buf[:0] // reset immediately; goroutine uses ct, not w.buf
 
 	// 3. Ensure we have node allocations (cached in client for 1 minute).
+	w.manifestMu.Lock()
 	if len(w.nodes) == 0 {
+		w.manifestMu.Unlock()
 		nodes, err := w.client.allocateNodes(w.ctx)
 		if err != nil {
 			return err
 		}
-		w.nodes = nodes
+		w.manifestMu.Lock()
+		if len(w.nodes) == 0 {
+			w.nodes = nodes
+		}
 	}
 	nodes := w.nodes // capture; read-only in goroutine
+	w.manifestMu.Unlock()
 
 	// 4. Acquire semaphore (blocks if pipeline is full).
 	select {
@@ -3562,8 +3570,15 @@ func (w *FileWriter) flushChunkAsync() error {
 
 // storeUploadErr stores the first upload error (subsequent errors are silently dropped).
 func (w *FileWriter) storeUploadErr(err error) {
-	errCopy := err
-	w.uploadErr.CompareAndSwap(nil, &errCopy)
+	if err == nil {
+		return
+	}
+	if w.uploadErr.Load() != nil {
+		return
+	}
+	errPtr := new(error)
+	*errPtr = err
+	w.uploadErr.CompareAndSwap(nil, errPtr)
 }
 
 // Finish finalizes the file data (flushing chunks, updating manifest) but does NOT commit metadata to Raft.
