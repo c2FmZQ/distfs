@@ -313,6 +313,7 @@ func (s *NativeStore) Prune() error {
 	}
 
 	if totalSize <= s.maxBytes {
+		s.estimatedBytes.Store(totalSize)
 		return nil
 	}
 
@@ -334,8 +335,10 @@ func (s *NativeStore) Prune() error {
 	}
 
 	if removedBytes > 0 {
-		s.estimatedBytes.Add(-removedBytes)
+		s.estimatedBytes.Store(totalSize)
 		s.saveEstimatedBytes()
+	} else {
+		s.estimatedBytes.Store(totalSize)
 	}
 
 	return nil

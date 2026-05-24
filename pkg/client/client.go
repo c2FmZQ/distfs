@@ -1029,12 +1029,18 @@ func (c *Client) getPathCache(fullPath string) (pathCacheEntry, bool) {
 	c.pathMu.RLock()
 	defer c.pathMu.RUnlock()
 	entry, ok := c.pathCache[fullPath]
+	if ok && entry.inode != nil {
+		entry.inode = entry.inode.Clone()
+	}
 	return entry, ok
 }
 
 func (c *Client) putPathCache(fullPath string, entry pathCacheEntry) {
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
+	if entry.inode != nil {
+		entry.inode = entry.inode.Clone()
+	}
 	c.pathCache[fullPath] = entry
 }
 
@@ -2250,7 +2256,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			c.pathMu.Lock()
 			for path, entry := range c.pathCache {
 				if entry.inodeID == id {
-					entry.inode = &updated
+					entry.inode = updated.Clone()
 					c.pathCache[path] = entry
 				}
 			}
@@ -2267,13 +2273,13 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			if c.metadataTTL > 0 {
 				c.inodeMemMu.Lock()
 				c.inodeMemCache[id] = cachedInode{
-					inode:    &updated,
+					inode:    updated.Clone(),
 					cachedAt: time.Now(),
 				}
 				c.inodeMemMu.Unlock()
 			}
 
-			return &updated, nil
+			return updated.Clone(), nil
 		}
 
 		if err != metadata.ErrConflict {
@@ -2384,7 +2390,30 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 					return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
 				}
 			}
-			return entry.inode, nil
+			inodeCopy := entry.inode.Clone()
+			// Decrypt ClientBlob if present and not yet decrypted
+			if len(inodeCopy.ClientBlob) > 0 && inodeCopy.GetFileKey() == nil {
+				if fileKey, err := c.unlockInode(ctx, inodeCopy); err == nil {
+					inodeCopy.SetFileKey(fileKey)
+					var blob metadata.InodeClientBlob
+					if err := c.decryptInodeClientBlob(inodeCopy.ClientBlob, fileKey, &blob); err == nil {
+						inodeCopy.SetSymlinkTarget(blob.SymlinkTarget)
+						inodeCopy.SetInlineData(blob.InlineData)
+						inodeCopy.SetMTime(blob.MTime)
+						inodeCopy.SetUID(blob.UID)
+						inodeCopy.SetGID(blob.GID)
+
+						// Update cache with the fully decrypted version
+						c.inodeMemMu.Lock()
+						c.inodeMemCache[id] = cachedInode{
+							inode:    inodeCopy.Clone(),
+							cachedAt: entry.cachedAt,
+						}
+						c.inodeMemMu.Unlock()
+					}
+				}
+			}
+			return inodeCopy, nil
 		}
 	}
 
@@ -2491,13 +2520,13 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 	if c.metadataTTL > 0 && inode != nil {
 		c.inodeMemMu.Lock()
 		c.inodeMemCache[id] = cachedInode{
-			inode:    inode,
+			inode:    inode.Clone(),
 			cachedAt: time.Now(),
 		}
 		c.inodeMemMu.Unlock()
 	}
 
-	return inode, nil
+	return inode.Clone(), nil
 }
 
 func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode, error) {
@@ -3596,6 +3625,11 @@ func (w *FileWriter) flushChunkAsync() error {
 	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf, chunkIndex)
 	if err != nil {
 		w.storeUploadErr(err)
+		w.manifestMu.Lock()
+		if len(w.manifest) > slotIdx {
+			w.manifest = w.manifest[:slotIdx]
+		}
+		w.manifestMu.Unlock()
 		return err
 	}
 	w.buf = w.buf[:0] // reset immediately; goroutine uses ct, not w.buf
@@ -3606,6 +3640,12 @@ func (w *FileWriter) flushChunkAsync() error {
 		w.manifestMu.Unlock()
 		nodes, err := w.client.allocateNodes(w.ctx)
 		if err != nil {
+			w.storeUploadErr(err)
+			w.manifestMu.Lock()
+			if len(w.manifest) > slotIdx {
+				w.manifest = w.manifest[:slotIdx]
+			}
+			w.manifestMu.Unlock()
 			return err
 		}
 		w.manifestMu.Lock()
@@ -3622,6 +3662,11 @@ func (w *FileWriter) flushChunkAsync() error {
 	case <-w.ctx.Done():
 		err := w.ctx.Err()
 		w.storeUploadErr(err)
+		w.manifestMu.Lock()
+		if len(w.manifest) > slotIdx {
+			w.manifest = w.manifest[:slotIdx]
+		}
+		w.manifestMu.Unlock()
 		return err
 	}
 
@@ -4441,7 +4486,7 @@ func (c *Client) saveDataFiles(ctx context.Context, names []string, data []any) 
 			inodeID: w.inode.ID,
 			key:     w.fileKey,
 			linkTag: w.parentID + ":" + w.nameHMAC,
-			inode:   &w.inode,
+			inode:   w.inode.Clone(),
 		}
 	}
 
