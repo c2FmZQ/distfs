@@ -32,6 +32,8 @@ type NativeStore struct {
 	lastPrune time.Time
 	// pruneInterval is the rate-limit interval for auto-pruning.
 	pruneInterval time.Duration
+	// pruneTimer is a deferred timer to run pruning when skipped due to rate limit.
+	pruneTimer *time.Timer
 }
 
 func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
@@ -162,6 +164,12 @@ func (s *NativeStore) Delete(bucket, key string) error {
 }
 
 func (s *NativeStore) Close() error {
+	s.mu.Lock()
+	if s.pruneTimer != nil {
+		s.pruneTimer.Stop()
+		s.pruneTimer = nil
+	}
+	s.mu.Unlock()
 	s.saveEstimatedBytes()
 	return s.db.Close()
 }
@@ -258,19 +266,32 @@ func (s *NativeStore) maybeSchedulePrune() {
 	if !s.pruning.CompareAndSwap(0, 1) {
 		return
 	}
-	s.mu.RLock()
+	s.mu.Lock()
 	since := time.Since(s.lastPrune)
 	interval := s.pruneInterval
-	s.mu.RUnlock()
 	if interval > 0 && since < interval {
+		// Rate-limited. Cancel any existing timer and schedule a new one
+		// for the remaining duration of the rate-limit window.
+		if s.pruneTimer != nil {
+			s.pruneTimer.Stop()
+		}
+		delay := interval - since
+		s.pruneTimer = time.AfterFunc(delay, func() {
+			s.maybeSchedulePrune()
+		})
+		s.mu.Unlock()
 		s.pruning.Store(0)
 		return
 	}
+	if s.pruneTimer != nil {
+		s.pruneTimer.Stop()
+		s.pruneTimer = nil
+	}
+	s.lastPrune = time.Now()
+	s.mu.Unlock()
+
 	go func() {
 		defer s.pruning.Store(0)
-		s.mu.Lock()
-		s.lastPrune = time.Now()
-		s.mu.Unlock()
 		_ = s.Prune()
 	}()
 }
@@ -314,6 +335,7 @@ func (s *NativeStore) Prune() error {
 
 	if totalSize <= s.maxBytes {
 		s.estimatedBytes.Store(totalSize)
+		s.saveEstimatedBytes()
 		return nil
 	}
 
@@ -334,12 +356,8 @@ func (s *NativeStore) Prune() error {
 		}
 	}
 
-	if removedBytes > 0 {
-		s.estimatedBytes.Store(totalSize)
-		s.saveEstimatedBytes()
-	} else {
-		s.estimatedBytes.Store(totalSize)
-	}
+	s.estimatedBytes.Store(totalSize)
+	s.saveEstimatedBytes()
 
 	return nil
 }

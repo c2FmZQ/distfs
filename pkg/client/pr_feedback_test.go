@@ -132,4 +132,60 @@ func TestNativeStorePruneDriftCorrection(t *testing.T) {
 	if s.estimatedBytes.Load() != 20 {
 		t.Errorf("Expected estimate to be corrected to 20, got %d", s.estimatedBytes.Load())
 	}
+
+	// Close store and reopen to verify BoltDB persistence of the corrected estimate
+	s.Close()
+	s2, err := NewNativeStore(tmpDir, 50)
+	if err != nil {
+		t.Fatalf("Failed to recreate native store: %v", err)
+	}
+	defer s2.Close()
+
+	if s2.estimatedBytes.Load() != 20 {
+		t.Errorf("Expected persisted estimate to be 20, got %d", s2.estimatedBytes.Load())
+	}
+}
+
+func TestNativeStorePruneTimerDeferred(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "native-store-prune-timer-test")
+	if err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	s, err := NewNativeStore(tmpDir, 10) // limit of 10 bytes
+	if err != nil {
+		t.Fatalf("Failed to create native store: %v", err)
+	}
+	defer s.Close()
+
+	// Set prune interval to 100ms
+	s.SetPruneInterval(100 * time.Millisecond)
+
+	// Mock lastPrune to just now to trigger rate-limiting
+	s.mu.Lock()
+	s.lastPrune = time.Now()
+	s.mu.Unlock()
+
+	// Put chunk exceeding the limit (12 bytes)
+	err = s.Put("chunks", "chunk1", []byte("123456789012"))
+	if err != nil {
+		t.Fatalf("Failed to put chunk: %v", err)
+	}
+
+	// Trigger maybeSchedulePrune. It should be skipped due to rate-limiting,
+	// but schedule a deferred timer for ~100ms.
+	s.maybeSchedulePrune()
+
+	path := s.getChunkPath("chunk1")
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("Expected chunk to still exist (pruning should be deferred): %v", err)
+	}
+
+	// Wait 150ms for deferred timer to fire and execute Prune
+	time.Sleep(150 * time.Millisecond)
+
+	if _, err := os.Stat(path); err == nil {
+		t.Errorf("Expected chunk to be pruned by the deferred timer")
+	}
 }
