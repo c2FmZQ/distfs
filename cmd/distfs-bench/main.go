@@ -162,6 +162,8 @@ func main() {
 			if conf.MetadataTTL != "" {
 				if d, err := time.ParseDuration(conf.MetadataTTL); err == nil {
 					c = c.WithMetadataTTL(d)
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid metadata_ttl %q: %v\n", conf.MetadataTTL, err)
 				}
 			}
 			dkBytes, _ := hex.DecodeString(conf.EncKey)

@@ -34,6 +34,8 @@ type NativeStore struct {
 	pruneInterval time.Duration
 	// pruneTimer is a deferred timer to run pruning when skipped due to rate limit.
 	pruneTimer *time.Timer
+	// pruneWg tracks active background pruning goroutines.
+	pruneWg sync.WaitGroup
 }
 
 func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
@@ -170,6 +172,9 @@ func (s *NativeStore) Close() error {
 		s.pruneTimer = nil
 	}
 	s.mu.Unlock()
+
+	s.pruneWg.Wait() // Wait for active background pruning to complete
+
 	s.saveEstimatedBytes()
 	return s.db.Close()
 }
@@ -290,8 +295,10 @@ func (s *NativeStore) maybeSchedulePrune() {
 	s.lastPrune = time.Now()
 	s.mu.Unlock()
 
+	s.pruneWg.Add(1)
 	go func() {
 		defer s.pruning.Store(0)
+		defer s.pruneWg.Done()
 		_ = s.Prune()
 	}()
 }

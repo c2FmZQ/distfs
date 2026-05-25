@@ -402,6 +402,7 @@ type pathCacheEntry struct {
 type cachedInode struct {
 	inode    *metadata.Inode
 	cachedAt time.Time
+	verified bool
 }
 
 // InodeInfo provides a safe, exported representation of an inode's public metadata.
@@ -2275,6 +2276,7 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 				c.inodeMemCache[id] = cachedInode{
 					inode:    updated.Clone(),
 					cachedAt: time.Now(),
+					verified: true,
 				}
 				c.inodeMemMu.Unlock()
 			}
@@ -2391,6 +2393,19 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				}
 			}
 			inodeCopy := entry.inode.Clone()
+			if verify && !entry.verified {
+				if err := c.verifyInode(ctx, inodeCopy); err != nil {
+					return nil, fmt.Errorf("inode %s verification failed: %w", id, err)
+				}
+				// Mark as verified in the memory cache
+				c.inodeMemMu.Lock()
+				c.inodeMemCache[id] = cachedInode{
+					inode:    inodeCopy.Clone(),
+					cachedAt: entry.cachedAt,
+					verified: true,
+				}
+				c.inodeMemMu.Unlock()
+			}
 			// Decrypt ClientBlob if present and not yet decrypted
 			if len(inodeCopy.ClientBlob) > 0 && inodeCopy.GetFileKey() == nil {
 				if fileKey, err := c.unlockInode(ctx, inodeCopy); err == nil {
@@ -2408,6 +2423,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 						c.inodeMemCache[id] = cachedInode{
 							inode:    inodeCopy.Clone(),
 							cachedAt: entry.cachedAt,
+							verified: entry.verified || verify,
 						}
 						c.inodeMemMu.Unlock()
 					}
@@ -2522,6 +2538,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		c.inodeMemCache[id] = cachedInode{
 			inode:    inode.Clone(),
 			cachedAt: time.Now(),
+			verified: verify,
 		}
 		c.inodeMemMu.Unlock()
 	}
@@ -3757,6 +3774,7 @@ func (w *FileWriter) Close() error {
 	defer func() {
 		w.closed = true
 		w.cancel()
+		w.uploadWg.Wait()
 		w.wg.Wait()
 	}()
 

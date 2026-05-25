@@ -189,3 +189,102 @@ func TestNativeStorePruneTimerDeferred(t *testing.T) {
 		t.Errorf("Expected chunk to be pruned by the deferred timer")
 	}
 }
+
+func TestMetadataCacheSignatureVerification(t *testing.T) {
+	c := &Client{
+		inodeMemCache: make(map[string]cachedInode),
+		metadataTTL:   5 * time.Second,
+		keyCache:      make(map[string]fileMetadata),
+	}
+	c.inodeMemMu = new(sync.RWMutex)
+	c.keyMu = new(sync.RWMutex)
+
+	inode := &metadata.Inode{
+		ID: "test-id",
+	}
+
+	// Insert into cache
+	c.inodeMemMu.Lock()
+	c.inodeMemCache[inode.ID] = cachedInode{
+		inode:    inode.Clone(),
+		cachedAt: time.Now(),
+	}
+	c.inodeMemMu.Unlock()
+
+	// Retrieve with verify=true. It should perform verifyInode and fail since the signatures are missing.
+	_, err := c.getInodeInternal(context.Background(), inode.ID, true)
+	if err == nil {
+		t.Fatalf("Expected getInodeInternal to fail signature verification on cache hit with verify=true")
+	}
+}
+
+func TestFileWriterCloseDrainsGoroutines(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	w := &FileWriter{
+		client: c,
+		ctx:    ctx,
+		cancel: cancel,
+		inode:  metadata.Inode{ID: "test-file"},
+	}
+
+	running := make(chan struct{})
+	done := make(chan struct{})
+
+	w.uploadWg.Add(1)
+	go func() {
+		defer w.uploadWg.Done()
+		close(running)
+		<-w.ctx.Done() // Block until cancelled
+		close(done)
+	}()
+
+	<-running
+
+	// Call Close(). It should cancel the context, wait for the goroutine, and return.
+	// Since w.Finish() will return nil (as w.written is 0 and no chunks flushed),
+	// it will run the deferred cleanup block.
+	_ = w.Close()
+
+	// Verify that the goroutine has actually finished
+	select {
+	case <-done:
+		// Passed!
+	default:
+		t.Errorf("Expected goroutine to have finished and been waited on by Close()")
+	}
+}
+
+func TestNativeStoreCloseRaceCondition(t *testing.T) {
+	tmpDir, err := os.MkdirTemp("", "native-store-close-race-test")
+	if err != nil {
+		t.Fatalf("Failed to create tmp dir: %v", err)
+	}
+	defer os.RemoveAll(tmpDir)
+
+	s, err := NewNativeStore(tmpDir, 10)
+	if err != nil {
+		t.Fatalf("Failed to create native store: %v", err)
+	}
+
+	// Put chunk to exceed limit
+	err = s.Put("chunks", "chunk1", []byte("123456789012"))
+	if err != nil {
+		t.Fatalf("Failed to put chunk: %v", err)
+	}
+
+	// Trigger maybeSchedulePrune to start a background pruning goroutine
+	s.maybeSchedulePrune()
+
+	// Immediately call Close(). It should wait for the background pruning goroutine
+	// to complete via pruneWg.Wait() before closing s.db.
+	err = s.Close()
+	if err != nil {
+		t.Errorf("Unexpected error from Close: %v", err)
+	}
+}
+
+
+
