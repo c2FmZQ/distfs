@@ -1499,3 +1499,65 @@ func TestClient_ConcurrentDirectoryUpdates(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_CachePoisoning_IncompleteVerification(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
+	defer ts.Close()
+
+	// 1. Create a legitimate directory
+	err := c.Mkdir(ctx, "/dir", 0755)
+	if err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	inode, _, err := c.resolvePath(ctx, "/dir")
+	if err != nil {
+		t.Fatalf("resolvePath failed: %v", err)
+	}
+
+	// Enable caching for this test (default is usually 0 in tests)
+	c.metadataTTL = 1 * time.Minute
+
+	// 2. Clear memory cache to ensure a clean state
+	c.inodeMemMu.Lock()
+	clear(c.inodeMemCache)
+	c.inodeMemMu.Unlock()
+
+	// 3. Simulate a nested fetch where created == false (e.g., inside path resolution)
+	nestedCtx, _, _ := withVerificationState(ctx)
+
+	// Fetch it using getInodeInternal(..., verify=true)
+	_, err = c.getInodeInternal(nestedCtx, inode.ID, true)
+	if err != nil {
+		t.Fatalf("Nested fetch failed: %v", err)
+	}
+
+	// 4. Verify cache state: The vulnerability would improperly cache this as verified: true
+	c.inodeMemMu.RLock()
+	entry, ok := c.inodeMemCache[inode.ID]
+	c.inodeMemMu.RUnlock()
+
+	if !ok {
+		t.Fatalf("Inode not cached")
+	}
+
+	if entry.verified {
+		t.Fatalf("VULNERABILITY DETECTED: Inode cached as verified: true despite incomplete signature queue processing")
+	}
+
+	// 5. Simulate a subsequent top-level fetch which should process the queue and upgrade the cache.
+	_, err = c.getInodeInternal(ctx, inode.ID, true)
+	if err != nil {
+		t.Fatalf("Top level fetch failed: %v", err)
+	}
+
+	c.inodeMemMu.RLock()
+	entry, _ = c.inodeMemCache[inode.ID]
+	c.inodeMemMu.RUnlock()
+
+	if !entry.verified {
+		t.Fatalf("Expected inode to be upgraded to verified: true after top-level fetch completed the signature check")
+	}
+}

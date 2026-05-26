@@ -2387,25 +2387,13 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		entry, found := c.inodeMemCache[id]
 		c.inodeMemMu.RUnlock()
 		if found && time.Since(entry.cachedAt) < c.metadataTTL {
-			if created {
-				if err := c.processVerificationQueue(ctx, state); err != nil {
-					return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
-				}
-			}
 			inodeCopy := entry.inode.Clone()
 			if verify && !entry.verified {
 				if err := c.verifyInode(ctx, inodeCopy); err != nil {
 					return nil, fmt.Errorf("inode %s verification failed: %w", id, err)
 				}
-				// Mark as verified in the memory cache
-				c.inodeMemMu.Lock()
-				c.inodeMemCache[id] = cachedInode{
-					inode:    inodeCopy.Clone(),
-					cachedAt: entry.cachedAt,
-					verified: true,
-				}
-				c.inodeMemMu.Unlock()
 			}
+
 			// Decrypt ClientBlob if present and not yet decrypted
 			if len(inodeCopy.ClientBlob) > 0 && inodeCopy.GetFileKey() == nil {
 				if fileKey, err := c.unlockInode(ctx, inodeCopy); err == nil {
@@ -2417,17 +2405,35 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 						inodeCopy.SetMTime(blob.MTime)
 						inodeCopy.SetUID(blob.UID)
 						inodeCopy.SetGID(blob.GID)
-
-						// Update cache with the fully decrypted version
-						c.inodeMemMu.Lock()
-						c.inodeMemCache[id] = cachedInode{
-							inode:    inodeCopy.Clone(),
-							cachedAt: entry.cachedAt,
-							verified: entry.verified || verify,
-						}
-						c.inodeMemMu.Unlock()
 					}
 				}
+			}
+
+			if created {
+				if err := c.processVerificationQueue(ctx, state); err != nil {
+					return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
+				}
+			}
+
+			// Update cache if we decrypted blob or verified it at the top level
+			needsCacheUpgrade := false
+			newVerifiedStatus := entry.verified
+			if verify && !entry.verified && created {
+				newVerifiedStatus = true
+				needsCacheUpgrade = true
+			}
+			if len(inodeCopy.ClientBlob) > 0 && entry.inode.GetFileKey() == nil && inodeCopy.GetFileKey() != nil {
+				needsCacheUpgrade = true
+			}
+
+			if needsCacheUpgrade {
+				c.inodeMemMu.Lock()
+				c.inodeMemCache[id] = cachedInode{
+					inode:    inodeCopy.Clone(),
+					cachedAt: entry.cachedAt,
+					verified: newVerifiedStatus,
+				}
+				c.inodeMemMu.Unlock()
 			}
 			return inodeCopy, nil
 		}
@@ -2538,7 +2544,7 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		c.inodeMemCache[id] = cachedInode{
 			inode:    inode.Clone(),
 			cachedAt: time.Now(),
-			verified: verify,
+			verified: verify && created,
 		}
 		c.inodeMemMu.Unlock()
 	}

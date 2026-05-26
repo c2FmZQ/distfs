@@ -285,6 +285,3 @@ func TestNativeStoreCloseRaceCondition(t *testing.T) {
 		t.Errorf("Unexpected error from Close: %v", err)
 	}
 }
-
-
-
