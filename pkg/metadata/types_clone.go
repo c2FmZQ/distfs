@@ -161,3 +161,117 @@ func (i *Inode) Clone() *Inode {
 
 	return &clone
 }
+
+// Clone returns a deep copy of the User.
+func (u *User) Clone() *User {
+	if u == nil {
+		return nil
+	}
+	clone := *u
+	if u.SignKey != nil {
+		clone.SignKey = make([]byte, len(u.SignKey))
+		copy(clone.SignKey, u.SignKey)
+	}
+	if u.EncKey != nil {
+		clone.EncKey = make([]byte, len(u.EncKey))
+		copy(clone.EncKey, u.EncKey)
+	}
+	if u.Signature != nil {
+		clone.Signature = make([]byte, len(u.Signature))
+		copy(clone.Signature, u.Signature)
+	}
+	return &clone
+}
+
+// Clone returns a deep copy of the Group.
+func (g *Group) Clone() *Group {
+	if g == nil {
+		return nil
+	}
+	clone := *g
+	if g.Nonce != nil {
+		clone.Nonce = make([]byte, len(g.Nonce))
+		copy(clone.Nonce, g.Nonce)
+	}
+	if g.EncKey != nil {
+		clone.EncKey = make([]byte, len(g.EncKey))
+		copy(clone.EncKey, g.EncKey)
+	}
+	if g.SignKey != nil {
+		clone.SignKey = make([]byte, len(g.SignKey))
+		copy(clone.SignKey, g.SignKey)
+	}
+	if g.HistoricalSignKeys != nil {
+		clone.HistoricalSignKeys = make(map[uint32][]byte, len(g.HistoricalSignKeys))
+		for k, v := range g.HistoricalSignKeys {
+			if v != nil {
+				vc := make([]byte, len(v))
+				copy(vc, v)
+				clone.HistoricalSignKeys[k] = vc
+			} else {
+				clone.HistoricalSignKeys[k] = nil
+			}
+		}
+	}
+	if g.EncryptedSignKey != nil {
+		clone.EncryptedSignKey = make([]byte, len(g.EncryptedSignKey))
+		copy(clone.EncryptedSignKey, g.EncryptedSignKey)
+	}
+	if g.Lockbox != nil {
+		clone.Lockbox = make(crypto.Lockbox, len(g.Lockbox))
+		for k, v := range g.Lockbox {
+			vc := crypto.LockboxEntry{Epoch: v.Epoch}
+			if v.KEMCiphertext != nil {
+				vc.KEMCiphertext = make([]byte, len(v.KEMCiphertext))
+				copy(vc.KEMCiphertext, v.KEMCiphertext)
+			}
+			if v.DEMCiphertext != nil {
+				vc.DEMCiphertext = make([]byte, len(v.DEMCiphertext))
+				copy(vc.DEMCiphertext, v.DEMCiphertext)
+			}
+			clone.Lockbox[k] = vc
+		}
+	}
+	if g.AnonymousLockbox != nil {
+		clone.AnonymousLockbox = make([][]byte, len(g.AnonymousLockbox))
+		for i, v := range g.AnonymousLockbox {
+			if v != nil {
+				vc := make([]byte, len(v))
+				copy(vc, v)
+				clone.AnonymousLockbox[i] = vc
+			}
+		}
+	}
+	if g.RegistryLockbox != nil {
+		clone.RegistryLockbox = make(crypto.Lockbox, len(g.RegistryLockbox))
+		for k, v := range g.RegistryLockbox {
+			vc := crypto.LockboxEntry{Epoch: v.Epoch}
+			if v.KEMCiphertext != nil {
+				vc.KEMCiphertext = make([]byte, len(v.KEMCiphertext))
+				copy(vc.KEMCiphertext, v.KEMCiphertext)
+			}
+			if v.DEMCiphertext != nil {
+				vc.DEMCiphertext = make([]byte, len(v.DEMCiphertext))
+				copy(vc.DEMCiphertext, v.DEMCiphertext)
+			}
+			clone.RegistryLockbox[k] = vc
+		}
+	}
+	if g.EncryptedRegistry != nil {
+		clone.EncryptedRegistry = make([]byte, len(g.EncryptedRegistry))
+		copy(clone.EncryptedRegistry, g.EncryptedRegistry)
+	}
+	if g.AnonymousRegistry != nil {
+		clone.AnonymousRegistry = make([]byte, len(g.AnonymousRegistry))
+		copy(clone.AnonymousRegistry, g.AnonymousRegistry)
+	}
+	if g.EncryptedEpochSeed != nil {
+		clone.EncryptedEpochSeed = make([]byte, len(g.EncryptedEpochSeed))
+		copy(clone.EncryptedEpochSeed, g.EncryptedEpochSeed)
+	}
+	if g.ClientBlob != nil {
+		clone.ClientBlob = make([]byte, len(g.ClientBlob))
+		copy(clone.ClientBlob, g.ClientBlob)
+	}
+	return &clone
+}

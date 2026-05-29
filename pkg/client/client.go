@@ -124,7 +124,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 
 				// Phase 69: Move to verified cache to break recursion
 				c.cacheMu.Lock()
-				c.verifiedGroupCache[id] = group
+				c.verifiedGroupCache[id] = group.Clone()
 				delete(c.unverifiedGroupCache, id)
 				c.cacheMu.Unlock()
 			} else {
@@ -146,7 +146,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 								return err
 							}
 							c.cacheMu.Lock()
-							c.verifiedGroupCache[id] = group
+							c.verifiedGroupCache[id] = group.Clone()
 							delete(c.unverifiedGroupCache, id)
 							c.cacheMu.Unlock()
 							continue
@@ -160,15 +160,18 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 
 				// Phase 69: Move to verified cache
 				c.cacheMu.Lock()
-				c.userCache[id] = user
+				c.userCache[id] = user.Clone()
 				c.cacheMu.Unlock()
 
 				// Root Identity Pinning (TOFU)
 				c.rootMu.Lock()
 				if id == c.rootOwner {
 					if len(c.rootOwnerPK) == 0 {
-						c.rootOwnerPK = user.SignKey
-						c.rootOwnerEK = user.EncKey
+						// Clone the keys so the pinned copy is independent of the verified user.
+						c.rootOwnerPK = make([]byte, len(user.SignKey))
+						copy(c.rootOwnerPK, user.SignKey)
+						c.rootOwnerEK = make([]byte, len(user.EncKey))
+						copy(c.rootOwnerEK, user.EncKey)
 					} else if !bytes.Equal(c.rootOwnerPK, user.SignKey) {
 						c.rootMu.Unlock()
 						return fmt.Errorf("ROOT IDENTITY MISMATCH: pinned public key for %s does not match server", id)
@@ -177,7 +180,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 				c.rootMu.Unlock()
 
 				c.cacheMu.Lock()
-				c.userCache[id] = user
+				c.userCache[id] = user.Clone()
 				c.cacheMu.Unlock()
 			}
 		}
@@ -1981,10 +1984,15 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		// If we only need the SignKey (for signature verification), the pinned version is enough.
 		// However, pinning is CRITICAL to break circularity during ResolvePath(/registry/...).
 		// We assume IsAdmin: true for the RootOwner because they are the cluster sovereign.
+		// Clone the pinned keys so callers cannot mutate internal state.
+		sk := make([]byte, len(pinnedPK))
+		copy(sk, pinnedPK)
+		ek := make([]byte, len(pinnedEK))
+		copy(ek, pinnedEK)
 		return &metadata.User{
 			ID:      id,
-			SignKey: pinnedPK,
-			EncKey:  pinnedEK,
+			SignKey: sk,
+			EncKey:  ek,
 			IsAdmin: true,
 		}, nil
 	}
@@ -1993,7 +2001,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		c.cacheMu.RLock()
 		if u, ok := c.userCache[id]; ok {
 			c.cacheMu.RUnlock()
-			return u, nil
+			return u.Clone(), nil
 		}
 		c.cacheMu.RUnlock()
 	}
@@ -2022,8 +2030,11 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 	c.rootMu.Lock()
 	if id == c.rootOwner {
 		if len(c.rootOwnerPK) == 0 {
-			c.rootOwnerPK = user.SignKey
-			c.rootOwnerEK = user.EncKey
+			// Clone the keys so the pinned copy is independent of the returned user.
+			c.rootOwnerPK = make([]byte, len(user.SignKey))
+			copy(c.rootOwnerPK, user.SignKey)
+			c.rootOwnerEK = make([]byte, len(user.EncKey))
+			copy(c.rootOwnerEK, user.EncKey)
 		} else if !bytes.Equal(c.rootOwnerPK, user.SignKey) {
 			c.rootMu.Unlock()
 			return nil, fmt.Errorf("ROOT IDENTITY MISMATCH: pinned public key for %s does not match server", id)
@@ -2032,7 +2043,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 	c.rootMu.Unlock()
 
 	c.cacheMu.Lock()
-	c.userCache[id] = user
+	c.userCache[id] = user.Clone()
 	c.cacheMu.Unlock()
 
 	return user, nil
@@ -5360,7 +5371,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 		c.cacheMu.RLock()
 		if g, ok := c.verifiedGroupCache[id]; ok {
 			c.cacheMu.RUnlock()
-			return g, nil
+			return g.Clone(), nil
 		}
 		c.cacheMu.RUnlock()
 	}
@@ -5376,7 +5387,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 		s.add(id)
 		// We store in unverified cache so decryptGroupKey can find it
 		c.cacheMu.Lock()
-		c.unverifiedGroupCache[id] = group
+		c.unverifiedGroupCache[id] = group.Clone()
 		c.cacheMu.Unlock()
 		return group, nil
 	}
@@ -5399,7 +5410,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 
 	// Cache in verified cache
 	c.cacheMu.Lock()
-	c.verifiedGroupCache[id] = group
+	c.verifiedGroupCache[id] = group.Clone()
 	// Remove from unverified cache if it was there
 	delete(c.unverifiedGroupCache, id)
 	c.cacheMu.Unlock()
@@ -5416,11 +5427,11 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 	c.cacheMu.RLock()
 	if g, ok := c.verifiedGroupCache[id]; ok {
 		c.cacheMu.RUnlock()
-		return g, nil
+		return g.Clone(), nil
 	}
 	if g, ok := c.unverifiedGroupCache[id]; ok {
 		c.cacheMu.RUnlock()
-		return g, nil
+		return g.Clone(), nil
 	}
 	c.cacheMu.RUnlock()
 
@@ -5430,7 +5441,7 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 	}
 
 	c.cacheMu.Lock()
-	c.unverifiedGroupCache[id] = group
+	c.unverifiedGroupCache[id] = group.Clone()
 	c.cacheMu.Unlock()
 
 	return group, nil
@@ -5549,7 +5560,7 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 
 	// 3. Cache Promotion (Tier 4)
 	c.cacheMu.Lock()
-	c.verifiedGroupCache[group.ID] = group
+	c.verifiedGroupCache[group.ID] = group.Clone()
 	delete(c.unverifiedGroupCache, group.ID)
 	c.cacheMu.Unlock()
 
@@ -6167,7 +6178,7 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 
 	// Update cache with the newly created group
 	c.cacheMu.Lock()
-	c.verifiedGroupCache[group.ID] = group
+	c.verifiedGroupCache[group.ID] = group.Clone()
 	c.cacheMu.Unlock()
 
 	// 2. Anchor in Registry (Phase 69)
@@ -7437,7 +7448,7 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 
 			// Update Cache
 			c.cacheMu.Lock()
-			c.verifiedGroupCache[id] = &updated
+			c.verifiedGroupCache[id] = updated.Clone()
 			c.cacheMu.Unlock()
 			if c.store != nil {
 				if gdata, err := json.Marshal(&updated); err == nil {
