@@ -405,7 +405,6 @@ type pathCacheEntry struct {
 type cachedInode struct {
 	inode    *metadata.Inode
 	cachedAt time.Time
-	verified bool
 }
 
 // InodeInfo provides a safe, exported representation of an inode's public metadata.
@@ -729,6 +728,8 @@ func (c *Client) withIdentity(userID string, key *mlkem.DecapsulationKey768) *Cl
 	c2.userID = userID
 	c2.decKey = key
 	c2.keyCache = make(map[string]fileMetadata) // New cache for new identity
+	c2.inodeMemMu = &sync.RWMutex{}
+	c2.inodeMemCache = make(map[string]cachedInode)
 	return &c2
 }
 
@@ -1832,8 +1833,15 @@ func (c *Client) verifyUser(ctx context.Context, user *metadata.User) error {
 	return nil
 }
 
-// getUserUnverified fetches the user metadata skipping registry verification.
+// getUserUnverified fetches the user metadata skipping registry verification,
+// but checking the verified cache first to save network requests.
 func (c *Client) getUserUnverified(ctx context.Context, id string) (*metadata.User, error) {
+	c.cacheMu.RLock()
+	if u, ok := c.userCache[id]; ok {
+		c.cacheMu.RUnlock()
+		return u.Clone(), nil
+	}
+	c.cacheMu.RUnlock()
 	return c.getUserRaw(ctx, id)
 }
 
@@ -2287,7 +2295,6 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 				c.inodeMemCache[id] = cachedInode{
 					inode:    updated.Clone(),
 					cachedAt: time.Now(),
-					verified: true,
 				}
 				c.inodeMemMu.Unlock()
 			}
@@ -2398,10 +2405,15 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		entry, found := c.inodeMemCache[id]
 		c.inodeMemMu.RUnlock()
 		if found && time.Since(entry.cachedAt) < c.metadataTTL {
+			if created {
+				if err := c.processVerificationQueue(ctx, state); err != nil {
+					return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
+				}
+			}
 			inodeCopy := entry.inode.Clone()
-			if verify && !entry.verified {
+			if verify {
 				if err := c.verifyInode(ctx, inodeCopy); err != nil {
-					return nil, fmt.Errorf("inode %s verification failed: %w", id, err)
+					return nil, err
 				}
 			}
 
@@ -2426,13 +2438,8 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				}
 			}
 
-			// Update cache if we decrypted blob or verified it at the top level
+			// Update cache if we decrypted blob
 			needsCacheUpgrade := false
-			newVerifiedStatus := entry.verified
-			if verify && !entry.verified && created {
-				newVerifiedStatus = true
-				needsCacheUpgrade = true
-			}
 			if len(inodeCopy.ClientBlob) > 0 && entry.inode.GetFileKey() == nil && inodeCopy.GetFileKey() != nil {
 				needsCacheUpgrade = true
 			}
@@ -2442,7 +2449,6 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				c.inodeMemCache[id] = cachedInode{
 					inode:    inodeCopy.Clone(),
 					cachedAt: entry.cachedAt,
-					verified: newVerifiedStatus,
 				}
 				c.inodeMemMu.Unlock()
 			}
@@ -2555,7 +2561,6 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		c.inodeMemCache[id] = cachedInode{
 			inode:    inode.Clone(),
 			cachedAt: time.Now(),
-			verified: verify && created,
 		}
 		c.inodeMemMu.Unlock()
 	}
@@ -3541,6 +3546,9 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 	nodes, err := c.allocateNodes(lctx)
 	if err != nil {
 		cancel()
+		if leaseNonce == "" {
+			_ = c.releaseLeases(ctx, []string{pathID}, nonce)
+		}
 		return nil, fmt.Errorf("failed to pre-allocate nodes: %w", err)
 	}
 
@@ -3788,11 +3796,19 @@ func (w *FileWriter) Close() error {
 	if w.closed {
 		return nil
 	}
+	var commitSuccess bool
 	defer func() {
 		w.closed = true
 		w.cancel()
 		w.uploadWg.Wait()
 		w.wg.Wait()
+		if !commitSuccess {
+			leaseTarget := w.inode.ID
+			if w.swapMode {
+				leaseTarget = w.pathID
+			}
+			_ = w.client.releaseLeases(w.ctx, []string{leaseTarget}, w.leaseNonce)
+		}
 	}()
 
 	if err := w.Finish(); err != nil {
@@ -3934,6 +3950,7 @@ func (w *FileWriter) Close() error {
 		}
 	}
 
+	commitSuccess = (err == nil)
 	return err
 }
 

@@ -36,6 +36,8 @@ type NativeStore struct {
 	pruneTimer *time.Timer
 	// pruneWg tracks active background pruning goroutines.
 	pruneWg sync.WaitGroup
+	// closed indicates if the store is closed.
+	closed bool
 }
 
 func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
@@ -167,6 +169,7 @@ func (s *NativeStore) Delete(bucket, key string) error {
 
 func (s *NativeStore) Close() error {
 	s.mu.Lock()
+	s.closed = true
 	if s.pruneTimer != nil {
 		s.pruneTimer.Stop()
 		s.pruneTimer = nil
@@ -272,6 +275,11 @@ func (s *NativeStore) maybeSchedulePrune() {
 		return
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		s.pruning.Store(0)
+		return
+	}
 	since := time.Since(s.lastPrune)
 	interval := s.pruneInterval
 	if interval > 0 && since < interval {
