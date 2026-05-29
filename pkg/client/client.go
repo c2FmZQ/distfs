@@ -37,6 +37,7 @@ import (
 	stdpath "path"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -123,7 +124,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 
 				// Phase 69: Move to verified cache to break recursion
 				c.cacheMu.Lock()
-				c.verifiedGroupCache[id] = group
+				c.verifiedGroupCache[id] = group.Clone()
 				delete(c.unverifiedGroupCache, id)
 				c.cacheMu.Unlock()
 			} else {
@@ -145,7 +146,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 								return err
 							}
 							c.cacheMu.Lock()
-							c.verifiedGroupCache[id] = group
+							c.verifiedGroupCache[id] = group.Clone()
 							delete(c.unverifiedGroupCache, id)
 							c.cacheMu.Unlock()
 							continue
@@ -159,15 +160,18 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 
 				// Phase 69: Move to verified cache
 				c.cacheMu.Lock()
-				c.userCache[id] = user
+				c.userCache[id] = user.Clone()
 				c.cacheMu.Unlock()
 
 				// Root Identity Pinning (TOFU)
 				c.rootMu.Lock()
 				if id == c.rootOwner {
 					if len(c.rootOwnerPK) == 0 {
-						c.rootOwnerPK = user.SignKey
-						c.rootOwnerEK = user.EncKey
+						// Clone the keys so the pinned copy is independent of the verified user.
+						c.rootOwnerPK = make([]byte, len(user.SignKey))
+						copy(c.rootOwnerPK, user.SignKey)
+						c.rootOwnerEK = make([]byte, len(user.EncKey))
+						copy(c.rootOwnerEK, user.EncKey)
 					} else if !bytes.Equal(c.rootOwnerPK, user.SignKey) {
 						c.rootMu.Unlock()
 						return fmt.Errorf("ROOT IDENTITY MISMATCH: pinned public key for %s does not match server", id)
@@ -176,7 +180,7 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 				c.rootMu.Unlock()
 
 				c.cacheMu.Lock()
-				c.userCache[id] = user
+				c.userCache[id] = user.Clone()
 				c.cacheMu.Unlock()
 			}
 		}
@@ -396,6 +400,12 @@ type pathCacheEntry struct {
 	key     []byte
 	linkTag string          // "ParentID:NameHMAC"
 	inode   *metadata.Inode // Optional: Cached full inode
+}
+
+type cachedInode struct {
+	inode    *metadata.Inode
+	cachedAt time.Time
+	verified bool
 }
 
 // InodeInfo provides a safe, exported representation of an inode's public metadata.
@@ -631,6 +641,21 @@ type Client struct {
 	allocCache  []metadata.Node
 	allocExpiry time.Time
 	allocMu     *sync.RWMutex
+
+	// Phase 76: Client Latency Optimization
+	// hedgeDelay is the stagger delay before launching a replica download.
+	// 0 = fire all replicas simultaneously; <0 = conservative 1s fallback.
+	hedgeDelay time.Duration
+	// maxPrefetch is the upper bound for the auto-tuning sequential prefetch window.
+	maxPrefetch int
+	// writePipeline is the number of concurrent chunk uploads during writes.
+	writePipeline int
+
+	// metadataTTL is the time-to-live for cached metadata.
+	metadataTTL time.Duration
+	// inodeMemCache caches decrypted Inodes in memory.
+	inodeMemCache map[string]cachedInode
+	inodeMemMu    *sync.RWMutex
 }
 
 // GetRootID returns the ID of the root directory.
@@ -674,6 +699,14 @@ func NewClient(serverAddr string) *Client {
 		allocMu:              &sync.RWMutex{},
 		registryDir:          "/registry",
 		anchoredNodesMu:      &sync.RWMutex{},
+		// Phase 76: Client Latency Optimization defaults
+		hedgeDelay:    150 * time.Millisecond,
+		maxPrefetch:   8,
+		writePipeline: 4,
+
+		metadataTTL:   0,
+		inodeMemCache: make(map[string]cachedInode),
+		inodeMemMu:    &sync.RWMutex{},
 	}
 }
 
@@ -753,6 +786,46 @@ func (c *Client) withRootAnchor(id, owner string, pk, ek []byte, version uint64)
 func (c *Client) WithStore(store KVStore) *Client {
 	c2 := *c
 	c2.store = store
+	return &c2
+}
+
+// WithHedgeDelay sets the stagger delay before launching a parallel replica download.
+// A value of 0 fires all replicas simultaneously (maximum throughput).
+// A negative value falls back to the conservative 1-second default.
+// Default: 150ms.
+func (c *Client) WithHedgeDelay(d time.Duration) *Client {
+	c2 := *c
+	c2.hedgeDelay = d
+	return &c2
+}
+
+// WithMaxPrefetch sets the upper bound for the auto-tuning sequential read-ahead
+// prefetch window, in chunks (each chunk is 1 MB). Default: 8.
+func (c *Client) WithMaxPrefetch(n int) *Client {
+	if n < 0 {
+		return c
+	}
+	c2 := *c
+	c2.maxPrefetch = n
+	return &c2
+}
+
+// WithWritePipeline sets the maximum number of concurrent chunk uploads during
+// a file write. Default: 4.
+func (c *Client) WithWritePipeline(n int) *Client {
+	if n <= 0 {
+		return c
+	}
+	c2 := *c
+	c2.writePipeline = n
+	return &c2
+}
+
+// WithMetadataTTL sets the metadata Time-To-Live (TTL) cache duration.
+// A value of 0 (default) disables metadata caching.
+func (c *Client) WithMetadataTTL(ttl time.Duration) *Client {
+	c2 := *c
+	c2.metadataTTL = ttl
 	return &c2
 }
 
@@ -960,12 +1033,18 @@ func (c *Client) getPathCache(fullPath string) (pathCacheEntry, bool) {
 	c.pathMu.RLock()
 	defer c.pathMu.RUnlock()
 	entry, ok := c.pathCache[fullPath]
+	if ok && entry.inode != nil {
+		entry.inode = entry.inode.Clone()
+	}
 	return entry, ok
 }
 
 func (c *Client) putPathCache(fullPath string, entry pathCacheEntry) {
 	c.pathMu.Lock()
 	defer c.pathMu.Unlock()
+	if entry.inode != nil {
+		entry.inode = entry.inode.Clone()
+	}
 	c.pathCache[fullPath] = entry
 }
 
@@ -1506,22 +1585,44 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 		for i, url := range urls {
 			started++
 			if i > 0 {
-				// Staggered start: Wait for timeout OR a result from previous attempts
-				wait := time.NewTimer(1 * time.Second)
-				select {
-				case <-lctx.Done():
-					wait.Stop()
-					return lctx.Err()
-				case res := <-resCh:
-					wait.Stop()
-					consumed++
-					if res.err == nil {
-						data = res.data
-						return nil
+				// Phase 76.2: Configurable hedge delay.
+				// delay==0: fire all replicas simultaneously.
+				// delay<0:  fall back to conservative 1s.
+				delay := c.hedgeDelay
+				if delay < 0 {
+					delay = time.Second
+				}
+				if delay == 0 {
+					// No stagger — launch immediately, but still check for early success.
+					select {
+					case <-lctx.Done():
+						return lctx.Err()
+					case res := <-resCh:
+						consumed++
+						if res.err == nil {
+							data = res.data
+							return nil
+						}
+					default:
 					}
-					// If it was an error, we continue to start the next staggered request immediately
-				case <-wait.C:
-					// Timeout reached, start next replica
+				} else {
+					// Staggered start: Wait for timeout OR a result from previous attempts.
+					wait := time.NewTimer(delay)
+					select {
+					case <-lctx.Done():
+						wait.Stop()
+						return lctx.Err()
+					case res := <-resCh:
+						wait.Stop()
+						consumed++
+						if res.err == nil {
+							data = res.data
+							return nil
+						}
+						// Error on previous attempt — launch next replica immediately.
+					case <-wait.C:
+						// Timeout reached, start next replica.
+					}
 				}
 			}
 			go func(targetURL string) {
@@ -1883,10 +1984,15 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		// If we only need the SignKey (for signature verification), the pinned version is enough.
 		// However, pinning is CRITICAL to break circularity during ResolvePath(/registry/...).
 		// We assume IsAdmin: true for the RootOwner because they are the cluster sovereign.
+		// Clone the pinned keys so callers cannot mutate internal state.
+		sk := make([]byte, len(pinnedPK))
+		copy(sk, pinnedPK)
+		ek := make([]byte, len(pinnedEK))
+		copy(ek, pinnedEK)
 		return &metadata.User{
 			ID:      id,
-			SignKey: pinnedPK,
-			EncKey:  pinnedEK,
+			SignKey: sk,
+			EncKey:  ek,
 			IsAdmin: true,
 		}, nil
 	}
@@ -1895,7 +2001,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		c.cacheMu.RLock()
 		if u, ok := c.userCache[id]; ok {
 			c.cacheMu.RUnlock()
-			return u, nil
+			return u.Clone(), nil
 		}
 		c.cacheMu.RUnlock()
 	}
@@ -1924,8 +2030,11 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 	c.rootMu.Lock()
 	if id == c.rootOwner {
 		if len(c.rootOwnerPK) == 0 {
-			c.rootOwnerPK = user.SignKey
-			c.rootOwnerEK = user.EncKey
+			// Clone the keys so the pinned copy is independent of the returned user.
+			c.rootOwnerPK = make([]byte, len(user.SignKey))
+			copy(c.rootOwnerPK, user.SignKey)
+			c.rootOwnerEK = make([]byte, len(user.EncKey))
+			copy(c.rootOwnerEK, user.EncKey)
 		} else if !bytes.Equal(c.rootOwnerPK, user.SignKey) {
 			c.rootMu.Unlock()
 			return nil, fmt.Errorf("ROOT IDENTITY MISMATCH: pinned public key for %s does not match server", id)
@@ -1934,7 +2043,7 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 	c.rootMu.Unlock()
 
 	c.cacheMu.Lock()
-	c.userCache[id] = user
+	c.userCache[id] = user.Clone()
 	c.cacheMu.Unlock()
 
 	return user, nil
@@ -2141,6 +2250,11 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			if key := inode.GetFileKey(); len(key) > 0 {
 				updated.SetFileKey(key)
 			}
+			updated.SetSymlinkTarget(inode.GetSymlinkTarget())
+			updated.SetInlineData(inode.GetInlineData())
+			updated.SetMTime(inode.GetMTime())
+			updated.SetUID(inode.GetUID())
+			updated.SetGID(inode.GetGID())
 
 			// Phase 31: Root Anchoring
 			if updated.ID == c.rootID {
@@ -2154,13 +2268,31 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			c.pathMu.Lock()
 			for path, entry := range c.pathCache {
 				if entry.inodeID == id {
-					entry.inode = &updated
+					entry.inode = updated.Clone()
 					c.pathCache[path] = entry
 				}
 			}
 			c.pathMu.Unlock()
 
-			return &updated, nil
+			// Write-through to BoltDB cache
+			if c.store != nil {
+				if idata, err := json.Marshal(&updated); err == nil {
+					c.store.Put("inodes", id, idata)
+				}
+			}
+
+			// Write-through to memory cache
+			if c.metadataTTL > 0 {
+				c.inodeMemMu.Lock()
+				c.inodeMemCache[id] = cachedInode{
+					inode:    updated.Clone(),
+					cachedAt: time.Now(),
+					verified: true,
+				}
+				c.inodeMemMu.Unlock()
+			}
+
+			return updated.Clone(), nil
 		}
 
 		if err != metadata.ErrConflict {
@@ -2192,6 +2324,31 @@ func (c *Client) applyBatch(ctx context.Context, cmds []metadata.LogCommand) ([]
 		return nil, err
 	}
 	c.clearPathCache()
+	if c.metadataTTL > 0 {
+		c.inodeMemMu.Lock()
+		for _, cmd := range cmds {
+			if cmd.Type == metadata.CmdCreateInode || cmd.Type == metadata.CmdUpdateInode {
+				var inode metadata.Inode
+				if json.Unmarshal(cmd.Data, &inode) == nil {
+					delete(c.inodeMemCache, inode.ID)
+					for linkKey := range inode.Links {
+						parts := strings.Split(linkKey, ":")
+						if len(parts) > 0 {
+							parentID := parts[0]
+							delete(c.inodeMemCache, parentID)
+						}
+					}
+				} else {
+					clear(c.inodeMemCache)
+					break
+				}
+			} else {
+				clear(c.inodeMemCache)
+				break
+			}
+		}
+		c.inodeMemMu.Unlock()
+	}
 	return results, nil
 }
 
@@ -2235,6 +2392,63 @@ func (c *Client) getInode(ctx context.Context, id string) (*metadata.Inode, erro
 
 func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (*metadata.Inode, error) {
 	ctx, state, created := withVerificationState(ctx)
+
+	if c.metadataTTL > 0 {
+		c.inodeMemMu.RLock()
+		entry, found := c.inodeMemCache[id]
+		c.inodeMemMu.RUnlock()
+		if found && time.Since(entry.cachedAt) < c.metadataTTL {
+			inodeCopy := entry.inode.Clone()
+			if verify && !entry.verified {
+				if err := c.verifyInode(ctx, inodeCopy); err != nil {
+					return nil, fmt.Errorf("inode %s verification failed: %w", id, err)
+				}
+			}
+
+			// Decrypt ClientBlob if present and not yet decrypted
+			if len(inodeCopy.ClientBlob) > 0 && inodeCopy.GetFileKey() == nil {
+				if fileKey, err := c.unlockInode(ctx, inodeCopy); err == nil {
+					inodeCopy.SetFileKey(fileKey)
+					var blob metadata.InodeClientBlob
+					if err := c.decryptInodeClientBlob(inodeCopy.ClientBlob, fileKey, &blob); err == nil {
+						inodeCopy.SetSymlinkTarget(blob.SymlinkTarget)
+						inodeCopy.SetInlineData(blob.InlineData)
+						inodeCopy.SetMTime(blob.MTime)
+						inodeCopy.SetUID(blob.UID)
+						inodeCopy.SetGID(blob.GID)
+					}
+				}
+			}
+
+			if created {
+				if err := c.processVerificationQueue(ctx, state); err != nil {
+					return nil, fmt.Errorf("inode %s integrity check failed: %w", id, err)
+				}
+			}
+
+			// Update cache if we decrypted blob or verified it at the top level
+			needsCacheUpgrade := false
+			newVerifiedStatus := entry.verified
+			if verify && !entry.verified && created {
+				newVerifiedStatus = true
+				needsCacheUpgrade = true
+			}
+			if len(inodeCopy.ClientBlob) > 0 && entry.inode.GetFileKey() == nil && inodeCopy.GetFileKey() != nil {
+				needsCacheUpgrade = true
+			}
+
+			if needsCacheUpgrade {
+				c.inodeMemMu.Lock()
+				c.inodeMemCache[id] = cachedInode{
+					inode:    inodeCopy.Clone(),
+					cachedAt: entry.cachedAt,
+					verified: newVerifiedStatus,
+				}
+				c.inodeMemMu.Unlock()
+			}
+			return inodeCopy, nil
+		}
+	}
 
 	// Phase 74: Metadata Cache
 	var inode *metadata.Inode
@@ -2336,7 +2550,17 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 		}
 	}
 
-	return inode, nil
+	if c.metadataTTL > 0 && inode != nil {
+		c.inodeMemMu.Lock()
+		c.inodeMemCache[id] = cachedInode{
+			inode:    inode.Clone(),
+			cachedAt: time.Now(),
+			verified: verify && created,
+		}
+		c.inodeMemMu.Unlock()
+	}
+
+	return inode.Clone(), nil
 }
 
 func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode, error) {
@@ -2732,6 +2956,13 @@ type FileReader struct {
 	lastChunkIdx   int64
 	sequentialHits int
 
+	// Phase 76.5: Auto-tuning prefetch window.
+	// prefetchWindow is the current number of chunks to prefetch ahead.
+	// It scales up on cache hits and down on sequential misses; resets on seeks.
+	prefetchWindow int
+	// maxPrefetch is the configured upper bound (inherited from Client.maxPrefetch).
+	maxPrefetch int
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -2801,6 +3032,14 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 	}
 
 	lctx, cancel := context.WithCancel(context.Background())
+	maxPrefetch := c.maxPrefetch
+	if maxPrefetch < 0 {
+		maxPrefetch = 8
+	}
+	prefetchWindow := 1
+	if maxPrefetch == 0 {
+		prefetchWindow = 0
+	}
 	r := &FileReader{
 		client:          c,
 		inode:           inode,
@@ -2811,6 +3050,8 @@ func (c *Client) newReaderWithInode(ctx context.Context, inode *metadata.Inode, 
 		token:           token,
 		leaseNonce:      nonce,
 		readAhead:       make(map[int64]*readAheadResult),
+		prefetchWindow:  prefetchWindow,
+		maxPrefetch:     maxPrefetch,
 		ctx:             lctx,
 		cancel:          cancel,
 		onExpired:       c.onLeaseExpired,
@@ -2960,6 +3201,11 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 				delete(r.readAhead, k)
 			}
 			r.readAheadMu.Unlock()
+			// Phase 76.5: Reset prefetch window on seek/random access.
+			r.prefetchWindow = 1
+			if r.maxPrefetch < 1 {
+				r.prefetchWindow = 0
+			}
 		}
 
 		var pt []byte
@@ -2981,9 +3227,10 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 			}
 			r.lastChunkIdx = chunkIdx
 
-			// Only trigger aggressive network pre-fetching if the last N reads were strictly sequential
-			if r.sequentialHits >= 1 { // After reading 2 consecutive chunks
-				for i := int64(1); i <= 3; i++ {
+			// Phase 76.5: Trigger prefetch using the dynamic window.
+			// Only prefetch after reading at least 2 consecutive chunks.
+			if r.sequentialHits >= 1 {
+				for i := int64(1); i <= int64(r.prefetchWindow); i++ {
 					r.triggerPrefetch(chunkIdx + i)
 				}
 			}
@@ -3006,6 +3253,10 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 					}
 				} else {
 					pt = res.data
+					// Phase 76.5: Cache hit — scale up the prefetch window.
+					if r.prefetchWindow < r.maxPrefetch {
+						r.prefetchWindow++
+					}
 				}
 			}
 
@@ -3048,6 +3299,10 @@ func (r *FileReader) readInternal(p []byte, isReadAt bool, off int64) (int, erro
 				pt, err = crypto.DecryptChunk(r.fileKey, uint64(chunkIdx), ct)
 				if err != nil {
 					return totalRead, err
+				}
+				// Phase 76.5: On-demand sequential fetch — gently shrink the window.
+				if r.sequentialHits >= 1 && r.prefetchWindow > 1 {
+					r.prefetchWindow--
 				}
 			}
 
@@ -3280,6 +3535,19 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 	}
 
 	lctx, cancel := context.WithCancel(context.Background())
+
+	// Phase 76.1: Eagerly warm the node allocation cache so the first chunk
+	// doesn't have to wait for an allocate round-trip.
+	nodes, err := c.allocateNodes(lctx)
+	if err != nil {
+		cancel()
+		return nil, fmt.Errorf("failed to pre-allocate nodes: %w", err)
+	}
+
+	pipelineSize := c.writePipeline
+	if pipelineSize <= 0 {
+		pipelineSize = 4
+	}
 	w := &FileWriter{
 		client:     c,
 		ctx:        lctx,
@@ -3297,6 +3565,8 @@ func (c *Client) OpenBlobWriteWithLease(ctx context.Context, fullPath string, le
 		oldInodeID: oldInodeID,
 		isNew:      true, // It's "new" because it's a new InodeID
 		onExpired:  c.onLeaseExpired,
+		nodes:      nodes,
+		uploadSem:  make(chan struct{}, pipelineSize),
 	}
 
 	w.wg.Add(1)
@@ -3330,11 +3600,25 @@ type FileWriter struct {
 	oldInodeID string
 	onExpired  func(id string, err error)
 	nodes      []metadata.Node
+
+	// Phase 76.1: Pipelined upload fields.
+	// uploadSem is a semaphore (buffered channel) bounding concurrent uploads.
+	uploadSem chan struct{}
+	// uploadWg tracks all in-flight upload goroutines.
+	uploadWg sync.WaitGroup
+	// uploadErr holds the first error reported by any upload goroutine.
+	uploadErr atomic.Pointer[error]
+	// manifestMu guards concurrent slot writes into manifest.
+	manifestMu sync.Mutex
 }
 
 func (w *FileWriter) Write(p []byte) (int, error) {
 	if w.closed {
 		return 0, io.ErrClosedPipe
+	}
+	// Phase 76.1: Surface any background upload error immediately.
+	if errPtr := w.uploadErr.Load(); errPtr != nil {
+		return 0, *errPtr
 	}
 	n := len(p)
 	for len(p) > 0 {
@@ -3344,7 +3628,7 @@ func (w *FileWriter) Write(p []byte) (int, error) {
 			break
 		}
 		w.buf = append(w.buf, p[:space]...)
-		if err := w.flushChunk(); err != nil {
+		if err := w.flushChunkAsync(); err != nil {
 			return 0, err
 		}
 		p = p[space:]
@@ -3353,38 +3637,120 @@ func (w *FileWriter) Write(p []byte) (int, error) {
 	return n, nil
 }
 
-func (w *FileWriter) flushChunk() error {
+// flushChunkAsync encrypts the current buffer synchronously on the caller goroutine,
+// then uploads the resulting ciphertext asynchronously. It pre-allocates a slot in
+// w.manifest so the chunk order is preserved regardless of upload completion order.
+// The buffer w.buf is reset immediately after encryption so the caller can continue
+// filling it for the next chunk without waiting for the network.
+func (w *FileWriter) flushChunkAsync() error {
 	if len(w.buf) == 0 {
 		return nil
 	}
-	// Use next chunk index (current manifest length)
+
+	// 1. Pre-allocate a manifest slot in order (caller goroutine only, no race).
+	w.manifestMu.Lock()
 	chunkIndex := uint64(len(w.manifest))
+	w.manifest = append(w.manifest, metadata.ChunkEntry{}) // empty placeholder
+	slotIdx := int(chunkIndex)
+	w.manifestMu.Unlock()
+
+	// 2. Encrypt synchronously. EncryptChunk reads w.buf and returns independent
+	//    allocations for cid and ct, so it is safe to reset w.buf after this call.
 	cid, ct, err := crypto.EncryptChunk(w.fileKey, w.buf, chunkIndex)
 	if err != nil {
+		w.storeUploadErr(err)
+		w.manifestMu.Lock()
+		if len(w.manifest) > slotIdx {
+			w.manifest = w.manifest[:slotIdx]
+		}
+		w.manifestMu.Unlock()
 		return err
 	}
-	token, err := w.client.issueToken(w.ctx, w.inode.ID, []string{cid}, "W")
-	if err != nil {
-		return err
-	}
+	w.buf = w.buf[:0] // reset immediately; goroutine uses ct, not w.buf
+
+	// 3. Ensure we have node allocations (cached in client for 1 minute).
+	w.manifestMu.Lock()
 	if len(w.nodes) == 0 {
+		w.manifestMu.Unlock()
 		nodes, err := w.client.allocateNodes(w.ctx)
 		if err != nil {
+			w.storeUploadErr(err)
+			w.manifestMu.Lock()
+			if len(w.manifest) > slotIdx {
+				w.manifest = w.manifest[:slotIdx]
+			}
+			w.manifestMu.Unlock()
 			return err
 		}
-		w.nodes = nodes
+		w.manifestMu.Lock()
+		if len(w.nodes) == 0 {
+			w.nodes = nodes
+		}
 	}
+	nodes := w.nodes // capture; read-only in goroutine
+	w.manifestMu.Unlock()
 
-	if err := w.client.uploadChunk(w.ctx, cid, ct, w.nodes, token); err != nil {
+	// 4. Acquire semaphore (blocks if pipeline is full).
+	select {
+	case w.uploadSem <- struct{}{}:
+	case <-w.ctx.Done():
+		err := w.ctx.Err()
+		w.storeUploadErr(err)
+		w.manifestMu.Lock()
+		if len(w.manifest) > slotIdx {
+			w.manifest = w.manifest[:slotIdx]
+		}
+		w.manifestMu.Unlock()
 		return err
 	}
-	var nodeIDs []string
-	for _, node := range w.nodes {
-		nodeIDs = append(nodeIDs, node.ID)
-	}
-	w.manifest = append(w.manifest, metadata.ChunkEntry{ID: cid, Nodes: nodeIDs})
-	w.buf = w.buf[:0]
+
+	// 5. Launch upload goroutine.
+	w.uploadWg.Add(1)
+	go func() {
+		defer w.uploadWg.Done()
+		defer func() { <-w.uploadSem }()
+
+		// Bail early if a previous goroutine already failed.
+		if w.uploadErr.Load() != nil {
+			return
+		}
+
+		token, err := w.client.issueToken(w.ctx, w.inode.ID, []string{cid}, "W")
+		if err != nil {
+			w.storeUploadErr(err)
+			return
+		}
+
+		if err := w.client.uploadChunk(w.ctx, cid, ct, nodes, token); err != nil {
+			w.storeUploadErr(err)
+			return
+		}
+
+		var nodeIDs []string
+		for _, n := range nodes {
+			nodeIDs = append(nodeIDs, n.ID)
+		}
+
+		// 6. Write into the pre-allocated slot.
+		w.manifestMu.Lock()
+		w.manifest[slotIdx] = metadata.ChunkEntry{ID: cid, Nodes: nodeIDs}
+		w.manifestMu.Unlock()
+	}()
+
 	return nil
+}
+
+// storeUploadErr stores the first upload error (subsequent errors are silently dropped).
+func (w *FileWriter) storeUploadErr(err error) {
+	if err == nil {
+		return
+	}
+	if w.uploadErr.Load() != nil {
+		return
+	}
+	errPtr := new(error)
+	*errPtr = err
+	w.uploadErr.CompareAndSwap(nil, errPtr)
 }
 
 // Finish finalizes the file data (flushing chunks, updating manifest) but does NOT commit metadata to Raft.
@@ -3399,8 +3765,15 @@ func (w *FileWriter) Finish() error {
 		w.inode.ChunkManifest = nil
 		w.inode.Size = uint64(len(w.buf))
 	} else {
-		if err := w.flushChunk(); err != nil {
+		// Phase 76.1: Flush the final (possibly partial) buffer asynchronously.
+		if err := w.flushChunkAsync(); err != nil {
 			return err
+		}
+		// Drain all in-flight upload goroutines.
+		w.uploadWg.Wait()
+		// Surface any upload error.
+		if errPtr := w.uploadErr.Load(); errPtr != nil {
+			return *errPtr
 		}
 		w.inode.SetInlineData(nil)
 		w.inode.ChunkManifest = w.manifest
@@ -3415,11 +3788,16 @@ func (w *FileWriter) Close() error {
 	if w.closed {
 		return nil
 	}
+	defer func() {
+		w.closed = true
+		w.cancel()
+		w.uploadWg.Wait()
+		w.wg.Wait()
+	}()
 
 	if err := w.Finish(); err != nil {
 		return err
 	}
-	w.closed = true
 
 	// Final Metadata Update
 	var err error
@@ -3556,9 +3934,6 @@ func (w *FileWriter) Close() error {
 		}
 	}
 
-	w.cancel()
-	w.wg.Wait()
-
 	return err
 }
 
@@ -3568,8 +3943,9 @@ func (w *FileWriter) Abort() {
 		return
 	}
 	w.closed = true
-	w.cancel()
-	w.wg.Wait()
+	w.cancel()        // cancels w.ctx, causing in-flight upload goroutines to exit early
+	w.uploadWg.Wait() // drain upload goroutines before releasing the lease
+	w.wg.Wait()       // drain leaseRenewalLoop
 
 	leaseTarget := w.inode.ID
 	if w.swapMode {
@@ -4145,7 +4521,7 @@ func (c *Client) saveDataFiles(ctx context.Context, names []string, data []any) 
 			inodeID: w.inode.ID,
 			key:     w.fileKey,
 			linkTag: w.parentID + ":" + w.nameHMAC,
-			inode:   &w.inode,
+			inode:   w.inode.Clone(),
 		}
 	}
 
@@ -4995,7 +5371,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 		c.cacheMu.RLock()
 		if g, ok := c.verifiedGroupCache[id]; ok {
 			c.cacheMu.RUnlock()
-			return g, nil
+			return g.Clone(), nil
 		}
 		c.cacheMu.RUnlock()
 	}
@@ -5011,7 +5387,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 		s.add(id)
 		// We store in unverified cache so decryptGroupKey can find it
 		c.cacheMu.Lock()
-		c.unverifiedGroupCache[id] = group
+		c.unverifiedGroupCache[id] = group.Clone()
 		c.cacheMu.Unlock()
 		return group, nil
 	}
@@ -5034,7 +5410,7 @@ func (c *Client) getGroupInternal(ctx context.Context, id string, bypassCache bo
 
 	// Cache in verified cache
 	c.cacheMu.Lock()
-	c.verifiedGroupCache[id] = group
+	c.verifiedGroupCache[id] = group.Clone()
 	// Remove from unverified cache if it was there
 	delete(c.unverifiedGroupCache, id)
 	c.cacheMu.Unlock()
@@ -5051,11 +5427,11 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 	c.cacheMu.RLock()
 	if g, ok := c.verifiedGroupCache[id]; ok {
 		c.cacheMu.RUnlock()
-		return g, nil
+		return g.Clone(), nil
 	}
 	if g, ok := c.unverifiedGroupCache[id]; ok {
 		c.cacheMu.RUnlock()
-		return g, nil
+		return g.Clone(), nil
 	}
 	c.cacheMu.RUnlock()
 
@@ -5065,7 +5441,7 @@ func (c *Client) getGroupUnverifiedCached(ctx context.Context, id string) (*meta
 	}
 
 	c.cacheMu.Lock()
-	c.unverifiedGroupCache[id] = group
+	c.unverifiedGroupCache[id] = group.Clone()
 	c.cacheMu.Unlock()
 
 	return group, nil
@@ -5184,7 +5560,7 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 
 	// 3. Cache Promotion (Tier 4)
 	c.cacheMu.Lock()
-	c.verifiedGroupCache[group.ID] = group
+	c.verifiedGroupCache[group.ID] = group.Clone()
 	delete(c.unverifiedGroupCache, group.ID)
 	c.cacheMu.Unlock()
 
@@ -5802,7 +6178,7 @@ func (c *Client) createGroupInternal(ctx context.Context, name string, isSystem 
 
 	// Update cache with the newly created group
 	c.cacheMu.Lock()
-	c.verifiedGroupCache[group.ID] = group
+	c.verifiedGroupCache[group.ID] = group.Clone()
 	c.cacheMu.Unlock()
 
 	// 2. Anchor in Registry (Phase 69)
@@ -7072,7 +7448,7 @@ func (c *Client) updateGroup(ctx context.Context, id string, fn GroupUpdateFunc)
 
 			// Update Cache
 			c.cacheMu.Lock()
-			c.verifiedGroupCache[id] = &updated
+			c.verifiedGroupCache[id] = updated.Clone()
 			c.cacheMu.Unlock()
 			if c.store != nil {
 				if gdata, err := json.Marshal(&updated); err == nil {

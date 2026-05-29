@@ -1499,3 +1499,308 @@ func TestClient_ConcurrentDirectoryUpdates(t *testing.T) {
 		}
 	}
 }
+
+func TestClient_CachePoisoning_IncompleteVerification(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
+	defer ts.Close()
+
+	// 1. Create a legitimate directory
+	err := c.Mkdir(ctx, "/dir", 0755)
+	if err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+	inode, _, err := c.resolvePath(ctx, "/dir")
+	if err != nil {
+		t.Fatalf("resolvePath failed: %v", err)
+	}
+
+	// Enable caching for this test (default is usually 0 in tests)
+	c.metadataTTL = 1 * time.Minute
+
+	// 2. Clear memory cache to ensure a clean state
+	c.inodeMemMu.Lock()
+	clear(c.inodeMemCache)
+	c.inodeMemMu.Unlock()
+
+	// 3. Simulate a nested fetch where created == false (e.g., inside path resolution)
+	nestedCtx, _, _ := withVerificationState(ctx)
+
+	// Fetch it using getInodeInternal(..., verify=true)
+	_, err = c.getInodeInternal(nestedCtx, inode.ID, true)
+	if err != nil {
+		t.Fatalf("Nested fetch failed: %v", err)
+	}
+
+	// 4. Verify cache state: The vulnerability would improperly cache this as verified: true
+	c.inodeMemMu.RLock()
+	entry, ok := c.inodeMemCache[inode.ID]
+	c.inodeMemMu.RUnlock()
+
+	if !ok {
+		t.Fatalf("Inode not cached")
+	}
+
+	if entry.verified {
+		t.Fatalf("VULNERABILITY DETECTED: Inode cached as verified: true despite incomplete signature queue processing")
+	}
+
+	// 5. Simulate a subsequent top-level fetch which should process the queue and upgrade the cache.
+	_, err = c.getInodeInternal(ctx, inode.ID, true)
+	if err != nil {
+		t.Fatalf("Top level fetch failed: %v", err)
+	}
+
+	c.inodeMemMu.RLock()
+	entry, _ = c.inodeMemCache[inode.ID]
+	c.inodeMemMu.RUnlock()
+
+	if !entry.verified {
+		t.Fatalf("Expected inode to be upgraded to verified: true after top-level fetch completed the signature check")
+	}
+}
+
+// TestCacheImmutability_InodeMemCache verifies that mutating an inode returned
+// from the memory cache does NOT corrupt the cached entry. This is a regression
+// guard against returning raw pointers from the cache.
+func TestCacheImmutability_InodeMemCache(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
+	defer ts.Close()
+
+	// Enable caching
+	c.metadataTTL = 1 * time.Minute
+
+	// Create a file so we have a real inode to work with
+	content := []byte("immutable cache test")
+	err := c.CreateFile(ctx, "/immutable.txt", bytes.NewReader(content), int64(len(content)))
+	if err != nil {
+		t.Fatalf("CreateFile failed: %v", err)
+	}
+
+	// First fetch: populates the memory cache
+	inode1, _, err := c.resolvePath(ctx, "/immutable.txt")
+	if err != nil {
+		t.Fatalf("First resolvePath failed: %v", err)
+	}
+	originalOwner := inode1.OwnerID
+	originalMode := inode1.Mode
+	originalVersion := inode1.Version
+
+	// Mutate the returned inode aggressively
+	inode1.OwnerID = "ATTACKER"
+	inode1.Mode = 0
+	inode1.Version = 999999
+	if inode1.Children != nil {
+		inode1.Children["evil"] = metadata.ChildEntry{ID: "evil-id"}
+	}
+	if inode1.Lockbox != nil {
+		inode1.Lockbox["evil-recipient"] = crypto.LockboxEntry{}
+	}
+
+	// Second fetch: should return the original cached values, NOT the mutated ones
+	inode2, _, err := c.resolvePath(ctx, "/immutable.txt")
+	if err != nil {
+		t.Fatalf("Second resolvePath failed: %v", err)
+	}
+
+	if inode2.OwnerID != originalOwner {
+		t.Errorf("CACHE CORRUPTION: OwnerID was mutated from %q to %q", originalOwner, inode2.OwnerID)
+	}
+	if inode2.Mode != originalMode {
+		t.Errorf("CACHE CORRUPTION: Mode was mutated from %d to %d", originalMode, inode2.Mode)
+	}
+	if inode2.Version != originalVersion {
+		t.Errorf("CACHE CORRUPTION: Version was mutated from %d to %d", originalVersion, inode2.Version)
+	}
+	if _, hasEvil := inode2.Lockbox["evil-recipient"]; hasEvil {
+		t.Error("CACHE CORRUPTION: Lockbox was mutated to contain an injected recipient")
+	}
+
+	// Also verify that the raw cache entry is untouched
+	c.inodeMemMu.RLock()
+	for _, entry := range c.inodeMemCache {
+		if entry.inode.OwnerID == "ATTACKER" {
+			t.Error("CACHE CORRUPTION: raw cache entry has the mutated OwnerID")
+		}
+	}
+	c.inodeMemMu.RUnlock()
+}
+
+// TestCacheImmutability_UserCache verifies that mutating a User returned from
+// the verified user cache does NOT corrupt the cached entry.
+func TestCacheImmutability_UserCache(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminSK
+	defer ts.Close()
+
+	// First fetch: should populate the user cache
+	user1, err := c.getUser(ctx, adminID)
+	if err != nil {
+		t.Fatalf("First getUser failed: %v", err)
+	}
+
+	originalSignKey := make([]byte, len(user1.SignKey))
+	copy(originalSignKey, user1.SignKey)
+	originalID := user1.ID
+
+	// Mutate the returned user
+	user1.ID = "ATTACKER-ID"
+	user1.IsAdmin = false
+	if len(user1.SignKey) > 0 {
+		user1.SignKey[0] ^= 0xFF // Flip bits in the signing key
+	}
+
+	// Second fetch: should return the original cached values
+	user2, err := c.getUser(ctx, adminID)
+	if err != nil {
+		t.Fatalf("Second getUser failed: %v", err)
+	}
+
+	if user2.ID != originalID {
+		t.Errorf("CACHE CORRUPTION: User ID was mutated from %q to %q", originalID, user2.ID)
+	}
+	if !bytes.Equal(user2.SignKey, originalSignKey) {
+		t.Error("CACHE CORRUPTION: User SignKey was mutated via external byte slice modification")
+	}
+
+	// Also verify the raw cache entry
+	c.cacheMu.RLock()
+	if cachedUser, ok := c.userCache[adminID]; ok {
+		if cachedUser.ID == "ATTACKER-ID" {
+			t.Error("CACHE CORRUPTION: raw userCache entry has mutated ID")
+		}
+		if len(cachedUser.SignKey) > 0 && !bytes.Equal(cachedUser.SignKey, originalSignKey) {
+			t.Error("CACHE CORRUPTION: raw userCache entry has mutated SignKey")
+		}
+	}
+	c.cacheMu.RUnlock()
+}
+
+// TestCacheImmutability_GroupCache verifies that mutating a Group returned from
+// the verified group cache does NOT corrupt the cached entry.
+func TestCacheImmutability_GroupCache(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
+	defer ts.Close()
+
+	// Create a group to populate the cache
+	group, err := c.createGroup(ctx, "immutable-test-group", false)
+	if err != nil {
+		t.Fatalf("CreateGroup failed: %v", err)
+	}
+	groupID := group.ID
+
+	// First fetch: should hit the verified cache
+	group1, err := c.getGroup(ctx, groupID)
+	if err != nil {
+		t.Fatalf("First getGroup failed: %v", err)
+	}
+
+	originalOwnerID := group1.OwnerID
+	originalSignKey := make([]byte, len(group1.SignKey))
+	copy(originalSignKey, group1.SignKey)
+
+	// Mutate the returned group aggressively
+	group1.OwnerID = "EVIL-OWNER"
+	group1.Epoch = 999
+	if len(group1.SignKey) > 0 {
+		group1.SignKey[0] ^= 0xFF
+	}
+	if group1.Lockbox != nil {
+		group1.Lockbox["evil-member"] = crypto.LockboxEntry{}
+	}
+
+	// Second fetch: should return the original cached values
+	group2, err := c.getGroup(ctx, groupID)
+	if err != nil {
+		t.Fatalf("Second getGroup failed: %v", err)
+	}
+
+	if group2.OwnerID != originalOwnerID {
+		t.Errorf("CACHE CORRUPTION: Group OwnerID was mutated from %q to %q", originalOwnerID, group2.OwnerID)
+	}
+	if group2.Epoch == 999 {
+		t.Error("CACHE CORRUPTION: Group Epoch was mutated to 999")
+	}
+	if !bytes.Equal(group2.SignKey, originalSignKey) {
+		t.Error("CACHE CORRUPTION: Group SignKey was mutated via external byte slice modification")
+	}
+	if _, hasEvil := group2.Lockbox["evil-member"]; hasEvil {
+		t.Error("CACHE CORRUPTION: Group Lockbox was mutated to contain an injected member")
+	}
+
+	// Verify the raw cache entry
+	c.cacheMu.RLock()
+	if cachedGroup, ok := c.verifiedGroupCache[groupID]; ok {
+		if cachedGroup.OwnerID == "EVIL-OWNER" {
+			t.Error("CACHE CORRUPTION: raw verifiedGroupCache entry has mutated OwnerID")
+		}
+		if len(cachedGroup.SignKey) > 0 && !bytes.Equal(cachedGroup.SignKey, originalSignKey) {
+			t.Error("CACHE CORRUPTION: raw verifiedGroupCache entry has mutated SignKey")
+		}
+	}
+	c.cacheMu.RUnlock()
+}
+
+// TestCacheImmutability_PathCache verifies that mutating an inode returned
+// from the path cache does NOT corrupt the cached entry.
+func TestCacheImmutability_PathCache(t *testing.T) {
+	ctx := context.Background()
+	c, _, _, ts, adminID, adminSK := setupTestClient(t)
+	_ = adminID
+	_ = adminSK
+	defer ts.Close()
+
+	// Create a directory so the path cache gets populated
+	err := c.Mkdir(ctx, "/pathcache", 0755)
+	if err != nil {
+		t.Fatalf("Mkdir failed: %v", err)
+	}
+
+	// Resolve once to populate path cache
+	inode1, _, err := c.resolvePath(ctx, "/pathcache")
+	if err != nil {
+		t.Fatalf("First resolvePath failed: %v", err)
+	}
+	originalID := inode1.ID
+
+	// Check that the path cache has an entry
+	entry, ok := c.getPathCache("/pathcache")
+	if !ok {
+		t.Skip("Path cache not populated for /pathcache, skipping")
+	}
+
+	// Mutate the inode from the path cache entry
+	if entry.inode != nil {
+		entry.inode.OwnerID = "EVIL-PATH-OWNER"
+		entry.inode.ID = "EVIL-PATH-ID"
+	}
+
+	// Read from path cache again
+	entry2, ok := c.getPathCache("/pathcache")
+	if ok && entry2.inode != nil {
+		if entry2.inode.OwnerID == "EVIL-PATH-OWNER" {
+			t.Error("CACHE CORRUPTION: pathCache inode OwnerID was mutated")
+		}
+		if entry2.inode.ID == "EVIL-PATH-ID" {
+			t.Error("CACHE CORRUPTION: pathCache inode ID was mutated")
+		}
+	}
+
+	// Full resolve should still give us the correct inode
+	inode2, _, err := c.resolvePath(ctx, "/pathcache")
+	if err != nil {
+		t.Fatalf("Second resolvePath failed: %v", err)
+	}
+	if inode2.ID != originalID {
+		t.Errorf("CACHE CORRUPTION: resolvePath returned mutated ID %q instead of %q", inode2.ID, originalID)
+	}
+}

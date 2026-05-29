@@ -4,11 +4,13 @@
 package client
 
 import (
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"go.etcd.io/bbolt"
@@ -19,6 +21,21 @@ type NativeStore struct {
 	maxBytes int64
 	db       *bbolt.DB
 	mu       sync.RWMutex
+
+	// Phase 76.3: Throttled & estimated cache pruning.
+	// estimatedBytes tracks the approximate on-disk chunk usage atomically,
+	// updated on every put/delete so we can skip Prune when under the limit.
+	estimatedBytes atomic.Int64
+	// pruning is a single-flight flag: 0=idle, 1=running.
+	pruning atomic.Int32
+	// lastPrune records when the last prune completed (guarded by mu).
+	lastPrune time.Time
+	// pruneInterval is the rate-limit interval for auto-pruning.
+	pruneInterval time.Duration
+	// pruneTimer is a deferred timer to run pruning when skipped due to rate limit.
+	pruneTimer *time.Timer
+	// pruneWg tracks active background pruning goroutines.
+	pruneWg sync.WaitGroup
 }
 
 func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
@@ -31,11 +48,71 @@ func NewNativeStore(baseDir string, maxBytes int64) (*NativeStore, error) {
 		return nil, fmt.Errorf("failed to open metadata db: %w", err)
 	}
 
-	return &NativeStore{
-		baseDir:  baseDir,
-		maxBytes: maxBytes,
-		db:       db,
-	}, nil
+	s := &NativeStore{
+		baseDir:       baseDir,
+		maxBytes:      maxBytes,
+		db:            db,
+		pruneInterval: 30 * time.Second,
+	}
+
+	// Initialize the byte estimate synchronously on startup to prevent any
+	// race conditions with concurrent puts/deletes.
+	s.initEstimatedBytes()
+
+	return s, nil
+}
+
+// initEstimatedBytes loads the estimatedBytes from BoltDB on startup,
+// falling back to a full directory walk only if it is missing or invalid.
+func (s *NativeStore) initEstimatedBytes() {
+	var persisted int64
+	var found bool
+
+	_ = s.db.View(func(tx *bbolt.Tx) error {
+		b := tx.Bucket([]byte("sys_config"))
+		if b == nil {
+			return nil
+		}
+		v := b.Get([]byte("estimated_bytes"))
+		if len(v) == 8 {
+			persisted = int64(binary.BigEndian.Uint64(v))
+			found = true
+		}
+		return nil
+	})
+
+	if found && persisted >= 0 {
+		s.estimatedBytes.Store(persisted)
+		return
+	}
+
+	// Fallback to directory walk
+	var total int64
+	chunksDir := filepath.Join(s.baseDir, "chunks")
+	_ = filepath.WalkDir(chunksDir, func(_ string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return nil
+		}
+		if info, err := d.Info(); err == nil {
+			total += info.Size()
+		}
+		return nil
+	})
+	s.estimatedBytes.Store(total)
+	s.saveEstimatedBytes()
+}
+
+// saveEstimatedBytes writes the current atomic estimatedBytes to BoltDB.
+func (s *NativeStore) saveEstimatedBytes() {
+	_ = s.db.Update(func(tx *bbolt.Tx) error {
+		b, err := tx.CreateBucketIfNotExists([]byte("sys_config"))
+		if err != nil {
+			return err
+		}
+		var buf [8]byte
+		binary.BigEndian.PutUint64(buf[:], uint64(s.estimatedBytes.Load()))
+		return b.Put([]byte("estimated_bytes"), buf[:])
+	})
 }
 
 func (s *NativeStore) Get(bucket, key string) ([]byte, error) {
@@ -89,6 +166,16 @@ func (s *NativeStore) Delete(bucket, key string) error {
 }
 
 func (s *NativeStore) Close() error {
+	s.mu.Lock()
+	if s.pruneTimer != nil {
+		s.pruneTimer.Stop()
+		s.pruneTimer = nil
+	}
+	s.mu.Unlock()
+
+	s.pruneWg.Wait() // Wait for active background pruning to complete
+
+	s.saveEstimatedBytes()
 	return s.db.Close()
 }
 
@@ -141,9 +228,10 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 		return err
 	}
 
-	// Trigger pruning if limit is set
-	if s.maxBytes > 0 {
-		go s.Prune()
+	// Phase 76.3: Update estimated byte count and conditionally prune.
+	s.estimatedBytes.Add(int64(len(value)))
+	if s.maxBytes > 0 && s.estimatedBytes.Load() > s.maxBytes {
+		s.maybeSchedulePrune()
 	}
 
 	return nil
@@ -151,11 +239,68 @@ func (s *NativeStore) putChunk(key string, value []byte) error {
 
 func (s *NativeStore) deleteChunk(key string) error {
 	path := s.getChunkPath(key)
+
+	// Phase 76.3: Stat before removal so we can update the byte estimate only on successful removal.
+	info, statErr := os.Stat(path)
 	err := os.Remove(path)
-	if err != nil && !os.IsNotExist(err) {
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
 		return err
 	}
+	if statErr == nil {
+		s.estimatedBytes.Add(-info.Size())
+	}
 	return nil
+}
+
+// SetPruneInterval sets the rate-limit interval for background auto-pruning.
+// Set to 0 to run auto-pruning on every limit breach without rate-limiting.
+func (s *NativeStore) SetPruneInterval(d time.Duration) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pruneInterval = d
+}
+
+// maybeSchedulePrune schedules a single background Prune run if:
+//   - No prune is already running (single-flight via atomic CAS), and
+//   - At least pruneInterval has elapsed since the last prune run.
+func (s *NativeStore) maybeSchedulePrune() {
+	// Single-flight: only one prune goroutine at a time.
+	if !s.pruning.CompareAndSwap(0, 1) {
+		return
+	}
+	s.mu.Lock()
+	since := time.Since(s.lastPrune)
+	interval := s.pruneInterval
+	if interval > 0 && since < interval {
+		// Rate-limited. Cancel any existing timer and schedule a new one
+		// for the remaining duration of the rate-limit window.
+		if s.pruneTimer != nil {
+			s.pruneTimer.Stop()
+		}
+		delay := interval - since
+		s.pruneTimer = time.AfterFunc(delay, func() {
+			s.maybeSchedulePrune()
+		})
+		s.mu.Unlock()
+		s.pruning.Store(0)
+		return
+	}
+	if s.pruneTimer != nil {
+		s.pruneTimer.Stop()
+		s.pruneTimer = nil
+	}
+	s.lastPrune = time.Now()
+	s.mu.Unlock()
+
+	s.pruneWg.Add(1)
+	go func() {
+		defer s.pruning.Store(0)
+		defer s.pruneWg.Done()
+		_ = s.Prune()
+	}()
 }
 
 type chunkInfo struct {
@@ -196,6 +341,8 @@ func (s *NativeStore) Prune() error {
 	}
 
 	if totalSize <= s.maxBytes {
+		s.estimatedBytes.Store(totalSize)
+		s.saveEstimatedBytes()
 		return nil
 	}
 
@@ -205,14 +352,19 @@ func (s *NativeStore) Prune() error {
 	})
 
 	// Delete until under limit
+	var removedBytes int64
 	for _, c := range chunks {
 		if totalSize <= s.maxBytes {
 			break
 		}
 		if err := os.Remove(c.path); err == nil {
 			totalSize -= c.size
+			removedBytes += c.size
 		}
 	}
+
+	s.estimatedBytes.Store(totalSize)
+	s.saveEstimatedBytes()
 
 	return nil
 }
