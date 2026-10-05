@@ -290,7 +290,7 @@ DistFS employs a strict "Zero-Trust" posture for new registrations, preventing u
     *   Crucially, a locked user cannot retrieve the `WorldIdentity` private key, preventing them from accessing world-readable files before they are formally vetted.
     *   A locked user's default storage and inode quota is strictly **Zero**.
 3.  **Administrative Onboarding:** To gain cluster access, a new user must undergo a guided onboarding flow (`distfs registry-add --unlock`):
-    *   **OOB Verification:** An admin verifies the user's PQC key fingerprint via an external channel using a 128-bit hex security code (e.g., `4AB2-CF01-...`, 8 groups) that the user displays with `distfs whoami`. The attestation is only signed if the keys still match the confirmed code.
+    *   **OOB Verification:** An admin verifies the user's PQC key fingerprint via an external channel using a 128-bit hex security code (e.g., `4AB2-CF01-...`, 8 groups) that the user displays with `distfs whoami --security-code`. The attestation is only signed if the keys still match the confirmed code.
     *   **Attestation:** The admin creates the user's entry in the canonical `/registry`.
     *   **Unlock & Quota:** The admin issues an FSM command to set `Locked: false` and provisions an initial quota.
     *   **Workspace:** The admin provisions a home directory (`/users/<username>`) and grants the user traversal rights by adding them to the `users` group.

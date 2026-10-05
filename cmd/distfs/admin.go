@@ -949,7 +949,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
 	fmt.Printf("User: %s (ID: %s)\n", username, userID)
 	fmt.Printf("Please contact this user out-of-band (e.g., via phone or Signal).\n")
-	fmt.Printf("Ask them to run 'distfs whoami' and verify their security code matches: %s\n", codeStr)
+	fmt.Printf("Ask them to run 'distfs whoami --security-code' and verify their security code matches: %s\n", codeStr)
 	fmt.Printf("-----------------------------------------\n")
 
 	if !assumeYes {
