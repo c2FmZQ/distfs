@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	bolt "go.etcd.io/bbolt"
 )
 
 // TestSecurity_ExpiredSessionKeyCacheEntry verifies that an expired cached
@@ -204,5 +206,71 @@ func TestSecurity_CreateGroupCannotOverwrite(t *testing.T) {
 	}
 	if after.SignerID != victim.SignerID || !bytes.Equal(after.SignKey, victim.SignKey) {
 		t.Fatal("existing group was modified")
+	}
+}
+
+// TestSecurity_ChunkPagesBoundToInode verifies that an inode cannot reference
+// (and thereby delete or garbage-collect) another inode's chunk pages.
+func TestSecurity_ChunkPagesBoundToInode(t *testing.T) {
+	tc := SetupCluster(t)
+	ctx := context.Background()
+
+	victimID, mallory := "victim", "mallory"
+	vsk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: victimID, UID: 1001, SignKey: vsk.Public()}, vsk, tc.AdminID, tc.AdminSK)
+	msk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
+
+	// Victim file large enough to be paged.
+	var manifest []ChunkEntry
+	for i := 0; i < MaxChunksPerPage+1; i++ {
+		manifest = append(manifest, ChunkEntry{ID: fmt.Sprintf("%064x", i)})
+	}
+	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1, ChunkManifest: manifest}
+	victimFile.SignInodeForTest(victimID, vsk)
+	b, _ := json.Marshal(victimFile)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, victimID); err != nil {
+		t.Fatal(err)
+	}
+	victimPage := "victim-file:p0"
+
+	pageExists := func() bool {
+		var ok bool
+		tc.Node.FSM.DB().View(func(tx *bolt.Tx) error {
+			v, _ := tc.Node.FSM.Get(tx, []byte("chunk_pages"), []byte(victimPage))
+			ok = v != nil
+			return nil
+		})
+		return ok
+	}
+	if !pageExists() {
+		t.Fatal("victim file was not paged")
+	}
+
+	// Creating an inode that references the victim's page is rejected.
+	hijack := Inode{ID: "mallory-hijack", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1, ChunkPages: []string{victimPage}}
+	hijack.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(hijack)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err == nil {
+		t.Error("created inode referencing another inode's chunk page")
+	}
+
+	// Updating an own inode to reference the victim's page is rejected.
+	own := Inode{ID: "mallory-file", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err != nil {
+		t.Fatal(err)
+	}
+	own.Version = 2
+	own.ChunkPages = []string{victimPage}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdUpdateInode, b, mallory); err == nil {
+		t.Error("updated inode to reference another inode's chunk page")
+	}
+
+	if !pageExists() {
+		t.Fatal("victim chunk page was deleted")
 	}
 }

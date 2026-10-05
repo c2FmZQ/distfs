@@ -29,10 +29,18 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   No existence check; `SelfOwnedGroup` skips authz. Fix: reject if `groups[ID]` exists (FSM + handler).
   Test: second CreateGroup with existing ID fails.
 
-- [ ] **S5. Chunk-page hijack / deletion** — `pkg/metadata/fsm.go` create/update inode & lease placeholders.
+- [x] **S5. Chunk-page hijack / deletion** — `pkg/metadata/fsm.go` create/update inode & lease placeholders.
   Client-supplied `ChunkPages` IDs are not bound to the inode; update-to-`[]` deletes victim pages,
   and delete→GC loads victim pages. Fix: reject any page ID not of the form `<inode.ID>:p<i>`.
   Test: foreign page IDs rejected.
+
+- [ ] **S6. GC / replication delete chunks listed in any manifest** — `pkg/metadata/fsm.go`, `gc.go`, `replication.go`.
+  `ChunkManifest` IDs are client-chosen and not bound to the uploader. A user lists a victim's chunk
+  IDs in their own file and deletes it → GC deletes the victim's chunks; listing extra nodes makes the
+  replication "over-replicated" prune delete real replicas. Fix: FSM chunk ownership index
+  (chunk ID → inode); a manifest may only add chunks that are unowned or already owned by the same
+  inode; GC only deletes chunks owned by the inode being finalized; rebuild index from inodes on
+  restore. Replication must not prune based on client-supplied node lists. Test.
 
 ## High — client must not trust the server
 
