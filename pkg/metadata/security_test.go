@@ -119,8 +119,8 @@ func TestSecurity_IssueTokenModes(t *testing.T) {
 
 	// u1's world-readable file and u1's private file.
 	for _, in := range []Inode{
-		{ID: "world", OwnerID: u1, Type: FileType, Mode: 0644, ChunkManifest: []ChunkEntry{{ID: readable}}},
-		{ID: "private", OwnerID: u1, Type: FileType, Mode: 0600, ChunkManifest: []ChunkEntry{{ID: victim}}},
+		{ID: "world", OwnerID: u1, Type: FileType, Mode: 0644, Size: 1, ChunkManifest: []ChunkEntry{{ID: readable}}},
+		{ID: "private", OwnerID: u1, Type: FileType, Mode: 0600, Size: 1, ChunkManifest: []ChunkEntry{{ID: victim}}},
 	} {
 		in.SignInodeForTest(u1, usk1)
 		b, _ := json.Marshal(in)
@@ -129,7 +129,7 @@ func TestSecurity_IssueTokenModes(t *testing.T) {
 		}
 	}
 	// u2's own file, whose committed manifest contains the "readable" chunk ID.
-	own := Inode{ID: "own", OwnerID: u2, Type: FileType, Mode: 0600, ChunkManifest: []ChunkEntry{{ID: strings.Repeat("d", 64)}}}
+	own := Inode{ID: "own", OwnerID: u2, Type: FileType, Mode: 0600, Size: 1, ChunkManifest: []ChunkEntry{{ID: strings.Repeat("d", 64)}}}
 	own.SignInodeForTest(u2, usk2)
 	ob, _ := json.Marshal(own)
 	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, ob, u2); err != nil {
@@ -243,7 +243,7 @@ func TestSecurity_ChunkPagesBoundToInode(t *testing.T) {
 	for i := 0; i < MaxChunksPerPage+1; i++ {
 		manifest = append(manifest, ChunkEntry{ID: fmt.Sprintf("%064x", i)})
 	}
-	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1, ChunkManifest: manifest}
+	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1, Size: uint64(len(manifest)) * crypto.ChunkSize, ChunkManifest: manifest}
 	victimFile.SignInodeForTest(victimID, vsk)
 	b, _ := json.Marshal(victimFile)
 	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, victimID); err != nil {
@@ -307,7 +307,7 @@ func TestSecurity_ChunkOwnership(t *testing.T) {
 	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
 
 	victimChunk := strings.Repeat("c", 64)
-	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1,
+	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1, Size: 1,
 		ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
 	victimFile.SignInodeForTest(victimID, vsk)
 	b, _ := json.Marshal(victimFile)
@@ -316,7 +316,7 @@ func TestSecurity_ChunkOwnership(t *testing.T) {
 	}
 
 	// Create with a foreign chunk is rejected.
-	steal := Inode{ID: "mallory-steal", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1,
+	steal := Inode{ID: "mallory-steal", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1, Size: 1,
 		ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
 	steal.SignInodeForTest(mallory, msk)
 	b, _ = json.Marshal(steal)
@@ -332,6 +332,7 @@ func TestSecurity_ChunkOwnership(t *testing.T) {
 		t.Fatal(err)
 	}
 	own.Version = 2
+	own.Size = 1
 	own.ChunkManifest = []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}
 	own.SignInodeForTest(mallory, msk)
 	b, _ = json.Marshal(own)
@@ -517,5 +518,60 @@ func TestSecurity_ForeignLeasesRedacted(t *testing.T) {
 		if k == "victim-nonce" || l.SessionID == "victim-session" || l.Nonce == "victim-nonce" {
 			t.Errorf("foreign lease identifiers leaked: %q %+v", k, l)
 		}
+	}
+}
+
+// TestSecurity_QuotaBypasses verifies that users cannot escape quota by
+// declaring a small size for a large manifest, by creating their own
+// unlimited quota group, or by rewriting a group's usage and limits.
+func TestSecurity_QuotaBypasses(t *testing.T) {
+	tc := SetupCluster(t)
+	ctx := context.Background()
+
+	u := "quota-user"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: u, UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
+
+	// 1. Many chunks, declared size 0.
+	in := Inode{ID: "q-file", OwnerID: u, Type: FileType, Mode: 0600, Version: 1, Size: 0,
+		ChunkManifest: []ChunkEntry{{ID: strings.Repeat("1", 64)}, {ID: strings.Repeat("2", 64)}, {ID: strings.Repeat("3", 64)}}}
+	in.SignInodeForTest(u, sk)
+	b, _ := json.Marshal(in)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, u); err == nil {
+		t.Error("created a file with more chunks than its declared size")
+	}
+
+	// 2. A user-created group cannot be quota-enabled, and client-supplied
+	//    usage/limits are ignored.
+	nonce := GenerateNonce()
+	g := Group{ID: GenerateGroupID(u, nonce), OwnerID: u, Nonce: nonce, GID: 7001, Version: 1, QuotaEnabled: true,
+		Quota: UserQuota{MaxBytes: 1 << 40}, Usage: UserUsage{TotalBytes: -1 << 40}}
+	g.SignGroupForTest(u, sk)
+	b, _ = json.Marshal(g)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateGroup, b, u); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := tc.Node.FSM.GetGroup(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.QuotaEnabled || stored.Quota.MaxBytes != 0 || stored.Usage.TotalBytes != 0 {
+		t.Errorf("client-controlled quota state persisted: enabled=%v quota=%+v usage=%+v", stored.QuotaEnabled, stored.Quota, stored.Usage)
+	}
+
+	// 3. UpdateGroup cannot change usage, limits or GID.
+	upd := *stored
+	upd.Version++
+	upd.Usage = UserUsage{TotalBytes: -1 << 40}
+	upd.Quota = UserQuota{MaxBytes: 1 << 40}
+	upd.GID = 7002
+	upd.SignGroupForTest(u, sk)
+	b, _ = json.Marshal(upd)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdUpdateGroup, b, u); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := tc.Node.FSM.GetGroup(g.ID)
+	if after.Usage.TotalBytes != 0 || after.Quota.MaxBytes != 0 || after.GID != 7001 {
+		t.Errorf("UpdateGroup changed server-managed state: gid=%d quota=%+v usage=%+v", after.GID, after.Quota, after.Usage)
 	}
 }

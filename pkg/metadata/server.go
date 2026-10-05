@@ -123,7 +123,7 @@ type Server struct {
 	oidcMu       sync.RWMutex
 	oidcConfig   *OIDCConfig
 	oidcAudience string // Required "aud" claim of ID tokens (the OIDC client ID)
-	stopCh     chan struct{}
+	stopCh       chan struct{}
 
 	vault  *NodeVault
 	decKey *mlkem.DecapsulationKey768

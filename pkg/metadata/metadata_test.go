@@ -551,6 +551,7 @@ func TestChunkPagination(t *testing.T) {
 		Type:          FileType,
 		OwnerID:       "u1",
 		Mode:          0600,
+		Size:          uint64(len(manifest)) * crypto.ChunkSize,
 		ChunkManifest: manifest,
 	}
 	inode.SignInodeForTest("u1", userSignKey)

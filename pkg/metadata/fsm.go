@@ -790,6 +790,9 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 	}
 
 	if inode.Type == FileType {
+		if err := checkManifestFitsSize(len(inode.ChunkManifest), inode.Size); err != nil {
+			return err
+		}
 		// Limit maximum size claim to prevent quota theft via inflation
 		maxPossibleSize := uint64(len(inode.ChunkManifest)) * crypto.ChunkSize
 		if len(inode.ChunkPages) > 0 {
@@ -911,6 +914,11 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 		}
 	}
 
+	if inode.Type == FileType && update.ChunkManifest != nil {
+		if err := checkManifestFitsSize(len(update.ChunkManifest), update.Size); err != nil {
+			return err
+		}
+	}
 	if inode.Type == FileType {
 		// Limit maximum size claim to prevent quota theft via inflation
 		maxPossibleSize := uint64(len(update.ChunkManifest)) * crypto.ChunkSize
@@ -1375,6 +1383,16 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		group.Version = 1
 	}
 
+	// Quota accounting is server state. A quota-enabled group becomes the
+	// quota debtor for its files, so only administrators may create one
+	// (otherwise any user could create an unlimited group and charge all of
+	// their files to it). Limits are set with SetGroupQuota.
+	group.Usage = UserUsage{}
+	group.Quota = UserQuota{}
+	if group.QuotaEnabled && !fsm.IsAdmin(group.SignerID) {
+		group.QuotaEnabled = false
+	}
+
 	if group.GID == 0 {
 		return fmt.Errorf("GID must be provided and non-zero")
 	}
@@ -1431,7 +1449,11 @@ func (fsm *MetadataFSM) executeUpdateGroup(tx *bolt.Tx, data []byte, sessionID s
 		return ErrConflict
 	}
 
-	update.QuotaEnabled = existing.QuotaEnabled // Immutable
+	// Server-managed state: not changeable through UpdateGroup.
+	update.QuotaEnabled = existing.QuotaEnabled
+	update.Quota = existing.Quota
+	update.Usage = existing.Usage
+	update.GID = existing.GID
 	fsm.updateGroupIndices(tx, &update, &existing)
 
 	encoded, _ := json.Marshal(update)
@@ -1775,6 +1797,20 @@ func (fsm *MetadataFSM) LoadInodeWithPages(tx *bolt.Tx, inode *Inode) error {
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// checkManifestFitsSize rejects manifests with more chunks than the declared
+// size needs. Usage is charged by Size, so a file claiming size 0 with many
+// chunks would otherwise store data without being charged for it.
+func checkManifestFitsSize(chunks int, size uint64) error {
+	if chunks == 0 {
+		return nil
+	}
+	needed := (size + crypto.ChunkSize - 1) / crypto.ChunkSize
+	if uint64(chunks) > needed {
+		return fmt.Errorf("%w: %d chunks exceed declared size %d", ErrStructuralInconsistency, chunks, size)
 	}
 	return nil
 }

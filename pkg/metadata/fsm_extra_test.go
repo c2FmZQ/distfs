@@ -54,6 +54,7 @@ func TestFSM_AddChunkReplica_Success(t *testing.T) {
 		ID:      "00000000000000000000000000000001",
 		Type:    FileType,
 		OwnerID: "u1",
+		Size:    1,
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1"}},
 		},
@@ -438,6 +439,7 @@ func TestFSM_GCMgmt_Extra(t *testing.T) {
 		ID:      "00000000000000000000000000000001",
 		Type:    FileType,
 		OwnerID: "u1",
+		Size:    1,
 		ChunkManifest: []ChunkEntry{
 			{ID: "c1", Nodes: []string{"n1"}},
 		},
