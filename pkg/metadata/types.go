@@ -692,6 +692,13 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(t)
 	h.Write([]byte("|"))
 
+	// Size bounds reads of the (padded) chunk data, so it must be signed.
+	sz := make([]byte, 8)
+	binary.BigEndian.PutUint64(sz, i.Size)
+	h.Write([]byte("size:"))
+	h.Write(sz)
+	h.Write([]byte("|"))
+
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
 		h.Write([]byte("links:"))

@@ -214,6 +214,7 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 6. `[]byte("client_blob:")` + `raw_encrypted_bytes` + `[]byte("|")`
 7. `[]byte("owner:" + owner_id + "|")`
 8. `[]byte("type:")` + `BigEndian(uint32(type))` + `[]byte("|")`
+   - `[]byte("size:")` + `BigEndian(uint64(size))` + `[]byte("|")` // Signed: bounds reads of padded chunk data.
 9. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
 10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID,hex_enc_name,hex_nonce|)` // Each entry is separated by |
 11. `[]byte("manifest:")` + `CSV(chunk_id)` + `[]byte("|")`  // Nodes are EXCLUDED from user-signed content hash.

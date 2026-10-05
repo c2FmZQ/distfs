@@ -378,3 +378,18 @@ func TestSecurity_ChunkOwnership(t *testing.T) {
 		t.Fatal("GC did not enqueue a chunk owned by the inode")
 	}
 }
+
+// TestSecurity_SizeIsSigned verifies that a server cannot change an inode's
+// size (truncating or extending reads) without invalidating its signature.
+func TestSecurity_SizeIsSigned(t *testing.T) {
+	sk, _ := crypto.GenerateIdentityKey()
+	in := Inode{ID: "f", OwnerID: "u", Type: FileType, Mode: 0600, Version: 1, Size: 1000}
+	in.SignInodeForTest("u", sk)
+	if !crypto.VerifySignature(sk.Public(), in.ManifestHash(), in.UserSig) {
+		t.Fatal("signature does not verify")
+	}
+	in.Size = 10
+	if crypto.VerifySignature(sk.Public(), in.ManifestHash(), in.UserSig) {
+		t.Fatal("signature still verifies after the size was changed")
+	}
+}
