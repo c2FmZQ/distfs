@@ -1683,3 +1683,369 @@ Enforce a structural bound on directory children (e.g., `MaxDirectoryChildren = 
 ### 3.5. Mitigation: Lease Exhaustion DoS
 - Hardcap lease duration to 5 minutes.
 - Limit concurrent active leases per user/session (e.g., 100).
+
+---
+
+## Phase 76: Client Latency Optimization
+
+**Goal:** Systematically eliminate the five concrete latency bottlenecks identified in the client-side read, write, caching, and path-resolution pipelines. All improvements must preserve the Zero-Knowledge security model — no plaintext data is ever cached or transmitted to the server in an unencrypted form.
+
+**Background:** Profiling and code analysis identified the following key bottlenecks:
+1. Serialized write pipeline blocks on each chunk upload before buffering the next.
+2. Staggered hedged reads use a hardcoded 1-second delay before trying replica nodes.
+3. Cache pruning (`NativeStore.Prune`) walks the full chunk directory on every write.
+4. Path resolution always makes one network round-trip per directory component, even for cached inodes.
+5. The sequential read-ahead prefetch window is hardcoded at 3 chunks and never self-tunes.
+
+---
+
+### Phase 76.1: Pipelined Background Write Uploads
+
+**Problem:** `FileWriter.flushChunk` is fully synchronous. Each time the 1MB buffer fills, `Write` blocks on: chunk encryption → `issueToken` (network) → `allocateNodes` (network) → `uploadChunk` (network). For multi-chunk files this produces a stop-and-go pipeline where the CPU and network are never simultaneously utilised.
+
+**Design:**
+- Introduce an internal `uploadJob` struct carrying the pre-encrypted ciphertext, chunk ID, and allocated nodes.
+- Replace the synchronous flush with a bounded goroutine-based pipeline controlled by a semaphore (default parallelism = 4). Each goroutine performs the network upload independently.
+- Chunk index ordering for the `ChunkManifest` is maintained via a pre-allocated slot array that goroutines write into atomically; the manifest is assembled in order only at `Finish` time.
+- `Finish` / `Close` block until all in-flight upload goroutines have completed (via `sync.WaitGroup`).
+- Any upload error is captured and surfaced as the return value of `Close`.
+- Token issuance and node allocation must also be pipelined or pre-fetched to avoid becoming the new bottleneck (see Step 76.1.3 below).
+
+**Steps:**
+
+#### Step 76.1.1: Define Upload Pipeline Internals
+- **File:** `pkg/client/client.go` (`FileWriter` struct)
+- **Action:** Add fields:
+  - `uploadSem chan struct{}` — buffered channel of size N (default 4) acting as a semaphore.
+  - `uploadWg sync.WaitGroup` — tracks all in-flight upload goroutines.
+  - `uploadErr atomic.Pointer[error]` (or `chan error`) — captures first upload error.
+  - `manifest []metadata.ChunkEntry` pre-allocated at writer creation with capacity hint.
+  - `manifestMu sync.Mutex` — protects concurrent manifest slot writes.
+- **Action:** Introduce a `pipelineParallelism` field (default 4) on the `FileWriter`, settable via a new `Client` option `WithWritePipeline(n int)`.
+
+#### Step 76.1.2: Refactor `flushChunk` into a Non-Blocking Pipeline Stage
+- **File:** `pkg/client/client.go`
+- **Action:** Rename the current `flushChunk` to `flushChunkSync` (kept for the inline/small-file fast-path).
+- **Action:** Implement `flushChunkAsync(buf []byte, chunkIndex uint64)`:
+  1. Call `crypto.EncryptChunk` synchronously on the caller goroutine (CPU-bound, keep on-stack to avoid data races on `w.buf`).
+  2. Acquire the upload semaphore (`w.uploadSem <- struct{}{}`).
+  3. Spawn a goroutine that:
+     a. Issues a write token for this chunk ID via `issueToken`.
+     b. Calls `uploadChunk`.
+     c. On success: writes `ChunkEntry{ID, Nodes}` into the correct pre-allocated manifest slot.
+     d. On error: stores the error via `w.uploadErr.Store(&err)`.
+     e. Releases the semaphore (`<-w.uploadSem`).
+     f. Calls `w.uploadWg.Done()`.
+  4. Before spawning, calls `w.uploadWg.Add(1)`.
+- **Action:** Update `FileWriter.Write` to call `flushChunkAsync` instead of `flushChunk` when the buffer fills.
+
+#### Step 76.1.3: Pre-fetch Node Allocations
+- **File:** `pkg/client/client.go` (`FileWriter`)
+- **Action:** After the first chunk is queued, proactively call `allocateNodes` in the background and cache the result for subsequent chunks. Node allocations are already cached in `c.allocCache` for 1 minute, so this is simply about ensuring the cache is warmed before the second chunk needs it.
+- **Action:** In `newWriter` / `OpenBlobWriteWithLease`, eagerly call `c.allocateNodes` (with its existing cache) so node information is ready by the time the first chunk flushes.
+
+#### Step 76.1.4: Update `Finish` / `Close`
+- **File:** `pkg/client/client.go`
+- **Action:** At the start of `Finish`:
+  1. If `len(w.manifest) == 0 && len(w.buf) <= InlineLimit`: use existing inline path (unchanged).
+  2. Otherwise: flush the last partial buffer via `flushChunkAsync`.
+  3. Call `w.uploadWg.Wait()` to drain all in-flight goroutines.
+  4. Check `w.uploadErr`; if non-nil, return it.
+  5. Assemble `w.inode.ChunkManifest` from the ordered manifest slot array.
+
+#### Step 76.1.5: Tests
+- **File:** `pkg/client/client_extra_test.go` (or new `pipeline_test.go`)
+- **Action:** Unit test: write a 10MB file through a mock HTTP server; assert that at least 2 chunk uploads were in-flight simultaneously.
+- **Action:** Integration test: write a 32MB file and verify data integrity on read-back.
+- **Action:** Regression test: verify `Close` surfaces upload errors correctly.
+
+---
+
+### Phase 76.2: Configurable Hedged Chunk Read Requests
+
+**Problem:** `downloadChunk` launches staggered replica requests with a hardcoded 1-second delay (`time.NewTimer(1 * time.Second)`). In low-latency clusters or when a replica is simply slow (not dead), this 1-second wait dominates read tail latency.
+
+**Design:**
+- Introduce a `HedgeDelay` field on the `Client` (default: `150ms`), configurable via `WithHedgeDelay(d time.Duration)`.
+- The stagger logic in `downloadChunk` replaces `1 * time.Second` with `c.HedgeDelay`.
+- Setting `HedgeDelay` to `0` disables staggering entirely (all replicas fired in parallel from the start — maximum throughput at the cost of server load).
+- Setting `HedgeDelay` to a negative value restores the previous 1-second conservative behaviour for backwards compatibility.
+- The dynamic variant (auto-tuning based on observed RTT) is deferred to a follow-up phase.
+
+**Steps:**
+
+#### Step 76.2.1: Add `HedgeDelay` to `Client`
+- **File:** `pkg/client/client.go` (Client struct, around line 580)
+- **Action:** Add field `hedgeDelay time.Duration`.
+- **Action:** In `NewClient`, initialise `hedgeDelay` to `150 * time.Millisecond`.
+- **Action:** Add builder method:
+  ```go
+  func (c *Client) WithHedgeDelay(d time.Duration) *Client {
+      c2 := *c
+      c2.hedgeDelay = d
+      return &c2
+  }
+  ```
+
+#### Step 76.2.2: Replace Hardcoded Stagger in `downloadChunk`
+- **File:** `pkg/client/client.go` (around line 1508–1525)
+- **Action:** Replace `time.NewTimer(1 * time.Second)` with:
+  ```go
+  delay := c.hedgeDelay
+  if delay < 0 {
+      delay = time.Second
+  }
+  wait := time.NewTimer(delay)
+  ```
+- **Action:** When `delay == 0`, skip the timer entirely and launch all replica goroutines immediately in the loop, removing the staggered-start select block.
+
+#### Step 76.2.3: Expose in CLI / FUSE Config
+- **File:** `cmd/distfs-fuse/main.go`, `cmd/distfs/main.go`
+- **Action:** Add a `--hedge-delay` flag (e.g., `--hedge-delay=150ms`). Parse it using `time.ParseDuration` and pass it to `c.WithHedgeDelay(d)`.
+- **Action:** Add `HedgeDelay` to the `config.Config` struct and persist it.
+
+#### Step 76.2.4: Tests
+- **File:** `pkg/client/hedged_test.go`
+- **Action:** Extend existing `TestDownloadChunk_HedgedRequests`: parameterise with a 150ms stagger and assert that the slow-primary/fast-replica scenario completes in under 250ms (not 1s+).
+- **Action:** Test `HedgeDelay=0`: all replica goroutines are launched simultaneously.
+- **Action:** Test `HedgeDelay<0`: behaves identically to the 1-second original.
+
+---
+
+### Phase 76.3: Throttled & Estimated Cache Pruning
+
+**Problem:** `NativeStore.putChunk` calls `go s.Prune()` on every successful chunk write. `Prune` walks the entire chunks directory tree, sorts all files by modification time, and deletes until under the size cap. Concurrent pruning goroutines contend on `s.mu`, thrash the filesystem, and compete with active read/write I/O.
+
+**Design:**
+- Track cumulative cache usage in-memory with a `int64` atomic counter (`estimatedBytes`).
+- Increment `estimatedBytes` on `putChunk`, decrement on `deleteChunk`.
+- Only trigger a `Prune` run if `estimatedBytes > maxBytes`.
+- Rate-limit pruning using a time-gated flag: prune at most once every 30 seconds regardless of how many writes occur in that window.
+- Replace the uncoordinated `go s.Prune()` with a single-flight pattern so only one prune goroutine runs at a time.
+
+**Steps:**
+
+#### Step 76.3.1: Add In-Memory Size Tracking to `NativeStore`
+- **File:** `pkg/client/storage_native.go`
+- **Action:** Add fields to `NativeStore`:
+  - `estimatedBytes int64` — atomically updated.
+  - `lastPrune      time.Time` — guarded by `mu`.
+  - `pruning        int32` — atomic flag (0=idle, 1=running) for single-flight.
+- **Action:** On `NewNativeStore`, perform a one-time background walk to initialise `estimatedBytes` from the actual on-disk chunk sizes.
+
+#### Step 76.3.2: Update `putChunk` and `deleteChunk`
+- **File:** `pkg/client/storage_native.go`
+- **Action:** In `putChunk`, after a successful write, atomically add `int64(len(value))` to `estimatedBytes`.
+- **Action:** In `deleteChunk`, atomically subtract the removed file's size from `estimatedBytes` (stat the file before removing it).
+- **Action:** Replace `go s.Prune()` with a conditional call:
+  ```go
+  if s.maxBytes > 0 && atomic.LoadInt64(&s.estimatedBytes) > s.maxBytes {
+      s.maybeSchedulePrune()
+  }
+  ```
+
+#### Step 76.3.3: Implement `maybeSchedulePrune`
+- **File:** `pkg/client/storage_native.go`
+- **Action:** Implement:
+  ```go
+  func (s *NativeStore) maybeSchedulePrune() {
+      // Single-flight: only one prune goroutine at a time.
+      if !atomic.CompareAndSwapInt32(&s.pruning, 0, 1) {
+          return
+      }
+      s.mu.RLock()
+      since := time.Since(s.lastPrune)
+      s.mu.RUnlock()
+      if since < 30*time.Second {
+          atomic.StoreInt32(&s.pruning, 0)
+          return
+      }
+      go func() {
+          defer atomic.StoreInt32(&s.pruning, 0)
+          s.mu.Lock()
+          s.lastPrune = time.Now()
+          s.mu.Unlock()
+          _ = s.Prune()
+      }()
+  }
+  ```
+- **Action:** Update `Prune` to also refresh `estimatedBytes` based on the actual post-prune directory size.
+
+#### Step 76.3.4: Tests
+- **File:** `pkg/client/storage_test.go`
+- **Action:** Unit test: write N chunks rapidly (> `maxBytes`); assert that `Prune` is called at most once per 30-second window (mock `time.Now` or use a short test interval).
+- **Action:** Unit test: verify `estimatedBytes` is accurate after a sequence of puts and deletes.
+- **Action:** Regression test: verify pruning still correctly deletes the oldest chunks to bring usage under the cap.
+
+---
+
+### Phase 76.4: Lease-Validated Client Metadata Caching *(DEFERRED)*
+
+> [!WARNING]
+> **Deferred — correctness constraint.** Analysis of `fsm.go:checkLease` shows that `LeaseShared` does **not** block writers from calling `updateInode`. Only `LeaseExclusive` blocks other sessions. Using a shared lease as a "inode won't change" cache freshness signal is therefore unsound — a concurrent writer could modify the inode while a reader holds a shared lease, causing stale metadata to be served from cache. This optimisation is deferred until the lease model is extended to enforce inode immutability under shared leases, or until a TTL-based path cache (analogous to NFS attribute cache timeout) is designed and reviewed.
+
+**Problem:** `getInodeInternal` always performs a network round-trip to fetch the current inode, even when the inode is cached locally. Path resolution over an N-component path makes N sequential network calls. Since the client already holds distributed leases, it has implicit guarantees about inode freshness for the duration of a lease.
+
+**Design:**
+- When the client holds a valid, unexpired **shared** or **exclusive** lease on an inode ID (tracked in a new `leasedInodes` map), treat the in-memory / KVStore cached inode as authoritative without a network fetch.
+- The `leasedInodes` map is maintained by the existing `acquireLeases` / `releaseLeases` calls. No new server-side protocol changes are required.
+- Cache freshness is defined by the lease expiry time. The existing `leaseRenewalLoop` already keeps leases alive.
+- This optimisation applies only to **read** operations. Write operations (`updateInode`, `createInode`) always go to the server.
+- If the client is **not** offline and a lease is not held, existing network-fetch behaviour is unchanged.
+
+**Steps:**
+
+#### Step 76.4.1: Add a `leasedInodes` Registry to `Client`
+- **File:** `pkg/client/client.go` (Client struct)
+- **Action:** Add fields:
+  - `leasedInodes   map[string]time.Time` — maps inode ID to its lease expiry time.
+  - `leasedInodesMu sync.RWMutex`
+- **Action:** In `NewClient`, initialise `leasedInodes = make(map[string]time.Time)`.
+
+#### Step 76.4.2: Update `acquireLeases` to Register Leases Locally
+- **File:** `pkg/client/client.go`
+- **Action:** After a successful `acquireLeases` call, register each inode ID in `leasedInodes` with an expiry of `time.Now().Add(duration)`. Use a write lock on `leasedInodesMu`.
+- **Action:** After a successful `releaseLeases` call, remove entries from `leasedInodes`.
+
+#### Step 76.4.3: Update `getInodeInternal` to Use Cached Value Under a Lease
+- **File:** `pkg/client/client.go` (around line 2252)
+- **Action:** After the KVStore cache lookup (line 2242–2250), before performing the network fetch, add:
+  ```go
+  if cacheHit && inode != nil && !c.offline {
+      c.leasedInodesMu.RLock()
+      expiry, leased := c.leasedInodes[id]
+      c.leasedInodesMu.RUnlock()
+      if leased && time.Now().Before(expiry) {
+          // Serve from cache; skip network fetch.
+          // Still run verification (signature check) against the cached inode.
+          goto verifyAndReturn
+      }
+  }
+  ```
+- **Action:** Introduce the `verifyAndReturn` label above the existing root-anchoring check at line 2278, and ensure the verification path (`verifyInode`) is still called on cache-served inodes.
+- **Note:** The `goto` can be avoided by refactoring into a helper function; prefer the refactor for cleanliness.
+
+#### Step 76.4.4: Update `leaseRenewalLoop` to Keep `leasedInodes` Fresh
+- **File:** `pkg/client/client.go` (`FileReader.leaseRenewalLoop` and `FileWriter.leaseRenewalLoop`)
+- **Action:** On each successful lease renewal, update the corresponding `leasedInodes` entries to the new expiry (`time.Now().Add(leaseDuration)`).
+- **Action:** On lease expiry (when `r.onExpired` fires), remove the inode from `leasedInodes`.
+
+#### Step 76.4.5: Thread-Safety Audit
+- Confirm `leasedInodes` is protected exclusively by `leasedInodesMu` in all code paths.
+- Confirm that no write operations (batch apply, updateInode) bypass the invalidation path.
+
+#### Step 76.4.6: Tests
+- **File:** `pkg/client/path_cache_test.go` (or a new `lease_cache_test.go`)
+- **Action:** Unit test: acquire a shared lease, write an inode to the KVStore mock, call `getInode` — assert no network request is made.
+- **Action:** Unit test: lease expires — subsequent `getInode` falls through to the network fetch.
+- **Action:** Integration test: open a `FileReader` on a large file; measure the number of inode fetches during sequential chunk reads and assert it drops to 0 after the first (the reader's lease is active).
+- **Action:** Regression test: releasing the lease and then calling `getInode` resumes network fetches.
+
+---
+
+### Phase 76.5: Auto-Tuning Dynamic Prefetch Window
+
+**Problem:** `FileReader.readInternal` prefetches exactly 3 chunks (3MB) after 2 consecutive sequential chunk reads. The window is hardcoded. On high-latency networks or when reading very large files, 3 chunks may not be enough to keep the decode pipeline fed. On random-access workloads, even a window of 1 wastes bandwidth.
+
+**Design:**
+- Make the prefetch window size dynamic, bounded between `minPrefetch=0` and `maxPrefetch` (default: 8 chunks = 8MB).
+- **Scale-up rule:** Each time a prefetched chunk is successfully consumed from the `readAhead` map (rather than being fetched on demand), increment `prefetchWindow` by 1, up to `maxPrefetch`.
+- **Scale-down rule:** Each time a cache miss occurs on a non-sequential access (seek / random read detected), reset `prefetchWindow` to 0.
+- **Steady-state:** On sequential misses (cache miss on the *next* sequential chunk), decrement by 1 (min 1 during sequential access to avoid stalling).
+- Allow `maxPrefetch` to be configured at client level via `WithMaxPrefetch(n int)`.
+
+**Steps:**
+
+#### Step 76.5.1: Add `WithMaxPrefetch` to `Client`
+- **File:** `pkg/client/client.go`
+- **Action:** Add field `maxPrefetch int` to `Client` struct (default: 8).
+- **Action:** Add builder method:
+  ```go
+  func (c *Client) WithMaxPrefetch(n int) *Client {
+      c2 := *c
+      if n >= 0 {
+          c2.maxPrefetch = n
+      }
+      return &c2
+  }
+  ```
+- **Action:** Thread `maxPrefetch` into `newReaderWithInode` so each `FileReader` inherits it.
+
+#### Step 76.5.2: Add Dynamic Window Fields to `FileReader`
+- **File:** `pkg/client/client.go` (`FileReader` struct)
+- **Action:** Add fields:
+  - `prefetchWindow int` — current window size; starts at 1.
+  - `maxPrefetch    int` — copied from client config.
+
+#### Step 76.5.3: Update `readInternal` to Use and Tune the Window
+- **File:** `pkg/client/client.go` (around line 2985–2989)
+- **Action:** Replace:
+  ```go
+  if r.sequentialHits >= 1 {
+      for i := int64(1); i <= 3; i++ {
+          r.triggerPrefetch(chunkIdx + i)
+      }
+  }
+  ```
+  with:
+  ```go
+  if r.sequentialHits >= 1 {
+      for i := int64(1); i <= int64(r.prefetchWindow); i++ {
+          r.triggerPrefetch(chunkIdx + i)
+      }
+  }
+  ```
+
+#### Step 76.5.4: Implement Window Tuning Logic
+- **File:** `pkg/client/client.go` (inside `readInternal`, in the cache-hit and cache-miss branches)
+- **Action — Cache hit (prefetched chunk consumed):** After `pt = res.data` is set from the `readAhead` map (line ~3008), add:
+  ```go
+  if r.prefetchWindow < r.maxPrefetch {
+      r.prefetchWindow++
+  }
+  ```
+- **Action — Cache miss on sequential chunk (on-demand download path):** After a successful `downloadChunk` when `r.sequentialHits >= 1`, add:
+  ```go
+  if r.prefetchWindow > 1 {
+      r.prefetchWindow--
+  }
+  ```
+- **Action — Random access (seek detected):** Where `r.sequentialHits` is reset to 0 (line ~2980), also reset `r.prefetchWindow = 1`.
+
+#### Step 76.5.5: Expose in CLI / FUSE Config
+- **File:** `cmd/distfs-fuse/main.go`, `cmd/distfs/main.go`
+- **Action:** Add `--max-prefetch=8` flag. Parse and pass to `c.WithMaxPrefetch(n)`.
+
+#### Step 76.5.6: Tests
+- **File:** `pkg/client/client_extra_test.go` (or new `prefetch_test.go`)
+- **Action:** Unit test: simulate sequential reads of a 20-chunk file through a mock server; assert `prefetchWindow` grows from 1 to at least 4.
+- **Action:** Unit test: inject a seek (non-sequential access) and assert `prefetchWindow` resets to 1.
+- **Action:** Unit test: simulate a slow network (introduce artificial delay in mock) and assert the window plateaus when cache misses occur.
+- **Action:** Integration test: sequential read of a 64MB file; measure throughput improvement vs. fixed window of 3.
+
+---
+
+### Phase 76: Summary & Verification Plan
+
+| Sub-phase | Primary Files Changed | Key Metric |
+|---|---|---|
+| 76.1 Pipelined Writes | `client.go` (`FileWriter`) | Upload time for 32MB file |
+| 76.2 Hedge Delay Config | `client.go` (`downloadChunk`), CLI | P99 chunk read latency |
+| 76.3 Throttled Pruning | `storage_native.go` | Concurrent write throughput |
+| 76.4 Lease Cache | `client.go` (`getInodeInternal`, `acquireLeases`) | Path resolution RTT count |
+| 76.5 Dynamic Prefetch | `client.go` (`FileReader`) | Sequential read throughput |
+
+**Automated Tests to Run:**
+```bash
+go test ./pkg/client/... -run TestPipeline -v
+go test ./pkg/client/... -run TestDownloadChunk_HedgedRequests -v
+go test ./pkg/client/... -run TestNativeStore -v
+go test ./pkg/client/... -run TestLeaseCache -v
+go test ./pkg/client/... -run TestPrefetch -v
+go test ./pkg/client/... -count=1 -race ./...
+```
+
+**Manual Verification:**
+- Mount a FUSE filesystem and measure `dd if=/mnt/distfs/bigfile.bin of=/dev/null bs=4M` throughput before and after.
+- Use `go tool pprof` on the FUSE binary during a large sequential read to confirm CPU is no longer dominated by AES-GCM decryption serialisation.
+- Observe cache directory I/O with `iostat` during a heavy write workload to confirm pruning no longer causes disk thrashing.

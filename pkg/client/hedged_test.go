@@ -26,7 +26,7 @@ import (
 )
 
 func TestDownloadChunk_HedgedRequests(t *testing.T) {
-	c := NewClient("http://localhost:8080")
+	c := NewClient("http://localhost:8080").WithHedgeDelay(1 * time.Second)
 
 	// Mock server with controllable delays
 	var callCount int32

@@ -146,6 +146,26 @@ func main() {
 			}
 
 			c := client.NewClient(conf.ServerURL)
+			if conf.HedgeDelay != "" {
+				if d, err := time.ParseDuration(conf.HedgeDelay); err == nil {
+					c = c.WithHedgeDelay(d)
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid hedge_delay %q: %v\n", conf.HedgeDelay, err)
+				}
+			}
+			if conf.MaxPrefetch != nil {
+				c = c.WithMaxPrefetch(*conf.MaxPrefetch)
+			}
+			if conf.WritePipeline > 0 {
+				c = c.WithWritePipeline(conf.WritePipeline)
+			}
+			if conf.MetadataTTL != "" {
+				if d, err := time.ParseDuration(conf.MetadataTTL); err == nil {
+					c = c.WithMetadataTTL(d)
+				} else {
+					fmt.Fprintf(os.Stderr, "Warning: invalid metadata_ttl %q: %v\n", conf.MetadataTTL, err)
+				}
+			}
 			dkBytes, _ := hex.DecodeString(conf.EncKey)
 			skBytes, _ := hex.DecodeString(conf.SignKey)
 			svKeyBytes, _ := hex.DecodeString(conf.ServerKey)
