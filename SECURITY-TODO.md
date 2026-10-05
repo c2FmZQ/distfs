@@ -66,7 +66,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   Fix: when the request expects a sealed response, reject unsealed bodies; require binding signature
   on sealed responses; don't silently skip when cluster key fetch fails.
 
-- [ ] **C7. Chunk ciphertext not checked against chunk ID** — `client.go` `downloadChunk`.
+- [x] **C7. Chunk ciphertext not checked against chunk ID** — `client.go` `downloadChunk`.
   Fix: verify `sha256(ciphertext) == chunkID` before decrypt/cache. Test: swapped chunk rejected.
 
 - [x] **C8. Inode `Size` unsigned** — `pkg/metadata/types.go` `ManifestHash`.

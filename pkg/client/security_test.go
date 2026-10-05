@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 
@@ -302,5 +303,31 @@ func TestSecurity_ResponsesMustBeSealedAndBound(t *testing.T) {
 	rt.rewrite = nil
 	if _, err := c.getInodeInternal(ctx, f.ID, false); err != nil {
 		t.Errorf("untampered response rejected: %v", err)
+	}
+}
+
+// TestSecurity_ChunkContentMustMatchID verifies that downloaded chunk data is
+// checked against its content-addressed ID, so a storage node cannot serve an
+// older or different ciphertext for a chunk named in a signed manifest.
+func TestSecurity_ChunkContentMustMatchID(t *testing.T) {
+	fileKey := make([]byte, 32)
+	want := bytes.Repeat([]byte("v2"), 100)
+	id, _, err := crypto.EncryptChunk(fileKey, want, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, staleCT, _ := crypto.EncryptChunk(fileKey, bytes.Repeat([]byte("v1"), 100), 0)
+
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(staleCT) // valid ciphertext for the same key and index, wrong content
+	}))
+	defer node.Close()
+
+	c := NewClient(node.URL)
+	if _, err := c.downloadChunk(t.Context(), id, []string{node.URL}, "token"); err == nil {
+		t.Fatal("accepted chunk data that does not match its ID")
+	}
+	if err := verifyChunkID(id, staleCT); err == nil {
+		t.Fatal("verifyChunkID accepted mismatched data")
 	}
 }

@@ -6,6 +6,8 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -561,7 +563,8 @@ func TestClient_DownloadHedged(t *testing.T) {
 	defer ts2.Close()
 
 	// downloadChunk(ctx, id, urls, token)
-	data, err := c.downloadChunk(ctx, "c1", []string{ts1.URL, ts2.URL}, "token")
+	sum := sha256.Sum256([]byte("chunk data"))
+	data, err := c.downloadChunk(ctx, hex.EncodeToString(sum[:]), []string{ts1.URL, ts2.URL}, "token")
 	if err != nil {
 		t.Fatalf("downloadChunk failed: %v", err)
 	}

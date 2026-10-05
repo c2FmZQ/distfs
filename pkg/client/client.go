@@ -1533,9 +1533,18 @@ var downloadBufPool = sync.Pool{
 	},
 }
 
+// verifyChunkID checks that ciphertext hashes to its content-addressed chunk ID.
+func verifyChunkID(id string, ciphertext []byte) error {
+	sum := sha256.Sum256(ciphertext)
+	if hex.EncodeToString(sum[:]) != id {
+		return fmt.Errorf("high-severity: chunk %s content does not match its ID", id)
+	}
+	return nil
+}
+
 func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, token string) ([]byte, error) {
 	if c.store != nil {
-		if data, err := c.store.Get("chunks", id); err == nil {
+		if data, err := c.store.Get("chunks", id); err == nil && verifyChunkID(id, data) == nil {
 			return data, nil
 		}
 	}
@@ -1623,6 +1632,10 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				if err == nil {
 					d = make([]byte, buf.Len())
 					copy(d, buf.Bytes())
+					// Chunk IDs are content addresses: reject data that does not
+					// hash to the ID named in the signed manifest (e.g. an older
+					// version of the chunk served by a malicious node).
+					err = verifyChunkID(id, d)
 				}
 				downloadBufPool.Put(buf)
 
