@@ -89,7 +89,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 - [x] **M6. Locked users keep live sessions** — `server.go` `sessionTokenCache`. Fix: re-check lock state from FSM per request / evict on lock.
 - [x] **M7. Replay key uses unauthenticated prefix** — `server.go` `checkReplay`. Fix: key on hash of the authenticated DEM ciphertext / signature.
 - [x] **M8. Cluster join TOFU MITM** — `server.go` `handleClusterJoin`. Fix: bind HMAC proof over the returned public keys; don't send raft secret over unverified channel.
-- [ ] **M9. Web service worker serves decrypted HTML/SVG inline** — `web/sw.js`. Fix: `Content-Security-Policy: sandbox`, `nosniff`, block active types / force attachment, reject navigations; unregister stale workers.
+- [x] **M9. Web service worker serves decrypted HTML/SVG inline** — `web/sw.js`. Fix: `Content-Security-Policy: sandbox`, `nosniff`, block active types / force attachment, reject navigations; unregister stale workers.
 - [ ] **M10. Web login ignores pinned server key** — `web/ts/app.ts`. Fix: use `config.server_key`.
 
 ## Low

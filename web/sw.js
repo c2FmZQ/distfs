@@ -2,6 +2,25 @@
 console.log('SW: Script loaded');
 const CACHE_NAME = 'distfs-encrypted-chunks-v1';
 
+// Decrypted content is served on the application's origin, so it must never
+// be able to run as active content (HTML, SVG, XML, ...): it could otherwise
+// read every file the user can access through this worker.
+const INLINE_MEDIA_TYPES = /^(image\/(png|jpeg|gif|webp|avif|bmp)|video\/[a-z0-9.+-]+|audio\/[a-z0-9.+-]+)$/;
+const SAFE_HEADERS = {
+    'Content-Security-Policy': "sandbox; default-src 'none'",
+    'X-Content-Type-Options': 'nosniff',
+};
+
+function safeMediaType(mimeType) {
+    const t = String(mimeType || '').split(';')[0].trim().toLowerCase();
+    return INLINE_MEDIA_TYPES.test(t) ? t : 'application/octet-stream';
+}
+
+function attachmentHeader(id) {
+    const name = String(id).split('/').pop() || 'download';
+    return `attachment; filename*=UTF-8''${encodeURIComponent(name)}`;
+}
+
 self.addEventListener('install', (event) => {
     self.skipWaiting();
 });
@@ -61,11 +80,10 @@ self.addEventListener('fetch', (event) => {
 });
 
 async function handleMediaStream(request, id, clientId) {
-    if (!clientId) {
-        const allClients = await self.clients.matchAll();
-        if (allClients.length > 0) {
-            clientId = allClients[0].id;
-        }
+    // Media is only served to subresource requests (<img>, <video>, ...) from
+    // one of our pages, never as a top-level or framed document.
+    if (!clientId || request.mode === 'navigate' || request.destination === 'document' || request.destination === 'iframe') {
+        return new Response("Forbidden", { status: 403, headers: SAFE_HEADERS });
     }
 
     const client = await self.clients.get(clientId);
@@ -84,7 +102,7 @@ async function handleMediaStream(request, id, clientId) {
             if (event.data.type === 'media-metadata') {
                 console.log(`SW: Received metadata for ${id}: size=${event.data.size}`);
                 const fileSize = event.data.size;
-                let mimeType = event.data.mimeType || 'application/octet-stream';
+                let mimeType = safeMediaType(event.data.mimeType);
                 
                 const { readable, writable } = new TransformStream();
                 const writer = writable.getWriter();
@@ -103,6 +121,7 @@ async function handleMediaStream(request, id, clientId) {
                         resolve(new Response(readable, {
                             status: 206,
                             headers: {
+                                ...SAFE_HEADERS,
                                 'Content-Range': `bytes ${start}-${end}/${fileSize}`,
                                 'Accept-Ranges': 'bytes',
                                 'Content-Length': chunksize.toString(),
@@ -113,6 +132,7 @@ async function handleMediaStream(request, id, clientId) {
                         resolve(new Response(readable, {
                             status: 200,
                             headers: {
+                                ...SAFE_HEADERS,
                                 'Content-Length': fileSize.toString(),
                                 'Content-Type': mimeType,
                                 'Accept-Ranges': 'bytes'
@@ -136,7 +156,7 @@ async function handleMediaStream(request, id, clientId) {
                         channel.port1.postMessage({ type: 'pull' });
                     } else if (chunkEvent.data.type === 'mime-update') {
                         console.log(`SW: Sniffed MIME update for ${id}: ${chunkEvent.data.mimeType}`);
-                        mimeType = chunkEvent.data.mimeType;
+                        mimeType = safeMediaType(chunkEvent.data.mimeType);
                         clearTimeout(sniffTimeout);
                         sendResponse();
                     } else if (chunkEvent.data.type === 'done') {
@@ -151,7 +171,7 @@ async function handleMediaStream(request, id, clientId) {
 
             } else if (event.data.type === 'error') {
                 console.error(`SW: Error from client: ${event.data.error}`);
-                resolve(new Response(event.data.error, { status: 500 }));
+                resolve(new Response(event.data.error, { status: 500, headers: { ...SAFE_HEADERS, 'Content-Type': 'text/plain' } }));
                 channel.port1.close();
             }
         };
@@ -194,7 +214,8 @@ async function handleDownload(id, clientId) {
 
     return new Response(readable, {
         headers: {
-            'Content-Disposition': `attachment; filename="${id.split('/').pop()}"`,
+            ...SAFE_HEADERS,
+            'Content-Disposition': attachmentHeader(id),
             'Content-Type': 'application/octet-stream',
         }
     });
