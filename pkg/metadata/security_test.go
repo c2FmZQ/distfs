@@ -722,3 +722,35 @@ func TestSecurity_PeerFullKeyMatch(t *testing.T) {
 		t.Fatal("peer accepted on node ID match despite a different TLS key")
 	}
 }
+
+// TestSecurity_ChallengeLimits verifies that the unauthenticated challenge
+// endpoint bounds request size and pending state.
+func TestSecurity_ChallengeLimits(t *testing.T) {
+	tc := SetupCluster(t)
+	post := func(body []byte) int {
+		resp, err := http.Post(tc.TS.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	big, _ := json.Marshal(AuthChallengeRequest{UserID: strings.Repeat("a", 1<<20)})
+	if code := post(big); code == http.StatusOK {
+		t.Error("accepted a 1MB user id")
+	}
+	long, _ := json.Marshal(AuthChallengeRequest{UserID: strings.Repeat("a", maxUserIDLength+1)})
+	if code := post(long); code == http.StatusOK {
+		t.Error("accepted an over-long user id")
+	}
+
+	tc.Server.challengeMu.Lock()
+	for i := 0; i < maxPendingChallenges; i++ {
+		tc.Server.challengeCache[fmt.Sprint(i)] = challengeEntry{UserID: "x", CreatedAt: time.Now()}
+	}
+	tc.Server.challengeMu.Unlock()
+	ok, _ := json.Marshal(AuthChallengeRequest{UserID: tc.AdminID})
+	if code := post(ok); code == http.StatusOK {
+		t.Error("issued a challenge beyond the pending-challenge cap")
+	}
+}

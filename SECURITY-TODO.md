@@ -99,5 +99,5 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 ## Low
 
 - [x] **L1. Peer identity truncated to 64 bits** — `node_identity.go`, `raft_manager.go` `verifyPeer`. Fix: compare full public key.
-- [ ] **L2. Unbounded `/v1/auth/challenge` body + cache** — `server.go`. Fix: `MaxBytesReader`, validate user ID format, cap cache.
+- [x] **L2. Unbounded `/v1/auth/challenge` body + cache** — `server.go`. Fix: `MaxBytesReader`, validate user ID format, cap cache.
 - [ ] **L3. Non-deterministic FSM apply (`time.Now()`)** — `fsm.go`. Fix: leader stamps `LogCommand.Timestamp`; FSM uses it.

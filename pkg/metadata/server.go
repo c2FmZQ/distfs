@@ -1048,10 +1048,22 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	return user, err
 }
 
+// Limits for the unauthenticated login endpoints.
+const (
+	maxAuthBodySize      = 1 << 20 // login and registration payloads (PQC keys and signatures)
+	maxChallengeBodySize = 4096
+	maxUserIDLength      = 256
+	maxPendingChallenges = 100000
+)
+
 func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 	var req AuthChallengeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChallengeBodySize)).Decode(&req); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.UserID == "" || len(req.UserID) > maxUserIDLength {
+		s.writeError(w, r, ErrCodeInternal, "invalid user id", http.StatusBadRequest)
 		return
 	}
 
@@ -1067,6 +1079,12 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 		if time.Since(v.CreatedAt) > 2*time.Minute {
 			delete(s.challengeCache, k)
 		}
+	}
+	// Bound memory held for unauthenticated callers.
+	if len(s.challengeCache) >= maxPendingChallenges {
+		s.challengeMu.Unlock()
+		s.writeError(w, r, ErrCodeInternal, "too many pending challenges", http.StatusServiceUnavailable)
+		return
 	}
 	s.challengeCache[base64.StdEncoding.EncodeToString(challenge)] = challengeEntry{
 		UserID:    req.UserID,
@@ -1085,7 +1103,7 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var solve AuthChallengeSolve
-	if err := json.NewDecoder(r.Body).Decode(&solve); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthBodySize)).Decode(&solve); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1650,7 +1668,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RegisterUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthBodySize)).Decode(&req); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
