@@ -12,7 +12,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   Expired cached session key path calls `sessionKeyMu.RUnlock()` twice → fatal, unrecoverable.
   Fix: remove the second `RUnlock`. Test: expired cache entry falls back without panicking.
 
-- [ ] **S2. Login challenge is a signing oracle** — `pkg/client/client.go` `Login`, `pkg/metadata/server.go` `handleLogin`.
+- [x] **S2. Login challenge is a signing oracle** — `pkg/client/client.go` `Login`, `pkg/metadata/server.go` `handleLogin`.
   Client signs a raw server-chosen 32-byte challenge with its identity key; a malicious server can
   set it to an inode `ManifestHash()` and obtain a valid `UserSig`.
   Fix: domain-separate (sign `"DistFS-Login-v1\x00" || challenge`), verify the same on server;

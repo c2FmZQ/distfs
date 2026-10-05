@@ -1079,7 +1079,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
+	if !crypto.VerifySignature(user.SignKey, LoginChallengeMessage(solve.Challenge), solve.Signature) {
 		s.writeError(w, r, ErrCodeInternal, "invalid signature", http.StatusUnauthorized)
 		return
 	}

@@ -796,11 +796,26 @@ type AuthChallengeResponse struct {
 	Signature []byte `json:"sig"`       // Server signature over Challenge
 }
 
+// LoginChallengeSize is the required length of a login challenge.
+const LoginChallengeSize = 32
+
+// loginChallengeDomain separates login signatures from every other signature
+// made with a user's identity key. Without it, a malicious server could choose
+// a challenge equal to e.g. an inode ManifestHash and obtain a valid UserSig.
+const loginChallengeDomain = "DistFS-Login-v1\x00"
+
+// LoginChallengeMessage returns the message a user signs to solve a login challenge.
+func LoginChallengeMessage(challenge []byte) []byte {
+	msg := make([]byte, 0, len(loginChallengeDomain)+len(challenge))
+	msg = append(msg, loginChallengeDomain...)
+	return append(msg, challenge...)
+}
+
 // AuthChallengeSolve is the user's response to the challenge.
 type AuthChallengeSolve struct {
 	UserID    string `json:"uid"`
 	Challenge []byte `json:"challenge"`
-	Signature []byte `json:"sig"`               // User signature over Challenge
+	Signature []byte `json:"sig"`               // User signature over LoginChallengeMessage(Challenge)
 	EncKey    []byte `json:"enc_key,omitempty"` // Ephemeral ML-KEM-768 PK for session key establishment
 }
 

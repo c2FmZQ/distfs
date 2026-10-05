@@ -49,7 +49,7 @@ func TestChallengeResponseAuth(t *testing.T) {
 	}
 
 	// 3. Solve Challenge (Sign it)
-	sig := userSK.Sign(cresp.Challenge)
+	sig := userSK.Sign(LoginChallengeMessage(cresp.Challenge))
 	solve := AuthChallengeSolve{
 		UserID:    user.ID,
 		Challenge: cresp.Challenge,

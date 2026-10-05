@@ -915,9 +915,12 @@ func (c *Client) Login(ctx context.Context) error {
 	if !crypto.VerifySignature(serverSignPK, challengeRes.Challenge, challengeRes.Signature) {
 		return fmt.Errorf("invalid server signature on challenge")
 	}
+	if len(challengeRes.Challenge) != metadata.LoginChallengeSize {
+		return fmt.Errorf("invalid challenge length: %d", len(challengeRes.Challenge))
+	}
 
-	// 3. Solve Challenge (Sign it) + Ephemeral Key for Forward Secrecy
-	sig := c.signKey.Sign(challengeRes.Challenge)
+	// 3. Solve Challenge (Sign it, domain-separated) + Ephemeral Key for Forward Secrecy
+	sig := c.signKey.Sign(metadata.LoginChallengeMessage(challengeRes.Challenge))
 
 	// Phase 53.1: Ephemeral PQC-KEM for Forward Secret Session Key
 	sessionDK, err := crypto.GenerateEncryptionKey()

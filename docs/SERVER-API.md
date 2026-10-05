@@ -63,7 +63,7 @@ These endpoints remain accessible on their original paths to support bootstrappi
 | `GET` | `/v1/cluster/stats` | None | Cluster-wide storage and node metrics. |
 | `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. |
 | `POST` | `/v1/auth/challenge` | None | Request a login challenge for a User ID. |
-| `POST` | `/v1/login` | Challenge | Establish a session and establishment a shared secret. |
+| `POST` | `/v1/login` | Challenge | Establish a session and a shared secret. `sig` = ML-DSA signature over `"DistFS-Login-v1\x00" \|\| challenge` (challenge MUST be 32 bytes). |
 | `POST` | `/v1/user/keysync` | Session + E2EE | Store encrypted configuration backup. |
 | `GET` | `/v1/user/keysync` | Bearer JWT | Retrieve encrypted configuration backup. |
 | `POST` | `/v1/node` | Raft Secret | Internal cluster management. |
