@@ -3362,7 +3362,6 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 			if ok {
 				if entry.expiry < time.Now().Unix() {
-					s.sessionKeyMu.RUnlock()
 					// Treat as cache miss, fall back to KEM
 				} else {
 					ts, payload, sig, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)

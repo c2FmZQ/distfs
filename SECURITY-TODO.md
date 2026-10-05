@@ -8,7 +8,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 
 ## Critical
 
-- [ ] **S1. Double `RUnlock` crashes the leader** — `pkg/metadata/server.go` `unsealRequest`.
+- [x] **S1. Double `RUnlock` crashes the leader** — `pkg/metadata/server.go` `unsealRequest`.
   Expired cached session key path calls `sessionKeyMu.RUnlock()` twice → fatal, unrecoverable.
   Fix: remove the second `RUnlock`. Test: expired cache entry falls back without panicking.
 
