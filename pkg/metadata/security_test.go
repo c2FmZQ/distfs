@@ -2,8 +2,10 @@ package metadata
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -87,5 +89,75 @@ func TestSecurity_LoginRequiresDomainSeparatedSignature(t *testing.T) {
 	}
 	if code := login(func(c []byte) []byte { return tc.AdminSK.Sign(LoginChallengeMessage(c)) }); code != http.StatusOK {
 		t.Fatalf("login with domain-separated signature failed: %d", code)
+	}
+}
+
+// TestSecurity_IssueTokenModes verifies that capability tokens cannot be
+// minted for chunks outside the inode's manifest or with escalated modes.
+func TestSecurity_IssueTokenModes(t *testing.T) {
+	tc := SetupCluster(t)
+
+	u1 := "u1"
+	usk1, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk1.Public()}, usk1, tc.AdminID, tc.AdminSK)
+	u2 := "u2"
+	usk2, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public()}, usk2, tc.AdminID, tc.AdminSK)
+	token2, secret2 := LoginSessionForTestWithSecret(t, tc.TS, u2, usk2)
+
+	readable := strings.Repeat("a", 64)
+	victim := strings.Repeat("b", 64)
+
+	// u1's world-readable file and u1's private file.
+	for _, in := range []Inode{
+		{ID: "world", OwnerID: u1, Type: FileType, Mode: 0644, ChunkManifest: []ChunkEntry{{ID: readable}}},
+		{ID: "private", OwnerID: u1, Type: FileType, Mode: 0600, ChunkManifest: []ChunkEntry{{ID: victim}}},
+	} {
+		in.SignInodeForTest(u1, usk1)
+		b, _ := json.Marshal(in)
+		if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, b, u1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	issue := func(inodeID, mode string, chunks ...string) int {
+		req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionIssueToken, map[string]any{
+			"inode_id": inodeID, "mode": mode, "chunks": chunks,
+		}, u2, usk2, secret2)
+		req.Header.Set("Session-Token", token2)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	tests := []struct {
+		name   string
+		inode  string
+		mode   string
+		chunks []string
+		ok     bool
+	}{
+		{"read own manifest chunk", "world", "R", []string{readable}, true},
+		{"read manifest (implicit)", "world", "R", nil, true},
+		{"read foreign chunk via readable inode", "world", "R", []string{victim}, false},
+		{"delete via read-only inode", "world", "D", []string{victim}, false},
+		{"combined mode RW", "world", "RW", []string{victim}, false},
+		{"combined mode RWD", "world", "RWD", []string{victim}, false},
+		{"delete without explicit chunks", "world", "D", nil, false},
+		{"unknown mode", "world", "X", []string{readable}, false},
+		{"delete for new inode (upload cleanup)", "new-inode", "D", []string{victim}, true},
+		{"read nonexistent inode", "new-inode", "R", []string{victim}, false},
+	}
+	for _, tt := range tests {
+		code := issue(tt.inode, tt.mode, tt.chunks...)
+		if tt.ok && code != http.StatusOK {
+			t.Errorf("%s: got %d, want 200", tt.name, code)
+		}
+		if !tt.ok && code == http.StatusOK {
+			t.Errorf("%s: token issued, want rejection", tt.name)
+		}
 	}
 }

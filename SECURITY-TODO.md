@@ -18,7 +18,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   Fix: domain-separate (sign `"DistFS-Login-v1\x00" || challenge`), verify the same on server;
   document in SERVER-API.md. Test: login sig does not verify as a raw signature over the challenge.
 
-- [ ] **S3. IssueToken mints arbitrary chunk capabilities** — `pkg/metadata/server.go` `handleIssueToken`.
+- [x] **S3. IssueToken mints arbitrary chunk capabilities** — `pkg/metadata/server.go` `handleIssueToken`.
   Modes other than exactly `"W"` only require read; `req.Chunks` is never checked against the
   inode manifest; `"D"`/`"RW"` grant delete / skip quota reservation.
   Fix: allow only modes `R`, `W`, `D`. `R`: require read + every chunk in the inode manifest.

@@ -262,7 +262,11 @@ To hide filenames from the server, all map keys in `children` and `links` are HM
 ### 6.2 Storage Tokens (Action `IssueToken`)
 - **Request:** `{"inode_id": "...", "chunks": ["hash"], "mode": "R|W|D"}`
 - **Response:** `{"payload": "base64_minified_json", "sig": "base64_cluster_sig"}`
-- **Capability Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts}`
+- **Capability Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts, "session_binding": "base64_sha256(session_nonce)"}`
+- **Mode Rules:** Clients MUST request exactly one of `R`, `W`, `D`; combined modes are reserved for cluster-internal tokens.
+  - `R`: requires read access to the inode; every requested chunk MUST be in the inode's manifest (empty `chunks` = whole manifest).
+  - `W`: requires write access to the inode (or the inode does not exist yet, for creation). Reserves pending quota.
+  - `D`: requires write access (or a not-yet-existing inode) and explicit `chunks`, none of which may be in the inode's committed manifest. Only for cleaning up uploads that failed to commit. The token is session-bound, and data nodes only honor a session-bound `D` for chunks that the same session created on that node.
 
 ---
 

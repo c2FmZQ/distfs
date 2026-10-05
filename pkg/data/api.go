@@ -64,7 +64,22 @@ type Server struct {
 	client           *http.Client
 	cachedMetaPubKey []byte
 	cacheMu          sync.RWMutex
+
+	// creators records which client session created each chunk on this node.
+	// A session-bound delete capability is only honored for chunks created by
+	// the same session, so that a user cannot delete chunks they did not upload.
+	creatorsMu sync.Mutex
+	creators   map[string]chunkCreator
 }
+
+type chunkCreator struct {
+	sessionBinding []byte
+	expiry         time.Time
+}
+
+// chunkCreatorTTL bounds how long a session can clean up chunks it uploaded.
+// It exceeds the capability token lifetime.
+const chunkCreatorTTL = 15 * time.Minute
 
 type schemeSwitchingTransport struct {
 	standard  http.RoundTripper
@@ -112,6 +127,7 @@ func NewServer(store Store, metaPubKey []byte, fsm *metadata.MetadataFSM, valida
 		metaPubKey: metaPubKey,
 		fsm:        fsm,
 		validator:  validator,
+		creators:   make(map[string]chunkCreator),
 		client: &http.Client{
 			Transport: transport,
 			Timeout:   10 * time.Second,
@@ -173,6 +189,30 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode string) error {
+	_, err := s.authenticate(r, chunkID, requiredMode)
+	return err
+}
+
+func (s *Server) recordCreator(chunkID string, sessionBinding []byte) {
+	s.creatorsMu.Lock()
+	defer s.creatorsMu.Unlock()
+	now := time.Now()
+	for id, c := range s.creators {
+		if now.After(c.expiry) {
+			delete(s.creators, id)
+		}
+	}
+	s.creators[chunkID] = chunkCreator{sessionBinding: sessionBinding, expiry: now.Add(chunkCreatorTTL)}
+}
+
+func (s *Server) isCreator(chunkID string, sessionBinding []byte) bool {
+	s.creatorsMu.Lock()
+	defer s.creatorsMu.Unlock()
+	c, ok := s.creators[chunkID]
+	return ok && time.Now().Before(c.expiry) && bytes.Equal(c.sessionBinding, sessionBinding)
+}
+
+func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) (*metadata.CapabilityToken, error) {
 	s.cacheMu.RLock()
 	pubKey := s.cachedMetaPubKey
 	s.cacheMu.RUnlock()
@@ -198,62 +238,62 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 	}
 
 	if pubKey == nil {
-		return fmt.Errorf("authentication failed: cluster signing key not available")
+		return nil, fmt.Errorf("authentication failed: cluster signing key not available")
 	}
 
 	auth := r.Header.Get("Authorization")
 	if !strings.HasPrefix(auth, "Bearer ") {
-		return fmt.Errorf("missing auth")
+		return nil, fmt.Errorf("missing auth")
 	}
 	tokenStr := strings.TrimPrefix(auth, "Bearer ")
 
 	tokenBytes, err := base64.StdEncoding.DecodeString(tokenStr)
 	if err != nil {
-		return fmt.Errorf("invalid token format")
+		return nil, fmt.Errorf("invalid token format")
 	}
 
 	var signed metadata.SignedAuthToken
 	if err := json.Unmarshal(tokenBytes, &signed); err != nil {
-		return fmt.Errorf("invalid token structure")
+		return nil, fmt.Errorf("invalid token structure")
 	}
 
 	if !crypto.VerifySignature(pubKey, signed.Payload, signed.Signature) {
-		return fmt.Errorf("invalid signature")
+		return nil, fmt.Errorf("invalid signature")
 	}
 
 	var cap metadata.CapabilityToken
 	if err := json.Unmarshal(signed.Payload, &cap); err != nil {
-		return fmt.Errorf("invalid capability payload")
+		return nil, fmt.Errorf("invalid capability payload")
 	}
 
 	if time.Now().Unix() > cap.Exp {
-		return fmt.Errorf("token expired")
+		return nil, fmt.Errorf("token expired")
 	}
 
 	// Verify Session Binding if present
 	if len(cap.SessionBinding) > 0 {
 		sess := r.Header.Get("Session-Token")
 		if sess == "" {
-			return fmt.Errorf("missing session token required by capability")
+			return nil, fmt.Errorf("missing session token required by capability")
 		}
 		b, err := base64.StdEncoding.DecodeString(sess)
 		if err != nil {
-			return fmt.Errorf("invalid session token encoding")
+			return nil, fmt.Errorf("invalid session token encoding")
 		}
 		var st metadata.SignedSessionToken
 		if err := json.Unmarshal(b, &st); err != nil {
-			return fmt.Errorf("invalid session token structure")
+			return nil, fmt.Errorf("invalid session token structure")
 		}
 
 		// Verify server's signature over the session token
 		payload, _ := json.Marshal(st.Token)
 		if !crypto.VerifySignature(pubKey, payload, st.Signature) {
-			return fmt.Errorf("invalid session token signature")
+			return nil, fmt.Errorf("invalid session token signature")
 		}
 
 		h := sha256.Sum256([]byte(st.Token.Nonce))
 		if !bytes.Equal(h[:], cap.SessionBinding) {
-			return fmt.Errorf("capability token is not bound to this session")
+			return nil, fmt.Errorf("capability token is not bound to this session")
 		}
 	}
 
@@ -265,7 +305,7 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 		}
 	}
 	if !hasPermission {
-		return fmt.Errorf("permission denied: required %s, got %s", requiredMode, cap.Mode)
+		return nil, fmt.Errorf("permission denied: required %s, got %s", requiredMode, cap.Mode)
 	}
 
 	allowed := false
@@ -276,15 +316,23 @@ func (s *Server) Internal_Authenticate(r *http.Request, chunkID, requiredMode st
 		}
 	}
 	if !allowed {
-		return fmt.Errorf("chunk access denied")
+		return nil, fmt.Errorf("chunk access denied")
 	}
 
-	return nil
+	return &cap, nil
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.Internal_Authenticate(r, id, "D"); err != nil {
+	cap, err := s.authenticate(r, id, "D")
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
+		return
+	}
+	// Session-bound (client) delete capabilities may only remove chunks that
+	// the same session created. Cluster-issued capabilities (GC, replication)
+	// carry no session binding.
+	if len(cap.SessionBinding) > 0 && !s.isCreator(id, cap.SessionBinding) {
+		http.Error(w, "chunk was not created by this session", http.StatusForbidden)
 		return
 	}
 
@@ -296,6 +344,9 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, id string)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	s.creatorsMu.Lock()
+	delete(s.creators, id)
+	s.creatorsMu.Unlock()
 	w.WriteHeader(http.StatusOK)
 }
 
@@ -345,16 +396,21 @@ func (s *Server) handleReplicate(w http.ResponseWriter, r *http.Request, id stri
 }
 
 func (s *Server) handlePut(w http.ResponseWriter, r *http.Request, id string) {
-	if err := s.Internal_Authenticate(r, id, "W"); err != nil {
+	cap, err := s.authenticate(r, id, "W")
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
 		return
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, 2*1024*1024)
 
-	if err := s.store.WriteChunk(id, r.Body); err != nil {
+	created, err := s.store.CreateChunk(id, r.Body)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+	if created && len(cap.SessionBinding) > 0 {
+		s.recordCreator(id, cap.SessionBinding)
 	}
 
 	successCount := 1 // Local write succeeded

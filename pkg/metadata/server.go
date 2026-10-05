@@ -1181,6 +1181,23 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clients may only request a single capability mode. Combined modes
+	// (e.g. "RW") are reserved for cluster-internal tokens.
+	switch req.Mode {
+	case "R", "W":
+	case "D":
+		// Delete is only for cleaning up chunks this session uploaded but failed
+		// to commit. It must name the chunks explicitly and be session-bound so
+		// data nodes can verify the session created them.
+		if len(req.Chunks) == 0 || r.Header.Get("Session-Token") == "" {
+			s.writeError(w, r, ErrCodeInternal, "delete capability requires explicit chunks and a session", http.StatusBadRequest)
+			return
+		}
+	default:
+		s.writeError(w, r, ErrCodeInternal, "invalid capability mode", http.StatusBadRequest)
+		return
+	}
+
 	// Verify Permission
 	var inode Inode
 	exists := true
@@ -1205,7 +1222,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	if exists {
 		reqBit := uint32(0004) // R
-		if req.Mode == "W" {
+		if req.Mode == "W" || req.Mode == "D" {
 			reqBit = 0002 // W
 		}
 
@@ -1215,9 +1232,27 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, ErrCodeForbidden, "POSIX access denied", http.StatusForbidden)
 			return
 		}
+
+		manifest := make(map[string]bool, len(inode.ChunkManifest))
+		for _, c := range inode.ChunkManifest {
+			manifest[c.ID] = true
+		}
+		for _, c := range req.Chunks {
+			switch {
+			case req.Mode == "R" && !manifest[c]:
+				// Read access to an inode only grants access to its own chunks.
+				s.writeError(w, r, ErrCodeForbidden, "chunk not in inode manifest", http.StatusForbidden)
+				return
+			case req.Mode == "D" && manifest[c]:
+				// Committed chunks are only removed by the cluster GC.
+				s.writeError(w, r, ErrCodeForbidden, "cannot delete committed chunk", http.StatusForbidden)
+				return
+			}
+		}
 	} else {
-		// Inode doesn't exist yet. Only allow "W" mode for creation.
-		if req.Mode != "W" {
+		// Inode doesn't exist yet. Allow "W" for creation and "D" for cleaning
+		// up chunks uploaded for a creation that failed to commit.
+		if req.Mode == "R" {
 			s.writeError(w, r, ErrCodeNotFound, "inode not found", http.StatusNotFound)
 			return
 		}
@@ -1270,8 +1305,13 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if req.Mode == "D" && len(capToken.SessionBinding) == 0 {
+		s.writeError(w, r, ErrCodeUnauthorized, "delete capability requires a valid session", http.StatusUnauthorized)
+		return
+	}
+
 	if len(capToken.Chunks) == 0 {
-		// If empty, allow all chunks in inode?
+		// If empty, allow all chunks in inode
 		for _, c := range inode.ChunkManifest {
 			capToken.Chunks = append(capToken.Chunks, c.ID)
 		}
