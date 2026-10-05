@@ -77,7 +77,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 
 ## Medium
 
-- [ ] **M1. JWT missing audience/issuer/exp checks** — `server.go` `verifyJWT`. Fix: `WithIssuer`, `WithAudience` (configured client ID), `WithExpirationRequired`.
+- [x] **M1. JWT missing audience/issuer/exp checks** — `server.go` `verifyJWT`. Fix: `WithIssuer`, `WithAudience` (configured client ID), `WithExpirationRequired`.
 - [ ] **M2. GetInode/GetInodes unauthorized** — `server.go`. Fix: require read access (owner, ACL, group, world, or link-traversal semantics per design); at minimum strip manifests/leases for non-readers.
 - [ ] **M3. Leases unauthorized; batch sub-command `sid`/`ts` overridable** — `fsm.go` `executeAcquireLeases`, batch apply.
   Fix: require write access to lease; always overwrite `uid`/`sid`/`ts` from the authenticated outer command.

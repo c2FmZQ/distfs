@@ -120,8 +120,9 @@ type Server struct {
 	leaderURLCache   map[raft.ServerAddress]string
 	leaderURLMu      sync.RWMutex
 
-	oidcMu     sync.RWMutex
-	oidcConfig *OIDCConfig
+	oidcMu       sync.RWMutex
+	oidcConfig   *OIDCConfig
+	oidcAudience string // Required "aud" claim of ID tokens (the OIDC client ID)
 	stopCh     chan struct{}
 
 	vault  *NodeVault
@@ -1528,12 +1529,45 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, s.sanitizeResponse(resp), http.StatusOK)
 }
 
+// DefaultOIDCAudience is the OIDC client ID used by DistFS clients.
+const DefaultOIDCAudience = "distfs"
+
+// SetOIDCAudience sets the required "aud" claim (the OIDC client ID).
+func (s *Server) SetOIDCAudience(aud string) {
+	s.oidcMu.Lock()
+	defer s.oidcMu.Unlock()
+	s.oidcAudience = aud
+}
+
 func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, error) {
 	s.jwks.Ready(ctx)
+
+	s.oidcMu.RLock()
+	var issuer string
+	if s.oidcConfig != nil {
+		issuer = s.oidcConfig.Issuer
+	}
+	audience := s.oidcAudience
+	s.oidcMu.RUnlock()
+	if issuer == "" {
+		return "", fmt.Errorf("invalid jwt: OIDC issuer not configured")
+	}
+	if audience == "" {
+		audience = DefaultOIDCAudience
+	}
+
+	// Tokens must be issued by our IdP, for our client, and must expire.
+	// Otherwise an ID token the IdP issued to any other application for the
+	// same user would be accepted.
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		kid, _ := token.Header["kid"].(string)
 		return s.jwks.GetKey(kid)
-	})
+	},
+		jwt.WithIssuer(issuer),
+		jwt.WithAudience(audience),
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}),
+	)
 
 	if err != nil || !token.Valid {
 		log.Printf("JWT Verification FAILED: %v", err)

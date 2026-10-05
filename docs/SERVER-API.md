@@ -61,7 +61,7 @@ These endpoints remain accessible on their original paths to support bootstrappi
 | `GET` | `/v1/node/info` | None | Node ID and protocol version. |
 | `GET` | `/v1/auth/config` | None | OIDC Issuer and endpoint configuration. |
 | `GET` | `/v1/cluster/stats` | None | Cluster-wide storage and node metrics. |
-| `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. |
+| `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. The ID token MUST have `iss` = the discovered issuer, `aud` = the configured client ID (`--oidc-client-id`, default `distfs`) and an `exp`. |
 | `POST` | `/v1/auth/challenge` | None | Request a login challenge for a User ID. |
 | `POST` | `/v1/login` | Challenge | Establish a session and a shared secret. `sig` = ML-DSA signature over `"DistFS-Login-v1\x00" \|\| challenge` (challenge MUST be 32 bytes). |
 | `POST` | `/v1/user/keysync` | Session + E2EE | Store encrypted configuration backup. |

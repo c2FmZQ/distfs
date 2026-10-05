@@ -3,14 +3,21 @@ package metadata
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/tlsproxy/jwks"
+	"github.com/golang-jwt/jwt/v5"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -391,5 +398,47 @@ func TestSecurity_SizeIsSigned(t *testing.T) {
 	in.Size = 10
 	if crypto.VerifySignature(sk.Public(), in.ManifestHash(), in.UserSig) {
 		t.Fatal("signature still verifies after the size was changed")
+	}
+}
+
+// TestSecurity_JWTClaims verifies that OIDC ID tokens must come from the
+// configured issuer, be issued for the DistFS client, and expire.
+func TestSecurity_JWTClaims(t *testing.T) {
+	tc := SetupCluster(t)
+
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwksRes := map[string]any{"keys": []any{map[string]any{
+		"kty": "RSA", "kid": "k",
+		"n": base64.RawURLEncoding.EncodeToString(priv.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(priv.E)).Bytes()),
+	}}}
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(jwksRes)
+	}))
+	defer jwksServer.Close()
+	tc.Server.jwks.SetIssuers([]jwks.Issuer{{Issuer: "idp", JWKSURI: jwksServer.URL}})
+	tc.Server.oidcConfig = &OIDCConfig{Issuer: "idp"}
+
+	mint := func(claims jwt.MapClaims) string {
+		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+		tok.Header["kid"] = "k"
+		s, _ := tok.SignedString(priv)
+		return s
+	}
+	exp := time.Now().Add(time.Hour).Unix()
+	ctx := context.Background()
+
+	if _, err := tc.Server.verifyJWT(ctx, mint(jwt.MapClaims{"iss": "idp", "aud": DefaultOIDCAudience, "sub": "s", "exp": exp})); err != nil {
+		t.Fatalf("valid token rejected: %v", err)
+	}
+	for name, claims := range map[string]jwt.MapClaims{
+		"other audience": {"iss": "idp", "aud": "some-other-app", "sub": "s", "exp": exp},
+		"no audience":    {"iss": "idp", "sub": "s", "exp": exp},
+		"other issuer":   {"iss": "evil", "aud": DefaultOIDCAudience, "sub": "s", "exp": exp},
+		"no expiry":      {"iss": "idp", "aud": DefaultOIDCAudience, "sub": "s"},
+	} {
+		if _, err := tc.Server.verifyJWT(ctx, mint(claims)); err == nil {
+			t.Errorf("%s: token accepted", name)
+		}
 	}
 }
