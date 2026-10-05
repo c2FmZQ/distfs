@@ -84,7 +84,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   the server cannot see anonymous group members; S3/S5/S6 removed what made chunk IDs exploitable.
 - [x] **M3. Leases unauthorized; batch sub-command `sid`/`ts` overridable** — `fsm.go` `executeAcquireLeases`, batch apply.
   Fix: require write access to lease; always overwrite `uid`/`sid`/`ts` from the authenticated outer command.
-- [ ] **M4. Group membership HMAC keyed by public group ID** — `types.go` `ComputeMemberHMAC` vs DISTFS-RAFT §2.3. Fix per design (needs design decision: clients can't know ClusterSecret).
+- [x] **M4. Group membership HMAC keyed by public group ID** — Doc fix: DISTFS-RAFT §2.3 overstated the guarantee. Membership must be visible to the server (it enforces group permissions) and members cannot hold a secret before decrypting their entry; anonymity is provided by the AnonymousLockbox (Theorem 11).
 - [ ] **M5. Quota bypasses** — self-owned quota group with quota 0 = unlimited; client-set `Usage`/`Quota` persisted on group create/update; client-declared `Size` 0. Fix: ignore client `Usage`/`Quota`; enforce user quota as fallback.
 - [ ] **M6. Locked users keep live sessions** — `server.go` `sessionTokenCache`. Fix: re-check lock state from FSM per request / evict on lock.
 - [ ] **M7. Replay key uses unauthenticated prefix** — `server.go` `checkReplay`. Fix: key on hash of the authenticated DEM ciphertext / signature.

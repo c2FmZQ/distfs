@@ -40,7 +40,7 @@ The **ClusterSecret** is a high-entropy symmetric secret that serves as the root
 ### 2.3 Identity Privacy (The Dark Registry)
 The server only operates on opaque identifiers. 
 *   **Dark Users:** `UserID = HMAC(sub, ClusterSecret)`.
-*   **Dark Groups:** To protect the social graph, group membership is managed via a **Dark Membership** model. A member's recipient ID in a Group Lockbox is not their `UserID`, but a salted HMAC: `RecipientID = HMAC(UserID, GroupID)`. This ensures that even if a server admin inspects the Lockbox, they cannot determine which users belong to the group without the `ClusterSecret`. HMAC acts as a **Pseudorandom Function (PRF)** in this context, ensuring that identifiers are indistinguishable from random noise to anyone without the secret key.
+*   **Dark Groups:** To protect the social graph, group membership is managed via a **Dark Membership** model. A member's recipient ID in a Group Lockbox is not their `UserID`, but a salted HMAC: `RecipientID = HMAC(key=GroupID, UserID)`. This prevents casual linking of lockbox entries across groups, but it is **pseudonymization, not anonymity**: the key (the GroupID) is public, so anyone who can read the group (including the server, which uses it to enforce group permissions, and other users) can test a known `UserID` for membership. Members who must be hidden from the server and other members MUST be provisioned through the `AnonymousLockbox` (Theorem 11).
 
 ## 3. Cluster Security & mTLS
 
