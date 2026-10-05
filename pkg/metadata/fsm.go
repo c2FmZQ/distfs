@@ -91,7 +91,7 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		return nil, err
 	}
 	err = db.Update(func(tx *bolt.Tx) error {
-		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases", "pending_reservations", "user_active_leases"}
+		buckets := []string{"inodes", "nodes", "users", "groups", "uids", "gids", "garbage_collection", "chunk_pages", "system", "keysync", "admins", "metrics", "user_memberships", "owner_groups", "leases", "unlinked_inodes", "filename_leases", "pending_reservations", "user_active_leases", "chunk_owners"}
 		for _, b := range buckets {
 			tx.CreateBucketIfNotExists([]byte(b))
 		}
@@ -126,6 +126,7 @@ func NewMetadataFSM(nodeID string, path string, clusterSecret []byte) (*Metadata
 		}
 		return nil
 	})
+	fsm.ensureChunkOwnerIndex()
 	return fsm, nil
 }
 
@@ -838,6 +839,9 @@ func (fsm *MetadataFSM) executeCreateInode(tx *bolt.Tx, data []byte, userID stri
 			return err
 		}
 	}
+	if err := fsm.claimChunks(tx, inode.ID, inode.ChunkManifest); err != nil {
+		return err
+	}
 	inode.Version = 1
 	if err := fsm.saveInodeWithPages(tx, &inode); err != nil {
 		return err
@@ -884,6 +888,11 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 			if !owned[pid] {
 				return fmt.Errorf("%w: chunk page %q does not belong to inode", ErrStructuralInconsistency, pid)
 			}
+		}
+	}
+	if update.ChunkManifest != nil {
+		if err := fsm.claimChunks(tx, inode.ID, update.ChunkManifest); err != nil {
+			return err
 		}
 	}
 
@@ -1880,6 +1889,11 @@ func (fsm *MetadataFSM) updateUsage(tx *bolt.Tx, userID, groupID string, inodes,
 func (fsm *MetadataFSM) enqueueGC(tx *bolt.Tx, inode *Inode) {
 	fsm.LoadInodeWithPages(tx, inode)
 	for _, chunk := range inode.ChunkManifest {
+		// Only collect chunks this inode owns.
+		if owner, _ := fsm.Get(tx, []byte("chunk_owners"), []byte(chunk.ID)); string(owner) != inode.ID {
+			continue
+		}
+		tx.Bucket([]byte("chunk_owners")).Delete([]byte(chunk.ID))
 		nodesData, _ := json.Marshal(chunk.Nodes)
 		fsm.Put(tx, []byte("garbage_collection"), []byte(chunk.ID), nodesData)
 	}
@@ -2645,6 +2659,78 @@ func (fsm *MetadataFSM) reopen() error {
 	fsm.mu.Lock()
 	fsm.db = db
 	fsm.mu.Unlock()
+	return fsm.ensureChunkOwnerIndex()
+}
+
+const chunkOwnerIndexMarker = "chunk_owners_v1"
+
+// ensureChunkOwnerIndex builds the chunk ownership index (chunk ID -> inode ID)
+// from existing inodes if it has not been built yet. It is deterministic given
+// the same state (bolt iterates keys in order; the first inode wins).
+// If the FSM keys are not available yet (e.g. a joining node before it receives
+// the keyring), the build is skipped and retried on the next open or restore.
+func (fsm *MetadataFSM) ensureChunkOwnerIndex() error {
+	if _, err := fsm.SystemKey(); err != nil {
+		return nil
+	}
+	err := fsm.db.Update(func(tx *bolt.Tx) error {
+		if _, err := tx.CreateBucketIfNotExists([]byte("chunk_owners")); err != nil {
+			return err
+		}
+		if v, _ := fsm.Get(tx, []byte("system"), []byte(chunkOwnerIndexMarker)); v != nil {
+			return nil
+		}
+		var inodes []Inode
+		if err := fsm.ForEach(tx, []byte("inodes"), func(k, v []byte) error {
+			var inode Inode
+			if err := json.Unmarshal(v, &inode); err != nil {
+				return err
+			}
+			inodes = append(inodes, inode)
+			return nil
+		}); err != nil {
+			return err
+		}
+		for i := range inodes {
+			inode := &inodes[i]
+			fsm.LoadInodeWithPages(tx, inode)
+			for _, c := range inode.ChunkManifest {
+				if owner, _ := fsm.Get(tx, []byte("chunk_owners"), []byte(c.ID)); owner == nil {
+					if err := fsm.Put(tx, []byte("chunk_owners"), []byte(c.ID), []byte(inode.ID)); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		return fsm.Put(tx, []byte("system"), []byte(chunkOwnerIndexMarker), []byte("1"))
+	})
+	if err != nil {
+		log.Printf("WARNING: FSM [%s]: chunk ownership index not built, will retry: %v", fsm.nodeID, err)
+	}
+	return nil
+}
+
+// claimChunks records inodeID as the owner of every chunk in its manifest.
+// It fails without writing anything if any chunk is owned by another inode,
+// which prevents a user from listing someone else's chunks in their own
+// manifest and having GC or replication pruning delete them.
+func (fsm *MetadataFSM) claimChunks(tx *bolt.Tx, inodeID string, manifest []ChunkEntry) error {
+	var unowned []string
+	for _, c := range manifest {
+		owner, _ := fsm.Get(tx, []byte("chunk_owners"), []byte(c.ID))
+		if owner == nil {
+			unowned = append(unowned, c.ID)
+			continue
+		}
+		if string(owner) != inodeID {
+			return fmt.Errorf("%w: chunk %s belongs to another inode", ErrStructuralInconsistency, c.ID)
+		}
+	}
+	for _, id := range unowned {
+		if err := fsm.Put(tx, []byte("chunk_owners"), []byte(id), []byte(inodeID)); err != nil {
+			return err
+		}
+	}
 	return nil
 }
 

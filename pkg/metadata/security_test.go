@@ -274,3 +274,97 @@ func TestSecurity_ChunkPagesBoundToInode(t *testing.T) {
 		t.Fatal("victim chunk page was deleted")
 	}
 }
+
+// TestSecurity_ChunkOwnership verifies that a user cannot list another inode's
+// chunks in their own manifest (which would let GC delete them), and that the
+// ownership index is rebuilt for existing data.
+func TestSecurity_ChunkOwnership(t *testing.T) {
+	tc := SetupCluster(t)
+	ctx := context.Background()
+	fsm := tc.Node.FSM
+
+	victimID, mallory := "victim", "mallory"
+	vsk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: victimID, UID: 1001, SignKey: vsk.Public()}, vsk, tc.AdminID, tc.AdminSK)
+	msk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
+
+	victimChunk := strings.Repeat("c", 64)
+	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1,
+		ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
+	victimFile.SignInodeForTest(victimID, vsk)
+	b, _ := json.Marshal(victimFile)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, victimID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create with a foreign chunk is rejected.
+	steal := Inode{ID: "mallory-steal", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1,
+		ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
+	steal.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(steal)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err == nil {
+		t.Error("created inode with another inode's chunk")
+	}
+
+	// Update of own inode with a foreign chunk is rejected.
+	own := Inode{ID: "mallory-file", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err != nil {
+		t.Fatal(err)
+	}
+	own.Version = 2
+	own.ChunkManifest = []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdUpdateInode, b, mallory); err == nil {
+		t.Error("updated inode to include another inode's chunk")
+	}
+
+	// GC never enqueues chunks the inode does not own, even if (e.g. legacy
+	// data) its manifest lists them.
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		in := Inode{ID: "mallory-file", ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
+		fsm.enqueueGC(tx, &in)
+		return nil
+	})
+	gcQueued := func(id string) bool {
+		var ok bool
+		fsm.DB().View(func(tx *bolt.Tx) error {
+			v := tx.Bucket([]byte("garbage_collection")).Get([]byte(id))
+			ok = v != nil
+			return nil
+		})
+		return ok
+	}
+	if gcQueued(victimChunk) {
+		t.Fatal("GC enqueued a chunk owned by another inode")
+	}
+
+	// The index is rebuilt from existing inodes when missing.
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		tx.DeleteBucket([]byte("chunk_owners"))
+		return tx.Bucket([]byte("system")).Delete([]byte(chunkOwnerIndexMarker))
+	})
+	if err := fsm.ensureChunkOwnerIndex(); err != nil {
+		t.Fatal(err)
+	}
+	fsm.DB().View(func(tx *bolt.Tx) error {
+		owner, _ := fsm.Get(tx, []byte("chunk_owners"), []byte(victimChunk))
+		if string(owner) != "victim-file" {
+			t.Errorf("rebuilt owner = %q, want victim-file", owner)
+		}
+		return nil
+	})
+
+	// The owner's own GC still collects its chunks.
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		in := victimFile
+		fsm.enqueueGC(tx, &in)
+		return nil
+	})
+	if !gcQueued(victimChunk) {
+		t.Fatal("GC did not enqueue a chunk owned by the inode")
+	}
+}

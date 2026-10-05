@@ -34,7 +34,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   and delete→GC loads victim pages. Fix: reject any page ID not of the form `<inode.ID>:p<i>`.
   Test: foreign page IDs rejected.
 
-- [ ] **S6. GC / replication delete chunks listed in any manifest** — `pkg/metadata/fsm.go`, `gc.go`, `replication.go`.
+- [x] **S6. GC / replication delete chunks listed in any manifest** — `pkg/metadata/fsm.go`, `gc.go`, `replication.go`.
   `ChunkManifest` IDs are client-chosen and not bound to the uploader. A user lists a victim's chunk
   IDs in their own file and deletes it → GC deletes the victim's chunks; listing extra nodes makes the
   replication "over-replicated" prune delete real replicas. Fix: FSM chunk ownership index
