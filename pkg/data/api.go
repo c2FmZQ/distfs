@@ -77,9 +77,9 @@ type chunkCreator struct {
 	expiry         time.Time
 }
 
-// chunkCreatorTTL bounds how long a session can clean up chunks it uploaded.
-// It exceeds the capability token lifetime.
-const chunkCreatorTTL = 15 * time.Minute
+// chunkCreatorTTL bounds how long a session can read back or clean up chunks
+// it uploaded. It matches the session token lifetime.
+const chunkCreatorTTL = time.Hour
 
 type schemeSwitchingTransport struct {
 	standard  http.RoundTripper
@@ -319,20 +319,21 @@ func (s *Server) authenticate(r *http.Request, chunkID, requiredMode string) (*m
 		return nil, fmt.Errorf("chunk access denied")
 	}
 
+	// Creator-only capabilities (and every session-bound delete) only apply to
+	// chunks the bound session created on this node. Cluster-issued (unbound)
+	// capabilities used by GC and replication are not restricted.
+	if cap.CreatorOnly || (requiredMode == "D" && len(cap.SessionBinding) > 0) {
+		if len(cap.SessionBinding) == 0 || !s.isCreator(chunkID, cap.SessionBinding) {
+			return nil, fmt.Errorf("chunk was not created by this session")
+		}
+	}
+
 	return &cap, nil
 }
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request, id string) {
-	cap, err := s.authenticate(r, id, "D")
-	if err != nil {
+	if _, err := s.authenticate(r, id, "D"); err != nil {
 		http.Error(w, err.Error(), http.StatusUnauthorized)
-		return
-	}
-	// Session-bound (client) delete capabilities may only remove chunks that
-	// the same session created. Cluster-issued capabilities (GC, replication)
-	// carry no session binding.
-	if len(cap.SessionBinding) > 0 && !s.isCreator(id, cap.SessionBinding) {
-		http.Error(w, "chunk was not created by this session", http.StatusForbidden)
 		return
 	}
 

@@ -121,6 +121,13 @@ func TestSecurity_IssueTokenModes(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	// u2's own file, whose committed manifest contains the "readable" chunk ID.
+	own := Inode{ID: "own", OwnerID: u2, Type: FileType, Mode: 0600, ChunkManifest: []ChunkEntry{{ID: strings.Repeat("d", 64)}}}
+	own.SignInodeForTest(u2, usk2)
+	ob, _ := json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, ob, u2); err != nil {
+		t.Fatal(err)
+	}
 
 	issue := func(inodeID, mode string, chunks ...string) int {
 		req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionIssueToken, map[string]any{
@@ -151,6 +158,9 @@ func TestSecurity_IssueTokenModes(t *testing.T) {
 		{"delete without explicit chunks", "world", "D", nil, false},
 		{"unknown mode", "world", "X", []string{readable}, false},
 		{"delete for new inode (upload cleanup)", "new-inode", "D", []string{victim}, true},
+		{"writer reads back uncommitted chunk (creator-only)", "own", "R", []string{victim}, true},
+		{"writer deletes uncommitted chunk", "own", "D", []string{victim}, true},
+		{"writer deletes committed chunk", "own", "D", []string{strings.Repeat("d", 64)}, false},
 		{"read nonexistent inode", "new-inode", "R", []string{victim}, false},
 	}
 	for _, tt := range tests {

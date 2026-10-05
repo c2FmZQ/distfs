@@ -853,6 +853,9 @@ type CapabilityToken struct {
 	Mode           string   `json:"mode"` // "R" or "W"
 	Exp            int64    `json:"exp"`
 	SessionBinding []byte   `json:"session_binding,omitempty"` // SHA256(SessionID)
+	// CreatorOnly restricts the capability to chunks that the bound session
+	// created on the data node (uncommitted uploads).
+	CreatorOnly bool `json:"creator_only,omitempty"`
 }
 
 // ClusterSignKey stores the cluster-wide token signing key information.

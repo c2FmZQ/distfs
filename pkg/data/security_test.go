@@ -68,15 +68,15 @@ func TestSecurity_SessionDeleteOnlyOwnUploads(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if code := do("DELETE", victim, testCapability(t, sk, "D", bindA, victim), sessA, nil); code != http.StatusForbidden {
-		t.Fatalf("session delete of a chunk it did not create: got %d, want 403", code)
+	if code := do("DELETE", victim, testCapability(t, sk, "D", bindA, victim), sessA, nil); code != http.StatusUnauthorized {
+		t.Fatalf("session delete of a chunk it did not create: got %d, want 401", code)
 	}
 	// Re-uploading an existing chunk must not make the session its creator.
 	if code := do("PUT", victim, testCapability(t, sk, "W", bindA, victim), sessA, victimData); code != http.StatusCreated {
 		t.Fatalf("PUT existing chunk: got %d", code)
 	}
-	if code := do("DELETE", victim, testCapability(t, sk, "D", bindA, victim), sessA, nil); code != http.StatusForbidden {
-		t.Fatalf("session delete after re-upload of existing chunk: got %d, want 403", code)
+	if code := do("DELETE", victim, testCapability(t, sk, "D", bindA, victim), sessA, nil); code != http.StatusUnauthorized {
+		t.Fatalf("session delete after re-upload of existing chunk: got %d, want 401", code)
 	}
 	if ok, _ := store.HasChunk(victim); !ok {
 		t.Fatal("victim chunk was deleted")
@@ -89,8 +89,27 @@ func TestSecurity_SessionDeleteOnlyOwnUploads(t *testing.T) {
 	if code := do("PUT", own, testCapability(t, sk, "W", bindA, own), sessA, ownData); code != http.StatusCreated {
 		t.Fatalf("PUT new chunk: got %d", code)
 	}
-	if code := do("DELETE", own, testCapability(t, sk, "D", bindB, own), sessB, nil); code != http.StatusForbidden {
-		t.Fatalf("delete by another session: got %d, want 403", code)
+	if code := do("DELETE", own, testCapability(t, sk, "D", bindB, own), sessB, nil); code != http.StatusUnauthorized {
+		t.Fatalf("delete by another session: got %d, want 401", code)
+	}
+
+	// Creator-only reads follow the same rule.
+	creatorRead := func(binding []byte, id string) string {
+		capB, _ := json.Marshal(metadata.CapabilityToken{
+			Chunks: []string{id}, Mode: "R", Exp: time.Now().Add(time.Hour).Unix(),
+			SessionBinding: binding, CreatorOnly: true,
+		})
+		b, _ := json.Marshal(metadata.SignedAuthToken{Payload: capB, Signature: sk.Sign(capB)})
+		return "Bearer " + base64.StdEncoding.EncodeToString(b)
+	}
+	if code := do("GET", own, creatorRead(bindA, own), sessA, nil); code != http.StatusOK {
+		t.Fatalf("creator-only read by creating session: got %d, want 200", code)
+	}
+	if code := do("GET", own, creatorRead(bindB, own), sessB, nil); code != http.StatusUnauthorized {
+		t.Fatalf("creator-only read by another session: got %d, want 401", code)
+	}
+	if code := do("GET", victim, creatorRead(bindA, victim), sessA, nil); code != http.StatusUnauthorized {
+		t.Fatalf("creator-only read of a chunk the session did not create: got %d, want 401", code)
 	}
 	if code := do("DELETE", own, testCapability(t, sk, "D", bindA, own), sessA, nil); code != http.StatusOK {
 		t.Fatalf("delete by creating session: got %d, want 200", code)

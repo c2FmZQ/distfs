@@ -1201,6 +1201,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 	// Verify Permission
 	var inode Inode
 	exists := true
+	creatorOnly := req.Mode == "D"
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
 		if err != nil {
@@ -1241,8 +1242,13 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 			switch {
 			case req.Mode == "R" && !manifest[c]:
 				// Read access to an inode only grants access to its own chunks.
-				s.writeError(w, r, ErrCodeForbidden, "chunk not in inode manifest", http.StatusForbidden)
-				return
+				// Writers may read back their own uncommitted uploads: the token
+				// is restricted to chunks this session created on the data node.
+				if !evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0002) || r.Header.Get("Session-Token") == "" {
+					s.writeError(w, r, ErrCodeForbidden, "chunk not in inode manifest", http.StatusForbidden)
+					return
+				}
+				creatorOnly = true
 			case req.Mode == "D" && manifest[c]:
 				// Committed chunks are only removed by the cluster GC.
 				s.writeError(w, r, ErrCodeForbidden, "cannot delete committed chunk", http.StatusForbidden)
@@ -1289,9 +1295,10 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	// Construct Token
 	capToken := CapabilityToken{
-		Chunks: req.Chunks,
-		Mode:   req.Mode,
-		Exp:    time.Now().Add(10 * time.Minute).Unix(),
+		Chunks:      req.Chunks,
+		Mode:        req.Mode,
+		Exp:         time.Now().Add(10 * time.Minute).Unix(),
+		CreatorOnly: creatorOnly,
 	}
 
 	// Session Locking: Bind to SHA256(SessionID)
@@ -1305,8 +1312,8 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if req.Mode == "D" && len(capToken.SessionBinding) == 0 {
-		s.writeError(w, r, ErrCodeUnauthorized, "delete capability requires a valid session", http.StatusUnauthorized)
+	if creatorOnly && len(capToken.SessionBinding) == 0 {
+		s.writeError(w, r, ErrCodeUnauthorized, "capability requires a valid session", http.StatusUnauthorized)
 		return
 	}
 
