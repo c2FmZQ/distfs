@@ -3486,7 +3486,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 					ts, payload, sig, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
 					if err == nil {
 						// Success with cached key
-						if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
+						if err := s.checkReplay(user.ID, ts, sig); err != nil {
 							return nil, nil, err
 						}
 						// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
@@ -3558,7 +3558,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	}
 
 	// 3. Replay Protection
-	if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
+	if err := s.checkReplay(user.ID, ts, sig); err != nil {
 		return nil, nil, err
 	}
 
@@ -3573,18 +3573,18 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 	return payload, ctx, nil
 }
-func (s *Server) checkReplay(userID string, ts int64, ciphertext []byte) error {
+// checkReplay rejects a request seen before. It is keyed on the request's
+// signature, which is authenticated and unique per signed message; the sealed
+// bytes themselves are not suitable since parts of them (e.g. the unused KEM
+// ciphertext in symmetric mode) are not authenticated and can be altered.
+func (s *Server) checkReplay(userID string, ts int64, sig []byte) error {
 	now := time.Now().UnixNano()
 	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
 		return fmt.Errorf("request timestamp out of range")
 	}
 
-	// Phase 68 refinement: Include part of ciphertext in nonce to allow concurrent requests with same timestamp
-	snippet := ""
-	if len(ciphertext) > 16 {
-		snippet = hex.EncodeToString(ciphertext[:16])
-	}
-	nonce := userID + ":" + fmt.Sprintf("%d", ts) + ":" + snippet
+	sigHash := sha256.Sum256(sig)
+	nonce := userID + ":" + fmt.Sprintf("%d", ts) + ":" + hex.EncodeToString(sigHash[:])
 	s.requestNonceMu.Lock()
 	// Lazy GC
 	for k, v := range s.requestNonceCache {

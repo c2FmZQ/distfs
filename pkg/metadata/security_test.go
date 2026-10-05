@@ -608,3 +608,41 @@ func TestSecurity_LockAppliesToLiveSessions(t *testing.T) {
 		t.Fatal("locked user's existing session still has access")
 	}
 }
+
+// TestSecurity_ReplayWithAlteredPrefix verifies that a captured session
+// request cannot be replayed by altering bytes the server does not
+// authenticate (the KEM ciphertext slot in symmetric mode).
+func TestSecurity_ReplayWithAlteredPrefix(t *testing.T) {
+	tc := SetupCluster(t)
+	token, secret := LoginSessionForTestWithSecret(t, tc.TS, tc.AdminID, tc.AdminSK)
+
+	env, _ := json.Marshal(SealedEnvelope{Action: ActionGetUser, Payload: MustMarshalJSON(GetUserRequest{ID: tc.AdminID})})
+	body := SealTestRequestSymmetric(t, tc.AdminID, tc.AdminSK, secret, env)
+
+	send := func(b []byte) int {
+		req, _ := http.NewRequest("POST", tc.TS.URL+"/v1/invoke", bytes.NewReader(b))
+		req.Header.Set("X-DistFS-Sealed", "true")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Session-Token", token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := send(body); code != http.StatusOK {
+		t.Fatalf("original request failed: %d", code)
+	}
+
+	var sr SealedRequest
+	json.Unmarshal(body, &sr)
+	sr.Sealed[0] ^= 0xff
+	altered, _ := json.Marshal(sr)
+	if code := send(altered); code == http.StatusOK {
+		t.Fatal("replayed request with an altered unauthenticated prefix was accepted")
+	}
+	if code := send(body); code == http.StatusOK {
+		t.Fatal("exact replay was accepted")
+	}
+}

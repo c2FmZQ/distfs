@@ -87,7 +87,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 - [x] **M4. Group membership HMAC keyed by public group ID** — Doc fix: DISTFS-RAFT §2.3 overstated the guarantee. Membership must be visible to the server (it enforces group permissions) and members cannot hold a secret before decrypting their entry; anonymity is provided by the AnonymousLockbox (Theorem 11).
 - [x] **M5. Quota bypasses** — self-owned quota group with quota 0 = unlimited; client-set `Usage`/`Quota` persisted on group create/update; client-declared `Size` 0. Fix: ignore client `Usage`/`Quota`; enforce user quota as fallback.
 - [x] **M6. Locked users keep live sessions** — `server.go` `sessionTokenCache`. Fix: re-check lock state from FSM per request / evict on lock.
-- [ ] **M7. Replay key uses unauthenticated prefix** — `server.go` `checkReplay`. Fix: key on hash of the authenticated DEM ciphertext / signature.
+- [x] **M7. Replay key uses unauthenticated prefix** — `server.go` `checkReplay`. Fix: key on hash of the authenticated DEM ciphertext / signature.
 - [ ] **M8. Cluster join TOFU MITM** — `server.go` `handleClusterJoin`. Fix: bind HMAC proof over the returned public keys; don't send raft secret over unverified channel.
 - [ ] **M9. Web service worker serves decrypted HTML/SVG inline** — `web/sw.js`. Fix: `Content-Security-Policy: sandbox`, `nosniff`, block active types / force attachment, reject navigations; unregister stale workers.
 - [ ] **M10. Web login ignores pinned server key** — `web/ts/app.ts`. Fix: use `config.server_key`.
