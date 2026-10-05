@@ -6,6 +6,7 @@ package client
 import (
 	"bytes"
 	"context"
+	"crypto/mlkem"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -23,6 +24,19 @@ type mockRoundTripper struct {
 
 func (m *mockRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 	return m.roundTrip(req)
+}
+
+// sealedMockResponse seals payload for the client the way the server does.
+func sealedMockResponse(t *testing.T, clientDK *mlkem.DecapsulationKey768, serverSK *crypto.IdentityKey, status int, payload []byte) *http.Response {
+	t.Helper()
+	sealed, err := crypto.SealResponse(clientDK.EncapsulationKey(), serverSK, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, _ := json.Marshal(metadata.SealedResponse{Sealed: sealed})
+	h := make(http.Header)
+	h.Set("X-DistFS-Sealed", "true")
+	return &http.Response{StatusCode: status, Header: h, Body: io.NopCloser(bytes.NewReader(b))}
 }
 
 func TestClient_MockedErrors(t *testing.T) {
@@ -84,6 +98,9 @@ func TestClient_MockedRetry(t *testing.T) {
 			if req.URL.Path == "/v1/meta/key/sign" {
 				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(sk.Public()))}, nil
 			}
+			if req.URL.Path == "/v1/meta/key/cluster/sign" {
+				return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(bytes.NewReader(nil))}, nil
+			}
 
 			attempts++
 			if attempts < 3 {
@@ -92,10 +109,7 @@ func TestClient_MockedRetry(t *testing.T) {
 					Body:       io.NopCloser(bytes.NewReader([]byte("retry me"))),
 				}, nil
 			}
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Body:       io.NopCloser(bytes.NewReader([]byte("[]"))),
-			}, nil
+			return sealedMockResponse(t, dk, sk, http.StatusOK, []byte("[]")), nil
 		},
 	}
 
@@ -130,8 +144,11 @@ func TestClient_MockedConflict(t *testing.T) {
 	attempts := 0
 	c.httpCli.Transport = &mockRoundTripper{
 		roundTrip: func(req *http.Request) (*http.Response, error) {
+			if req.URL.Path == "/v1/meta/key/sign" {
+				return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(bytes.NewReader(sk.Public()))}, nil
+			}
 			if req.Method == "GET" && strings.Contains(req.URL.Path, "/v1/user/") {
-				res := metadata.User{ID: "u1", SignKey: sk.Public()}
+				res := metadata.User{ID: "u1", SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
 				b, _ := json.Marshal(res)
 				return &http.Response{
 					StatusCode: http.StatusOK,
@@ -163,12 +180,9 @@ func TestClient_MockedConflict(t *testing.T) {
 				}
 
 				if env.Action == metadata.ActionGetUser {
-					res := metadata.User{ID: "u1", SignKey: sk.Public()}
+					res := metadata.User{ID: "u1", SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}
 					b, _ := json.Marshal(res)
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(bytes.NewReader(b)),
-					}, nil
+					return sealedMockResponse(t, dk, sk, http.StatusOK, b), nil
 				}
 
 				if env.Action == metadata.ActionGetInode {
@@ -196,10 +210,7 @@ func TestClient_MockedConflict(t *testing.T) {
 					inode.SignInodeForTest("u1", sk)
 
 					b, _ := json.Marshal(inode)
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(bytes.NewReader(b)),
-					}, nil
+					return sealedMockResponse(t, dk, sk, http.StatusOK, b), nil
 				}
 
 				if env.Action == metadata.ActionBatch {
@@ -220,10 +231,7 @@ func TestClient_MockedConflict(t *testing.T) {
 					ib, _ := json.Marshal(updatedInode)
 					batchRes := []json.RawMessage{ib}
 					bb, _ := json.Marshal(batchRes)
-					return &http.Response{
-						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(bytes.NewReader(bb)),
-					}, nil
+					return sealedMockResponse(t, dk, sk, http.StatusOK, bb), nil
 				}
 			}
 

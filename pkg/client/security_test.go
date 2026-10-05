@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"net/http"
 	"sync"
@@ -228,5 +229,78 @@ func TestSecurity_InodeSubstitution(t *testing.T) {
 
 	if got, err := c.getInodeInternal(ctx, x.ID, true); err == nil {
 		t.Fatalf("accepted inode %s in place of requested %s", got.ID, x.ID)
+	}
+}
+
+// rewriteTransport lets a test tamper with /v1/invoke responses.
+type rewriteTransport struct {
+	base    http.RoundTripper
+	rewrite func(*http.Response) *http.Response
+}
+
+func (r *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.base.RoundTrip(req)
+	if err != nil || req.URL.Path != "/v1/invoke" || r.rewrite == nil {
+		return resp, err
+	}
+	return r.rewrite(resp), nil
+}
+
+// TestSecurity_ResponsesMustBeSealedAndBound verifies that the client rejects
+// unsealed successful responses and sealed responses without a cluster binding.
+func TestSecurity_ResponsesMustBeSealedAndBound(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	if err := c.saveDataFile(ctx, "/f", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := c.resolvePath(ctx, "/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.getClusterSignKey(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	base := c.httpCli.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	rt := &rewriteTransport{base: base}
+	c.httpCli.Transport = rt
+
+	// 1. Plaintext (unsealed) response forged by a network attacker.
+	rt.rewrite = func(resp *http.Response) *http.Response {
+		resp.Body.Close()
+		b, _ := json.Marshal(metadata.Inode{ID: f.ID})
+		resp.Header.Del("X-DistFS-Sealed")
+		resp.Body = io.NopCloser(bytes.NewReader(b))
+		return resp
+	}
+	if _, err := c.getInodeInternal(ctx, f.ID, false); err == nil {
+		t.Error("accepted an unsealed response")
+	}
+
+	// 2. Sealed response with the binding signature stripped.
+	rt.rewrite = func(resp *http.Response) *http.Response {
+		var sr metadata.SealedResponse
+		json.NewDecoder(resp.Body).Decode(&sr)
+		resp.Body.Close()
+		sr.BindingSignature = nil
+		b, _ := json.Marshal(sr)
+		resp.Body = io.NopCloser(bytes.NewReader(b))
+		resp.ContentLength = int64(len(b))
+		return resp
+	}
+	if _, err := c.getInodeInternal(ctx, f.ID, false); err == nil {
+		t.Error("accepted a response without a cluster binding signature")
+	}
+
+	// 3. Untampered responses still work.
+	rt.rewrite = nil
+	if _, err := c.getInodeInternal(ctx, f.ID, false); err != nil {
+		t.Errorf("untampered response rejected: %v", err)
 	}
 }

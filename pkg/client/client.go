@@ -1190,6 +1190,11 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 }
 func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.ReadCloser, error) {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
+		// A successful response to a request that expects a sealed reply MUST
+		// be sealed; otherwise anyone on the path could forge it.
+		if resp.StatusCode < 400 {
+			return nil, fmt.Errorf("high-severity: expected a sealed response from the server")
+		}
 		// If the server rejected our sealed request before unsealing it (e.g. 403 Forbidden),
 		// it did not cache our session key. We must invalidate our local cache to
 		// ensure the next request falls back to Full KEM.
@@ -1210,9 +1215,17 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 	}
 
 	// Phase 71: Response Binding (Verifiable Timeline)
+	// Once the cluster signing key is known, every sealed response MUST carry a
+	// binding signature; a forking server could otherwise simply omit it.
+	cPK, cerr := c.getClusterSignKey(ctx)
+	if cerr == nil && len(cPK) > 0 && len(sealed.BindingSignature) == 0 {
+		return nil, fmt.Errorf("high-severity: response is missing the cluster binding signature")
+	}
 	if len(sealed.BindingSignature) > 0 {
-		cPK, err := c.getClusterSignKey(ctx)
-		if err == nil && len(cPK) > 0 {
+		if cerr != nil {
+			return nil, fmt.Errorf("failed to fetch cluster signing key to verify response binding: %w", cerr)
+		}
+		if len(cPK) > 0 {
 			h := crypto.NewHash()
 			h.Write(sealed.Sealed)
 			idxBuf := make([]byte, 8)
@@ -1966,6 +1979,17 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 	user, err := c.getUserRaw(ctx, id)
 	if err != nil {
 		return nil, err
+	}
+
+	// Our own identity is verified against the keys we hold, not the registry.
+	if id == c.userID && c.signKey != nil && c.decKey != nil {
+		if !bytes.Equal(user.SignKey, c.signKey.Public()) || !bytes.Equal(user.EncKey, c.decKey.EncapsulationKey().Bytes()) {
+			return nil, fmt.Errorf("high-severity: server returned substitute keys for our own identity %s", id)
+		}
+		c.cacheMu.Lock()
+		c.userCache[id] = user
+		c.cacheMu.Unlock()
+		return user, nil
 	}
 
 	// Phase 69: Aggregate Optimistic Verification
@@ -4989,7 +5013,7 @@ func (c *Client) getWorldPublicKey(ctx context.Context) (*mlkem.EncapsulationKey
 		return wp, nil
 	}
 
-	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world", nil, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world", nil, requestOptions{retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -5237,6 +5261,18 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 }
 
 func (c *Client) verifyGroupOnce(ctx context.Context, group *metadata.Group) error {
+	if err := c.verifyGroupSelf(ctx, group); err != nil {
+		return err
+	}
+	if c.registryDir == "" {
+		return nil // Non-registry mode trusts server authenticity
+	}
+	return c.verifyGroupAttestation(ctx, group)
+}
+
+// verifyGroupSelf checks the group's own signature (by a verified signer) and
+// its ID commitment.
+func (c *Client) verifyGroupSelf(ctx context.Context, group *metadata.Group) error {
 	if group.Signature == nil {
 		return fmt.Errorf("missing group signature")
 	}
@@ -5265,11 +5301,11 @@ func (c *Client) verifyGroupOnce(ctx context.Context, group *metadata.Group) err
 	if group.ID != expectedID {
 		return fmt.Errorf("group ID commitment mismatch for %s: expected %s (owner=%s)", group.ID, expectedID, group.OwnerID)
 	}
+	return nil
+}
 
-	if c.registryDir == "" {
-		return nil // Non-registry mode trusts server authenticity
-	}
-
+// verifyGroupAttestation cross-checks the group against its registry attestation.
+func (c *Client) verifyGroupAttestation(ctx context.Context, group *metadata.Group) error {
 	// 2. Fetch and Verify Registry Attestation for the Group (Tier 3: Confirmation)
 	idPath := c.registryDir + "/" + group.ID + ".group-id"
 	attestationInode, attestationKey, err := c.resolvePathInternal(ctx, idPath, true)
@@ -5559,10 +5595,25 @@ func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
 
 // AnchorGroupInRegistry creates a signed attestation for a group in the registry.
 func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID string) error {
-	group, err := c.getGroupUnverifiedCached(ctx, groupID)
+	group, err := c.getGroupRaw(ctx, groupID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch group for anchoring: %w", err)
 	}
+	// The attestation vouches for the group's keys, so they must at least be
+	// signed by a verified signer and match the group's ID commitment.
+	vctx, state, _ := withVerificationState(ctx)
+	if err := c.verifyGroupSelf(vctx, group); err != nil {
+		return fmt.Errorf("refusing to anchor group %s: %w", groupID, err)
+	}
+	if err := c.processVerificationQueue(vctx, state); err != nil {
+		return fmt.Errorf("refusing to anchor group %s: %w", groupID, err)
+	}
+	// We are attesting these keys, so they are verified from our point of view.
+	c.cacheMu.Lock()
+	c.verifiedGroupCache[group.ID] = group
+	delete(c.unverifiedGroupCache, group.ID)
+	c.cacheMu.Unlock()
+
 	regDir := c.registryDir
 	if regDir == "" {
 		return nil // Registry not configured, skip anchoring
@@ -6671,7 +6722,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 
 func (c *Client) getClusterStats(ctx context.Context) (*metadata.ClusterStats, error) {
 	var stats metadata.ClusterStats
-	_, _, err := c.doRequest(ctx, "GET", "/v1/cluster/stats", nil, requestOptions{sealed: true, unseal: true, retry: true}, &stats)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/cluster/stats", nil, requestOptions{retry: true}, &stats)
 	if err != nil {
 		return nil, err
 	}

@@ -2228,7 +2228,8 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 			hook(nil)
 		}
 
-		w.WriteHeader(successCode)
+		// Respond through writeJSON so that sealed requests get a sealed reply.
+		s.writeJSON(w, r, nil, successCode)
 	}
 }
 
@@ -2608,13 +2609,16 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
 		sealed, err := s.sealResponse(r, ctxUser, b)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(status)
-			w.Write(sealed)
+		if err != nil {
+			// Never fall back to plaintext for a sealed request.
+			w.Header().Del("Content-Type")
+			http.Error(w, "failed to seal response", http.StatusInternalServerError)
 			return
 		}
-		// If sealing fails, we still want to return the error/data with original status
+		w.Header().Set("X-DistFS-Sealed", "true")
+		w.WriteHeader(status)
+		w.Write(sealed)
+		return
 	}
 
 	w.WriteHeader(status)
@@ -2626,12 +2630,15 @@ func (s *Server) writeSealedResponse(w http.ResponseWriter, r *http.Request, dat
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
 		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
+		if err != nil {
+			// Never fall back to plaintext for a sealed request.
+			s.writeError(w, r, ErrCodeInternal, "failed to seal response", http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("X-DistFS-Sealed", "true")
+		w.WriteHeader(http.StatusOK)
+		w.Write(sealed)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -2716,9 +2723,13 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.WriteHeader(http.StatusOK)
-	encoder := json.NewEncoder(w)
+	// The audit stream is buffered so that it can be sealed for the client.
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	defer func() {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		s.writeSealedResponse(w, r, out.Bytes())
+	}()
 
 	// 2. Perform Audit in a single View transaction
 	s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -3370,8 +3381,7 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 		"kem": base64.StdEncoding.EncodeToString(kemCT),
 		"dem": base64.StdEncoding.EncodeToString(demCT),
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, r, resp, http.StatusOK)
 }
 
 func (s *Server) parseSessionToken(tokenStr string) (*SessionToken, error) {
@@ -4163,6 +4173,5 @@ func (s *Server) handleValidateMetadata(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, r, resp, http.StatusOK)
 }

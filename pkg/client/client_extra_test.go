@@ -514,14 +514,20 @@ func TestClient_UnsealExtraErrors(t *testing.T) {
 	_ = adminSK
 	defer ts.Close()
 
-	// 1. Not sealed
+	// 1. Not sealed: successful responses must be sealed; error responses may not be.
 	resp := &http.Response{
-		Header: make(http.Header),
-		Body:   io.NopCloser(bytes.NewReader([]byte("{}"))),
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(bytes.NewReader([]byte("{}"))),
 	}
 	_, err := c.unsealResponse(ctx, resp)
-	if err != nil {
-		t.Errorf("unsealResponse failed for non-sealed: %v", err)
+	if err == nil {
+		t.Error("unsealResponse accepted an unsealed successful response")
+	}
+	resp.StatusCode = http.StatusNotFound
+	resp.Body = io.NopCloser(bytes.NewReader([]byte("{}")))
+	if _, err := c.unsealResponse(ctx, resp); err != nil {
+		t.Errorf("unsealResponse failed for unsealed error response: %v", err)
 	}
 
 	// 2. Invalid format

@@ -62,7 +62,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 - [x] **C5. Inode ID substitution** — `client.go` `getInodeInternal`, `directory.go` `resolveSequential`, FUSE refresh paths.
   Fix: reject when `fetched.ID != requested id`. Test.
 
-- [ ] **C6. Unsealed / unbound responses trusted** — `client.go` `unsealResponse`, `doRequest`.
+- [x] **C6. Unsealed / unbound responses trusted** — `client.go` `unsealResponse`, `doRequest`.
   Fix: when the request expects a sealed response, reject unsealed bodies; require binding signature
   on sealed responses; don't silently skip when cluster key fetch fails.
 
