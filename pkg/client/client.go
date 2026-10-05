@@ -2514,7 +2514,6 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 			if inode == nil || !requested[inode.ID] {
 				return nil, fmt.Errorf("high-severity: server returned an inode that was not requested")
 			}
-			delete(requested, inode.ID) // Reject duplicates
 			if err := c.verifyInode(ctx, inode); err != nil {
 				return nil, fmt.Errorf("structural inconsistency: inode %s verification failed: %w", inode.ID, err)
 			}
