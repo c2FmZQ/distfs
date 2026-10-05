@@ -754,3 +754,48 @@ func TestSecurity_ChallengeLimits(t *testing.T) {
 		t.Error("issued a challenge beyond the pending-challenge cap")
 	}
 }
+
+// TestSecurity_DeterministicApply verifies that lease decisions use the
+// command's timestamp, not the applying node's clock, so every node (and a
+// replay of the log) reaches the same result.
+func TestSecurity_DeterministicApply(t *testing.T) {
+	tc := SetupCluster(t)
+	owner := "det-owner"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: owner, UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
+
+	nonce := GenerateNonce()
+	f := Inode{ID: GenerateInodeID(owner, nonce), Nonce: nonce, OwnerID: owner, Type: FileType, Mode: 0600, Version: 1}
+	f.SignInodeForTest(owner, sk)
+	b, _ := json.Marshal(f)
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, b, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	apply := func(cmd LogCommand) interface{} {
+		data, _ := cmd.Marshal()
+		fut := tc.Node.Raft.Apply(data, 5*time.Second)
+		if err := fut.Error(); err != nil {
+			t.Fatal(err)
+		}
+		return fut.Response()
+	}
+
+	// Ten minutes ago, session s1 took a one-minute exclusive lease...
+	t0 := time.Now().Add(-10 * time.Minute).UnixNano()
+	lb, _ := json.Marshal(LeaseRequest{InodeIDs: []string{f.ID}, Type: LeaseExclusive, Duration: int64(time.Minute)})
+	if res := apply(LogCommand{Type: CmdAcquireLeases, Data: lb, UserID: owner, SessionNonce: "s1", Timestamp: t0}); tc.Node.FSM.containsError(res) {
+		t.Fatalf("lease: %v", res)
+	}
+
+	// ...and 30 seconds later session s2 tried to update the file. At that
+	// time the lease was active, regardless of when the entry is applied.
+	f.Version = 2
+	f.Mode = 0640
+	f.SignInodeForTest(owner, sk)
+	ub, _ := json.Marshal(f)
+	res := apply(LogCommand{Type: CmdUpdateInode, Data: ub, UserID: owner, SessionNonce: "s2", Timestamp: t0 + int64(30*time.Second)})
+	if !tc.Node.FSM.containsError(res) {
+		t.Fatal("update inside another session's lease succeeded: lease check used the wall clock")
+	}
+}

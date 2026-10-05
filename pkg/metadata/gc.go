@@ -130,7 +130,7 @@ func (g *GCWorker) runUnlinkedCleanup() {
 	for _, id := range toFinalize {
 		// Propose CmdDeleteInode again. FSM will finalize it if leases are gone.
 		cmd := LogCommand{Type: CmdDeleteInode, Data: []byte(id)}
-		b, _ := json.Marshal(cmd)
+		b, _ := cmd.Marshal()
 		g.server.raft.Apply(b, 5*time.Second)
 	}
 }

@@ -287,7 +287,7 @@ func (rm *ReplicationMonitor) executeRepair(inodeID, chunkID string, source Node
 	body, _ := json.Marshal(req)
 
 	cmd := LogCommand{Type: CmdAddChunkReplica, Data: body}
-	b, _ := json.Marshal(cmd)
+	b, _ := cmd.Marshal()
 
 	f := rm.server.raft.Apply(b, 5*time.Second)
 	if err := f.Error(); err != nil {
@@ -321,7 +321,7 @@ func (rm *ReplicationMonitor) executePrune(inodeID, chunkID string, targetIDs []
 	body, _ := json.Marshal(req)
 
 	cmd := LogCommand{Type: CmdRemoveChunkReplica, Data: body}
-	b, _ := json.Marshal(cmd)
+	b, _ := cmd.Marshal()
 
 	f := rm.server.raft.Apply(b, 5*time.Second)
 	if err := f.Error(); err != nil {

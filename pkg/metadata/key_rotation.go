@@ -229,6 +229,6 @@ func (w *KeyRotationWorker) rotate() {
 
 	data, _ := json.Marshal(clusterKey)
 	cmd := LogCommand{Type: CmdRotateKey, Data: data}
-	b, _ := json.Marshal(cmd)
+	b, _ := cmd.Marshal()
 	w.server.raft.Apply(b, 5*time.Second)
 }

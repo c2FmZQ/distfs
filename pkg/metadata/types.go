@@ -26,6 +26,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
@@ -1211,7 +1212,13 @@ type LogCommand struct {
 	RaftIndex     uint64            `json:"idx,omitempty"`            // Optional index for deterministic IDs
 }
 
+// Marshal encodes the command for proposal to Raft. Commands are stamped with
+// the proposer's time so that every node applies them with the same time
+// (FSM apply must be deterministic).
 func (c LogCommand) Marshal() ([]byte, error) {
+	if c.Timestamp == 0 {
+		c.Timestamp = time.Now().UnixNano()
+	}
 	return json.Marshal(c)
 }
 

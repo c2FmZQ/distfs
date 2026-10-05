@@ -661,11 +661,10 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	return fmt.Errorf("unknown command")
 }
 
-func (fsm *MetadataFSM) checkLease(inode *Inode, sessionNonce string) error {
+func (fsm *MetadataFSM) checkLease(inode *Inode, sessionNonce string, now int64) error {
 	if inode == nil || len(inode.Leases) == 0 {
 		return nil
 	}
-	now := time.Now().UnixNano()
 	for _, l := range inode.Leases {
 		if l.Expiry > now && l.Type == LeaseExclusive && l.SessionID != sessionNonce {
 			return fmt.Errorf("exclusive lease held by another session")
@@ -674,7 +673,7 @@ func (fsm *MetadataFSM) checkLease(inode *Inode, sessionNonce string) error {
 	return nil
 }
 
-func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionNonce string) error {
+func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionNonce string, now int64) error {
 	if path == "" {
 		return nil
 	}
@@ -687,7 +686,6 @@ func (fsm *MetadataFSM) checkPathLease(tx *bolt.Tx, path, sessionNonce string) e
 	}
 	var leases map[string]LeaseInfo
 	json.Unmarshal(plain, &leases)
-	now := time.Now().UnixNano()
 	for _, l := range leases {
 		if l.Expiry > now && l.SessionID != sessionNonce {
 			return fmt.Errorf("%w: path %s: lease held by session %s", ErrConflict, path, l.SessionID)
@@ -1016,7 +1014,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 		}
 	}
 
-	if err := fsm.checkLease(&inode, sessionNonce); err != nil {
+	if err := fsm.checkLease(&inode, sessionNonce, ts); err != nil {
 		return err
 	}
 
@@ -1039,7 +1037,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 				if !ok {
 					return fmt.Errorf("%w: missing lease binding for change to entry %s", ErrLeaseRequired, nameHMAC)
 				}
-				if err := fsm.checkPathLease(tx, pathID, sessionNonce); err != nil {
+				if err := fsm.checkPathLease(tx, pathID, sessionNonce, ts); err != nil {
 					return err
 				}
 			}
@@ -1053,7 +1051,7 @@ func (fsm *MetadataFSM) executeUpdateInode(tx *bolt.Tx, data []byte, userID, ses
 				if !ok {
 					return fmt.Errorf("%w: missing lease binding for new entry %s", ErrLeaseRequired, nameHMAC)
 				}
-				if err := fsm.checkPathLease(tx, pathID, sessionNonce); err != nil {
+				if err := fsm.checkPathLease(tx, pathID, sessionNonce, ts); err != nil {
 					return err
 				}
 			}
@@ -1182,7 +1180,7 @@ func (fsm *MetadataFSM) executeDeleteInode(tx *bolt.Tx, data []byte, sessionNonc
 	}
 	var inode Inode
 	json.Unmarshal(plain, &inode)
-	if err := fsm.checkLease(&inode, sessionNonce); err != nil {
+	if err := fsm.checkLease(&inode, sessionNonce, ts); err != nil {
 		return err
 	}
 	if inode.NLink > 0 {
