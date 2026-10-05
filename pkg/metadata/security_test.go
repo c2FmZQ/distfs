@@ -575,3 +575,36 @@ func TestSecurity_QuotaBypasses(t *testing.T) {
 		t.Errorf("UpdateGroup changed server-managed state: gid=%d quota=%+v usage=%+v", after.GID, after.Quota, after.Usage)
 	}
 }
+
+// TestSecurity_LockAppliesToLiveSessions verifies that locking a user takes
+// effect on sessions they already established.
+func TestSecurity_LockAppliesToLiveSessions(t *testing.T) {
+	tc := SetupCluster(t)
+	u := "lockme"
+	sk, _ := crypto.GenerateIdentityKey()
+	dk, _ := crypto.GenerateEncryptionKey()
+	CreateUser(t, tc.Node, User{ID: u, UID: 1001, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}, sk, tc.AdminID, tc.AdminSK)
+	token, secret := LoginSessionForTestWithSecret(t, tc.TS, u, sk)
+
+	getWorld := func() int {
+		req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionGetWorldPrivate, nil, u, sk, secret)
+		req.Header.Set("Session-Token", token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := getWorld(); code != http.StatusOK {
+		t.Fatalf("unlocked user denied: %d", code)
+	}
+
+	b, _ := json.Marshal(AdminSetUserLockRequest{UserID: u, Locked: true})
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdAdminSetUserLock, b, tc.AdminID); err != nil {
+		t.Fatal(err)
+	}
+	if code := getWorld(); code == http.StatusOK {
+		t.Fatal("locked user's existing session still has access")
+	}
+}

@@ -959,7 +959,10 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	if s.sessionTokenCache != nil {
 		if sessInfo, ok := s.sessionTokenCache.Get(sess); ok {
 			if time.Now().Unix() <= sessInfo.Expiry {
-				return sessInfo.User, nil
+				// The cache only saves re-verifying the token signature. The
+				// user record is re-read so that state changes such as an admin
+				// locking the account take effect on existing sessions.
+				return s.fsm.GetUser(sessInfo.User.ID)
 			}
 			s.sessionTokenCache.Remove(sess)
 		}
