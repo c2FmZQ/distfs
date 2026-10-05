@@ -684,3 +684,41 @@ func TestSecurity_PinnedDiscoveryClient(t *testing.T) {
 		t.Fatal("pinned client connected to a node with a different TLS key")
 	}
 }
+
+// TestSecurity_PeerFullKeyMatch verifies that mTLS peer authentication
+// compares the full TLS key of a registered node, not just the 64-bit node ID
+// derived from it.
+func TestSecurity_PeerFullKeyMatch(t *testing.T) {
+	tc := SetupCluster(t)
+
+	certFor := func(pub ed25519.PublicKey, priv ed25519.PrivateKey) []byte {
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+	register := func(id string, pub ed25519.PublicKey) {
+		b, _ := json.Marshal(Node{ID: id, Status: NodeStatusActive, PublicKey: pub, Address: "https://" + id})
+		cmd, _ := LogCommand{Type: CmdRegisterNode, Data: b}.Marshal()
+		if err := tc.Node.Raft.Apply(cmd, 5*time.Second).Error(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verify := tc.Node.ClientTLSConfig.VerifyPeerCertificate
+
+	realPub, realPriv, _ := ed25519.GenerateKey(rand.Reader)
+	register(NodeIDFromPublicKey(realPub), realPub)
+	if err := verify([][]byte{certFor(realPub, realPriv)}, nil); err != nil {
+		t.Fatalf("registered node rejected: %v", err)
+	}
+
+	// An attacker key whose derived ID belongs to a node registered with a
+	// different full key (what a 64-bit prefix collision would produce).
+	evilPub, evilPriv, _ := ed25519.GenerateKey(rand.Reader)
+	register(NodeIDFromPublicKey(evilPub), realPub)
+	if err := verify([][]byte{certFor(evilPub, evilPriv)}, nil); err == nil {
+		t.Fatal("peer accepted on node ID match despite a different TLS key")
+	}
+}

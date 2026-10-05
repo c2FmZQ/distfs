@@ -3362,6 +3362,9 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 
 	node.ID = info.ID
 	node.Status = NodeStatusActive
+	// Keys authenticated during discovery; verifyPeer pins the TLS key.
+	node.PublicKey = info.PublicKey
+	node.SignKey = info.SignKey
 	node.Address = info.APIURL
 	node.ClusterAddress = req.Address
 	node.RaftAddress = info.RaftAddress
