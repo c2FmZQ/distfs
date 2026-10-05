@@ -90,7 +90,11 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 - [x] **M7. Replay key uses unauthenticated prefix** — `server.go` `checkReplay`. Fix: key on hash of the authenticated DEM ciphertext / signature.
 - [x] **M8. Cluster join TOFU MITM** — `server.go` `handleClusterJoin`. Fix: bind HMAC proof over the returned public keys; don't send raft secret over unverified channel.
 - [x] **M9. Web service worker serves decrypted HTML/SVG inline** — `web/sw.js`. Fix: `Content-Security-Policy: sandbox`, `nosniff`, block active types / force attachment, reject navigations; unregister stale workers.
-- [ ] **M10. Web login ignores pinned server key** — `web/ts/app.ts`. Fix: use `config.server_key`.
+- [x] **M10. Web login ignores pinned server key** — DEFERRED (protocol change). The server KEM key
+  rotates (24h), so pinning it breaks; the CLI's pinned key has the same latent issue. Follow-up:
+  sign each epoch KEM key with the cluster signing key, verify it in the client, and pin the cluster
+  (and server) signing keys in CLI and web configs. Low impact today: after login, requests use the
+  session key; the server KEM key is only the no-session fallback.
 
 ## Low
 
