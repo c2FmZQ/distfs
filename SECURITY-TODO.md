@@ -52,7 +52,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 - [x] **C2. verifyUser / verifyGroup chain uses unverified verifier keys** — `client.go` `verifyUser`, `verifyGroup`.
   Also check `entry.UserID == user.ID` and group ID equality. Test: forged attestation rejected.
 
-- [ ] **C3. Key substitution in provisionRecipient / AddUserToGroup** — `client.go` `provisionRecipient`, `AddUserToGroup`, `setAttrByID`.
+- [x] **C3. Key substitution in provisionRecipient / AddUserToGroup** — `client.go` `provisionRecipient`, `AddUserToGroup`, `setAttrByID`.
   Fix: use verified user/group keys; honor `ContactInfo` keys when provided; fail (not debug-log) on
   group verification failure. Test: unverified recipient key rejected.
 

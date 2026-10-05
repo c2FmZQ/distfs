@@ -72,3 +72,39 @@ func TestSecurity_DeferredVerificationUsesObservedKeys(t *testing.T) {
 		t.Fatal("inode signed with a substitute key was accepted")
 	}
 }
+
+// TestSecurity_RecipientKeysMustBeVerified verifies that file keys and group
+// seeds are only encrypted to registry-verified (or out-of-band verified) keys.
+func TestSecurity_RecipientKeysMustBeVerified(t *testing.T) {
+	c, node, _, ts, adminID, adminSK := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	provisionUser(t, ts, node, c, adminID, adminSK, "bob")
+
+	// "unanchored" is a user record the server knows about but that no
+	// registry attestation vouches for (e.g. a key injected by the server).
+	msk, _ := crypto.GenerateIdentityKey()
+	mdk, _ := crypto.GenerateEncryptionKey()
+	metadata.CreateUser(t, node, metadata.User{ID: "unanchored", SignKey: msk.Public(), EncKey: mdk.EncapsulationKey().Bytes()}, msk, adminID, adminSK)
+
+	payload := make([]byte, 32)
+	if err := c.provisionRecipient(ctx, crypto.NewLockbox(), "unanchored", payload, nil); err == nil {
+		t.Fatal("file key provisioned to an unverified recipient key")
+	}
+	if err := c.provisionRecipient(ctx, crypto.NewLockbox(), "bob", payload, nil); err != nil {
+		t.Fatalf("provisioning a verified recipient failed: %v", err)
+	}
+
+	// Contact info whose keys differ from what the server serves is rejected.
+	info, err := c.Stat(ctx, "/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersGID := info.Sys().(*InodeInfo).GroupID
+	otherDK, _ := crypto.GenerateEncryptionKey()
+	ci := &ContactInfo{UserID: "unanchored", EncKey: otherDK.EncapsulationKey().Bytes(), SignKey: msk.Public()}
+	if err := c.AddUserToGroup(ctx, usersGID, "unanchored", "x", ci); err == nil {
+		t.Fatal("AddUserToGroup accepted contact info that does not match the server's keys")
+	}
+}

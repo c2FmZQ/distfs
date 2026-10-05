@@ -4714,8 +4714,10 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		// Use HMAC for the recipient key
 		target := c.computeMemberHMAC(groupContext.ID, recipientID)
 
-		// For Group Lockboxes, the payload is usually the Epoch Seed
-		user, err := c.getUserUnverified(ctx, recipientID)
+		// For Group Lockboxes, the payload is usually the Epoch Seed.
+		// Recipient keys MUST be verified: the server could otherwise substitute
+		// its own key and learn the payload.
+		user, err := c.getUser(ctx, recipientID)
 		if err == nil {
 			upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
 			if err != nil {
@@ -4725,7 +4727,7 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		}
 
 		// Recipient might be a Group (Hierarchical Ownership)
-		group, err := c.getGroupUnverifiedCached(ctx, recipientID)
+		group, err := c.getGroup(ctx, recipientID)
 		if err == nil {
 			upk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 			if err != nil {
@@ -4749,8 +4751,8 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		return lb.AddRecipient(metadata.WorldID, wpk, payload, 0)
 	}
 
-	// 3b. Try as User
-	user, err := c.getUserUnverified(ctx, recipientID)
+	// 3b. Try as User (verified keys only)
+	user, err := c.getUser(ctx, recipientID)
 	if err == nil {
 		upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
 		if err != nil {
@@ -4759,8 +4761,8 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		return lb.AddRecipient(recipientID, upk, payload, 0)
 	}
 
-	// 3c. Try as Group (Asymmetric Encryption using Group Public Key)
-	group, err := c.getGroupUnverifiedCached(ctx, recipientID)
+	// 3c. Try as Group (Asymmetric Encryption using verified Group Public Key)
+	group, err := c.getGroup(ctx, recipientID)
 	if err == nil {
 		gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 		if err != nil {
@@ -5918,7 +5920,23 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 		}
 
 		// Phase 71: Use provisionRecipient with group context for HMAC privacy.
-		if err := c.provisionRecipient(ctx, group.Lockbox, userID, epochSeed, group); err != nil {
+		// When the caller verified the user's keys out of band (ContactInfo),
+		// encrypt to exactly those keys.
+		if ci != nil {
+			if ci.UserID != userID {
+				return fmt.Errorf("contact info is for user %s, not %s", ci.UserID, userID)
+			}
+			if server, err := c.getUserRaw(ctx, userID); err == nil && (!bytes.Equal(server.EncKey, ci.EncKey) || !bytes.Equal(server.SignKey, ci.SignKey)) {
+				return fmt.Errorf("high-severity: server keys for user %s do not match the verified contact info", userID)
+			}
+			upk, err := crypto.UnmarshalEncapsulationKey(ci.EncKey)
+			if err != nil {
+				return fmt.Errorf("invalid contact encryption key: %w", err)
+			}
+			if err := group.Lockbox.AddRecipient(c.computeMemberHMAC(group.ID, userID), upk, epochSeed, group.Epoch); err != nil {
+				return err
+			}
+		} else if err := c.provisionRecipient(ctx, group.Lockbox, userID, epochSeed, group); err != nil {
 			return err
 		}
 

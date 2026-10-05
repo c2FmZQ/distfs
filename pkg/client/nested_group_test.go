@@ -36,7 +36,7 @@ func TestNestedGroupAccess(t *testing.T) {
 	bob := metadata.User{ID: bobID, SignKey: bobSign.Public(), EncKey: bobDK.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, bob, bobSign, clientAlice.userID, clientAlice.signKey)
 
-	err = clientAlice.AddUserToGroup(ctx, parentGroup.ID, bobID, "Bob", nil)
+	err = clientAlice.AddUserToGroup(ctx, parentGroup.ID, bobID, "Bob", contactFor(bob))
 	if err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestGroupKeyCaching(t *testing.T) {
 	bob := metadata.User{ID: bobID, SignKey: bobSign.Public(), EncKey: bobDK.EncapsulationKey().Bytes()}
 	metadata.CreateUser(t, node, bob, bobSign, adminID, adminSK)
 
-	err = clientAlice.AddUserToGroup(ctx, group.ID, bobID, "Bob", nil)
+	err = clientAlice.AddUserToGroup(ctx, group.ID, bobID, "Bob", contactFor(bob))
 	if err != nil {
 		t.Fatalf("AddUserToGroup failed: %v", err)
 	}
