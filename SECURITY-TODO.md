@@ -44,12 +44,12 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 
 ## High — client must not trust the server
 
-- [ ] **C1. Inode signer key fetched unverified** — `pkg/client/client.go` `verifyInode` (+ group signer, owner delegation).
+- [x] **C1. Inode signer key fetched unverified** — `pkg/client/client.go` `verifyInode` (+ group signer, owner delegation).
   Signature checked against a fresh server-supplied key; deferred queue only re-checks by ID.
   Fix: resolve signer keys via the anchor-verified path (`getUser`/verified cache), never `getUserUnverified`.
   Test: server substitutes signer key → verification fails.
 
-- [ ] **C2. verifyUser / verifyGroup chain uses unverified verifier keys** — `client.go` `verifyUser`, `verifyGroup`.
+- [x] **C2. verifyUser / verifyGroup chain uses unverified verifier keys** — `client.go` `verifyUser`, `verifyGroup`.
   Also check `entry.UserID == user.ID` and group ID equality. Test: forged attestation rejected.
 
 - [ ] **C3. Key substitution in provisionRecipient / AddUserToGroup** — `client.go` `provisionRecipient`, `AddUserToGroup`, `setAttrByID`.
