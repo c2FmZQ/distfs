@@ -3812,6 +3812,11 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.checkLeasePermission(user, &req); err != nil {
+		s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	if req.Duration == 0 {
 		req.Duration = int64(2 * time.Minute) // Default duration
 		// NOTE: If we modify it here and re-marshal, we break the signature.
@@ -3831,6 +3836,55 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 		newBody, _ := json.Marshal(req)
 		s.ApplyRaftCommandRaw(w, r, CmdAcquireLeases, newBody, http.StatusOK)
 	}
+}
+
+// checkLeasePermission ensures exclusive leases are only granted to users who
+// may write the inode; otherwise any user could lock e.g. the root directory or
+// another user's files and block every mutation by other sessions. Shared
+// leases are not checked: the server cannot see anonymous group membership.
+// Placeholders for new inodes must be owned by the requester.
+func (s *Server) checkLeasePermission(user *User, req *LeaseRequest) error {
+	if s.fsm.IsAdmin(user.ID) {
+		return nil
+	}
+	for _, p := range req.Placeholders {
+		if p.OwnerID != user.ID {
+			return fmt.Errorf("forbidden: placeholder %s must be owned by the requester", p.ID)
+		}
+		if p.GroupID != "" {
+			if in, _ := s.fsm.IsUserInGroup(user.ID, p.GroupID); !in {
+				return fmt.Errorf("forbidden: not a member of group %s", p.GroupID)
+			}
+		}
+	}
+	if req.Type != LeaseExclusive {
+		return nil
+	}
+	for _, id := range req.InodeIDs {
+		if strings.HasPrefix(id, "path:") || !IsInodeID(id) {
+			continue // Name reservations
+		}
+		var inode Inode
+		var exists bool
+		err := s.fsm.db.View(func(tx *bolt.Tx) error {
+			plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
+			if err != nil || plain == nil {
+				return err
+			}
+			exists = true
+			return json.Unmarshal(plain, &inode)
+		})
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue // New inode: covered by its placeholder
+		}
+		if req.Type == LeaseExclusive && !evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0002) {
+			return fmt.Errorf("forbidden: exclusive lease on %s requires write access", id)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {

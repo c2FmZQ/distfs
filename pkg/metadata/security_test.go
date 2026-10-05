@@ -442,3 +442,56 @@ func TestSecurity_JWTClaims(t *testing.T) {
 		}
 	}
 }
+
+// TestSecurity_LeaseAuthorization verifies that users cannot lock inodes they
+// may not write, and cannot borrow another session's identity in a batch to
+// bypass that session's exclusive lease.
+func TestSecurity_LeaseAuthorization(t *testing.T) {
+	tc := SetupCluster(t)
+
+	owner, mallory := "owner", "mallory"
+	osk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: owner, UID: 1001, SignKey: osk.Public()}, osk, tc.AdminID, tc.AdminSK)
+	msk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
+
+	nonce := GenerateNonce()
+	f := Inode{ID: GenerateInodeID(owner, nonce), Nonce: nonce, OwnerID: owner, Type: FileType, Mode: 0644, Version: 1}
+	f.SignInodeForTest(owner, osk)
+	b, _ := json.Marshal(f)
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, b, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Mallory (read-only) cannot take an exclusive lease on the file.
+	mtoken, msecret := LoginSessionForTestWithSecret(t, tc.TS, mallory, msk)
+	req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionAcquireLeases, LeaseRequest{InodeIDs: []string{f.ID}, Type: LeaseExclusive, Duration: int64(time.Minute)}, mallory, msk, msecret)
+	req.Header.Set("Session-Token", mtoken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("read-only user obtained an exclusive lease")
+	}
+
+	// 2. The owner's session "victim-session" holds an exclusive lease.
+	lctx := context.WithValue(context.Background(), sessionNonceContextKey, "victim-session")
+	lb, _ := json.Marshal(LeaseRequest{InodeIDs: []string{f.ID}, Type: LeaseExclusive, Duration: int64(time.Minute)})
+	if _, err := tc.Server.ApplyRaftCommandInternal(lctx, CmdAcquireLeases, lb, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another session of a writer cannot claim to be "victim-session" inside
+	// a batch sub-command to bypass the lease.
+	f.Version = 2
+	f.Mode = 0600
+	f.SignInodeForTest(owner, osk)
+	ub, _ := json.Marshal(f)
+	batch, _ := json.Marshal([]LogCommand{{Type: CmdUpdateInode, Data: ub, SessionNonce: "victim-session"}})
+	actx := context.WithValue(context.Background(), sessionNonceContextKey, "other-session")
+	if _, err := tc.Server.ApplyRaftCommandInternal(actx, CmdBatch, batch, owner); err == nil {
+		t.Fatal("batch sub-command bypassed another session's exclusive lease")
+	}
+}

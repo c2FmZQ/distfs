@@ -636,14 +636,20 @@ func (fsm *MetadataFSM) executeCommand(tx *bolt.Tx, cmd LogCommand, depth int) i
 	case CmdBatch:
 		var subCmds []LogCommand
 		json.Unmarshal(cmd.Data, &subCmds)
+		// A batch submitted on behalf of a user (cmd.UserID set) carries the
+		// authenticated identity, session and time; sub-commands MUST NOT be
+		// able to override them (e.g. another session's ID to bypass its
+		// lease, or a future timestamp to expire leases). Server-aggregated
+		// batches have no outer user and keep their per-command values.
+		clientBatch := cmd.UserID != ""
 		for i := range subCmds {
-			if subCmds[i].UserID == "" {
+			if clientBatch || subCmds[i].UserID == "" {
 				subCmds[i].UserID = cmd.UserID
 			}
-			if subCmds[i].SessionNonce == "" {
+			if clientBatch || subCmds[i].SessionNonce == "" {
 				subCmds[i].SessionNonce = cmd.SessionNonce
 			}
-			if subCmds[i].Timestamp == 0 {
+			if clientBatch || subCmds[i].Timestamp == 0 {
 				subCmds[i].Timestamp = ts
 			}
 			if subCmds[i].RaftIndex == 0 {

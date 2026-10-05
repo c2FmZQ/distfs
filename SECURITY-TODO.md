@@ -79,7 +79,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 
 - [x] **M1. JWT missing audience/issuer/exp checks** — `server.go` `verifyJWT`. Fix: `WithIssuer`, `WithAudience` (configured client ID), `WithExpirationRequired`.
 - [ ] **M2. GetInode/GetInodes unauthorized** — `server.go`. Fix: require read access (owner, ACL, group, world, or link-traversal semantics per design); at minimum strip manifests/leases for non-readers.
-- [ ] **M3. Leases unauthorized; batch sub-command `sid`/`ts` overridable** — `fsm.go` `executeAcquireLeases`, batch apply.
+- [x] **M3. Leases unauthorized; batch sub-command `sid`/`ts` overridable** — `fsm.go` `executeAcquireLeases`, batch apply.
   Fix: require write access to lease; always overwrite `uid`/`sid`/`ts` from the authenticated outer command.
 - [ ] **M4. Group membership HMAC keyed by public group ID** — `types.go` `ComputeMemberHMAC` vs DISTFS-RAFT §2.3. Fix per design (needs design decision: clients can't know ClusterSecret).
 - [ ] **M5. Quota bypasses** — self-owned quota group with quota 0 = unlimited; client-set `Usage`/`Quota` persisted on group create/update; client-declared `Size` 0. Fix: ignore client `Usage`/`Quota`; enforce user quota as fallback.
