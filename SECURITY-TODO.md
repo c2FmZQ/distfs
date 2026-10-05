@@ -25,7 +25,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   `W`: require write (or new inode) + reservation. `D`: require write + chunks must NOT be referenced
   by the inode's committed manifest (upload-failure cleanup only). Test: D/RW/R-on-foreign-chunk rejected.
 
-- [ ] **S4. Group takeover via CreateGroup on existing ID** — `pkg/metadata/fsm.go` `executeCreateGroup`, server Batch handler.
+- [x] **S4. Group takeover via CreateGroup on existing ID** — `pkg/metadata/fsm.go` `executeCreateGroup`, server Batch handler.
   No existence check; `SelfOwnedGroup` skips authz. Fix: reject if `groups[ID]` exists (FSM + handler).
   Test: second CreateGroup with existing ID fails.
 

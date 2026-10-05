@@ -264,15 +264,7 @@ func TestServer_AdminHandlers(t *testing.T) {
 		t.Errorf("handleAdminPromote failed: %d", resp.StatusCode)
 	}
 
-	// 12. handleSetGroupQuota
-	// Create group first
-	g1 := Group{ID: "g1", GID: 2001, QuotaEnabled: true, OwnerID: u1, SignerID: u1}
-	g1.Signature = usk.Sign(g1.Hash())
-	g1b, _ := json.Marshal(g1)
-	if res, err := server.ApplyRaftCommandInternal(context.Background(), CmdCreateGroup, g1b, u1); err != nil || server.fsm.containsError(res) {
-		t.Fatalf("Create Group g1 failed: err=%v, res=%v", err, res)
-	}
-
+	// 12. handleSetGroupQuota (g1 was created above)
 	groupQuotaReq := SetGroupQuotaRequest{GroupID: "g1", MaxInodes: ptr(uint64(50))}
 	req = NewSealedTestRequestSymmetric(t, ts.URL, ActionAdminGroupQuota, groupQuotaReq, u1, usk, secret)
 	req.Header.Set("Session-Token", token)

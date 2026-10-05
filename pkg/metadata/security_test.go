@@ -161,3 +161,48 @@ func TestSecurity_IssueTokenModes(t *testing.T) {
 		}
 	}
 }
+
+// TestSecurity_CreateGroupCannotOverwrite verifies that CreateGroup cannot be
+// used to replace an existing group (owner, keys and membership).
+func TestSecurity_CreateGroupCannotOverwrite(t *testing.T) {
+	tc := SetupCluster(t)
+
+	mallory := "mallory"
+	msk, _ := crypto.GenerateIdentityKey()
+	mdk, _ := crypto.GenerateEncryptionKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public(), EncKey: mdk.EncapsulationKey().Bytes()}, msk, tc.AdminID, tc.AdminSK)
+
+	victim, err := tc.Node.FSM.GetGroup("users")
+	if err != nil {
+		t.Fatalf("GetGroup(users): %v", err)
+	}
+
+	lb := crypto.NewLockbox()
+	lb.AddRecipient(ComputeMemberHMAC(victim.ID, mallory), mdk.EncapsulationKey(), make([]byte, 32), 0)
+	forged := Group{
+		ID:       victim.ID,
+		GID:      victim.GID,
+		OwnerID:  SelfOwnedGroup,
+		Nonce:    GenerateNonce(),
+		Version:  1,
+		EncKey:   mdk.EncapsulationKey().Bytes(),
+		SignKey:  msk.Public(),
+		SignerID: mallory,
+		Lockbox:  lb,
+	}
+	forged.Signature = msk.Sign(forged.Hash())
+	b, _ := json.Marshal(forged)
+	batch, _ := json.Marshal([]LogCommand{{Type: CmdCreateGroup, Data: b, UserID: mallory}})
+
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdBatch, batch, mallory); err == nil {
+		t.Fatal("CreateGroup overwrote an existing group")
+	}
+
+	after, err := tc.Node.FSM.GetGroup("users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SignerID != victim.SignerID || !bytes.Equal(after.SignKey, victim.SignKey) {
+		t.Fatal("existing group was modified")
+	}
+}

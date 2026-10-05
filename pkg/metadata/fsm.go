@@ -1311,6 +1311,12 @@ func (fsm *MetadataFSM) executeCreateGroup(tx *bolt.Tx, data []byte) interface{}
 		return err
 	}
 
+	// A group can only be created once. Overwriting an existing group would let
+	// any user replace its owner, keys and membership.
+	if existing, _ := fsm.Get(tx, []byte("groups"), []byte(group.ID)); existing != nil {
+		return ErrExists
+	}
+
 	// Verify Signature
 	if err := fsm.verifyGroupSignature(tx, &group); err != nil {
 		return fmt.Errorf("group creation signature failed: %w", err)
