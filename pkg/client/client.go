@@ -6377,6 +6377,11 @@ func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		}
 		if attr.Size != nil {
 			i.Size = *attr.Size
+			// Truncation drops chunks wholly beyond the new size; the server
+			// rejects manifests with more chunks than the size needs.
+			if needed := (i.Size + crypto.ChunkSize - 1) / crypto.ChunkSize; uint64(len(i.ChunkManifest)) > needed {
+				i.ChunkManifest = i.ChunkManifest[:needed]
+			}
 		}
 		if attr.MTime != nil {
 			i.SetMTime(*attr.MTime)

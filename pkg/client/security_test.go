@@ -374,3 +374,35 @@ func mustResolveID(t *testing.T, c *Client, path string) string {
 	}
 	return in.ID
 }
+
+// TestTruncateTrimsManifest verifies that truncating a chunked file drops
+// chunks beyond the new size, which the server requires (a manifest may not
+// hold more chunks than the declared size needs).
+func TestTruncateTrimsManifest(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	data := bytes.Repeat([]byte("x"), metadata.InlineLimit+1)
+	if err := c.saveDataFile(ctx, "/t", data); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := c.resolvePath(ctx, "/t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.ChunkManifest) == 0 {
+		t.Fatal("test file is not chunked")
+	}
+	if err := c.setAttr(ctx, "/t", metadata.SetAttrRequest{Size: Ptr(uint64(0))}); err != nil {
+		t.Fatalf("truncate to 0 failed: %v", err)
+	}
+	c.clearPathCache()
+	after, _, err := c.resolvePath(ctx, "/t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size != 0 || len(after.ChunkManifest) != 0 {
+		t.Fatalf("after truncate: size=%d chunks=%d", after.Size, len(after.ChunkManifest))
+	}
+}
