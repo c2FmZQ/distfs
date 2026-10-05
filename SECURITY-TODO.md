@@ -78,7 +78,10 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 ## Medium
 
 - [x] **M1. JWT missing audience/issuer/exp checks** — `server.go` `verifyJWT`. Fix: `WithIssuer`, `WithAudience` (configured client ID), `WithExpirationRequired`.
-- [ ] **M2. GetInode/GetInodes unauthorized** — `server.go`. Fix: require read access (owner, ACL, group, world, or link-traversal semantics per design); at minimum strip manifests/leases for non-readers.
+- [x] **M2. GetInode/GetInodes unauthorized** — `server.go`. Resolved as far as the design allows:
+  other sessions' lease identifiers are redacted. Signed fields (chunk IDs, children) cannot be
+  withheld without breaking client verification (e.g. `ls -l` of files the user cannot read), and
+  the server cannot see anonymous group members; S3/S5/S6 removed what made chunk IDs exploitable.
 - [x] **M3. Leases unauthorized; batch sub-command `sid`/`ts` overridable** — `fsm.go` `executeAcquireLeases`, batch apply.
   Fix: require write access to lease; always overwrite `uid`/`sid`/`ts` from the authenticated outer command.
 - [ ] **M4. Group membership HMAC keyed by public group ID** — `types.go` `ComputeMemberHMAC` vs DISTFS-RAFT §2.3. Fix per design (needs design decision: clients can't know ClusterSecret).

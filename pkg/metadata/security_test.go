@@ -495,3 +495,27 @@ func TestSecurity_LeaseAuthorization(t *testing.T) {
 		t.Fatal("batch sub-command bypassed another session's exclusive lease")
 	}
 }
+
+// TestSecurity_ForeignLeasesRedacted verifies that GetInode does not reveal
+// other sessions' lease identifiers.
+func TestSecurity_ForeignLeasesRedacted(t *testing.T) {
+	in := &Inode{Leases: map[string]LeaseInfo{
+		"victim-nonce": {SessionID: "victim-session", Nonce: "victim-nonce", Type: LeaseExclusive},
+		"my-nonce":     {SessionID: "my-session", Nonce: "my-nonce"},
+	}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r = r.WithContext(context.WithValue(r.Context(), sessionNonceContextKey, "my-session"))
+	redactForeignLeases(in, r)
+
+	if len(in.Leases) != 2 {
+		t.Fatalf("expected 2 leases, got %d", len(in.Leases))
+	}
+	if _, ok := in.Leases["my-nonce"]; !ok {
+		t.Error("own lease was redacted")
+	}
+	for k, l := range in.Leases {
+		if k == "victim-nonce" || l.SessionID == "victim-session" || l.Nonce == "victim-nonce" {
+			t.Errorf("foreign lease identifiers leaked: %q %+v", k, l)
+		}
+	}
+}

@@ -1903,6 +1903,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	s.resolveURLs(inode.ChunkManifest)
+	redactForeignLeases(&inode, r)
 	data, err = json.Marshal(inode)
 	if err != nil {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
@@ -1913,6 +1914,29 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 
 	// E2EE?
 	s.writeSealedResponse(w, r, data)
+}
+
+// redactForeignLeases hides the session identifiers of leases held by other
+// sessions. Leases are not covered by the owner's signature, so they can be
+// redacted without breaking client-side verification.
+func redactForeignLeases(inode *Inode, r *http.Request) {
+	if len(inode.Leases) == 0 {
+		return
+	}
+	own, _ := r.Context().Value(sessionNonceContextKey).(string)
+	redacted := make(map[string]LeaseInfo, len(inode.Leases))
+	n := 0
+	for k, l := range inode.Leases {
+		if own != "" && l.SessionID == own {
+			redacted[k] = l
+			continue
+		}
+		n++
+		l.SessionID = ""
+		l.Nonce = ""
+		redacted[fmt.Sprintf("redacted-%d", n)] = l
+	}
+	inode.Leases = redacted
 }
 
 func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
@@ -1968,6 +1992,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 
 	for _, inode := range result {
 		s.resolveURLs(inode.ChunkManifest)
+		redactForeignLeases(inode, r)
 	}
 
 	data, _ := json.Marshal(result)
