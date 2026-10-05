@@ -756,10 +756,10 @@ func TestServer_handleClusterJoin_mTLSError(t *testing.T) {
 		nonceHex := r.Header.Get("X-Raft-Nonce")
 		nonce, _ := hex.DecodeString(nonceHex)
 
-		// Sign as NODE_RESPONSE
+		// Sign as NODE_RESPONSE (bound to the empty response body)
 		mac := hmac.New(sha256.New, []byte("testsecret"))
 		mac.Write(nonce)
-		mac.Write([]byte("NODE_RESPONSE"))
+		mac.Write([]byte(nodeResponseLabel(nil)))
 		sig := hex.EncodeToString(mac.Sum(nil))
 
 		w.Header().Set("X-Raft-Response", sig)

@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -651,8 +652,6 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, ErrCodeInternal, "invalid leader signature", http.StatusUnauthorized)
 			return
 		}
-		// Prove knowledge of secret back to leader
-		w.Header().Set(raftResponseHeader, s.signNonce(nonce, "NODE_RESPONSE"))
 	} else if !s.checkRaftSecret(r) {
 		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
@@ -670,8 +669,51 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	if s.decKey != nil {
 		info["enc_key"] = s.decKey.EncapsulationKey().Bytes()
 	}
+	body, _ := json.Marshal(info)
+	if nonceStr != "" && sigStr != "" {
+		// Prove knowledge of the secret back to the leader, bound to this exact
+		// response so that a relay cannot substitute its own keys.
+		nonce, _ := hex.DecodeString(nonceStr)
+		w.Header().Set(raftResponseHeader, s.signNonce(nonce, nodeResponseLabel(body)))
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	w.Write(body)
+}
+
+// nodeResponseLabel binds the node's discovery proof to its response body.
+func nodeResponseLabel(body []byte) string {
+	h := sha256.Sum256(body)
+	return "NODE_RESPONSE|" + hex.EncodeToString(h[:])
+}
+
+// pinnedDiscoveryClient returns a client for talking to a joining node that
+// only accepts the given TLS key, which was authenticated during discovery.
+func (s *Server) pinnedDiscoveryClient(pub ed25519.PublicKey) *http.Client {
+	t := ech.NewTransport()
+	cfg := &tls.Config{}
+	if base, ok := s.discoveryHTTPClient.Transport.(*ech.Transport); ok {
+		if base.TLSConfig != nil {
+			cfg = base.TLSConfig.Clone()
+		}
+		t.Resolver = base.Resolver
+	}
+	cfg.InsecureSkipVerify = true // Replaced by the key pinning below.
+	cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("no peer certificate")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return err
+		}
+		key, ok := cert.PublicKey.(ed25519.PublicKey)
+		if !ok || !key.Equal(pub) {
+			return fmt.Errorf("joining node presented an unexpected TLS key")
+		}
+		return nil
+	}
+	t.TLSConfig = cfg
+	return &http.Client{Transport: t, Timeout: s.discoveryHTTPClient.Timeout}
 }
 
 // ServeHTTP routes and handles incoming Metadata API requests.
@@ -3149,9 +3191,15 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify node response signature
+	infoBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to read discovery response", http.StatusInternalServerError)
+		return
+	}
+
+	// Verify node response signature over the exact response body
 	nodeSig := resp.Header.Get(raftResponseHeader)
-	if !s.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
+	if !s.verifySignature(nonce, nodeResponseLabel(infoBody), nodeSig) {
 		s.writeError(w, r, ErrCodeInternal, "invalid node response signature (secret mismatch?)", http.StatusForbidden)
 		return
 	}
@@ -3182,7 +3230,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		SignKey     []byte `json:"sign_key"`
 		EncKey      []byte `json:"enc_key"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	if err := json.Unmarshal(infoBody, &info); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "invalid discovery response", http.StatusInternalServerError)
 		return
 	}
@@ -3233,6 +3281,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bootstrapURL := strings.TrimSuffix(req.Address, "/") + "/v1/system/bootstrap"
+	pushClient := s.pinnedDiscoveryClient(probedEdKey)
 	var pushResp *http.Response
 	var lastPushErr error
 	alreadyBootstrapped := false
@@ -3249,10 +3298,11 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 			pushReq.Header.Set("X-Raft-Secret", s.raftSecret)
 		}
 
-		// We use discoveryHTTPClient here because the joining node's certificate
-		// is not yet in the FSM's trusted list. The payload is sealed with the node's
-		// ML-KEM key, ensuring confidentiality.
-		pushResp, err = s.discoveryHTTPClient.Do(pushReq)
+		// The joining node's certificate is not yet in the FSM's trusted list,
+		// so the connection is pinned to the TLS key authenticated during
+		// discovery (the request carries the raft secret). The payload is also
+		// sealed with the node's authenticated ML-KEM key.
+		pushResp, err = pushClient.Do(pushReq)
 		if err == nil {
 			if pushResp.StatusCode == http.StatusOK {
 				break
@@ -3573,6 +3623,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 	return payload, ctx, nil
 }
+
 // checkReplay rejects a request seen before. It is keyed on the request's
 // signature, which is authenticated and unique per signed message; the sealed
 // bytes themselves are not suitable since parts of them (e.g. the unused KEM

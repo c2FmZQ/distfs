@@ -3,8 +3,11 @@ package metadata
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -644,5 +647,40 @@ func TestSecurity_ReplayWithAlteredPrefix(t *testing.T) {
 	}
 	if code := send(body); code == http.StatusOK {
 		t.Fatal("exact replay was accepted")
+	}
+}
+
+// TestSecurity_PinnedDiscoveryClient verifies that the bootstrap push to a
+// joining node (which carries the raft secret) only connects to the TLS key
+// that was authenticated during discovery.
+func TestSecurity_PinnedDiscoveryClient(t *testing.T) {
+	tc := SetupCluster(t)
+
+	newTLSServer := func() (*httptest.Server, ed25519.PublicKey) {
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv}}}
+		srv.StartTLS()
+		return srv, pub
+	}
+	node, nodeKey := newTLSServer()
+	defer node.Close()
+	impostor, _ := newTLSServer()
+	defer impostor.Close()
+
+	client := tc.Server.pinnedDiscoveryClient(nodeKey)
+	resp, err := client.Get(node.URL)
+	if err != nil {
+		t.Fatalf("pinned client rejected the authenticated node: %v", err)
+	}
+	resp.Body.Close()
+	if resp, err := client.Get(impostor.URL); err == nil {
+		resp.Body.Close()
+		t.Fatal("pinned client connected to a node with a different TLS key")
 	}
 }
