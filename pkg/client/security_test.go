@@ -1,6 +1,10 @@
 package client
 
 import (
+	"bytes"
+	"io"
+	"net/http"
+	"sync"
 	"testing"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
@@ -143,5 +147,86 @@ func TestSecurity_AnchorBindsToConfirmedCode(t *testing.T) {
 	}
 	if err := c.AnchorUserInRegistryWithCode(ctx, "dave", "dave", adminID, code); err != nil {
 		t.Fatalf("anchoring with the confirmed code failed: %v", err)
+	}
+}
+
+// replayTransport records the server's response to the next request and can
+// replay it in place of the response to a later request, simulating a server
+// that answers with a different (validly signed) object than requested.
+type replayTransport struct {
+	base     http.RoundTripper
+	mu       sync.Mutex
+	record   bool
+	recorded *http.Response
+	body     []byte
+	replay   bool
+}
+
+func (r *replayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	replay := r.replay && r.recorded != nil && req.URL.Path == "/v1/invoke"
+	r.mu.Unlock()
+	if replay {
+		resp := *r.recorded
+		resp.Header = r.recorded.Header.Clone()
+		resp.Body = io.NopCloser(bytes.NewReader(r.body))
+		resp.Request = req
+		return &resp, nil
+	}
+	resp, err := r.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.record && req.URL.Path == "/v1/invoke" {
+		r.body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(r.body))
+		rec := *resp
+		r.recorded = &rec
+		r.record = false
+	}
+	return resp, nil
+}
+
+// TestSecurity_InodeSubstitution verifies that the client rejects a validly
+// signed inode returned in place of the requested one.
+func TestSecurity_InodeSubstitution(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	if err := c.saveDataFile(ctx, "/x", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.saveDataFile(ctx, "/y", []byte("attacker-chosen")); err != nil {
+		t.Fatal(err)
+	}
+	x, _, err := c.resolvePath(ctx, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, _, err := c.resolvePath(ctx, "/y")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &replayTransport{base: c.httpCli.Transport}
+	if rt.base == nil {
+		rt.base = http.DefaultTransport
+	}
+	c.httpCli.Transport = rt
+
+	rt.record = true
+	if _, err := c.getInodeInternal(ctx, y.ID, true); err != nil {
+		t.Fatalf("fetch y: %v", err)
+	}
+	rt.mu.Lock()
+	rt.replay = true
+	rt.mu.Unlock()
+
+	if got, err := c.getInodeInternal(ctx, x.ID, true); err == nil {
+		t.Fatalf("accepted inode %s in place of requested %s", got.ID, x.ID)
 	}
 }

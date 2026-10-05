@@ -2327,6 +2327,12 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				return nil, err
 			}
 		} else {
+			// The signature binds an inode's content to its own ID, not to the
+			// ID that was requested; the server could otherwise answer with any
+			// other validly signed inode.
+			if fetchedInode.ID != id {
+				return nil, fmt.Errorf("high-severity: server returned inode %q for requested inode %q", fetchedInode.ID, id)
+			}
 			if cacheHit && inode != nil && fetchedInode.Version < inode.Version {
 				return nil, fmt.Errorf("STALE MANIFEST ROLLBACK DETECTED: expected version >= %d, got %d", inode.Version, fetchedInode.Version)
 			}
@@ -2432,8 +2438,17 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 			return nil, err
 		}
 
+		requested := make(map[string]bool, len(chunkIDs))
+		for _, id := range chunkIDs {
+			requested[id] = true
+		}
+
 		// Phase 31: Verification
 		for _, inode := range chunkInodes {
+			if inode == nil || !requested[inode.ID] {
+				return nil, fmt.Errorf("high-severity: server returned an inode that was not requested")
+			}
+			delete(requested, inode.ID) // Reject duplicates
 			if err := c.verifyInode(ctx, inode); err != nil {
 				return nil, fmt.Errorf("structural inconsistency: inode %s verification failed: %w", inode.ID, err)
 			}
