@@ -108,3 +108,40 @@ func TestSecurity_RecipientKeysMustBeVerified(t *testing.T) {
 		t.Fatal("AddUserToGroup accepted contact info that does not match the server's keys")
 	}
 }
+
+// TestSecurity_AnchorBindsToConfirmedCode verifies that the registry
+// attestation is only signed for the exact keys whose verification code the
+// administrator confirmed, and that the code is long enough to resist grinding.
+func TestSecurity_AnchorBindsToConfirmedCode(t *testing.T) {
+	c, node, _, ts, adminID, adminSK := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	dsk, _ := crypto.GenerateIdentityKey()
+	ddk, _ := crypto.GenerateEncryptionKey()
+	metadata.CreateUser(t, node, metadata.User{ID: "dave", SignKey: dsk.Public(), EncKey: ddk.EncapsulationKey().Bytes()}, dsk, adminID, adminSK)
+
+	code, err := c.GetUserVerificationCode(ctx, "dave")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := VerificationCode(ddk.EncapsulationKey().Bytes(), dsk.Public()); code != want {
+		t.Fatalf("code = %s, want %s", code, want)
+	}
+	if len(code) != 39 { // 8 groups of 4 hex digits = 128 bits
+		t.Fatalf("verification code %q is not 128 bits", code)
+	}
+	if own := c.OwnVerificationCode(); own != VerificationCode(c.decKey.EncapsulationKey().Bytes(), c.signKey.Public()) {
+		t.Fatalf("OwnVerificationCode mismatch: %s", own)
+	}
+
+	// A code for different keys (the server switched keys after the check).
+	otherDK, _ := crypto.GenerateEncryptionKey()
+	stale := VerificationCode(otherDK.EncapsulationKey().Bytes(), dsk.Public())
+	if err := c.AnchorUserInRegistryWithCode(ctx, "dave", "dave", adminID, stale); err == nil {
+		t.Fatal("anchored keys that do not match the confirmed code")
+	}
+	if err := c.AnchorUserInRegistryWithCode(ctx, "dave", "dave", adminID, code); err != nil {
+		t.Fatalf("anchoring with the confirmed code failed: %v", err)
+	}
+}

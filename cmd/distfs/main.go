@@ -617,10 +617,11 @@ func main() {
 			},
 			{
 				Name:  "whoami",
-				Usage: "Display your user ID",
+				Usage: "Display your user ID and security code",
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					c := loadClient()
 					fmt.Println(c.UserID())
+					fmt.Printf("Security code: %s\n", c.OwnVerificationCode())
 					return nil
 				},
 			},

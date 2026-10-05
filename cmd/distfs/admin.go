@@ -77,6 +77,7 @@ type AdminClient interface {
 	UserID() string
 	GetUserVerificationCode(ctx context.Context, userID string) (string, error)
 	AnchorUserInRegistry(ctx context.Context, username, userID, signerID string) error
+	AnchorUserInRegistryWithCode(ctx context.Context, username, userID, signerID, expectedCode string) error
 	AdminSetUserLock(ctx context.Context, userID string, lock bool) error
 	Mkdir(ctx context.Context, path string, perm os.FileMode) error
 	AnchorGroupInRegistry(ctx context.Context, name, groupID string) error
@@ -948,7 +949,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 	fmt.Printf("\n--- OUT-OF-BAND VERIFICATION REQUIRED ---\n")
 	fmt.Printf("User: %s (ID: %s)\n", username, userID)
 	fmt.Printf("Please contact this user out-of-band (e.g., via phone or Signal).\n")
-	fmt.Printf("Ask them to verify their security code matches: %s\n", codeStr)
+	fmt.Printf("Ask them to run 'distfs whoami' and verify their security code matches: %s\n", codeStr)
 	fmt.Printf("-----------------------------------------\n")
 
 	if !assumeYes {
@@ -963,7 +964,7 @@ func cmdRegistryAdd(ctx context.Context, username, userID string, unlock bool, q
 	}
 
 	// 3. Attestation & Registry Update
-	if err := c.AnchorUserInRegistry(ctx, username, userID, c.UserID()); err != nil {
+	if err := c.AnchorUserInRegistryWithCode(ctx, username, userID, c.UserID(), codeStr); err != nil {
 		return fmt.Errorf("failed to anchor user in registry: %w", err)
 	}
 

@@ -56,7 +56,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
   Fix: use verified user/group keys; honor `ContactInfo` keys when provided; fail (not debug-log) on
   group verification failure. Test: unverified recipient key rejected.
 
-- [ ] **C4. Admin anchoring TOCTOU + 24-bit code** — `client.go` `GetUserVerificationCode`, `AnchorUserInRegistry`, `cmd/distfs/admin.go`.
+- [x] **C4. Admin anchoring TOCTOU + 24-bit code** — `client.go` `GetUserVerificationCode`, `AnchorUserInRegistry`, `cmd/distfs/admin.go`.
   Fix: anchor exactly the keys the code was computed from (pass them through); lengthen code to ≥ 80 bits.
 
 - [ ] **C5. Inode ID substitution** — `client.go` `getInodeInternal`, `directory.go` `resolveSequential`, FUSE refresh paths.

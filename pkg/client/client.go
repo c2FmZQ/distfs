@@ -4323,17 +4323,35 @@ func (c *Client) AdminGetInodeDump(ctx context.Context, id string) (*InodeDump, 
 	return dump, nil
 }
 
-// GetUserVerificationCode returns a deterministic verification code for a user based on their public keys.
+// VerificationCode returns the out-of-band security code for a user's public
+// keys: 128 bits of SHA-256(EncKey || SignKey), as 8 groups of 4 hex digits.
+// It is long enough that a server cannot grind keys to collide with it.
+func VerificationCode(encKey, signKey []byte) string {
+	h := crypto.NewHash()
+	h.Write(encKey)
+	h.Write(signKey)
+	sum := h.Sum(nil)
+	parts := make([]string, 8)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("%02X%02X", sum[2*i], sum[2*i+1])
+	}
+	return strings.Join(parts, "-")
+}
+
+// GetUserVerificationCode returns the verification code for the keys the
+// server currently holds for a user.
 func (c *Client) GetUserVerificationCode(ctx context.Context, userID string) (string, error) {
-	user, err := c.getUserUnverified(ctx, userID)
+	user, err := c.getUserRaw(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	h := crypto.NewHash()
-	h.Write(user.EncKey)
-	h.Write(user.SignKey)
-	codeBytes := h.Sum(nil)
-	return fmt.Sprintf("%02X-%02X-%02X", codeBytes[0], codeBytes[1], codeBytes[2]), nil
+	return VerificationCode(user.EncKey, user.SignKey), nil
+}
+
+// OwnVerificationCode returns the verification code for this client's own keys,
+// for the user to read to an administrator out of band.
+func (c *Client) OwnVerificationCode() string {
+	return VerificationCode(c.decKey.EncapsulationKey().Bytes(), c.signKey.Public())
 }
 
 // DumpInode returns a JSON representation of an inode for administrative debugging.
@@ -5640,15 +5658,31 @@ func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID
 	return nil
 }
 
+// AnchorUserInRegistry signs a registry attestation for the keys the server
+// currently holds for userID. Interactive callers MUST use
+// AnchorUserInRegistryWithCode so that the attested keys are exactly the ones
+// confirmed out of band.
 func (c *Client) AnchorUserInRegistry(ctx context.Context, username string, userID string, verifierID string) error {
+	return c.AnchorUserInRegistryWithCode(ctx, username, userID, verifierID, "")
+}
+
+// AnchorUserInRegistryWithCode is like AnchorUserInRegistry but refuses to
+// anchor unless the keys being attested match expectedCode, the verification
+// code the administrator confirmed with the user out of band. This prevents a
+// malicious server from showing one set of keys for the code check and
+// another for the attestation.
+func (c *Client) AnchorUserInRegistryWithCode(ctx context.Context, username, userID, verifierID, expectedCode string) error {
 	if username == "" {
 		return fmt.Errorf("username is required to anchor a user in the registry")
 	}
 
-	// 1. Fetch User Metadata (Unverified)
-	user, err := c.getUserUnverified(ctx, userID)
+	// 1. Fetch User Metadata (Unverified; confirmed below by expectedCode)
+	user, err := c.getUserRaw(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch user %s for anchoring: %w", userID, err)
+	}
+	if expectedCode != "" && VerificationCode(user.EncKey, user.SignKey) != expectedCode {
+		return fmt.Errorf("high-severity: keys for user %s changed since the verification code was confirmed", userID)
 	}
 
 	regDir := c.registryDir
