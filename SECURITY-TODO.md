@@ -72,7 +72,7 @@ users, (c) a malicious/compromised metadata server (clients must detect tamperin
 - [x] **C8. Inode `Size` unsigned** — `pkg/metadata/types.go` `ManifestHash`.
   Fix: include `Size` in the manifest hash (client + server). Test: size tamper detected.
 
-- [ ] **C9. Mutation results trusted & cached unverified** — `client.go` `updateInodeInternal`, `createInode`; root anchor updated before verify in `getInodeInternal`.
+- [x] **C9. Mutation results trusted & cached unverified** — `client.go` `updateInodeInternal`, `createInode`; root anchor updated before verify in `getInodeInternal`.
   Fix: verify returned inodes before caching; update root anchor only after verification.
 
 ## Medium

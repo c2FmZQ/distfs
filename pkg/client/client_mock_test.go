@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/mlkem"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -222,14 +223,14 @@ func TestClient_MockedConflict(t *testing.T) {
 						}, nil
 					}
 
-					// Return a successful batch response after 2 attempts
+					// Return a successful batch response after 2 attempts,
+					// echoing the inode the client wrote (as the server does).
 					attempts++
-					// For tests, use the SAME inodeID but incremented version
-					u1ID := "u1"
-					updatedInode := metadata.Inode{ID: inodeID, Nonce: nonce, Version: 2, Type: metadata.FileType, OwnerID: u1ID}
-					updatedInode.SignInodeForTest("u1", sk)
-					ib, _ := json.Marshal(updatedInode)
-					batchRes := []json.RawMessage{ib}
+					var cmds []metadata.LogCommand
+					if err := json.Unmarshal(env.Payload, &cmds); err != nil || len(cmds) == 0 {
+						return nil, fmt.Errorf("bad batch: %v", err)
+					}
+					batchRes := []json.RawMessage{cmds[0].Data}
 					bb, _ := json.Marshal(batchRes)
 					return sealedMockResponse(t, dk, sk, http.StatusOK, bb), nil
 				}

@@ -2171,8 +2171,12 @@ func (c *Client) createInode(ctx context.Context, inode *metadata.Inode) (*metad
 		return nil, fmt.Errorf("failed to decode created inode: %w", err)
 	}
 
-	// Preserve transient fields
 	created.SetFileKey(inode.GetFileKey())
+	if err := c.verifyMutationResult(ctx, &created, inode.ID, inode.Version); err != nil {
+		return nil, err
+	}
+
+	// Preserve transient fields
 	created.SetSymlinkTarget(inode.GetSymlinkTarget())
 	created.SetInlineData(inode.GetInlineData())
 	created.SetMTime(inode.GetMTime())
@@ -2188,6 +2192,18 @@ func (c *Client) createInode(ctx context.Context, inode *metadata.Inode) (*metad
 	}
 
 	return &created, nil
+}
+
+// verifyMutationResult checks an inode returned by the server after a create
+// or update: it must be the inode and version we wrote, and verify fully.
+func (c *Client) verifyMutationResult(ctx context.Context, result *metadata.Inode, id string, version uint64) error {
+	if result.ID != id || result.Version != version {
+		return fmt.Errorf("high-severity: server returned inode %s v%d after writing %s v%d", result.ID, result.Version, id, version)
+	}
+	if err := c.verifyInode(ctx, result); err != nil {
+		return fmt.Errorf("mutation result verification failed: %w", err)
+	}
+	return nil
 }
 
 // updateInode performs an atomic read-modify-write operation on an inode.
@@ -2242,6 +2258,12 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			// Ensure we keep the file key if we already had it (e.g. placeholder updates)
 			if key := inode.GetFileKey(); len(key) > 0 {
 				updated.SetFileKey(key)
+			}
+
+			// The result is cached and reused, so it must be exactly what we
+			// wrote and pass full verification.
+			if err := c.verifyMutationResult(ctx, &updated, id, inode.Version); err != nil {
+				return nil, err
 			}
 
 			// Phase 31: Root Anchoring
@@ -2397,10 +2419,24 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 			c.rootMu.Unlock()
 			return nil, fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", version, inode.Version)
 		}
+		c.rootMu.Unlock()
+	}
 
-		// Update anchor
+	// Phase 31: Verification
+	if verify {
+		if err := c.verifyInode(ctx, inode); err != nil {
+			return nil, err
+		}
+	}
+
+	// Advance the root anchor only from a verified root inode; an unverified
+	// one could otherwise poison it (e.g. with a huge version).
+	if id == c.rootID && verify {
+		c.rootMu.Lock()
 		c.rootOwner = inode.OwnerID
-		c.rootVersion = inode.Version
+		if inode.Version > c.rootVersion {
+			c.rootVersion = inode.Version
+		}
 		needKeys := len(c.rootOwnerPK) == 0
 		c.rootMu.Unlock()
 
@@ -2413,13 +2449,6 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				c.rootOwnerEK = user.EncKey
 				c.rootMu.Unlock()
 			}
-		}
-	}
-
-	// Phase 31: Verification
-	if verify {
-		if err := c.verifyInode(ctx, inode); err != nil {
-			return nil, err
 		}
 	}
 

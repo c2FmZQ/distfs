@@ -331,3 +331,44 @@ func TestSecurity_ChunkContentMustMatchID(t *testing.T) {
 		t.Fatal("verifyChunkID accepted mismatched data")
 	}
 }
+
+// TestSecurity_MutationResultsAreVerified verifies that inodes returned by the
+// server after a write are checked before being cached or used as anchors.
+func TestSecurity_MutationResultsAreVerified(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	if err := c.saveDataFile(ctx, "/m", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := c.updateInode(ctx, mustResolveID(t, c, "/m"), func(i *metadata.Inode) error { return nil })
+	if err != nil {
+		t.Fatalf("updateInode: %v", err)
+	}
+	if err := c.verifyMutationResult(ctx, updated, updated.ID, updated.Version); err != nil {
+		t.Fatalf("genuine result rejected: %v", err)
+	}
+
+	wrongVersion := *updated
+	if err := c.verifyMutationResult(ctx, &wrongVersion, updated.ID, updated.Version+1); err == nil {
+		t.Error("accepted a result with the wrong version")
+	}
+	if err := c.verifyMutationResult(ctx, updated, "other-id", updated.Version); err == nil {
+		t.Error("accepted a result for a different inode")
+	}
+	tampered := *updated
+	tampered.Size += 1
+	if err := c.verifyMutationResult(ctx, &tampered, updated.ID, updated.Version); err == nil {
+		t.Error("accepted a tampered result")
+	}
+}
+
+func mustResolveID(t *testing.T, c *Client, path string) string {
+	t.Helper()
+	in, _, err := c.resolvePath(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return in.ID
+}
