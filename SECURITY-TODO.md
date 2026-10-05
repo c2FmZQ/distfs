@@ -1,0 +1,88 @@
+# Security Review TODO
+
+Findings from the 2026-10-05 full-codebase security review. Each item is resolved in its own
+commit with a regression test. This file is deleted once every item is checked off.
+
+Threat model: (a) unauthenticated network attackers, (b) authenticated users attacking other
+users, (c) a malicious/compromised metadata server (clients must detect tampering).
+
+## Critical
+
+- [ ] **S1. Double `RUnlock` crashes the leader** — `pkg/metadata/server.go` `unsealRequest`.
+  Expired cached session key path calls `sessionKeyMu.RUnlock()` twice → fatal, unrecoverable.
+  Fix: remove the second `RUnlock`. Test: expired cache entry falls back without panicking.
+
+- [ ] **S2. Login challenge is a signing oracle** — `pkg/client/client.go` `Login`, `pkg/metadata/server.go` `handleLogin`.
+  Client signs a raw server-chosen 32-byte challenge with its identity key; a malicious server can
+  set it to an inode `ManifestHash()` and obtain a valid `UserSig`.
+  Fix: domain-separate (sign `"DistFS-Login-v1\x00" || challenge`), verify the same on server;
+  document in SERVER-API.md. Test: login sig does not verify as a raw signature over the challenge.
+
+- [ ] **S3. IssueToken mints arbitrary chunk capabilities** — `pkg/metadata/server.go` `handleIssueToken`.
+  Modes other than exactly `"W"` only require read; `req.Chunks` is never checked against the
+  inode manifest; `"D"`/`"RW"` grant delete / skip quota reservation.
+  Fix: allow only modes `R`, `W`, `D`. `R`: require read + every chunk in the inode manifest.
+  `W`: require write (or new inode) + reservation. `D`: require write + chunks must NOT be referenced
+  by the inode's committed manifest (upload-failure cleanup only). Test: D/RW/R-on-foreign-chunk rejected.
+
+- [ ] **S4. Group takeover via CreateGroup on existing ID** — `pkg/metadata/fsm.go` `executeCreateGroup`, server Batch handler.
+  No existence check; `SelfOwnedGroup` skips authz. Fix: reject if `groups[ID]` exists (FSM + handler).
+  Test: second CreateGroup with existing ID fails.
+
+- [ ] **S5. Chunk-page hijack / deletion** — `pkg/metadata/fsm.go` create/update inode & lease placeholders.
+  Client-supplied `ChunkPages` IDs are not bound to the inode; update-to-`[]` deletes victim pages,
+  and delete→GC loads victim pages. Fix: reject any page ID not of the form `<inode.ID>:p<i>`.
+  Test: foreign page IDs rejected.
+
+## High — client must not trust the server
+
+- [ ] **C1. Inode signer key fetched unverified** — `pkg/client/client.go` `verifyInode` (+ group signer, owner delegation).
+  Signature checked against a fresh server-supplied key; deferred queue only re-checks by ID.
+  Fix: resolve signer keys via the anchor-verified path (`getUser`/verified cache), never `getUserUnverified`.
+  Test: server substitutes signer key → verification fails.
+
+- [ ] **C2. verifyUser / verifyGroup chain uses unverified verifier keys** — `client.go` `verifyUser`, `verifyGroup`.
+  Also check `entry.UserID == user.ID` and group ID equality. Test: forged attestation rejected.
+
+- [ ] **C3. Key substitution in provisionRecipient / AddUserToGroup** — `client.go` `provisionRecipient`, `AddUserToGroup`, `setAttrByID`.
+  Fix: use verified user/group keys; honor `ContactInfo` keys when provided; fail (not debug-log) on
+  group verification failure. Test: unverified recipient key rejected.
+
+- [ ] **C4. Admin anchoring TOCTOU + 24-bit code** — `client.go` `GetUserVerificationCode`, `AnchorUserInRegistry`, `cmd/distfs/admin.go`.
+  Fix: anchor exactly the keys the code was computed from (pass them through); lengthen code to ≥ 80 bits.
+
+- [ ] **C5. Inode ID substitution** — `client.go` `getInodeInternal`, `directory.go` `resolveSequential`, FUSE refresh paths.
+  Fix: reject when `fetched.ID != requested id`. Test.
+
+- [ ] **C6. Unsealed / unbound responses trusted** — `client.go` `unsealResponse`, `doRequest`.
+  Fix: when the request expects a sealed response, reject unsealed bodies; require binding signature
+  on sealed responses; don't silently skip when cluster key fetch fails.
+
+- [ ] **C7. Chunk ciphertext not checked against chunk ID** — `client.go` `downloadChunk`.
+  Fix: verify `sha256(ciphertext) == chunkID` before decrypt/cache. Test: swapped chunk rejected.
+
+- [ ] **C8. Inode `Size` unsigned** — `pkg/metadata/types.go` `ManifestHash`.
+  Fix: include `Size` in the manifest hash (client + server). Test: size tamper detected.
+
+- [ ] **C9. Mutation results trusted & cached unverified** — `client.go` `updateInodeInternal`, `createInode`; root anchor updated before verify in `getInodeInternal`.
+  Fix: verify returned inodes before caching; update root anchor only after verification.
+
+## Medium
+
+- [ ] **M1. JWT missing audience/issuer/exp checks** — `server.go` `verifyJWT`. Fix: `WithIssuer`, `WithAudience` (configured client ID), `WithExpirationRequired`.
+- [ ] **M2. GetInode/GetInodes unauthorized** — `server.go`. Fix: require read access (owner, ACL, group, world, or link-traversal semantics per design); at minimum strip manifests/leases for non-readers.
+- [ ] **M3. Leases unauthorized; batch sub-command `sid`/`ts` overridable** — `fsm.go` `executeAcquireLeases`, batch apply.
+  Fix: require write access to lease; always overwrite `uid`/`sid`/`ts` from the authenticated outer command.
+- [ ] **M4. Group membership HMAC keyed by public group ID** — `types.go` `ComputeMemberHMAC` vs DISTFS-RAFT §2.3. Fix per design (needs design decision: clients can't know ClusterSecret).
+- [ ] **M5. Quota bypasses** — self-owned quota group with quota 0 = unlimited; client-set `Usage`/`Quota` persisted on group create/update; client-declared `Size` 0. Fix: ignore client `Usage`/`Quota`; enforce user quota as fallback.
+- [ ] **M6. Locked users keep live sessions** — `server.go` `sessionTokenCache`. Fix: re-check lock state from FSM per request / evict on lock.
+- [ ] **M7. Replay key uses unauthenticated prefix** — `server.go` `checkReplay`. Fix: key on hash of the authenticated DEM ciphertext / signature.
+- [ ] **M8. Cluster join TOFU MITM** — `server.go` `handleClusterJoin`. Fix: bind HMAC proof over the returned public keys; don't send raft secret over unverified channel.
+- [ ] **M9. Web service worker serves decrypted HTML/SVG inline** — `web/sw.js`. Fix: `Content-Security-Policy: sandbox`, `nosniff`, block active types / force attachment, reject navigations; unregister stale workers.
+- [ ] **M10. Web login ignores pinned server key** — `web/ts/app.ts`. Fix: use `config.server_key`.
+
+## Low
+
+- [ ] **L1. Peer identity truncated to 64 bits** — `node_identity.go`, `raft_manager.go` `verifyPeer`. Fix: compare full public key.
+- [ ] **L2. Unbounded `/v1/auth/challenge` body + cache** — `server.go`. Fix: `MaxBytesReader`, validate user ID format, cap cache.
+- [ ] **L3. Non-deterministic FSM apply (`time.Now()`)** — `fsm.go`. Fix: leader stamps `LogCommand.Timestamp`; FSM uses it.
