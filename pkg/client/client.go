@@ -53,7 +53,40 @@ const (
 
 type verificationState struct {
 	toVerify map[string]bool
+	// observed holds the exact (not yet verified) user records whose keys were
+	// used during the optimistic phase. Deferred verification MUST confirm these
+	// records, not a fresh fetch, or the server could substitute keys.
+	observed map[string]*metadata.User
 	mu       sync.Mutex
+}
+
+func sameUserKeys(a, b *metadata.User) bool {
+	return bytes.Equal(a.SignKey, b.SignKey) && bytes.Equal(a.EncKey, b.EncKey)
+}
+
+// observeUser queues a user for deferred verification and records the keys
+// that were used. It fails if different keys were already used for the same ID.
+func (s *verificationState) observeUser(u *metadata.User) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.observed == nil {
+		s.observed = make(map[string]*metadata.User)
+	}
+	if prev, ok := s.observed[u.ID]; ok && !sameUserKeys(prev, u) {
+		return fmt.Errorf("high-severity: server returned inconsistent keys for user %s", u.ID)
+	}
+	s.observed[u.ID] = u
+	if s.toVerify == nil {
+		s.toVerify = make(map[string]bool)
+	}
+	s.toVerify[u.ID] = true
+	return nil
+}
+
+func (s *verificationState) observedUser(id string) *metadata.User {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.observed[id]
 }
 
 func (s *verificationState) add(id string) {
@@ -128,14 +161,22 @@ func (c *Client) processVerificationQueue(ctx context.Context, state *verificati
 				c.cacheMu.Unlock()
 			} else {
 				// User
+				observed := state.observedUser(id)
 				c.cacheMu.RLock()
-				_, verified := c.userCache[id]
+				cached, verified := c.userCache[id]
 				c.cacheMu.RUnlock()
 				if verified {
+					if observed != nil && !sameUserKeys(cached, observed) {
+						return fmt.Errorf("high-severity: key substitution detected for user %s", id)
+					}
 					continue // Already in verified cache
 				}
 
-				user, err := c.getUserRaw(ctx, id)
+				user := observed
+				var err error
+				if user == nil {
+					user, err = c.getUserRaw(ctx, id)
+				}
 				if err != nil {
 					// Fallback: it might be a group that wasn't in the cache yet
 					if IsNotFound(err) {
@@ -915,9 +956,12 @@ func (c *Client) Login(ctx context.Context) error {
 	if !crypto.VerifySignature(serverSignPK, challengeRes.Challenge, challengeRes.Signature) {
 		return fmt.Errorf("invalid server signature on challenge")
 	}
+	if len(challengeRes.Challenge) != metadata.LoginChallengeSize {
+		return fmt.Errorf("invalid challenge length: %d", len(challengeRes.Challenge))
+	}
 
-	// 3. Solve Challenge (Sign it) + Ephemeral Key for Forward Secrecy
-	sig := c.signKey.Sign(challengeRes.Challenge)
+	// 3. Solve Challenge (Sign it, domain-separated) + Ephemeral Key for Forward Secrecy
+	sig := c.signKey.Sign(metadata.LoginChallengeMessage(challengeRes.Challenge))
 
 	// Phase 53.1: Ephemeral PQC-KEM for Forward Secret Session Key
 	sessionDK, err := crypto.GenerateEncryptionKey()
@@ -1146,6 +1190,11 @@ func (c *Client) sealBody(ctx context.Context, req *http.Request, payload []byte
 }
 func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.ReadCloser, error) {
 	if resp.Header.Get("X-DistFS-Sealed") != "true" {
+		// A successful response to a request that expects a sealed reply MUST
+		// be sealed; otherwise anyone on the path could forge it.
+		if resp.StatusCode < 400 {
+			return nil, fmt.Errorf("high-severity: expected a sealed response from the server")
+		}
 		// If the server rejected our sealed request before unsealing it (e.g. 403 Forbidden),
 		// it did not cache our session key. We must invalidate our local cache to
 		// ensure the next request falls back to Full KEM.
@@ -1166,9 +1215,17 @@ func (c *Client) unsealResponse(ctx context.Context, resp *http.Response) (io.Re
 	}
 
 	// Phase 71: Response Binding (Verifiable Timeline)
+	// Once the cluster signing key is known, every sealed response MUST carry a
+	// binding signature; a forking server could otherwise simply omit it.
+	cPK, cerr := c.getClusterSignKey(ctx)
+	if cerr == nil && len(cPK) > 0 && len(sealed.BindingSignature) == 0 {
+		return nil, fmt.Errorf("high-severity: response is missing the cluster binding signature")
+	}
 	if len(sealed.BindingSignature) > 0 {
-		cPK, err := c.getClusterSignKey(ctx)
-		if err == nil && len(cPK) > 0 {
+		if cerr != nil {
+			return nil, fmt.Errorf("failed to fetch cluster signing key to verify response binding: %w", cerr)
+		}
+		if len(cPK) > 0 {
 			h := crypto.NewHash()
 			h.Write(sealed.Sealed)
 			idxBuf := make([]byte, 8)
@@ -1476,9 +1533,18 @@ var downloadBufPool = sync.Pool{
 	},
 }
 
+// verifyChunkID checks that ciphertext hashes to its content-addressed chunk ID.
+func verifyChunkID(id string, ciphertext []byte) error {
+	sum := sha256.Sum256(ciphertext)
+	if hex.EncodeToString(sum[:]) != id {
+		return fmt.Errorf("high-severity: chunk %s content does not match its ID", id)
+	}
+	return nil
+}
+
 func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, token string) ([]byte, error) {
 	if c.store != nil {
-		if data, err := c.store.Get("chunks", id); err == nil {
+		if data, err := c.store.Get("chunks", id); err == nil && verifyChunkID(id, data) == nil {
 			return data, nil
 		}
 	}
@@ -1566,6 +1632,10 @@ func (c *Client) downloadChunk(ctx context.Context, id string, urls []string, to
 				if err == nil {
 					d = make([]byte, buf.Len())
 					copy(d, buf.Bytes())
+					// Chunk IDs are content addresses: reject data that does not
+					// hash to the ID named in the signed manifest (e.g. an older
+					// version of the chunk served by a malicious node).
+					err = verifyChunkID(id, d)
 				}
 				downloadBufPool.Put(buf)
 
@@ -1675,8 +1745,21 @@ func (c *Client) ListGroups(ctx context.Context) iter.Seq2[metadata.GroupListEnt
 	}
 }
 
-// verifyUser verifies a user's identity against the registry anchor.
+// verifyUser verifies a user's identity against the registry anchor. Keys of
+// users it depends on (verifiers, signers of registry files) are verified
+// through the same queue before it returns.
 func (c *Client) verifyUser(ctx context.Context, user *metadata.User) error {
+	ctx, state, created := withVerificationState(ctx)
+	if err := c.verifyUserOnce(ctx, user); err != nil {
+		return err
+	}
+	if created {
+		return c.processVerificationQueue(ctx, state)
+	}
+	return nil
+}
+
+func (c *Client) verifyUserOnce(ctx context.Context, user *metadata.User) error {
 	if c.registryDir == "" {
 		return nil
 	}
@@ -1703,12 +1786,15 @@ func (c *Client) verifyUser(ctx context.Context, user *metadata.User) error {
 	if err := json.NewDecoder(rc).Decode(&entry); err != nil {
 		return fmt.Errorf("failed to decode registry entry for user %s: %w", user.ID, err)
 	}
+	if entry.UserID != user.ID {
+		return fmt.Errorf("high-severity: registry attestation for %s names a different user %s", user.ID, entry.UserID)
+	}
 
 	// Tier 3: Registry Cross-Check (Confirmation)
-	// Fetch the verifier's keys OPTIMISTICALLY from the server.
-	verifier, err := c.getUserUnverified(ctx, entry.VerifierID)
+	// The verifier's keys are themselves verified (or queued for deferred verification).
+	verifier, err := c.getUser(ctx, entry.VerifierID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch optimistic verifier %s for user %s: %w", entry.VerifierID, user.ID, err)
+		return fmt.Errorf("failed to fetch verifier %s for user %s: %w", entry.VerifierID, user.ID, err)
 	}
 
 	vpk, err := crypto.UnmarshalIdentityPublicKey(verifier.SignKey)
@@ -1858,6 +1944,9 @@ func (c *Client) getUserRaw(ctx context.Context, id string) (*metadata.User, err
 				return nil, err
 			}
 		} else {
+			if fetchedUser.ID != id {
+				return nil, fmt.Errorf("high-severity: server returned user %q for requested user %q", fetchedUser.ID, id)
+			}
 			user = &fetchedUser
 			// Update cache
 			if c.store != nil {
@@ -1905,11 +1994,24 @@ func (c *Client) getUserInternal(ctx context.Context, id string, bypassCache boo
 		return nil, err
 	}
 
+	// Our own identity is verified against the keys we hold, not the registry.
+	if id == c.userID && c.signKey != nil && c.decKey != nil {
+		if !bytes.Equal(user.SignKey, c.signKey.Public()) || !bytes.Equal(user.EncKey, c.decKey.EncapsulationKey().Bytes()) {
+			return nil, fmt.Errorf("high-severity: server returned substitute keys for our own identity %s", id)
+		}
+		c.cacheMu.Lock()
+		c.userCache[id] = user
+		c.cacheMu.Unlock()
+		return user, nil
+	}
+
 	// Phase 69: Aggregate Optimistic Verification
 	// If a verification queue is active, we return the optimistic (server-signed) user
 	// and add it to the queue for deferred confirmation.
 	if s, ok := ctx.Value(verificationStateKey).(*verificationState); ok {
-		s.add(id)
+		if err := s.observeUser(user); err != nil {
+			return nil, err
+		}
 		return user, nil
 	}
 
@@ -2069,8 +2171,12 @@ func (c *Client) createInode(ctx context.Context, inode *metadata.Inode) (*metad
 		return nil, fmt.Errorf("failed to decode created inode: %w", err)
 	}
 
-	// Preserve transient fields
 	created.SetFileKey(inode.GetFileKey())
+	if err := c.verifyMutationResult(ctx, &created, inode.ID, inode.Version); err != nil {
+		return nil, err
+	}
+
+	// Preserve transient fields
 	created.SetSymlinkTarget(inode.GetSymlinkTarget())
 	created.SetInlineData(inode.GetInlineData())
 	created.SetMTime(inode.GetMTime())
@@ -2086,6 +2192,18 @@ func (c *Client) createInode(ctx context.Context, inode *metadata.Inode) (*metad
 	}
 
 	return &created, nil
+}
+
+// verifyMutationResult checks an inode returned by the server after a create
+// or update: it must be the inode and version we wrote, and verify fully.
+func (c *Client) verifyMutationResult(ctx context.Context, result *metadata.Inode, id string, version uint64) error {
+	if result.ID != id || result.Version != version {
+		return fmt.Errorf("high-severity: server returned inode %s v%d after writing %s v%d", result.ID, result.Version, id, version)
+	}
+	if err := c.verifyInode(ctx, result); err != nil {
+		return fmt.Errorf("mutation result verification failed: %w", err)
+	}
+	return nil
 }
 
 // updateInode performs an atomic read-modify-write operation on an inode.
@@ -2140,6 +2258,12 @@ func (c *Client) updateInodeInternal(ctx context.Context, id string, fn InodeUpd
 			// Ensure we keep the file key if we already had it (e.g. placeholder updates)
 			if key := inode.GetFileKey(); len(key) > 0 {
 				updated.SetFileKey(key)
+			}
+
+			// The result is cached and reused, so it must be exactly what we
+			// wrote and pass full verification.
+			if err := c.verifyMutationResult(ctx, &updated, id, inode.Version); err != nil {
+				return nil, err
 			}
 
 			// Phase 31: Root Anchoring
@@ -2262,6 +2386,12 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				return nil, err
 			}
 		} else {
+			// The signature binds an inode's content to its own ID, not to the
+			// ID that was requested; the server could otherwise answer with any
+			// other validly signed inode.
+			if fetchedInode.ID != id {
+				return nil, fmt.Errorf("high-severity: server returned inode %q for requested inode %q", fetchedInode.ID, id)
+			}
 			if cacheHit && inode != nil && fetchedInode.Version < inode.Version {
 				return nil, fmt.Errorf("STALE MANIFEST ROLLBACK DETECTED: expected version >= %d, got %d", inode.Version, fetchedInode.Version)
 			}
@@ -2289,10 +2419,24 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 			c.rootMu.Unlock()
 			return nil, fmt.Errorf("ROOT ROLLBACK DETECTED: expected version >= %d, got %d", version, inode.Version)
 		}
+		c.rootMu.Unlock()
+	}
 
-		// Update anchor
+	// Phase 31: Verification
+	if verify {
+		if err := c.verifyInode(ctx, inode); err != nil {
+			return nil, err
+		}
+	}
+
+	// Advance the root anchor only from a verified root inode; an unverified
+	// one could otherwise poison it (e.g. with a huge version).
+	if id == c.rootID && verify {
+		c.rootMu.Lock()
 		c.rootOwner = inode.OwnerID
-		c.rootVersion = inode.Version
+		if inode.Version > c.rootVersion {
+			c.rootVersion = inode.Version
+		}
 		needKeys := len(c.rootOwnerPK) == 0
 		c.rootMu.Unlock()
 
@@ -2305,13 +2449,6 @@ func (c *Client) getInodeInternal(ctx context.Context, id string, verify bool) (
 				c.rootOwnerEK = user.EncKey
 				c.rootMu.Unlock()
 			}
-		}
-	}
-
-	// Phase 31: Verification
-	if verify {
-		if err := c.verifyInode(ctx, inode); err != nil {
-			return nil, err
 		}
 	}
 
@@ -2367,8 +2504,16 @@ func (c *Client) getInodes(ctx context.Context, ids []string) ([]*metadata.Inode
 			return nil, err
 		}
 
+		requested := make(map[string]bool, len(chunkIDs))
+		for _, id := range chunkIDs {
+			requested[id] = true
+		}
+
 		// Phase 31: Verification
 		for _, inode := range chunkInodes {
+			if inode == nil || !requested[inode.ID] {
+				return nil, fmt.Errorf("high-severity: server returned an inode that was not requested")
+			}
 			if err := c.verifyInode(ctx, inode); err != nil {
 				return nil, fmt.Errorf("structural inconsistency: inode %s verification failed: %w", inode.ID, err)
 			}
@@ -4258,17 +4403,35 @@ func (c *Client) AdminGetInodeDump(ctx context.Context, id string) (*InodeDump, 
 	return dump, nil
 }
 
-// GetUserVerificationCode returns a deterministic verification code for a user based on their public keys.
+// VerificationCode returns the out-of-band security code for a user's public
+// keys: 128 bits of SHA-256(EncKey || SignKey), as 8 groups of 4 hex digits.
+// It is long enough that a server cannot grind keys to collide with it.
+func VerificationCode(encKey, signKey []byte) string {
+	h := crypto.NewHash()
+	h.Write(encKey)
+	h.Write(signKey)
+	sum := h.Sum(nil)
+	parts := make([]string, 8)
+	for i := range parts {
+		parts[i] = fmt.Sprintf("%02X%02X", sum[2*i], sum[2*i+1])
+	}
+	return strings.Join(parts, "-")
+}
+
+// GetUserVerificationCode returns the verification code for the keys the
+// server currently holds for a user.
 func (c *Client) GetUserVerificationCode(ctx context.Context, userID string) (string, error) {
-	user, err := c.getUserUnverified(ctx, userID)
+	user, err := c.getUserRaw(ctx, userID)
 	if err != nil {
 		return "", err
 	}
-	h := crypto.NewHash()
-	h.Write(user.EncKey)
-	h.Write(user.SignKey)
-	codeBytes := h.Sum(nil)
-	return fmt.Sprintf("%02X-%02X-%02X", codeBytes[0], codeBytes[1], codeBytes[2]), nil
+	return VerificationCode(user.EncKey, user.SignKey), nil
+}
+
+// OwnVerificationCode returns the verification code for this client's own keys,
+// for the user to read to an administrator out of band.
+func (c *Client) OwnVerificationCode() string {
+	return VerificationCode(c.decKey.EncapsulationKey().Bytes(), c.signKey.Public())
 }
 
 // DumpInode returns a JSON representation of an inode for administrative debugging.
@@ -4364,6 +4527,17 @@ func (c *Client) getInodeUnverified(ctx context.Context, id string) (*metadata.I
 
 // verifyInode verifies the manifest signatures and authorized signers.
 func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
+	ctx, state, created := withVerificationState(ctx)
+	if err := c.verifyInodeOnce(ctx, inode); err != nil {
+		return err
+	}
+	if created {
+		return c.processVerificationQueue(ctx, state)
+	}
+	return nil
+}
+
+func (c *Client) verifyInodeOnce(ctx context.Context, inode *metadata.Inode) error {
 	// 1. Resolve File Key from Lockbox (Needed for both ClientBlob and Phase 67 Names)
 	fileKey := inode.GetFileKey()
 	if len(fileKey) == 0 {
@@ -4481,10 +4655,11 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 		signKey = pk
 	}
 
-	// Fetch signer metadata OPTIMISTICALLY from the server.
-	signer, err := c.getUserUnverified(ctx, signerID)
+	// The signer's keys are verified (or recorded for deferred verification of
+	// exactly these keys).
+	signer, err := c.getUser(ctx, signerID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch optimistic signer %s for inode %s: %w", signerID, inode.ID, err)
+		return fmt.Errorf("failed to fetch signer %s for inode %s: %w", signerID, inode.ID, err)
 	}
 
 	if len(signKey) == 0 {
@@ -4493,11 +4668,6 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 
 	if !crypto.VerifySignature(signKey, hash, inode.UserSig) {
 		return fmt.Errorf("invalid manifest signature by %s", signerID)
-	}
-
-	// Queue signer for deferred registry verification
-	if s, ok := ctx.Value(verificationStateKey).(*verificationState); ok {
-		s.add(signerID)
 	}
 
 	groupSigValid := false
@@ -4597,17 +4767,13 @@ func (c *Client) verifyInode(ctx context.Context, inode *metadata.Inode) error {
 			return fmt.Errorf("missing owner delegation signature on inode %s", inode.ID)
 		}
 
-		// Verify delegation signature using unverified owner key (deferred verification added below)
-		owner, err := c.getUserUnverified(ctx, inode.OwnerID)
+		// The owner's keys are verified (or recorded for deferred verification).
+		owner, err := c.getUser(ctx, inode.OwnerID)
 		if err != nil {
-			return fmt.Errorf("failed to fetch optimistic owner %s for delegation check: %w", inode.OwnerID, err)
+			return fmt.Errorf("failed to fetch owner %s for delegation check: %w", inode.OwnerID, err)
 		}
 		if !crypto.VerifySignature(owner.SignKey, inode.DelegationHash(), inode.OwnerDelegationSig) {
 			return fmt.Errorf("invalid owner delegation signature on inode %s", inode.ID)
-		}
-		// Ensure owner is also queued for verification
-		if s, ok := ctx.Value(verificationStateKey).(*verificationState); ok {
-			s.add(inode.OwnerID)
 		}
 	}
 
@@ -4646,8 +4812,10 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		// Use HMAC for the recipient key
 		target := c.computeMemberHMAC(groupContext.ID, recipientID)
 
-		// For Group Lockboxes, the payload is usually the Epoch Seed
-		user, err := c.getUserUnverified(ctx, recipientID)
+		// For Group Lockboxes, the payload is usually the Epoch Seed.
+		// Recipient keys MUST be verified: the server could otherwise substitute
+		// its own key and learn the payload.
+		user, err := c.getUser(ctx, recipientID)
 		if err == nil {
 			upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
 			if err != nil {
@@ -4657,7 +4825,7 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		}
 
 		// Recipient might be a Group (Hierarchical Ownership)
-		group, err := c.getGroupUnverifiedCached(ctx, recipientID)
+		group, err := c.getGroup(ctx, recipientID)
 		if err == nil {
 			upk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 			if err != nil {
@@ -4681,8 +4849,8 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		return lb.AddRecipient(metadata.WorldID, wpk, payload, 0)
 	}
 
-	// 3b. Try as User
-	user, err := c.getUserUnverified(ctx, recipientID)
+	// 3b. Try as User (verified keys only)
+	user, err := c.getUser(ctx, recipientID)
 	if err == nil {
 		upk, err := crypto.UnmarshalEncapsulationKey(user.EncKey)
 		if err != nil {
@@ -4691,8 +4859,8 @@ func (c *Client) provisionRecipient(ctx context.Context, lb crypto.Lockbox, reci
 		return lb.AddRecipient(recipientID, upk, payload, 0)
 	}
 
-	// 3c. Try as Group (Asymmetric Encryption using Group Public Key)
-	group, err := c.getGroupUnverifiedCached(ctx, recipientID)
+	// 3c. Try as Group (Asymmetric Encryption using verified Group Public Key)
+	group, err := c.getGroup(ctx, recipientID)
 	if err == nil {
 		gpk, err := crypto.UnmarshalEncapsulationKey(group.EncKey)
 		if err != nil {
@@ -4886,7 +5054,7 @@ func (c *Client) getWorldPublicKey(ctx context.Context) (*mlkem.EncapsulationKey
 		return wp, nil
 	}
 
-	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world", nil, requestOptions{sealed: true, unseal: true, retry: true}, nil)
+	bodyRC, _, err := c.doRequest(ctx, "GET", "/v1/meta/key/world", nil, requestOptions{retry: true}, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -5097,6 +5265,9 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 				return nil, err
 			}
 		} else {
+			if fetchedGroup.ID != id {
+				return nil, fmt.Errorf("high-severity: server returned group %q for requested group %q", fetchedGroup.ID, id)
+			}
 			if cacheHit && group != nil && fetchedGroup.Version < group.Version {
 				return nil, fmt.Errorf("STALE MANIFEST ROLLBACK DETECTED: expected version >= %d, got %d", group.Version, fetchedGroup.Version)
 			}
@@ -5117,15 +5288,41 @@ func (c *Client) getGroupRaw(ctx context.Context, id string) (*metadata.Group, e
 
 // verifyGroup verifies the group metadata signature and cross-checks it against the registry attestation.
 func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
+	ctx, state, created := withVerificationState(ctx)
+	if err := c.verifyGroupOnce(ctx, group); err != nil {
+		return err
+	}
+	if created {
+		if err := c.processVerificationQueue(ctx, state); err != nil {
+			c.invalidateGroupCache(group.ID)
+			return err
+		}
+	}
+	return nil
+}
+
+func (c *Client) verifyGroupOnce(ctx context.Context, group *metadata.Group) error {
+	if err := c.verifyGroupSelf(ctx, group); err != nil {
+		return err
+	}
+	if c.registryDir == "" {
+		return nil // Non-registry mode trusts server authenticity
+	}
+	return c.verifyGroupAttestation(ctx, group)
+}
+
+// verifyGroupSelf checks the group's own signature (by a verified signer) and
+// its ID commitment.
+func (c *Client) verifyGroupSelf(ctx context.Context, group *metadata.Group) error {
 	if group.Signature == nil {
 		return fmt.Errorf("missing group signature")
 	}
 
 	// 1. Verify ML-DSA Signature on Group Metadata (Tier 1: Server Authenticity)
-	// We fetch the signer's metadata OPTIMISTICALLY from the server.
-	signer, err := c.getUserUnverified(ctx, group.SignerID)
+	// The signer's keys are verified (or queued for deferred verification).
+	signer, err := c.getUser(ctx, group.SignerID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch optimistic signer %s for group %s: %w", group.SignerID, group.ID, err)
+		return fmt.Errorf("failed to fetch signer %s for group %s: %w", group.SignerID, group.ID, err)
 	}
 
 	spk, err := crypto.UnmarshalIdentityPublicKey(signer.SignKey)
@@ -5137,10 +5334,19 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 		return fmt.Errorf("high-severity: invalid group signature for group %s (signer=%s)", group.ID, group.SignerID)
 	}
 
-	if c.registryDir == "" {
-		return nil // Non-registry mode trusts server authenticity
+	// Phase 69.7: Cryptographic ID Commitment
+	if len(group.Nonce) != metadata.NonceLength {
+		return fmt.Errorf("invalid cryptographic nonce length for group %s: expected %d, got %d", group.ID, metadata.NonceLength, len(group.Nonce))
 	}
+	expectedID := metadata.GenerateGroupID(group.OwnerID, group.Nonce)
+	if group.ID != expectedID {
+		return fmt.Errorf("group ID commitment mismatch for %s: expected %s (owner=%s)", group.ID, expectedID, group.OwnerID)
+	}
+	return nil
+}
 
+// verifyGroupAttestation cross-checks the group against its registry attestation.
+func (c *Client) verifyGroupAttestation(ctx context.Context, group *metadata.Group) error {
 	// 2. Fetch and Verify Registry Attestation for the Group (Tier 3: Confirmation)
 	idPath := c.registryDir + "/" + group.ID + ".group-id"
 	attestationInode, attestationKey, err := c.resolvePathInternal(ctx, idPath, true)
@@ -5158,11 +5364,14 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 	if err := json.NewDecoder(attestationRC).Decode(&entry); err != nil {
 		return fmt.Errorf("failed to decode registry entry for group %s: %w", group.ID, err)
 	}
+	if entry.GroupID != group.ID {
+		return fmt.Errorf("high-severity: registry attestation for group %s names a different group %s", group.ID, entry.GroupID)
+	}
 
-	// Verify attestation signature using verifier key OPTIMISTICALLY from server
-	verifier, err := c.getUserUnverified(ctx, entry.VerifierID)
+	// The verifier's keys are verified (or queued for deferred verification).
+	verifier, err := c.getUser(ctx, entry.VerifierID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch optimistic verifier %s for group %s: %w", entry.VerifierID, group.ID, err)
+		return fmt.Errorf("failed to fetch verifier %s for group %s: %w", entry.VerifierID, group.ID, err)
 	}
 
 	vpk, err := crypto.UnmarshalIdentityPublicKey(verifier.SignKey)
@@ -5182,20 +5391,11 @@ func (c *Client) verifyGroup(ctx context.Context, group *metadata.Group) error {
 		return fmt.Errorf("high-severity: group signing key hijacking detected for %s", group.ID)
 	}
 
-	// 3. Cache Promotion (Tier 4)
+	// 3. Cache Promotion (Tier 4), only after every check passed.
 	c.cacheMu.Lock()
 	c.verifiedGroupCache[group.ID] = group
 	delete(c.unverifiedGroupCache, group.ID)
 	c.cacheMu.Unlock()
-
-	// Phase 69.7: Cryptographic ID Commitment
-	if len(group.Nonce) != metadata.NonceLength {
-		return fmt.Errorf("invalid cryptographic nonce length for group %s: expected %d, got %d", group.ID, metadata.NonceLength, len(group.Nonce))
-	}
-	expectedID := metadata.GenerateGroupID(group.OwnerID, group.Nonce)
-	if group.ID != expectedID {
-		return fmt.Errorf("group ID commitment mismatch for %s: expected %s (owner=%s)", group.ID, expectedID, group.OwnerID)
-	}
 
 	return nil
 }
@@ -5436,10 +5636,25 @@ func (c *Client) AnchorClusterInRegistry(ctx context.Context) error {
 
 // AnchorGroupInRegistry creates a signed attestation for a group in the registry.
 func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID string) error {
-	group, err := c.getGroupUnverifiedCached(ctx, groupID)
+	group, err := c.getGroupRaw(ctx, groupID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch group for anchoring: %w", err)
 	}
+	// The attestation vouches for the group's keys, so they must at least be
+	// signed by a verified signer and match the group's ID commitment.
+	vctx, state, _ := withVerificationState(ctx)
+	if err := c.verifyGroupSelf(vctx, group); err != nil {
+		return fmt.Errorf("refusing to anchor group %s: %w", groupID, err)
+	}
+	if err := c.processVerificationQueue(vctx, state); err != nil {
+		return fmt.Errorf("refusing to anchor group %s: %w", groupID, err)
+	}
+	// We are attesting these keys, so they are verified from our point of view.
+	c.cacheMu.Lock()
+	c.verifiedGroupCache[group.ID] = group
+	delete(c.unverifiedGroupCache, group.ID)
+	c.cacheMu.Unlock()
+
 	regDir := c.registryDir
 	if regDir == "" {
 		return nil // Registry not configured, skip anchoring
@@ -5550,15 +5765,31 @@ func (c *Client) AnchorGroupInRegistry(ctx context.Context, name string, groupID
 	return nil
 }
 
+// AnchorUserInRegistry signs a registry attestation for the keys the server
+// currently holds for userID. Interactive callers MUST use
+// AnchorUserInRegistryWithCode so that the attested keys are exactly the ones
+// confirmed out of band.
 func (c *Client) AnchorUserInRegistry(ctx context.Context, username string, userID string, verifierID string) error {
+	return c.AnchorUserInRegistryWithCode(ctx, username, userID, verifierID, "")
+}
+
+// AnchorUserInRegistryWithCode is like AnchorUserInRegistry but refuses to
+// anchor unless the keys being attested match expectedCode, the verification
+// code the administrator confirmed with the user out of band. This prevents a
+// malicious server from showing one set of keys for the code check and
+// another for the attestation.
+func (c *Client) AnchorUserInRegistryWithCode(ctx context.Context, username, userID, verifierID, expectedCode string) error {
 	if username == "" {
 		return fmt.Errorf("username is required to anchor a user in the registry")
 	}
 
-	// 1. Fetch User Metadata (Unverified)
-	user, err := c.getUserUnverified(ctx, userID)
+	// 1. Fetch User Metadata (Unverified; confirmed below by expectedCode)
+	user, err := c.getUserRaw(ctx, userID)
 	if err != nil {
 		return fmt.Errorf("failed to fetch user %s for anchoring: %w", userID, err)
+	}
+	if expectedCode != "" && VerificationCode(user.EncKey, user.SignKey) != expectedCode {
+		return fmt.Errorf("high-severity: keys for user %s changed since the verification code was confirmed", userID)
 	}
 
 	regDir := c.registryDir
@@ -5830,7 +6061,23 @@ func (c *Client) AddUserToGroup(ctx context.Context, groupID, userID, info strin
 		}
 
 		// Phase 71: Use provisionRecipient with group context for HMAC privacy.
-		if err := c.provisionRecipient(ctx, group.Lockbox, userID, epochSeed, group); err != nil {
+		// When the caller verified the user's keys out of band (ContactInfo),
+		// encrypt to exactly those keys.
+		if ci != nil {
+			if ci.UserID != userID {
+				return fmt.Errorf("contact info is for user %s, not %s", ci.UserID, userID)
+			}
+			if server, err := c.getUserRaw(ctx, userID); err == nil && (!bytes.Equal(server.EncKey, ci.EncKey) || !bytes.Equal(server.SignKey, ci.SignKey)) {
+				return fmt.Errorf("high-severity: server keys for user %s do not match the verified contact info", userID)
+			}
+			upk, err := crypto.UnmarshalEncapsulationKey(ci.EncKey)
+			if err != nil {
+				return fmt.Errorf("invalid contact encryption key: %w", err)
+			}
+			if err := group.Lockbox.AddRecipient(c.computeMemberHMAC(group.ID, userID), upk, epochSeed, group.Epoch); err != nil {
+				return err
+			}
+		} else if err := c.provisionRecipient(ctx, group.Lockbox, userID, epochSeed, group); err != nil {
 			return err
 		}
 
@@ -6130,6 +6377,11 @@ func (c *Client) setAttrByID(ctx context.Context, inode *metadata.Inode, key []b
 		}
 		if attr.Size != nil {
 			i.Size = *attr.Size
+			// Truncation drops chunks wholly beyond the new size; the server
+			// rejects manifests with more chunks than the size needs.
+			if needed := (i.Size + crypto.ChunkSize - 1) / crypto.ChunkSize; uint64(len(i.ChunkManifest)) > needed {
+				i.ChunkManifest = i.ChunkManifest[:needed]
+			}
 		}
 		if attr.MTime != nil {
 			i.SetMTime(*attr.MTime)
@@ -6516,7 +6768,7 @@ func (c *Client) withConflictRetry(ctx context.Context, op func() error) error {
 
 func (c *Client) getClusterStats(ctx context.Context) (*metadata.ClusterStats, error) {
 	var stats metadata.ClusterStats
-	_, _, err := c.doRequest(ctx, "GET", "/v1/cluster/stats", nil, requestOptions{sealed: true, unseal: true, retry: true}, &stats)
+	_, _, err := c.doRequest(ctx, "GET", "/v1/cluster/stats", nil, requestOptions{retry: true}, &stats)
 	if err != nil {
 		return nil, err
 	}

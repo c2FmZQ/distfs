@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"testing"
 
@@ -49,7 +50,7 @@ func TestChallengeResponseAuth(t *testing.T) {
 	}
 
 	// 3. Solve Challenge (Sign it)
-	sig := userSK.Sign(cresp.Challenge)
+	sig := userSK.Sign(LoginChallengeMessage(cresp.Challenge))
 	solve := AuthChallengeSolve{
 		UserID:    user.ID,
 		Challenge: cresp.Challenge,
@@ -100,8 +101,14 @@ func TestMutualRaftAuth(t *testing.T) {
 	}
 
 	nodeSig := resp.Header.Get("X-Raft-Response")
-	if !tc.Server.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
+	infoBody, _ := io.ReadAll(resp.Body)
+	if !tc.Server.verifySignature(nonce, nodeResponseLabel(infoBody), nodeSig) {
 		t.Error("invalid node response signature")
+	}
+	// The proof is bound to the response body: altered keys must not verify.
+	tampered := bytes.Replace(infoBody, []byte(`"id"`), []byte(`"iD"`), 1)
+	if tc.Server.verifySignature(nonce, nodeResponseLabel(tampered), nodeSig) {
+		t.Error("node response signature verified for a tampered body")
 	}
 
 	// 2. Invalid Leader Signature

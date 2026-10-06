@@ -18,6 +18,8 @@ package client
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -28,6 +30,11 @@ import (
 func TestDownloadChunk_HedgedRequests(t *testing.T) {
 	c := NewClient("http://localhost:8080")
 
+	// Chunk IDs are content addresses, so every replica serves the same bytes.
+	content := []byte("chunk-data")
+	sum := sha256.Sum256(content)
+	chunkID := hex.EncodeToString(sum[:])
+
 	// Mock server with controllable delays
 	var callCount int32
 	ts1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -35,7 +42,7 @@ func TestDownloadChunk_HedgedRequests(t *testing.T) {
 		// Slow response (3 seconds) - should trigger hedge
 		time.Sleep(3 * time.Second)
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("chunk-data-from-1"))
+		w.Write(content)
 	}))
 	defer ts1.Close()
 
@@ -43,7 +50,7 @@ func TestDownloadChunk_HedgedRequests(t *testing.T) {
 		atomic.AddInt32(&callCount, 1)
 		// Fast response
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("chunk-data-from-2"))
+		w.Write(content)
 	}))
 	defer ts2.Close()
 
@@ -52,14 +59,14 @@ func TestDownloadChunk_HedgedRequests(t *testing.T) {
 	defer cancel()
 
 	start := time.Now()
-	data, err := c.downloadChunk(ctx, "chunk-1", urls, "token")
+	data, err := c.downloadChunk(ctx, chunkID, urls, "token")
 	duration := time.Since(start)
 
 	if err != nil {
 		t.Fatalf("downloadChunk failed: %v", err)
 	}
 
-	if string(data) != "chunk-data-from-2" {
+	if string(data) != string(content) {
 		t.Errorf("got unexpected data: %s", string(data))
 	}
 
@@ -87,17 +94,21 @@ func TestDownloadChunk_Cancellation(t *testing.T) {
 	}))
 	defer ts1.Close()
 
+	content := []byte("success")
+	sum := sha256.Sum256(content)
+	chunkID := hex.EncodeToString(sum[:])
+
 	ts2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Succeed immediately
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("success"))
+		w.Write(content)
 	}))
 	defer ts2.Close()
 
 	// TS1 is first, TS2 is replica. We'll wait for TS2 to succeed via hedge.
 	urls := []string{ts1.URL, ts2.URL}
 
-	_, err := c.downloadChunk(t.Context(), "chunk-1", urls, "token")
+	_, err := c.downloadChunk(t.Context(), chunkID, urls, "token")
 	if err != nil {
 		t.Fatalf("downloadChunk failed: %v", err)
 	}

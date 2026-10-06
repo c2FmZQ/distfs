@@ -120,6 +120,10 @@ func (m *mockAdminClient) AnchorUserInRegistry(ctx context.Context, username, us
 	return m.err
 }
 
+func (m *mockAdminClient) AnchorUserInRegistryWithCode(ctx context.Context, username, userID, signerID, expectedCode string) error {
+	return m.err
+}
+
 func (m *mockAdminClient) AdminSetUserLock(ctx context.Context, userID string, lock bool) error {
 	return m.err
 }

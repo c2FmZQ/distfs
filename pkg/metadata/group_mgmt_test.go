@@ -196,10 +196,11 @@ func TestGroupQuotaEnforcement(t *testing.T) {
 	// 1. Create Group G1
 	nonceG1 := GenerateNonce()
 	groupID := GenerateGroupID(userID, nonceG1)
-	g1 := Group{ID: groupID, OwnerID: userID, Nonce: nonceG1, GID: 5001, Version: 1, QuotaEnabled: true, SignerID: userID, SignKey: sk.Public()}
-	g1.SignGroupForTest(userID, sk)
+	// Quota-enabled groups can only be created by an administrator.
+	g1 := Group{ID: groupID, OwnerID: userID, Nonce: nonceG1, GID: 5001, Version: 1, QuotaEnabled: true, SignKey: sk.Public()}
+	g1.SignGroupForTest(tc.AdminID, tc.AdminSK)
 	g1Bytes, _ := json.Marshal(g1)
-	gCmd, err := LogCommand{Type: CmdCreateGroup, Data: g1Bytes, UserID: userID}.Marshal()
+	gCmd, err := LogCommand{Type: CmdCreateGroup, Data: g1Bytes, UserID: tc.AdminID}.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}

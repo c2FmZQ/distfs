@@ -141,3 +141,8 @@ func createDataNode(t *testing.T, metaNode *metadata.RaftNode, id string) (*http
 
 	return ts, ds
 }
+
+// contactFor returns out-of-band verified contact info for a test user.
+func contactFor(u metadata.User) *ContactInfo {
+	return &ContactInfo{UserID: u.ID, EncKey: u.EncKey, SignKey: u.SignKey}
+}

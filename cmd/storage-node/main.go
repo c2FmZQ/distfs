@@ -105,6 +105,7 @@ func main() {
 			&cli.StringFlag{Name: "data-dir", Value: "data", Usage: "Directory for storage"},
 			&cli.BoolFlag{Name: "bootstrap", Value: false, Usage: "Bootstrap a new cluster"},
 			&cli.StringFlag{Name: "oidc-discovery-url", Usage: "OIDC Discovery URL"},
+			&cli.StringFlag{Name: "oidc-client-id", Value: metadata.DefaultOIDCAudience, Usage: "OIDC client ID; ID tokens must carry it as their audience"},
 			&cli.StringFlag{Name: "raft-secret", Usage: "Shared secret for cluster operations"},
 			&cli.StringFlag{Name: "tls-cert", Usage: "TLS certificate for public API"},
 			&cli.StringFlag{Name: "tls-key", Usage: "TLS key for public API"},
@@ -291,6 +292,7 @@ func main() {
 
 			// 4. Initialize Servers
 			metaServer := metadata.NewServer(nodeID, rn.Raft, rn.FSM, oidcURL, signKey, raftSecret, rn.ClientTLSConfig, 24*time.Hour, metadata.NewNodeVault(st), decKey, disableDoH)
+			metaServer.SetOIDCAudience(cmd.String("oidc-client-id"))
 			metaServer.SetRaftAddress(raftAdvertise)
 			metaServer.SetAPIURL(apiURL)
 			metaServer.SetTLSPublicKey(raftKey.Public())

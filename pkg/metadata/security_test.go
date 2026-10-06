@@ -1,0 +1,801 @@
+package metadata
+
+import (
+	"bytes"
+	"context"
+	"crypto/ed25519"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"math/big"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/tlsproxy/jwks"
+	"github.com/golang-jwt/jwt/v5"
+	bolt "go.etcd.io/bbolt"
+)
+
+// TestSecurity_ExpiredSessionKeyCacheEntry verifies that an expired cached
+// session key falls back to the KEM path instead of crashing the server
+// (previously a double RUnlock caused a fatal, unrecoverable error).
+func TestSecurity_ExpiredSessionKeyCacheEntry(t *testing.T) {
+	tc := SetupCluster(t)
+
+	token, sessionKey := LoginSessionForTestWithSecret(t, tc.TS, tc.AdminID, tc.AdminSK)
+	st, err := tc.Server.parseSessionToken(token)
+	if err != nil {
+		t.Fatalf("parseSessionToken: %v", err)
+	}
+
+	tc.Server.sessionKeyMu.Lock()
+	entry, ok := tc.Server.sessionKeyCache[st.Nonce]
+	if !ok {
+		tc.Server.sessionKeyMu.Unlock()
+		t.Fatal("session key not cached after login")
+	}
+	entry.expiry = time.Now().Add(-time.Minute).Unix()
+	tc.Server.sessionKeyCache[st.Nonce] = entry
+	tc.Server.sessionKeyMu.Unlock()
+
+	req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionGetUser, GetUserRequest{ID: tc.AdminID}, tc.AdminID, tc.AdminSK, sessionKey)
+	req.Header.Set("Session-Token", token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatalf("expected expired cached session key to be rejected, got 200")
+	}
+
+	// The server must still be alive and serving.
+	resp, err = http.Get(tc.TS.URL + "/v1/health")
+	if err != nil {
+		t.Fatalf("server not responding after expired session request: %v", err)
+	}
+	resp.Body.Close()
+}
+
+// TestSecurity_LoginRequiresDomainSeparatedSignature verifies that a raw
+// signature over the challenge is rejected. Otherwise the login flow would be a
+// signing oracle for arbitrary 32-byte hashes (e.g. inode ManifestHash).
+func TestSecurity_LoginRequiresDomainSeparatedSignature(t *testing.T) {
+	tc := SetupCluster(t)
+
+	login := func(sign func(challenge []byte) []byte) int {
+		b, _ := json.Marshal(AuthChallengeRequest{UserID: tc.AdminID})
+		resp, err := http.Post(tc.TS.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var cres AuthChallengeResponse
+		json.NewDecoder(resp.Body).Decode(&cres)
+		resp.Body.Close()
+
+		sessionDK, _ := crypto.GenerateEncryptionKey()
+		b, _ = json.Marshal(AuthChallengeSolve{
+			UserID:    tc.AdminID,
+			Challenge: cres.Challenge,
+			Signature: sign(cres.Challenge),
+			EncKey:    sessionDK.EncapsulationKey().Bytes(),
+		})
+		resp, err = http.Post(tc.TS.URL+"/v1/login", "application/json", bytes.NewReader(b))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	if code := login(func(c []byte) []byte { return tc.AdminSK.Sign(c) }); code == http.StatusOK {
+		t.Fatal("login accepted a raw (non domain-separated) challenge signature")
+	}
+	if code := login(func(c []byte) []byte { return tc.AdminSK.Sign(LoginChallengeMessage(c)) }); code != http.StatusOK {
+		t.Fatalf("login with domain-separated signature failed: %d", code)
+	}
+}
+
+// TestSecurity_IssueTokenModes verifies that capability tokens cannot be
+// minted for chunks outside the inode's manifest or with escalated modes.
+func TestSecurity_IssueTokenModes(t *testing.T) {
+	tc := SetupCluster(t)
+
+	u1 := "u1"
+	usk1, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: u1, UID: 1001, SignKey: usk1.Public()}, usk1, tc.AdminID, tc.AdminSK)
+	u2 := "u2"
+	usk2, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: u2, UID: 1002, SignKey: usk2.Public()}, usk2, tc.AdminID, tc.AdminSK)
+	token2, secret2 := LoginSessionForTestWithSecret(t, tc.TS, u2, usk2)
+
+	readable := strings.Repeat("a", 64)
+	victim := strings.Repeat("b", 64)
+
+	// u1's world-readable file and u1's private file.
+	for _, in := range []Inode{
+		{ID: "world", OwnerID: u1, Type: FileType, Mode: 0644, Size: 1, ChunkManifest: []ChunkEntry{{ID: readable}}},
+		{ID: "private", OwnerID: u1, Type: FileType, Mode: 0600, Size: 1, ChunkManifest: []ChunkEntry{{ID: victim}}},
+	} {
+		in.SignInodeForTest(u1, usk1)
+		b, _ := json.Marshal(in)
+		if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, b, u1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// u2's own file, whose committed manifest contains the "readable" chunk ID.
+	own := Inode{ID: "own", OwnerID: u2, Type: FileType, Mode: 0600, Size: 1, ChunkManifest: []ChunkEntry{{ID: strings.Repeat("d", 64)}}}
+	own.SignInodeForTest(u2, usk2)
+	ob, _ := json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, ob, u2); err != nil {
+		t.Fatal(err)
+	}
+
+	issue := func(inodeID, mode string, chunks ...string) int {
+		req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionIssueToken, map[string]any{
+			"inode_id": inodeID, "mode": mode, "chunks": chunks,
+		}, u2, usk2, secret2)
+		req.Header.Set("Session-Token", token2)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+
+	tests := []struct {
+		name   string
+		inode  string
+		mode   string
+		chunks []string
+		ok     bool
+	}{
+		{"read own manifest chunk", "world", "R", []string{readable}, true},
+		{"read manifest (implicit)", "world", "R", nil, true},
+		{"read foreign chunk via readable inode", "world", "R", []string{victim}, false},
+		{"delete via read-only inode", "world", "D", []string{victim}, false},
+		{"combined mode RW", "world", "RW", []string{victim}, false},
+		{"combined mode RWD", "world", "RWD", []string{victim}, false},
+		{"delete without explicit chunks", "world", "D", nil, false},
+		{"unknown mode", "world", "X", []string{readable}, false},
+		{"delete for new inode (upload cleanup)", "new-inode", "D", []string{victim}, true},
+		{"writer reads back uncommitted chunk (creator-only)", "own", "R", []string{victim}, true},
+		{"writer deletes uncommitted chunk", "own", "D", []string{victim}, true},
+		{"writer deletes committed chunk", "own", "D", []string{strings.Repeat("d", 64)}, false},
+		{"read nonexistent inode", "new-inode", "R", []string{victim}, false},
+	}
+	for _, tt := range tests {
+		code := issue(tt.inode, tt.mode, tt.chunks...)
+		if tt.ok && code != http.StatusOK {
+			t.Errorf("%s: got %d, want 200", tt.name, code)
+		}
+		if !tt.ok && code == http.StatusOK {
+			t.Errorf("%s: token issued, want rejection", tt.name)
+		}
+	}
+}
+
+// TestSecurity_CreateGroupCannotOverwrite verifies that CreateGroup cannot be
+// used to replace an existing group (owner, keys and membership).
+func TestSecurity_CreateGroupCannotOverwrite(t *testing.T) {
+	tc := SetupCluster(t)
+
+	mallory := "mallory"
+	msk, _ := crypto.GenerateIdentityKey()
+	mdk, _ := crypto.GenerateEncryptionKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public(), EncKey: mdk.EncapsulationKey().Bytes()}, msk, tc.AdminID, tc.AdminSK)
+
+	victim, err := tc.Node.FSM.GetGroup("users")
+	if err != nil {
+		t.Fatalf("GetGroup(users): %v", err)
+	}
+
+	lb := crypto.NewLockbox()
+	lb.AddRecipient(ComputeMemberHMAC(victim.ID, mallory), mdk.EncapsulationKey(), make([]byte, 32), 0)
+	forged := Group{
+		ID:       victim.ID,
+		GID:      victim.GID,
+		OwnerID:  SelfOwnedGroup,
+		Nonce:    GenerateNonce(),
+		Version:  1,
+		EncKey:   mdk.EncapsulationKey().Bytes(),
+		SignKey:  msk.Public(),
+		SignerID: mallory,
+		Lockbox:  lb,
+	}
+	forged.Signature = msk.Sign(forged.Hash())
+	b, _ := json.Marshal(forged)
+	batch, _ := json.Marshal([]LogCommand{{Type: CmdCreateGroup, Data: b, UserID: mallory}})
+
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdBatch, batch, mallory); err == nil {
+		t.Fatal("CreateGroup overwrote an existing group")
+	}
+
+	after, err := tc.Node.FSM.GetGroup("users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.SignerID != victim.SignerID || !bytes.Equal(after.SignKey, victim.SignKey) {
+		t.Fatal("existing group was modified")
+	}
+}
+
+// TestSecurity_ChunkPagesBoundToInode verifies that an inode cannot reference
+// (and thereby delete or garbage-collect) another inode's chunk pages.
+func TestSecurity_ChunkPagesBoundToInode(t *testing.T) {
+	tc := SetupCluster(t)
+	ctx := context.Background()
+
+	victimID, mallory := "victim", "mallory"
+	vsk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: victimID, UID: 1001, SignKey: vsk.Public()}, vsk, tc.AdminID, tc.AdminSK)
+	msk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
+
+	// Victim file large enough to be paged.
+	var manifest []ChunkEntry
+	for i := 0; i < MaxChunksPerPage+1; i++ {
+		manifest = append(manifest, ChunkEntry{ID: fmt.Sprintf("%064x", i)})
+	}
+	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1, Size: uint64(len(manifest)) * crypto.ChunkSize, ChunkManifest: manifest}
+	victimFile.SignInodeForTest(victimID, vsk)
+	b, _ := json.Marshal(victimFile)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, victimID); err != nil {
+		t.Fatal(err)
+	}
+	victimPage := "victim-file:p0"
+
+	pageExists := func() bool {
+		var ok bool
+		tc.Node.FSM.DB().View(func(tx *bolt.Tx) error {
+			v, _ := tc.Node.FSM.Get(tx, []byte("chunk_pages"), []byte(victimPage))
+			ok = v != nil
+			return nil
+		})
+		return ok
+	}
+	if !pageExists() {
+		t.Fatal("victim file was not paged")
+	}
+
+	// Creating an inode that references the victim's page is rejected.
+	hijack := Inode{ID: "mallory-hijack", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1, ChunkPages: []string{victimPage}}
+	hijack.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(hijack)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err == nil {
+		t.Error("created inode referencing another inode's chunk page")
+	}
+
+	// Updating an own inode to reference the victim's page is rejected.
+	own := Inode{ID: "mallory-file", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err != nil {
+		t.Fatal(err)
+	}
+	own.Version = 2
+	own.ChunkPages = []string{victimPage}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdUpdateInode, b, mallory); err == nil {
+		t.Error("updated inode to reference another inode's chunk page")
+	}
+
+	if !pageExists() {
+		t.Fatal("victim chunk page was deleted")
+	}
+}
+
+// TestSecurity_ChunkOwnership verifies that a user cannot list another inode's
+// chunks in their own manifest (which would let GC delete them), and that the
+// ownership index is rebuilt for existing data.
+func TestSecurity_ChunkOwnership(t *testing.T) {
+	tc := SetupCluster(t)
+	ctx := context.Background()
+	fsm := tc.Node.FSM
+
+	victimID, mallory := "victim", "mallory"
+	vsk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: victimID, UID: 1001, SignKey: vsk.Public()}, vsk, tc.AdminID, tc.AdminSK)
+	msk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
+
+	victimChunk := strings.Repeat("c", 64)
+	victimFile := Inode{ID: "victim-file", OwnerID: victimID, Type: FileType, Mode: 0600, Version: 1, Size: 1,
+		ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
+	victimFile.SignInodeForTest(victimID, vsk)
+	b, _ := json.Marshal(victimFile)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, victimID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create with a foreign chunk is rejected.
+	steal := Inode{ID: "mallory-steal", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1, Size: 1,
+		ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
+	steal.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(steal)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err == nil {
+		t.Error("created inode with another inode's chunk")
+	}
+
+	// Update of own inode with a foreign chunk is rejected.
+	own := Inode{ID: "mallory-file", OwnerID: mallory, Type: FileType, Mode: 0600, Version: 1}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, mallory); err != nil {
+		t.Fatal(err)
+	}
+	own.Version = 2
+	own.Size = 1
+	own.ChunkManifest = []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}
+	own.SignInodeForTest(mallory, msk)
+	b, _ = json.Marshal(own)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdUpdateInode, b, mallory); err == nil {
+		t.Error("updated inode to include another inode's chunk")
+	}
+
+	// GC never enqueues chunks the inode does not own, even if (e.g. legacy
+	// data) its manifest lists them.
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		in := Inode{ID: "mallory-file", ChunkManifest: []ChunkEntry{{ID: victimChunk, Nodes: []string{"n1"}}}}
+		fsm.enqueueGC(tx, &in)
+		return nil
+	})
+	gcQueued := func(id string) bool {
+		var ok bool
+		fsm.DB().View(func(tx *bolt.Tx) error {
+			v := tx.Bucket([]byte("garbage_collection")).Get([]byte(id))
+			ok = v != nil
+			return nil
+		})
+		return ok
+	}
+	if gcQueued(victimChunk) {
+		t.Fatal("GC enqueued a chunk owned by another inode")
+	}
+
+	// The index is rebuilt from existing inodes when missing.
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		tx.DeleteBucket([]byte("chunk_owners"))
+		return tx.Bucket([]byte("system")).Delete([]byte(chunkOwnerIndexMarker))
+	})
+	if err := fsm.ensureChunkOwnerIndex(); err != nil {
+		t.Fatal(err)
+	}
+	fsm.DB().View(func(tx *bolt.Tx) error {
+		owner, _ := fsm.Get(tx, []byte("chunk_owners"), []byte(victimChunk))
+		if string(owner) != "victim-file" {
+			t.Errorf("rebuilt owner = %q, want victim-file", owner)
+		}
+		return nil
+	})
+
+	// The owner's own GC still collects its chunks.
+	fsm.DB().Update(func(tx *bolt.Tx) error {
+		in := victimFile
+		fsm.enqueueGC(tx, &in)
+		return nil
+	})
+	if !gcQueued(victimChunk) {
+		t.Fatal("GC did not enqueue a chunk owned by the inode")
+	}
+}
+
+// TestSecurity_SizeIsSigned verifies that a server cannot change an inode's
+// size (truncating or extending reads) without invalidating its signature.
+func TestSecurity_SizeIsSigned(t *testing.T) {
+	sk, _ := crypto.GenerateIdentityKey()
+	in := Inode{ID: "f", OwnerID: "u", Type: FileType, Mode: 0600, Version: 1, Size: 1000}
+	in.SignInodeForTest("u", sk)
+	if !crypto.VerifySignature(sk.Public(), in.ManifestHash(), in.UserSig) {
+		t.Fatal("signature does not verify")
+	}
+	in.Size = 10
+	if crypto.VerifySignature(sk.Public(), in.ManifestHash(), in.UserSig) {
+		t.Fatal("signature still verifies after the size was changed")
+	}
+}
+
+// TestSecurity_JWTClaims verifies that OIDC ID tokens must come from the
+// configured issuer, be issued for the DistFS client, and expire.
+func TestSecurity_JWTClaims(t *testing.T) {
+	tc := SetupCluster(t)
+
+	priv, _ := rsa.GenerateKey(rand.Reader, 2048)
+	jwksRes := map[string]any{"keys": []any{map[string]any{
+		"kty": "RSA", "kid": "k",
+		"n": base64.RawURLEncoding.EncodeToString(priv.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(priv.E)).Bytes()),
+	}}}
+	jwksServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(jwksRes)
+	}))
+	defer jwksServer.Close()
+	tc.Server.jwks.SetIssuers([]jwks.Issuer{{Issuer: "idp", JWKSURI: jwksServer.URL}})
+	tc.Server.oidcConfig = &OIDCConfig{Issuer: "idp"}
+
+	mint := func(claims jwt.MapClaims) string {
+		tok := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+		tok.Header["kid"] = "k"
+		s, _ := tok.SignedString(priv)
+		return s
+	}
+	exp := time.Now().Add(time.Hour).Unix()
+	ctx := context.Background()
+
+	if _, err := tc.Server.verifyJWT(ctx, mint(jwt.MapClaims{"iss": "idp", "aud": DefaultOIDCAudience, "sub": "s", "exp": exp})); err != nil {
+		t.Fatalf("valid token rejected: %v", err)
+	}
+	for name, claims := range map[string]jwt.MapClaims{
+		"other audience": {"iss": "idp", "aud": "some-other-app", "sub": "s", "exp": exp},
+		"no audience":    {"iss": "idp", "sub": "s", "exp": exp},
+		"other issuer":   {"iss": "evil", "aud": DefaultOIDCAudience, "sub": "s", "exp": exp},
+		"no expiry":      {"iss": "idp", "aud": DefaultOIDCAudience, "sub": "s"},
+	} {
+		if _, err := tc.Server.verifyJWT(ctx, mint(claims)); err == nil {
+			t.Errorf("%s: token accepted", name)
+		}
+	}
+}
+
+// TestSecurity_LeaseAuthorization verifies that users cannot lock inodes they
+// may not write, and cannot borrow another session's identity in a batch to
+// bypass that session's exclusive lease.
+func TestSecurity_LeaseAuthorization(t *testing.T) {
+	tc := SetupCluster(t)
+
+	owner, mallory := "owner", "mallory"
+	osk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: owner, UID: 1001, SignKey: osk.Public()}, osk, tc.AdminID, tc.AdminSK)
+	msk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: mallory, UID: 1666, SignKey: msk.Public()}, msk, tc.AdminID, tc.AdminSK)
+
+	nonce := GenerateNonce()
+	f := Inode{ID: GenerateInodeID(owner, nonce), Nonce: nonce, OwnerID: owner, Type: FileType, Mode: 0644, Version: 1}
+	f.SignInodeForTest(owner, osk)
+	b, _ := json.Marshal(f)
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, b, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. Mallory (read-only) cannot take an exclusive lease on the file.
+	mtoken, msecret := LoginSessionForTestWithSecret(t, tc.TS, mallory, msk)
+	req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionAcquireLeases, LeaseRequest{InodeIDs: []string{f.ID}, Type: LeaseExclusive, Duration: int64(time.Minute)}, mallory, msk, msecret)
+	req.Header.Set("Session-Token", mtoken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		t.Fatal("read-only user obtained an exclusive lease")
+	}
+
+	// 2. The owner's session "victim-session" holds an exclusive lease.
+	lctx := context.WithValue(context.Background(), sessionNonceContextKey, "victim-session")
+	lb, _ := json.Marshal(LeaseRequest{InodeIDs: []string{f.ID}, Type: LeaseExclusive, Duration: int64(time.Minute)})
+	if _, err := tc.Server.ApplyRaftCommandInternal(lctx, CmdAcquireLeases, lb, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another session of a writer cannot claim to be "victim-session" inside
+	// a batch sub-command to bypass the lease.
+	f.Version = 2
+	f.Mode = 0600
+	f.SignInodeForTest(owner, osk)
+	ub, _ := json.Marshal(f)
+	batch, _ := json.Marshal([]LogCommand{{Type: CmdUpdateInode, Data: ub, SessionNonce: "victim-session"}})
+	actx := context.WithValue(context.Background(), sessionNonceContextKey, "other-session")
+	if _, err := tc.Server.ApplyRaftCommandInternal(actx, CmdBatch, batch, owner); err == nil {
+		t.Fatal("batch sub-command bypassed another session's exclusive lease")
+	}
+}
+
+// TestSecurity_ForeignLeasesRedacted verifies that GetInode does not reveal
+// other sessions' lease identifiers.
+func TestSecurity_ForeignLeasesRedacted(t *testing.T) {
+	in := &Inode{Leases: map[string]LeaseInfo{
+		"victim-nonce": {SessionID: "victim-session", Nonce: "victim-nonce", Type: LeaseExclusive},
+		"my-nonce":     {SessionID: "my-session", Nonce: "my-nonce"},
+	}}
+	r := httptest.NewRequest("GET", "/", nil)
+	r = r.WithContext(context.WithValue(r.Context(), sessionNonceContextKey, "my-session"))
+	redactForeignLeases(in, r)
+
+	if len(in.Leases) != 2 {
+		t.Fatalf("expected 2 leases, got %d", len(in.Leases))
+	}
+	if _, ok := in.Leases["my-nonce"]; !ok {
+		t.Error("own lease was redacted")
+	}
+	for k, l := range in.Leases {
+		if k == "victim-nonce" || l.SessionID == "victim-session" || l.Nonce == "victim-nonce" {
+			t.Errorf("foreign lease identifiers leaked: %q %+v", k, l)
+		}
+	}
+}
+
+// TestSecurity_QuotaBypasses verifies that users cannot escape quota by
+// declaring a small size for a large manifest, by creating their own
+// unlimited quota group, or by rewriting a group's usage and limits.
+func TestSecurity_QuotaBypasses(t *testing.T) {
+	tc := SetupCluster(t)
+	ctx := context.Background()
+
+	u := "quota-user"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: u, UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
+
+	// 1. Many chunks, declared size 0.
+	in := Inode{ID: "q-file", OwnerID: u, Type: FileType, Mode: 0600, Version: 1, Size: 0,
+		ChunkManifest: []ChunkEntry{{ID: strings.Repeat("1", 64)}, {ID: strings.Repeat("2", 64)}, {ID: strings.Repeat("3", 64)}}}
+	in.SignInodeForTest(u, sk)
+	b, _ := json.Marshal(in)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateInode, b, u); err == nil {
+		t.Error("created a file with more chunks than its declared size")
+	}
+
+	// 2. A user-created group cannot be quota-enabled, and client-supplied
+	//    usage/limits are ignored.
+	nonce := GenerateNonce()
+	g := Group{ID: GenerateGroupID(u, nonce), OwnerID: u, Nonce: nonce, GID: 7001, Version: 1, QuotaEnabled: true,
+		Quota: UserQuota{MaxBytes: 1 << 40}, Usage: UserUsage{TotalBytes: -1 << 40}}
+	g.SignGroupForTest(u, sk)
+	b, _ = json.Marshal(g)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdCreateGroup, b, u); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := tc.Node.FSM.GetGroup(g.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.QuotaEnabled || stored.Quota.MaxBytes != 0 || stored.Usage.TotalBytes != 0 {
+		t.Errorf("client-controlled quota state persisted: enabled=%v quota=%+v usage=%+v", stored.QuotaEnabled, stored.Quota, stored.Usage)
+	}
+
+	// 3. UpdateGroup cannot change usage, limits or GID.
+	upd := *stored
+	upd.Version++
+	upd.Usage = UserUsage{TotalBytes: -1 << 40}
+	upd.Quota = UserQuota{MaxBytes: 1 << 40}
+	upd.GID = 7002
+	upd.SignGroupForTest(u, sk)
+	b, _ = json.Marshal(upd)
+	if _, err := tc.Server.ApplyRaftCommandInternal(ctx, CmdUpdateGroup, b, u); err != nil {
+		t.Fatal(err)
+	}
+	after, _ := tc.Node.FSM.GetGroup(g.ID)
+	if after.Usage.TotalBytes != 0 || after.Quota.MaxBytes != 0 || after.GID != 7001 {
+		t.Errorf("UpdateGroup changed server-managed state: gid=%d quota=%+v usage=%+v", after.GID, after.Quota, after.Usage)
+	}
+}
+
+// TestSecurity_LockAppliesToLiveSessions verifies that locking a user takes
+// effect on sessions they already established.
+func TestSecurity_LockAppliesToLiveSessions(t *testing.T) {
+	tc := SetupCluster(t)
+	u := "lockme"
+	sk, _ := crypto.GenerateIdentityKey()
+	dk, _ := crypto.GenerateEncryptionKey()
+	CreateUser(t, tc.Node, User{ID: u, UID: 1001, SignKey: sk.Public(), EncKey: dk.EncapsulationKey().Bytes()}, sk, tc.AdminID, tc.AdminSK)
+	token, secret := LoginSessionForTestWithSecret(t, tc.TS, u, sk)
+
+	getWorld := func() int {
+		req := NewSealedTestRequestSymmetric(t, tc.TS.URL, ActionGetWorldPrivate, nil, u, sk, secret)
+		req.Header.Set("Session-Token", token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := getWorld(); code != http.StatusOK {
+		t.Fatalf("unlocked user denied: %d", code)
+	}
+
+	b, _ := json.Marshal(AdminSetUserLockRequest{UserID: u, Locked: true})
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdAdminSetUserLock, b, tc.AdminID); err != nil {
+		t.Fatal(err)
+	}
+	if code := getWorld(); code == http.StatusOK {
+		t.Fatal("locked user's existing session still has access")
+	}
+}
+
+// TestSecurity_ReplayWithAlteredPrefix verifies that a captured session
+// request cannot be replayed by altering bytes the server does not
+// authenticate (the KEM ciphertext slot in symmetric mode).
+func TestSecurity_ReplayWithAlteredPrefix(t *testing.T) {
+	tc := SetupCluster(t)
+	token, secret := LoginSessionForTestWithSecret(t, tc.TS, tc.AdminID, tc.AdminSK)
+
+	env, _ := json.Marshal(SealedEnvelope{Action: ActionGetUser, Payload: MustMarshalJSON(GetUserRequest{ID: tc.AdminID})})
+	body := SealTestRequestSymmetric(t, tc.AdminID, tc.AdminSK, secret, env)
+
+	send := func(b []byte) int {
+		req, _ := http.NewRequest("POST", tc.TS.URL+"/v1/invoke", bytes.NewReader(b))
+		req.Header.Set("X-DistFS-Sealed", "true")
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Session-Token", token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := send(body); code != http.StatusOK {
+		t.Fatalf("original request failed: %d", code)
+	}
+
+	var sr SealedRequest
+	json.Unmarshal(body, &sr)
+	sr.Sealed[0] ^= 0xff
+	altered, _ := json.Marshal(sr)
+	if code := send(altered); code == http.StatusOK {
+		t.Fatal("replayed request with an altered unauthenticated prefix was accepted")
+	}
+	if code := send(body); code == http.StatusOK {
+		t.Fatal("exact replay was accepted")
+	}
+}
+
+// TestSecurity_PinnedDiscoveryClient verifies that the bootstrap push to a
+// joining node (which carries the raft secret) only connects to the TLS key
+// that was authenticated during discovery.
+func TestSecurity_PinnedDiscoveryClient(t *testing.T) {
+	tc := SetupCluster(t)
+
+	newTLSServer := func() (*httptest.Server, ed25519.PublicKey) {
+		pub, priv, _ := ed25519.GenerateKey(rand.Reader)
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+		srv.TLS = &tls.Config{Certificates: []tls.Certificate{{Certificate: [][]byte{der}, PrivateKey: priv}}}
+		srv.StartTLS()
+		return srv, pub
+	}
+	node, nodeKey := newTLSServer()
+	defer node.Close()
+	impostor, _ := newTLSServer()
+	defer impostor.Close()
+
+	client := tc.Server.pinnedDiscoveryClient(nodeKey)
+	resp, err := client.Get(node.URL)
+	if err != nil {
+		t.Fatalf("pinned client rejected the authenticated node: %v", err)
+	}
+	resp.Body.Close()
+	if resp, err := client.Get(impostor.URL); err == nil {
+		resp.Body.Close()
+		t.Fatal("pinned client connected to a node with a different TLS key")
+	}
+}
+
+// TestSecurity_PeerFullKeyMatch verifies that mTLS peer authentication
+// compares the full TLS key of a registered node, not just the 64-bit node ID
+// derived from it.
+func TestSecurity_PeerFullKeyMatch(t *testing.T) {
+	tc := SetupCluster(t)
+
+	certFor := func(pub ed25519.PublicKey, priv ed25519.PrivateKey) []byte {
+		tmpl := &x509.Certificate{SerialNumber: big.NewInt(1), NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour)}
+		der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, pub, priv)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+	register := func(id string, pub ed25519.PublicKey) {
+		b, _ := json.Marshal(Node{ID: id, Status: NodeStatusActive, PublicKey: pub, Address: "https://" + id})
+		cmd, _ := LogCommand{Type: CmdRegisterNode, Data: b}.Marshal()
+		if err := tc.Node.Raft.Apply(cmd, 5*time.Second).Error(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	verify := tc.Node.ClientTLSConfig.VerifyPeerCertificate
+
+	realPub, realPriv, _ := ed25519.GenerateKey(rand.Reader)
+	register(NodeIDFromPublicKey(realPub), realPub)
+	if err := verify([][]byte{certFor(realPub, realPriv)}, nil); err != nil {
+		t.Fatalf("registered node rejected: %v", err)
+	}
+
+	// An attacker key whose derived ID belongs to a node registered with a
+	// different full key (what a 64-bit prefix collision would produce).
+	evilPub, evilPriv, _ := ed25519.GenerateKey(rand.Reader)
+	register(NodeIDFromPublicKey(evilPub), realPub)
+	if err := verify([][]byte{certFor(evilPub, evilPriv)}, nil); err == nil {
+		t.Fatal("peer accepted on node ID match despite a different TLS key")
+	}
+}
+
+// TestSecurity_ChallengeLimits verifies that the unauthenticated challenge
+// endpoint bounds request size and pending state.
+func TestSecurity_ChallengeLimits(t *testing.T) {
+	tc := SetupCluster(t)
+	post := func(body []byte) int {
+		resp, err := http.Post(tc.TS.URL+"/v1/auth/challenge", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	big, _ := json.Marshal(AuthChallengeRequest{UserID: strings.Repeat("a", 1<<20)})
+	if code := post(big); code == http.StatusOK {
+		t.Error("accepted a 1MB user id")
+	}
+	long, _ := json.Marshal(AuthChallengeRequest{UserID: strings.Repeat("a", maxUserIDLength+1)})
+	if code := post(long); code == http.StatusOK {
+		t.Error("accepted an over-long user id")
+	}
+
+	tc.Server.challengeMu.Lock()
+	for i := 0; i < maxPendingChallenges; i++ {
+		tc.Server.challengeCache[fmt.Sprint(i)] = challengeEntry{UserID: "x", CreatedAt: time.Now()}
+	}
+	tc.Server.challengeMu.Unlock()
+	ok, _ := json.Marshal(AuthChallengeRequest{UserID: tc.AdminID})
+	if code := post(ok); code == http.StatusOK {
+		t.Error("issued a challenge beyond the pending-challenge cap")
+	}
+}
+
+// TestSecurity_DeterministicApply verifies that lease decisions use the
+// command's timestamp, not the applying node's clock, so every node (and a
+// replay of the log) reaches the same result.
+func TestSecurity_DeterministicApply(t *testing.T) {
+	tc := SetupCluster(t)
+	owner := "det-owner"
+	sk, _ := crypto.GenerateIdentityKey()
+	CreateUser(t, tc.Node, User{ID: owner, UID: 1001, SignKey: sk.Public()}, sk, tc.AdminID, tc.AdminSK)
+
+	nonce := GenerateNonce()
+	f := Inode{ID: GenerateInodeID(owner, nonce), Nonce: nonce, OwnerID: owner, Type: FileType, Mode: 0600, Version: 1}
+	f.SignInodeForTest(owner, sk)
+	b, _ := json.Marshal(f)
+	if _, err := tc.Server.ApplyRaftCommandInternal(context.Background(), CmdCreateInode, b, owner); err != nil {
+		t.Fatal(err)
+	}
+
+	apply := func(cmd LogCommand) interface{} {
+		data, _ := cmd.Marshal()
+		fut := tc.Node.Raft.Apply(data, 5*time.Second)
+		if err := fut.Error(); err != nil {
+			t.Fatal(err)
+		}
+		return fut.Response()
+	}
+
+	// Ten minutes ago, session s1 took a one-minute exclusive lease...
+	t0 := time.Now().Add(-10 * time.Minute).UnixNano()
+	lb, _ := json.Marshal(LeaseRequest{InodeIDs: []string{f.ID}, Type: LeaseExclusive, Duration: int64(time.Minute)})
+	if res := apply(LogCommand{Type: CmdAcquireLeases, Data: lb, UserID: owner, SessionNonce: "s1", Timestamp: t0}); tc.Node.FSM.containsError(res) {
+		t.Fatalf("lease: %v", res)
+	}
+
+	// ...and 30 seconds later session s2 tried to update the file. At that
+	// time the lease was active, regardless of when the entry is applied.
+	f.Version = 2
+	f.Mode = 0640
+	f.SignInodeForTest(owner, sk)
+	ub, _ := json.Marshal(f)
+	res := apply(LogCommand{Type: CmdUpdateInode, Data: ub, UserID: owner, SessionNonce: "s2", Timestamp: t0 + int64(30*time.Second)})
+	if !tc.Node.FSM.containsError(res) {
+		t.Fatal("update inside another session's lease succeeded: lease check used the wall clock")
+	}
+}

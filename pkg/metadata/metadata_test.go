@@ -348,6 +348,7 @@ func TestKeySync(t *testing.T) {
 
 	// Update srv to use mock JWKS
 	tc.Server.jwks.SetIssuers([]jwks.Issuer{{Issuer: "test-auth-server", JWKSURI: jwksServer.URL + "/jwks.json"}})
+	tc.Server.oidcConfig = &OIDCConfig{Issuer: "test-auth-server"}
 
 	// 2. Setup User
 	email := "sync@example.com"
@@ -364,7 +365,7 @@ func TestKeySync(t *testing.T) {
 
 	// Mint JWT
 	jwtToken := jwt.NewWithClaims(jwt.SigningMethodRS256, jwt.MapClaims{
-		"iss": "test-auth-server", "email": email, "sub": sub,
+		"iss": "test-auth-server", "aud": DefaultOIDCAudience, "email": email, "sub": sub,
 		"exp": time.Now().Add(time.Hour).Unix(),
 	})
 	jwtToken.Header["kid"] = kid
@@ -550,6 +551,7 @@ func TestChunkPagination(t *testing.T) {
 		Type:          FileType,
 		OwnerID:       "u1",
 		Mode:          0600,
+		Size:          uint64(len(manifest)) * crypto.ChunkSize,
 		ChunkManifest: manifest,
 	}
 	inode.SignInodeForTest("u1", userSignKey)

@@ -61,9 +61,9 @@ These endpoints remain accessible on their original paths to support bootstrappi
 | `GET` | `/v1/node/info` | None | Node ID and protocol version. |
 | `GET` | `/v1/auth/config` | None | OIDC Issuer and endpoint configuration. |
 | `GET` | `/v1/cluster/stats` | None | Cluster-wide storage and node metrics. |
-| `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. |
+| `POST` | `/v1/user/register` | OIDC JWT | Register a new user and public keys. The ID token MUST have `iss` = the discovered issuer, `aud` = the configured client ID (`--oidc-client-id`, default `distfs`) and an `exp`. |
 | `POST` | `/v1/auth/challenge` | None | Request a login challenge for a User ID. |
-| `POST` | `/v1/login` | Challenge | Establish a session and establishment a shared secret. |
+| `POST` | `/v1/login` | Challenge | Establish a session and a shared secret. `sig` = ML-DSA signature over `"DistFS-Login-v1\x00" \|\| challenge` (challenge MUST be 32 bytes). |
 | `POST` | `/v1/user/keysync` | Session + E2EE | Store encrypted configuration backup. |
 | `GET` | `/v1/user/keysync` | Bearer JWT | Retrieve encrypted configuration backup. |
 | `POST` | `/v1/node` | Raft Secret | Internal cluster management. |
@@ -214,6 +214,7 @@ The `user_sig` is over the SHA-256 hash of these fields concatenated **exactly**
 6. `[]byte("client_blob:")` + `raw_encrypted_bytes` + `[]byte("|")`
 7. `[]byte("owner:" + owner_id + "|")`
 8. `[]byte("type:")` + `BigEndian(uint32(type))` + `[]byte("|")`
+   - `[]byte("size:")` + `BigEndian(uint64(size))` + `[]byte("|")` // Signed: bounds reads of padded chunk data.
 9. `[]byte("links:")` + `SortedCSV(parentID:nameHMAC)` + `[]byte("|")`
 10. `[]byte("children:")` + `SortedCSV(nameHMAC:childID,hex_enc_name,hex_nonce|)` // Each entry is separated by |
 11. `[]byte("manifest:")` + `CSV(chunk_id)` + `[]byte("|")`  // Nodes are EXCLUDED from user-signed content hash.
@@ -262,7 +263,11 @@ To hide filenames from the server, all map keys in `children` and `links` are HM
 ### 6.2 Storage Tokens (Action `IssueToken`)
 - **Request:** `{"inode_id": "...", "chunks": ["hash"], "mode": "R|W|D"}`
 - **Response:** `{"payload": "base64_minified_json", "sig": "base64_cluster_sig"}`
-- **Capability Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts}`
+- **Capability Schema:** `{"chunks": ["hash"], "mode": "RWD", "exp": unix_ts, "session_binding": "base64_sha256(session_nonce)", "creator_only": bool}`
+- **Mode Rules:** Clients MUST request exactly one of `R`, `W`, `D`; combined modes are reserved for cluster-internal tokens.
+  - `R`: requires read access to the inode; requested chunks MUST be in the inode's manifest (empty `chunks` = whole manifest). A writer (write access + session) may also read back its own uncommitted uploads: such tokens carry `"creator_only": true` and data nodes only honor them for chunks the bound session created.
+  - `W`: requires write access to the inode (or the inode does not exist yet, for creation). Reserves pending quota.
+  - `D`: requires write access (or a not-yet-existing inode) and explicit `chunks`, none of which may be in the inode's committed manifest. Only for cleaning up uploads that failed to commit. The token is session-bound, and data nodes only honor a session-bound `D` for chunks that the same session created on that node.
 
 ---
 

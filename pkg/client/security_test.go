@@ -1,0 +1,408 @@
+//go:build !wasm
+
+package client
+
+import (
+	"bytes"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"testing"
+
+	"github.com/c2FmZQ/distfs/pkg/crypto"
+	"github.com/c2FmZQ/distfs/pkg/metadata"
+)
+
+// TestSecurity_DeferredVerificationUsesObservedKeys verifies that deferred
+// registry verification confirms exactly the keys that were used during the
+// optimistic phase, so a malicious server cannot hand out substitute keys and
+// then answer the confirmation fetch honestly.
+func TestSecurity_DeferredVerificationUsesObservedKeys(t *testing.T) {
+	c, node, _, ts, adminID, adminSK := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	provisionUser(t, ts, node, c, adminID, adminSK, "bob")
+	attackerSK, _ := crypto.GenerateIdentityKey()
+
+	real, err := c.getUserRaw(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := *real
+	forged.SignKey = attackerSK.Public()
+
+	// 1. Substitute keys for a not-yet-verified user are rejected, even though
+	//    a fresh fetch would return the genuine record.
+	c.invalidateUserCache("bob")
+	vctx, state, _ := withVerificationState(ctx)
+	if err := state.observeUser(&forged); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.processVerificationQueue(vctx, state); err == nil {
+		t.Fatal("deferred verification accepted substituted keys")
+	}
+	c.cacheMu.RLock()
+	_, cached := c.userCache["bob"]
+	c.cacheMu.RUnlock()
+	if cached {
+		t.Fatal("substituted keys were promoted to the verified cache")
+	}
+
+	// 2. Substitute keys for an already-verified user are rejected.
+	if _, err := c.getUser(ctx, "bob"); err != nil {
+		t.Fatalf("getUser(bob): %v", err)
+	}
+	vctx, state, _ = withVerificationState(ctx)
+	state.observeUser(&forged)
+	if err := c.processVerificationQueue(vctx, state); err == nil {
+		t.Fatal("deferred verification accepted keys differing from the verified cache")
+	}
+
+	// 3. Inconsistent keys for the same user within one operation are rejected.
+	_, state, _ = withVerificationState(ctx)
+	if err := state.observeUser(real); err != nil {
+		t.Fatal(err)
+	}
+	if err := state.observeUser(&forged); err == nil {
+		t.Fatal("inconsistent keys for the same user were accepted")
+	}
+
+	// 4. An inode signed with a substitute key for a verified signer is rejected.
+	nonce := metadata.GenerateNonce()
+	inode := &metadata.Inode{ID: metadata.GenerateInodeID("bob", nonce), Nonce: nonce, OwnerID: "bob", Type: metadata.DirType, Version: 1}
+	inode.SetSignerID("bob")
+	inode.ClientBlob = nil
+	inode.UserSig = attackerSK.Sign(inode.ManifestHash())
+	if err := c.verifyInode(ctx, inode); err == nil {
+		t.Fatal("inode signed with a substitute key was accepted")
+	}
+}
+
+// TestSecurity_RecipientKeysMustBeVerified verifies that file keys and group
+// seeds are only encrypted to registry-verified (or out-of-band verified) keys.
+func TestSecurity_RecipientKeysMustBeVerified(t *testing.T) {
+	c, node, _, ts, adminID, adminSK := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	provisionUser(t, ts, node, c, adminID, adminSK, "bob")
+
+	// "unanchored" is a user record the server knows about but that no
+	// registry attestation vouches for (e.g. a key injected by the server).
+	msk, _ := crypto.GenerateIdentityKey()
+	mdk, _ := crypto.GenerateEncryptionKey()
+	metadata.CreateUser(t, node, metadata.User{ID: "unanchored", SignKey: msk.Public(), EncKey: mdk.EncapsulationKey().Bytes()}, msk, adminID, adminSK)
+
+	payload := make([]byte, 32)
+	if err := c.provisionRecipient(ctx, crypto.NewLockbox(), "unanchored", payload, nil); err == nil {
+		t.Fatal("file key provisioned to an unverified recipient key")
+	}
+	if err := c.provisionRecipient(ctx, crypto.NewLockbox(), "bob", payload, nil); err != nil {
+		t.Fatalf("provisioning a verified recipient failed: %v", err)
+	}
+
+	// Contact info whose keys differ from what the server serves is rejected.
+	info, err := c.Stat(ctx, "/users")
+	if err != nil {
+		t.Fatal(err)
+	}
+	usersGID := info.Sys().(*InodeInfo).GroupID
+	otherDK, _ := crypto.GenerateEncryptionKey()
+	ci := &ContactInfo{UserID: "unanchored", EncKey: otherDK.EncapsulationKey().Bytes(), SignKey: msk.Public()}
+	if err := c.AddUserToGroup(ctx, usersGID, "unanchored", "x", ci); err == nil {
+		t.Fatal("AddUserToGroup accepted contact info that does not match the server's keys")
+	}
+}
+
+// TestSecurity_AnchorBindsToConfirmedCode verifies that the registry
+// attestation is only signed for the exact keys whose verification code the
+// administrator confirmed, and that the code is long enough to resist grinding.
+func TestSecurity_AnchorBindsToConfirmedCode(t *testing.T) {
+	c, node, _, ts, adminID, adminSK := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	dsk, _ := crypto.GenerateIdentityKey()
+	ddk, _ := crypto.GenerateEncryptionKey()
+	metadata.CreateUser(t, node, metadata.User{ID: "dave", SignKey: dsk.Public(), EncKey: ddk.EncapsulationKey().Bytes()}, dsk, adminID, adminSK)
+
+	code, err := c.GetUserVerificationCode(ctx, "dave")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := VerificationCode(ddk.EncapsulationKey().Bytes(), dsk.Public()); code != want {
+		t.Fatalf("code = %s, want %s", code, want)
+	}
+	if len(code) != 39 { // 8 groups of 4 hex digits = 128 bits
+		t.Fatalf("verification code %q is not 128 bits", code)
+	}
+	if own := c.OwnVerificationCode(); own != VerificationCode(c.decKey.EncapsulationKey().Bytes(), c.signKey.Public()) {
+		t.Fatalf("OwnVerificationCode mismatch: %s", own)
+	}
+
+	// A code for different keys (the server switched keys after the check).
+	otherDK, _ := crypto.GenerateEncryptionKey()
+	stale := VerificationCode(otherDK.EncapsulationKey().Bytes(), dsk.Public())
+	if err := c.AnchorUserInRegistryWithCode(ctx, "dave", "dave", adminID, stale); err == nil {
+		t.Fatal("anchored keys that do not match the confirmed code")
+	}
+	if err := c.AnchorUserInRegistryWithCode(ctx, "dave", "dave", adminID, code); err != nil {
+		t.Fatalf("anchoring with the confirmed code failed: %v", err)
+	}
+}
+
+// replayTransport records the server's response to the next request and can
+// replay it in place of the response to a later request, simulating a server
+// that answers with a different (validly signed) object than requested.
+type replayTransport struct {
+	base     http.RoundTripper
+	mu       sync.Mutex
+	record   bool
+	recorded *http.Response
+	body     []byte
+	replay   bool
+}
+
+func (r *replayTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	r.mu.Lock()
+	replay := r.replay && r.recorded != nil && req.URL.Path == "/v1/invoke"
+	r.mu.Unlock()
+	if replay {
+		resp := *r.recorded
+		resp.Header = r.recorded.Header.Clone()
+		resp.Body = io.NopCloser(bytes.NewReader(r.body))
+		resp.Request = req
+		return &resp, nil
+	}
+	resp, err := r.base.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.record && req.URL.Path == "/v1/invoke" {
+		r.body, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		resp.Body = io.NopCloser(bytes.NewReader(r.body))
+		rec := *resp
+		r.recorded = &rec
+		r.record = false
+	}
+	return resp, nil
+}
+
+// TestSecurity_InodeSubstitution verifies that the client rejects a validly
+// signed inode returned in place of the requested one.
+func TestSecurity_InodeSubstitution(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	if err := c.saveDataFile(ctx, "/x", []byte("x")); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.saveDataFile(ctx, "/y", []byte("attacker-chosen")); err != nil {
+		t.Fatal(err)
+	}
+	x, _, err := c.resolvePath(ctx, "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	y, _, err := c.resolvePath(ctx, "/y")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rt := &replayTransport{base: c.httpCli.Transport}
+	if rt.base == nil {
+		rt.base = http.DefaultTransport
+	}
+	c.httpCli.Transport = rt
+
+	rt.record = true
+	if _, err := c.getInodeInternal(ctx, y.ID, true); err != nil {
+		t.Fatalf("fetch y: %v", err)
+	}
+	rt.mu.Lock()
+	rt.replay = true
+	rt.mu.Unlock()
+
+	if got, err := c.getInodeInternal(ctx, x.ID, true); err == nil {
+		t.Fatalf("accepted inode %s in place of requested %s", got.ID, x.ID)
+	}
+}
+
+// rewriteTransport lets a test tamper with /v1/invoke responses.
+type rewriteTransport struct {
+	base    http.RoundTripper
+	rewrite func(*http.Response) *http.Response
+}
+
+func (r *rewriteTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := r.base.RoundTrip(req)
+	if err != nil || req.URL.Path != "/v1/invoke" || r.rewrite == nil {
+		return resp, err
+	}
+	return r.rewrite(resp), nil
+}
+
+// TestSecurity_ResponsesMustBeSealedAndBound verifies that the client rejects
+// unsealed successful responses and sealed responses without a cluster binding.
+func TestSecurity_ResponsesMustBeSealedAndBound(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	if err := c.saveDataFile(ctx, "/f", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	f, _, err := c.resolvePath(ctx, "/f")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.getClusterSignKey(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	base := c.httpCli.Transport
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	rt := &rewriteTransport{base: base}
+	c.httpCli.Transport = rt
+
+	// 1. Plaintext (unsealed) response forged by a network attacker.
+	rt.rewrite = func(resp *http.Response) *http.Response {
+		resp.Body.Close()
+		b, _ := json.Marshal(metadata.Inode{ID: f.ID})
+		resp.Header.Del("X-DistFS-Sealed")
+		resp.Body = io.NopCloser(bytes.NewReader(b))
+		return resp
+	}
+	if _, err := c.getInodeInternal(ctx, f.ID, false); err == nil {
+		t.Error("accepted an unsealed response")
+	}
+
+	// 2. Sealed response with the binding signature stripped.
+	rt.rewrite = func(resp *http.Response) *http.Response {
+		var sr metadata.SealedResponse
+		json.NewDecoder(resp.Body).Decode(&sr)
+		resp.Body.Close()
+		sr.BindingSignature = nil
+		b, _ := json.Marshal(sr)
+		resp.Body = io.NopCloser(bytes.NewReader(b))
+		resp.ContentLength = int64(len(b))
+		return resp
+	}
+	if _, err := c.getInodeInternal(ctx, f.ID, false); err == nil {
+		t.Error("accepted a response without a cluster binding signature")
+	}
+
+	// 3. Untampered responses still work.
+	rt.rewrite = nil
+	if _, err := c.getInodeInternal(ctx, f.ID, false); err != nil {
+		t.Errorf("untampered response rejected: %v", err)
+	}
+}
+
+// TestSecurity_ChunkContentMustMatchID verifies that downloaded chunk data is
+// checked against its content-addressed ID, so a storage node cannot serve an
+// older or different ciphertext for a chunk named in a signed manifest.
+func TestSecurity_ChunkContentMustMatchID(t *testing.T) {
+	fileKey := make([]byte, 32)
+	want := bytes.Repeat([]byte("v2"), 100)
+	id, _, err := crypto.EncryptChunk(fileKey, want, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, staleCT, _ := crypto.EncryptChunk(fileKey, bytes.Repeat([]byte("v1"), 100), 0)
+
+	node := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write(staleCT) // valid ciphertext for the same key and index, wrong content
+	}))
+	defer node.Close()
+
+	c := NewClient(node.URL)
+	if _, err := c.downloadChunk(t.Context(), id, []string{node.URL}, "token"); err == nil {
+		t.Fatal("accepted chunk data that does not match its ID")
+	}
+	if err := verifyChunkID(id, staleCT); err == nil {
+		t.Fatal("verifyChunkID accepted mismatched data")
+	}
+}
+
+// TestSecurity_MutationResultsAreVerified verifies that inodes returned by the
+// server after a write are checked before being cached or used as anchors.
+func TestSecurity_MutationResultsAreVerified(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	if err := c.saveDataFile(ctx, "/m", []byte("data")); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := c.updateInode(ctx, mustResolveID(t, c, "/m"), func(i *metadata.Inode) error { return nil })
+	if err != nil {
+		t.Fatalf("updateInode: %v", err)
+	}
+	if err := c.verifyMutationResult(ctx, updated, updated.ID, updated.Version); err != nil {
+		t.Fatalf("genuine result rejected: %v", err)
+	}
+
+	wrongVersion := *updated
+	if err := c.verifyMutationResult(ctx, &wrongVersion, updated.ID, updated.Version+1); err == nil {
+		t.Error("accepted a result with the wrong version")
+	}
+	if err := c.verifyMutationResult(ctx, updated, "other-id", updated.Version); err == nil {
+		t.Error("accepted a result for a different inode")
+	}
+	tampered := *updated
+	tampered.Size += 1
+	if err := c.verifyMutationResult(ctx, &tampered, updated.ID, updated.Version); err == nil {
+		t.Error("accepted a tampered result")
+	}
+}
+
+func mustResolveID(t *testing.T, c *Client, path string) string {
+	t.Helper()
+	in, _, err := c.resolvePath(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return in.ID
+}
+
+// TestTruncateTrimsManifest verifies that truncating a chunked file drops
+// chunks beyond the new size, which the server requires (a manifest may not
+// hold more chunks than the declared size needs).
+func TestTruncateTrimsManifest(t *testing.T) {
+	c, _, _, ts, _, _ := setupTestClient(t)
+	defer ts.Close()
+	ctx := t.Context()
+
+	data := bytes.Repeat([]byte("x"), metadata.InlineLimit+1)
+	if err := c.saveDataFile(ctx, "/t", data); err != nil {
+		t.Fatal(err)
+	}
+	before, _, err := c.resolvePath(ctx, "/t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(before.ChunkManifest) == 0 {
+		t.Fatal("test file is not chunked")
+	}
+	if err := c.setAttr(ctx, "/t", metadata.SetAttrRequest{Size: Ptr(uint64(0))}); err != nil {
+		t.Fatalf("truncate to 0 failed: %v", err)
+	}
+	c.clearPathCache()
+	after, _, err := c.resolvePath(ctx, "/t")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size != 0 || len(after.ChunkManifest) != 0 {
+		t.Fatalf("after truncate: size=%d chunks=%d", after.Size, len(after.ChunkManifest))
+	}
+}

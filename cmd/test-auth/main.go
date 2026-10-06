@@ -92,6 +92,7 @@ func main() {
 					"email": email,
 					"sub":   "sub-" + email,
 					"iss":   "test-auth-server",
+					"aud":   "distfs",
 					"exp":   time.Now().Add(1 * time.Hour).Unix(),
 				})
 				token.Header["kid"] = kid
@@ -158,6 +159,7 @@ func main() {
 					"email": flow.Email,
 					"sub":   "sub-" + flow.Email,
 					"iss":   "test-auth-server",
+					"aud":   "distfs",
 					"exp":   time.Now().Add(1 * time.Hour).Unix(),
 				})
 				token.Header["kid"] = kid

@@ -61,8 +61,13 @@ func getShardPath(id string) string {
 }
 
 func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
+	_, err := s.CreateChunk(id, data)
+	return err
+}
+
+func (s *DiskStore) CreateChunk(id string, data io.Reader) (bool, error) {
 	if !validChunkID.MatchString(id) {
-		return fmt.Errorf("invalid chunk id format")
+		return false, fmt.Errorf("invalid chunk id format")
 	}
 
 	name := getShardPath(id)
@@ -72,7 +77,7 @@ func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
 	// This avoids race conditions with concurrent uploads of identical chunks (e.g. zeros).
 	if exists, _ := s.HasChunk(id); exists {
 		s.mu.Unlock()
-		return nil
+		return false, nil
 	}
 
 	wc, err := s.st.OpenBlobWrite(name, name)
@@ -80,16 +85,19 @@ func (s *DiskStore) WriteChunk(id string, data io.Reader) error {
 
 	if err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			return nil // Idempotency: another goroutine is writing it
+			return false, nil // Idempotency: another goroutine is writing it
 		}
-		return err
+		return false, err
 	}
 
 	if _, err := io.Copy(wc, data); err != nil {
 		wc.Close()
-		return err
+		return false, err
 	}
-	return wc.Close()
+	if err := wc.Close(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func (s *DiskStore) ReadChunk(id string) (io.ReadCloser, error) {

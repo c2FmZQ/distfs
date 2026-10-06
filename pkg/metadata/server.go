@@ -26,6 +26,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/hex"
@@ -120,9 +121,10 @@ type Server struct {
 	leaderURLCache   map[raft.ServerAddress]string
 	leaderURLMu      sync.RWMutex
 
-	oidcMu     sync.RWMutex
-	oidcConfig *OIDCConfig
-	stopCh     chan struct{}
+	oidcMu       sync.RWMutex
+	oidcConfig   *OIDCConfig
+	oidcAudience string // Required "aud" claim of ID tokens (the OIDC client ID)
+	stopCh       chan struct{}
 
 	vault  *NodeVault
 	decKey *mlkem.DecapsulationKey768
@@ -650,8 +652,6 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, ErrCodeInternal, "invalid leader signature", http.StatusUnauthorized)
 			return
 		}
-		// Prove knowledge of secret back to leader
-		w.Header().Set(raftResponseHeader, s.signNonce(nonce, "NODE_RESPONSE"))
 	} else if !s.checkRaftSecret(r) {
 		s.writeError(w, r, ErrCodeUnauthorized, "unauthorized", http.StatusUnauthorized)
 		return
@@ -669,8 +669,51 @@ func (s *Server) handleNodeInfo(w http.ResponseWriter, r *http.Request) {
 	if s.decKey != nil {
 		info["enc_key"] = s.decKey.EncapsulationKey().Bytes()
 	}
+	body, _ := json.Marshal(info)
+	if nonceStr != "" && sigStr != "" {
+		// Prove knowledge of the secret back to the leader, bound to this exact
+		// response so that a relay cannot substitute its own keys.
+		nonce, _ := hex.DecodeString(nonceStr)
+		w.Header().Set(raftResponseHeader, s.signNonce(nonce, nodeResponseLabel(body)))
+	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(info)
+	w.Write(body)
+}
+
+// nodeResponseLabel binds the node's discovery proof to its response body.
+func nodeResponseLabel(body []byte) string {
+	h := sha256.Sum256(body)
+	return "NODE_RESPONSE|" + hex.EncodeToString(h[:])
+}
+
+// pinnedDiscoveryClient returns a client for talking to a joining node that
+// only accepts the given TLS key, which was authenticated during discovery.
+func (s *Server) pinnedDiscoveryClient(pub ed25519.PublicKey) *http.Client {
+	t := ech.NewTransport()
+	cfg := &tls.Config{}
+	if base, ok := s.discoveryHTTPClient.Transport.(*ech.Transport); ok {
+		if base.TLSConfig != nil {
+			cfg = base.TLSConfig.Clone()
+		}
+		t.Resolver = base.Resolver
+	}
+	cfg.InsecureSkipVerify = true // Replaced by the key pinning below.
+	cfg.VerifyPeerCertificate = func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
+		if len(rawCerts) == 0 {
+			return fmt.Errorf("no peer certificate")
+		}
+		cert, err := x509.ParseCertificate(rawCerts[0])
+		if err != nil {
+			return err
+		}
+		key, ok := cert.PublicKey.(ed25519.PublicKey)
+		if !ok || !key.Equal(pub) {
+			return fmt.Errorf("joining node presented an unexpected TLS key")
+		}
+		return nil
+	}
+	t.TLSConfig = cfg
+	return &http.Client{Transport: t, Timeout: s.discoveryHTTPClient.Timeout}
 }
 
 // ServeHTTP routes and handles incoming Metadata API requests.
@@ -958,7 +1001,10 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	if s.sessionTokenCache != nil {
 		if sessInfo, ok := s.sessionTokenCache.Get(sess); ok {
 			if time.Now().Unix() <= sessInfo.Expiry {
-				return sessInfo.User, nil
+				// The cache only saves re-verifying the token signature. The
+				// user record is re-read so that state changes such as an admin
+				// locking the account take effect on existing sessions.
+				return s.fsm.GetUser(sessInfo.User.ID)
 			}
 			s.sessionTokenCache.Remove(sess)
 		}
@@ -1002,10 +1048,22 @@ func (s *Server) authenticate(r *http.Request) (*User, error) {
 	return user, err
 }
 
+// Limits for the unauthenticated login endpoints.
+const (
+	maxAuthBodySize      = 1 << 20 // login and registration payloads (PQC keys and signatures)
+	maxChallengeBodySize = 4096
+	maxUserIDLength      = 256
+	maxPendingChallenges = 100000
+)
+
 func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 	var req AuthChallengeRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxChallengeBodySize)).Decode(&req); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
+		return
+	}
+	if req.UserID == "" || len(req.UserID) > maxUserIDLength {
+		s.writeError(w, r, ErrCodeInternal, "invalid user id", http.StatusBadRequest)
 		return
 	}
 
@@ -1021,6 +1079,12 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 		if time.Since(v.CreatedAt) > 2*time.Minute {
 			delete(s.challengeCache, k)
 		}
+	}
+	// Bound memory held for unauthenticated callers.
+	if len(s.challengeCache) >= maxPendingChallenges {
+		s.challengeMu.Unlock()
+		s.writeError(w, r, ErrCodeInternal, "too many pending challenges", http.StatusServiceUnavailable)
+		return
 	}
 	s.challengeCache[base64.StdEncoding.EncodeToString(challenge)] = challengeEntry{
 		UserID:    req.UserID,
@@ -1039,7 +1103,7 @@ func (s *Server) handleAuthChallenge(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var solve AuthChallengeSolve
-	if err := json.NewDecoder(r.Body).Decode(&solve); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthBodySize)).Decode(&solve); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1079,7 +1143,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !crypto.VerifySignature(user.SignKey, solve.Challenge, solve.Signature) {
+	if !crypto.VerifySignature(user.SignKey, LoginChallengeMessage(solve.Challenge), solve.Signature) {
 		s.writeError(w, r, ErrCodeInternal, "invalid signature", http.StatusUnauthorized)
 		return
 	}
@@ -1181,9 +1245,27 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Clients may only request a single capability mode. Combined modes
+	// (e.g. "RW") are reserved for cluster-internal tokens.
+	switch req.Mode {
+	case "R", "W":
+	case "D":
+		// Delete is only for cleaning up chunks this session uploaded but failed
+		// to commit. It must name the chunks explicitly and be session-bound so
+		// data nodes can verify the session created them.
+		if len(req.Chunks) == 0 || r.Header.Get("Session-Token") == "" {
+			s.writeError(w, r, ErrCodeInternal, "delete capability requires explicit chunks and a session", http.StatusBadRequest)
+			return
+		}
+	default:
+		s.writeError(w, r, ErrCodeInternal, "invalid capability mode", http.StatusBadRequest)
+		return
+	}
+
 	// Verify Permission
 	var inode Inode
 	exists := true
+	creatorOnly := req.Mode == "D"
 	err := s.fsm.db.View(func(tx *bolt.Tx) error {
 		plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(req.InodeID))
 		if err != nil {
@@ -1205,7 +1287,7 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	if exists {
 		reqBit := uint32(0004) // R
-		if req.Mode == "W" {
+		if req.Mode == "W" || req.Mode == "D" {
 			reqBit = 0002 // W
 		}
 
@@ -1215,9 +1297,32 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, r, ErrCodeForbidden, "POSIX access denied", http.StatusForbidden)
 			return
 		}
+
+		manifest := make(map[string]bool, len(inode.ChunkManifest))
+		for _, c := range inode.ChunkManifest {
+			manifest[c.ID] = true
+		}
+		for _, c := range req.Chunks {
+			switch {
+			case req.Mode == "R" && !manifest[c]:
+				// Read access to an inode only grants access to its own chunks.
+				// Writers may read back their own uncommitted uploads: the token
+				// is restricted to chunks this session created on the data node.
+				if !evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0002) || r.Header.Get("Session-Token") == "" {
+					s.writeError(w, r, ErrCodeForbidden, "chunk not in inode manifest", http.StatusForbidden)
+					return
+				}
+				creatorOnly = true
+			case req.Mode == "D" && manifest[c]:
+				// Committed chunks are only removed by the cluster GC.
+				s.writeError(w, r, ErrCodeForbidden, "cannot delete committed chunk", http.StatusForbidden)
+				return
+			}
+		}
 	} else {
-		// Inode doesn't exist yet. Only allow "W" mode for creation.
-		if req.Mode != "W" {
+		// Inode doesn't exist yet. Allow "W" for creation and "D" for cleaning
+		// up chunks uploaded for a creation that failed to commit.
+		if req.Mode == "R" {
 			s.writeError(w, r, ErrCodeNotFound, "inode not found", http.StatusNotFound)
 			return
 		}
@@ -1254,9 +1359,10 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 
 	// Construct Token
 	capToken := CapabilityToken{
-		Chunks: req.Chunks,
-		Mode:   req.Mode,
-		Exp:    time.Now().Add(10 * time.Minute).Unix(),
+		Chunks:      req.Chunks,
+		Mode:        req.Mode,
+		Exp:         time.Now().Add(10 * time.Minute).Unix(),
+		CreatorOnly: creatorOnly,
 	}
 
 	// Session Locking: Bind to SHA256(SessionID)
@@ -1270,8 +1376,13 @@ func (s *Server) handleIssueToken(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if creatorOnly && len(capToken.SessionBinding) == 0 {
+		s.writeError(w, r, ErrCodeUnauthorized, "capability requires a valid session", http.StatusUnauthorized)
+		return
+	}
+
 	if len(capToken.Chunks) == 0 {
-		// If empty, allow all chunks in inode?
+		// If empty, allow all chunks in inode
 		for _, c := range inode.ChunkManifest {
 			capToken.Chunks = append(capToken.Chunks, c.ID)
 		}
@@ -1481,12 +1592,45 @@ func (s *Server) handleBatch(w http.ResponseWriter, r *http.Request) {
 	s.writeJSON(w, r, s.sanitizeResponse(resp), http.StatusOK)
 }
 
+// DefaultOIDCAudience is the OIDC client ID used by DistFS clients.
+const DefaultOIDCAudience = "distfs"
+
+// SetOIDCAudience sets the required "aud" claim (the OIDC client ID).
+func (s *Server) SetOIDCAudience(aud string) {
+	s.oidcMu.Lock()
+	defer s.oidcMu.Unlock()
+	s.oidcAudience = aud
+}
+
 func (s *Server) verifyJWT(ctx context.Context, tokenStr string) (string, error) {
 	s.jwks.Ready(ctx)
+
+	s.oidcMu.RLock()
+	var issuer string
+	if s.oidcConfig != nil {
+		issuer = s.oidcConfig.Issuer
+	}
+	audience := s.oidcAudience
+	s.oidcMu.RUnlock()
+	if issuer == "" {
+		return "", fmt.Errorf("invalid jwt: OIDC issuer not configured")
+	}
+	if audience == "" {
+		audience = DefaultOIDCAudience
+	}
+
+	// Tokens must be issued by our IdP, for our client, and must expire.
+	// Otherwise an ID token the IdP issued to any other application for the
+	// same user would be accepted.
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		kid, _ := token.Header["kid"].(string)
 		return s.jwks.GetKey(kid)
-	})
+	},
+		jwt.WithIssuer(issuer),
+		jwt.WithAudience(audience),
+		jwt.WithExpirationRequired(),
+		jwt.WithValidMethods([]string{"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512", "EdDSA"}),
+	)
 
 	if err != nil || !token.Valid {
 		log.Printf("JWT Verification FAILED: %v", err)
@@ -1524,7 +1668,7 @@ func (s *Server) handleRegisterUser(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req RegisterUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxAuthBodySize)).Decode(&req); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "bad request", http.StatusBadRequest)
 		return
 	}
@@ -1822,6 +1966,7 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 	}
 
 	s.resolveURLs(inode.ChunkManifest)
+	redactForeignLeases(&inode, r)
 	data, err = json.Marshal(inode)
 	if err != nil {
 		s.writeError(w, r, ErrCodeInternal, err.Error(), http.StatusInternalServerError)
@@ -1832,6 +1977,29 @@ func (s *Server) handleGetInode(w http.ResponseWriter, r *http.Request, id strin
 
 	// E2EE?
 	s.writeSealedResponse(w, r, data)
+}
+
+// redactForeignLeases hides the session identifiers of leases held by other
+// sessions. Leases are not covered by the owner's signature, so they can be
+// redacted without breaking client-side verification.
+func redactForeignLeases(inode *Inode, r *http.Request) {
+	if len(inode.Leases) == 0 {
+		return
+	}
+	own, _ := r.Context().Value(sessionNonceContextKey).(string)
+	redacted := make(map[string]LeaseInfo, len(inode.Leases))
+	n := 0
+	for k, l := range inode.Leases {
+		if own != "" && l.SessionID == own {
+			redacted[k] = l
+			continue
+		}
+		n++
+		l.SessionID = ""
+		l.Nonce = ""
+		redacted[fmt.Sprintf("redacted-%d", n)] = l
+	}
+	inode.Leases = redacted
 }
 
 func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
@@ -1887,6 +2055,7 @@ func (s *Server) handleGetInodes(w http.ResponseWriter, r *http.Request) {
 
 	for _, inode := range result {
 		s.resolveURLs(inode.ChunkManifest)
+		redactForeignLeases(inode, r)
 	}
 
 	data, _ := json.Marshal(result)
@@ -2181,7 +2350,8 @@ func (s *Server) ApplyRaftCommandWithHook(w http.ResponseWriter, r *http.Request
 			hook(nil)
 		}
 
-		w.WriteHeader(successCode)
+		// Respond through writeJSON so that sealed requests get a sealed reply.
+		s.writeJSON(w, r, nil, successCode)
 	}
 }
 
@@ -2561,13 +2731,16 @@ func (s *Server) writeJSON(w http.ResponseWriter, r *http.Request, data interfac
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
 		sealed, err := s.sealResponse(r, ctxUser, b)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(status)
-			w.Write(sealed)
+		if err != nil {
+			// Never fall back to plaintext for a sealed request.
+			w.Header().Del("Content-Type")
+			http.Error(w, "failed to seal response", http.StatusInternalServerError)
 			return
 		}
-		// If sealing fails, we still want to return the error/data with original status
+		w.Header().Set("X-DistFS-Sealed", "true")
+		w.WriteHeader(status)
+		w.Write(sealed)
+		return
 	}
 
 	w.WriteHeader(status)
@@ -2579,12 +2752,15 @@ func (s *Server) writeSealedResponse(w http.ResponseWriter, r *http.Request, dat
 	ctxUser, _ := r.Context().Value(userContextKey).(*User)
 	if ctxUser != nil && r.Header.Get("X-DistFS-Sealed") == "true" {
 		sealed, err := s.sealResponse(r, ctxUser, data)
-		if err == nil {
-			w.Header().Set("X-DistFS-Sealed", "true")
-			w.WriteHeader(http.StatusOK)
-			w.Write(sealed)
+		if err != nil {
+			// Never fall back to plaintext for a sealed request.
+			s.writeError(w, r, ErrCodeInternal, "failed to seal response", http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("X-DistFS-Sealed", "true")
+		w.WriteHeader(http.StatusOK)
+		w.Write(sealed)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -2669,9 +2845,13 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/x-ndjson")
-	w.WriteHeader(http.StatusOK)
-	encoder := json.NewEncoder(w)
+	// The audit stream is buffered so that it can be sealed for the client.
+	var out bytes.Buffer
+	encoder := json.NewEncoder(&out)
+	defer func() {
+		w.Header().Set("Content-Type", "application/x-ndjson")
+		s.writeSealedResponse(w, r, out.Bytes())
+	}()
 
 	// 2. Perform Audit in a single View transaction
 	s.fsm.db.View(func(tx *bolt.Tx) error {
@@ -3029,9 +3209,15 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify node response signature
+	infoBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if err != nil {
+		s.writeError(w, r, ErrCodeInternal, "failed to read discovery response", http.StatusInternalServerError)
+		return
+	}
+
+	// Verify node response signature over the exact response body
 	nodeSig := resp.Header.Get(raftResponseHeader)
-	if !s.verifySignature(nonce, "NODE_RESPONSE", nodeSig) {
+	if !s.verifySignature(nonce, nodeResponseLabel(infoBody), nodeSig) {
 		s.writeError(w, r, ErrCodeInternal, "invalid node response signature (secret mismatch?)", http.StatusForbidden)
 		return
 	}
@@ -3062,7 +3248,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 		SignKey     []byte `json:"sign_key"`
 		EncKey      []byte `json:"enc_key"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+	if err := json.Unmarshal(infoBody, &info); err != nil {
 		s.writeError(w, r, ErrCodeInternal, "invalid discovery response", http.StatusInternalServerError)
 		return
 	}
@@ -3113,6 +3299,7 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	bootstrapURL := strings.TrimSuffix(req.Address, "/") + "/v1/system/bootstrap"
+	pushClient := s.pinnedDiscoveryClient(probedEdKey)
 	var pushResp *http.Response
 	var lastPushErr error
 	alreadyBootstrapped := false
@@ -3129,10 +3316,11 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 			pushReq.Header.Set("X-Raft-Secret", s.raftSecret)
 		}
 
-		// We use discoveryHTTPClient here because the joining node's certificate
-		// is not yet in the FSM's trusted list. The payload is sealed with the node's
-		// ML-KEM key, ensuring confidentiality.
-		pushResp, err = s.discoveryHTTPClient.Do(pushReq)
+		// The joining node's certificate is not yet in the FSM's trusted list,
+		// so the connection is pinned to the TLS key authenticated during
+		// discovery (the request carries the raft secret). The payload is also
+		// sealed with the node's authenticated ML-KEM key.
+		pushResp, err = pushClient.Do(pushReq)
 		if err == nil {
 			if pushResp.StatusCode == http.StatusOK {
 				break
@@ -3192,6 +3380,9 @@ func (s *Server) handleClusterJoin(w http.ResponseWriter, r *http.Request) {
 
 	node.ID = info.ID
 	node.Status = NodeStatusActive
+	// Keys authenticated during discovery; verifyPeer pins the TLS key.
+	node.PublicKey = info.PublicKey
+	node.SignKey = info.SignKey
 	node.Address = info.APIURL
 	node.ClusterAddress = req.Address
 	node.RaftAddress = info.RaftAddress
@@ -3323,8 +3514,7 @@ func (s *Server) handleGetWorldPrivateKey(w http.ResponseWriter, r *http.Request
 		"kem": base64.StdEncoding.EncodeToString(kemCT),
 		"dem": base64.StdEncoding.EncodeToString(demCT),
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, r, resp, http.StatusOK)
 }
 
 func (s *Server) parseSessionToken(tokenStr string) (*SessionToken, error) {
@@ -3362,13 +3552,12 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 			if ok {
 				if entry.expiry < time.Now().Unix() {
-					s.sessionKeyMu.RUnlock()
 					// Treat as cache miss, fall back to KEM
 				} else {
 					ts, payload, sig, err := crypto.OpenRequestSymmetric(entry.key, user.SignKey, sealed.Sealed)
 					if err == nil {
 						// Success with cached key
-						if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
+						if err := s.checkReplay(user.ID, ts, sig); err != nil {
 							return nil, nil, err
 						}
 						// Phase 53.1: Pass session key to handlers via context for symmetric response sealing
@@ -3440,7 +3629,7 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 	}
 
 	// 3. Replay Protection
-	if err := s.checkReplay(user.ID, ts, sealed.Sealed); err != nil {
+	if err := s.checkReplay(user.ID, ts, sig); err != nil {
 		return nil, nil, err
 	}
 
@@ -3455,18 +3644,19 @@ func (s *Server) unsealRequest(w http.ResponseWriter, r *http.Request, user *Use
 
 	return payload, ctx, nil
 }
-func (s *Server) checkReplay(userID string, ts int64, ciphertext []byte) error {
+
+// checkReplay rejects a request seen before. It is keyed on the request's
+// signature, which is authenticated and unique per signed message; the sealed
+// bytes themselves are not suitable since parts of them (e.g. the unused KEM
+// ciphertext in symmetric mode) are not authenticated and can be altered.
+func (s *Server) checkReplay(userID string, ts int64, sig []byte) error {
 	now := time.Now().UnixNano()
 	if ts < now-int64(2*time.Minute) || ts > now+int64(2*time.Minute) {
 		return fmt.Errorf("request timestamp out of range")
 	}
 
-	// Phase 68 refinement: Include part of ciphertext in nonce to allow concurrent requests with same timestamp
-	snippet := ""
-	if len(ciphertext) > 16 {
-		snippet = hex.EncodeToString(ciphertext[:16])
-	}
-	nonce := userID + ":" + fmt.Sprintf("%d", ts) + ":" + snippet
+	sigHash := sha256.Sum256(sig)
+	nonce := userID + ":" + fmt.Sprintf("%d", ts) + ":" + hex.EncodeToString(sigHash[:])
 	s.requestNonceMu.Lock()
 	// Lazy GC
 	for k, v := range s.requestNonceCache {
@@ -3722,6 +3912,11 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.checkLeasePermission(user, &req); err != nil {
+		s.writeError(w, r, ErrCodeForbidden, err.Error(), http.StatusForbidden)
+		return
+	}
+
 	if req.Duration == 0 {
 		req.Duration = int64(2 * time.Minute) // Default duration
 		// NOTE: If we modify it here and re-marshal, we break the signature.
@@ -3741,6 +3936,55 @@ func (s *Server) handleAcquireLeases(w http.ResponseWriter, r *http.Request) {
 		newBody, _ := json.Marshal(req)
 		s.ApplyRaftCommandRaw(w, r, CmdAcquireLeases, newBody, http.StatusOK)
 	}
+}
+
+// checkLeasePermission ensures exclusive leases are only granted to users who
+// may write the inode; otherwise any user could lock e.g. the root directory or
+// another user's files and block every mutation by other sessions. Shared
+// leases are not checked: the server cannot see anonymous group membership.
+// Placeholders for new inodes must be owned by the requester.
+func (s *Server) checkLeasePermission(user *User, req *LeaseRequest) error {
+	if s.fsm.IsAdmin(user.ID) {
+		return nil
+	}
+	for _, p := range req.Placeholders {
+		if p.OwnerID != user.ID {
+			return fmt.Errorf("forbidden: placeholder %s must be owned by the requester", p.ID)
+		}
+		if p.GroupID != "" {
+			if in, _ := s.fsm.IsUserInGroup(user.ID, p.GroupID); !in {
+				return fmt.Errorf("forbidden: not a member of group %s", p.GroupID)
+			}
+		}
+	}
+	if req.Type != LeaseExclusive {
+		return nil
+	}
+	for _, id := range req.InodeIDs {
+		if strings.HasPrefix(id, "path:") || !IsInodeID(id) {
+			continue // Name reservations
+		}
+		var inode Inode
+		var exists bool
+		err := s.fsm.db.View(func(tx *bolt.Tx) error {
+			plain, err := s.fsm.Get(tx, []byte("inodes"), []byte(id))
+			if err != nil || plain == nil {
+				return err
+			}
+			exists = true
+			return json.Unmarshal(plain, &inode)
+		})
+		if err != nil {
+			return err
+		}
+		if !exists {
+			continue // New inode: covered by its placeholder
+		}
+		if req.Type == LeaseExclusive && !evaluatePOSIXAccess(s.fsm, &inode, user.ID, 0002) {
+			return fmt.Errorf("forbidden: exclusive lease on %s requires write access", id)
+		}
+	}
+	return nil
 }
 
 func (s *Server) handleReleaseLeases(w http.ResponseWriter, r *http.Request) {
@@ -4117,6 +4361,5 @@ func (s *Server) handleValidateMetadata(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	s.writeJSON(w, r, resp, http.StatusOK)
 }

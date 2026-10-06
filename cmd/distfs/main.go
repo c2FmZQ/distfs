@@ -617,9 +617,16 @@ func main() {
 			},
 			{
 				Name:  "whoami",
-				Usage: "Display your user ID",
+				Usage: "Display your user ID (or, with --security-code, your out-of-band verification code)",
+				Flags: []cli.Flag{
+					&cli.BoolFlag{Name: "security-code", Usage: "Print the security code an administrator verifies before adding you to the registry"},
+				},
 				Action: func(ctx context.Context, cmd *cli.Command) error {
 					c := loadClient()
+					if cmd.Bool("security-code") {
+						fmt.Println(c.OwnVerificationCode())
+						return nil
+					}
 					fmt.Println(c.UserID())
 					return nil
 				},

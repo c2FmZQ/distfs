@@ -59,6 +59,7 @@ func TestReplicationMonitor_Scan(t *testing.T) {
 	// 2. Setup Inode with under-replication (n1, n3 are owners, but n3 will be "dead" soon)
 	inode := Inode{
 		ID:      "invalid-but-test-mocked",
+		Size:    1,
 		Type:    FileType,
 		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{
@@ -187,6 +188,7 @@ func TestReplicationMonitor_Prune(t *testing.T) {
 	// 2. Setup Inode with over-replication (4 nodes, target is 3)
 	inode := Inode{
 		ID:      "over-replicated-inode",
+		Size:    1,
 		Type:    FileType,
 		OwnerID: "u1",
 		ChunkManifest: []ChunkEntry{

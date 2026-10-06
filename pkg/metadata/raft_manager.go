@@ -17,6 +17,7 @@
 package metadata
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/tls"
@@ -101,10 +102,16 @@ func NewRaftNodeWithConfig(nodeID, bindAddr, advertiseAddr, baseDir string, st *
 			return nil
 		}
 
-		// Check if peer is in FSM
+		// Check if peer is in FSM. Node IDs are only a 64-bit prefix of the
+		// key, so when the full key is on record it must match exactly.
 		derivedID := NodeIDFromPublicKey(edPub)
-		if n, err := fsm.GetNode(derivedID); err == nil && n != nil && n.Status == NodeStatusActive {
-			return nil
+		if n, err := fsm.GetNode(derivedID); err == nil && n != nil {
+			if len(n.PublicKey) > 0 && !bytes.Equal(n.PublicKey, edPub) {
+				return fmt.Errorf("peer key does not match registered node %s", derivedID)
+			}
+			if n.Status == NodeStatusActive {
+				return nil
+			}
 		}
 
 		// Check if peer is in Raft Configuration (bootstrap/join scenario)

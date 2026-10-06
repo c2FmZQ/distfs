@@ -25,6 +25,10 @@ type Store interface {
 	// It must be atomic (all or nothing).
 	WriteChunk(id string, data io.Reader) error
 
+	// CreateChunk is like WriteChunk but also reports whether this call
+	// created the chunk (false if it already existed).
+	CreateChunk(id string, data io.Reader) (bool, error)
+
 	// ReadChunk returns a reader for the chunk data.
 	// The caller must close the reader.
 	ReadChunk(id string) (io.ReadCloser, error)

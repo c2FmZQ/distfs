@@ -475,7 +475,7 @@ func LoginSessionForTestWithSecret(t *testing.T, ts *httptest.Server, userID str
 	json.NewDecoder(resp.Body).Decode(&challengeRes)
 
 	// 2. Solve Challenge + Ephemeral Key for Forward Secrecy
-	sig := userSignKey.Sign(challengeRes.Challenge)
+	sig := userSignKey.Sign(LoginChallengeMessage(challengeRes.Challenge))
 
 	// Phase 53.1: Ephemeral PQC-KEM for Forward Secret Session Key
 	sessionDK, _ := crypto.GenerateEncryptionKey()

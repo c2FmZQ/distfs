@@ -26,6 +26,7 @@ import (
 	"io"
 	"sort"
 	"strconv"
+	"time"
 
 	"github.com/c2FmZQ/distfs/pkg/crypto"
 )
@@ -692,6 +693,13 @@ func (i *Inode) ManifestHash() []byte {
 	h.Write(t)
 	h.Write([]byte("|"))
 
+	// Size bounds reads of the (padded) chunk data, so it must be signed.
+	sz := make([]byte, 8)
+	binary.BigEndian.PutUint64(sz, i.Size)
+	h.Write([]byte("size:"))
+	h.Write(sz)
+	h.Write([]byte("|"))
+
 	// Write Links (sorted for canonicality)
 	if len(i.Links) > 0 {
 		h.Write([]byte("links:"))
@@ -796,11 +804,26 @@ type AuthChallengeResponse struct {
 	Signature []byte `json:"sig"`       // Server signature over Challenge
 }
 
+// LoginChallengeSize is the required length of a login challenge.
+const LoginChallengeSize = 32
+
+// loginChallengeDomain separates login signatures from every other signature
+// made with a user's identity key. Without it, a malicious server could choose
+// a challenge equal to e.g. an inode ManifestHash and obtain a valid UserSig.
+const loginChallengeDomain = "DistFS-Login-v1\x00"
+
+// LoginChallengeMessage returns the message a user signs to solve a login challenge.
+func LoginChallengeMessage(challenge []byte) []byte {
+	msg := make([]byte, 0, len(loginChallengeDomain)+len(challenge))
+	msg = append(msg, loginChallengeDomain...)
+	return append(msg, challenge...)
+}
+
 // AuthChallengeSolve is the user's response to the challenge.
 type AuthChallengeSolve struct {
 	UserID    string `json:"uid"`
 	Challenge []byte `json:"challenge"`
-	Signature []byte `json:"sig"`               // User signature over Challenge
+	Signature []byte `json:"sig"`               // User signature over LoginChallengeMessage(Challenge)
 	EncKey    []byte `json:"enc_key,omitempty"` // Ephemeral ML-KEM-768 PK for session key establishment
 }
 
@@ -838,6 +861,9 @@ type CapabilityToken struct {
 	Mode           string   `json:"mode"` // "R" or "W"
 	Exp            int64    `json:"exp"`
 	SessionBinding []byte   `json:"session_binding,omitempty"` // SHA256(SessionID)
+	// CreatorOnly restricts the capability to chunks that the bound session
+	// created on the data node (uncommitted uploads).
+	CreatorOnly bool `json:"creator_only,omitempty"`
 }
 
 // ClusterSignKey stores the cluster-wide token signing key information.
@@ -1186,7 +1212,13 @@ type LogCommand struct {
 	RaftIndex     uint64            `json:"idx,omitempty"`            // Optional index for deterministic IDs
 }
 
+// Marshal encodes the command for proposal to Raft. Commands are stamped with
+// the proposer's time so that every node applies them with the same time
+// (FSM apply must be deterministic).
 func (c LogCommand) Marshal() ([]byte, error) {
+	if c.Timestamp == 0 {
+		c.Timestamp = time.Now().UnixNano()
+	}
 	return json.Marshal(c)
 }
 

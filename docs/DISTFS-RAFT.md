@@ -40,7 +40,7 @@ The **ClusterSecret** is a high-entropy symmetric secret that serves as the root
 ### 2.3 Identity Privacy (The Dark Registry)
 The server only operates on opaque identifiers. 
 *   **Dark Users:** `UserID = HMAC(sub, ClusterSecret)`.
-*   **Dark Groups:** To protect the social graph, group membership is managed via a **Dark Membership** model. A member's recipient ID in a Group Lockbox is not their `UserID`, but a salted HMAC: `RecipientID = HMAC(UserID, GroupID)`. This ensures that even if a server admin inspects the Lockbox, they cannot determine which users belong to the group without the `ClusterSecret`. HMAC acts as a **Pseudorandom Function (PRF)** in this context, ensuring that identifiers are indistinguishable from random noise to anyone without the secret key.
+*   **Dark Groups:** To protect the social graph, group membership is managed via a **Dark Membership** model. A member's recipient ID in a Group Lockbox is not their `UserID`, but a salted HMAC: `RecipientID = HMAC(key=GroupID, UserID)`. This prevents casual linking of lockbox entries across groups, but it is **pseudonymization, not anonymity**: the key (the GroupID) is public, so anyone who can read the group (including the server, which uses it to enforce group permissions, and other users) can test a known `UserID` for membership. Members who must be hidden from the server and other members MUST be provisioned through the `AnonymousLockbox` (Theorem 11).
 
 ## 3. Cluster Security & mTLS
 
@@ -58,7 +58,7 @@ To prevent a compromised cluster from presenting different versions of the histo
 During login, the client and server perform an ephemeral PQC-KEM exchange. The server generates a unique **Session Key** encapsulated for the client's ephemeral public key. This key is used to protect all subsequent traffic in that session. Because the session key is ephemeral and never persisted in the Raft log or FSM, a future compromise of the cluster's long-term keys does not reveal the content of past sessions.
 
 ### 3.4 Proof of Identity Possession (Auth Challenges)
-To prevent session hijacking or unauthorized login, the cluster enforces a **Challenge-Response** protocol. The server issues a random 32-byte challenge which the user must sign with their private `SignKey` (ML-DSA). Only users who can prove possession of the private key bound to their `UserID` can obtain a valid session token.
+To prevent session hijacking or unauthorized login, the cluster enforces a **Challenge-Response** protocol. The server issues a random 32-byte challenge $C$ which the user must sign with their private `SignKey` (ML-DSA). The signed message is domain-separated: `"DistFS-Login-v1\x00" || C`. Signing the raw challenge would turn login into a signing oracle: a malicious server could choose $C$ equal to an inode `ManifestHash` and obtain a valid `UserSig` for forged metadata. Only users who can prove possession of the private key bound to their `UserID` can obtain a valid session token.
 
 ### 3.5 mTLS & TOFU Bootstrapping
 Inter-node communication is secured via mutual TLS with a strict TOFU-to-Strict transition (see Section 5.2).
@@ -166,6 +166,6 @@ Therefore, the filesystem state transitions from one consistent state to another
 **Proof Sketch:**
 During the `Login` flow, the server generates a random 256-bit challenge $C$.
 1.  **Uniqueness:** $C$ is high-entropy and single-use, preventing replay.
-2.  **Attribution:** The user must return $Sign(SK_{user}, C)$.
+2.  **Attribution:** The user must return $Sign(SK_{user}, \text{"DistFS-Login-v1\textbackslash x00"} \| C)$. The domain prefix ensures a login signature can never be reinterpreted as a signature over any other DistFS message (e.g. a 32-byte `ManifestHash`).
 3.  **Verification:** The server verifies the signature against the user's `SignKey` in the registry.
 By the EUF-CMA security of ML-DSA, an adversary $\mathcal{A}$ who does not possess $SK_{user}$ cannot produce a valid signature for a fresh challenge $C$. Therefore, the server ensures that the requester is the legitimate owner of the identity before issuing a session token.
