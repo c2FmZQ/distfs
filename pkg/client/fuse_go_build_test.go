@@ -208,6 +208,11 @@ func main() {
 		fmt.Sprintf("GOPATH=%s", goPath),
 		fmt.Sprintf("GOCACHE=%s", goCache),
 		"GO111MODULE=off",
+		"GOTOOLCHAIN=local",
+		"GOPROXY=off",
+		"GOSUMDB=off",
+		"GOTELEMETRY=off",
+		"GOPRIVATE=*",
 	)
 
 	start := time.Now()

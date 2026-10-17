@@ -37,7 +37,15 @@ type IdentityPublicKey struct {
 }
 
 func (k *IdentityPublicKey) Verify(msg, sig []byte) bool {
-	return mldsa65.Verify(k.pub, msg, nil, sig)
+	pubBytes := k.pub.Bytes()
+	if verifyCacheGet(pubBytes, msg, sig) {
+		return true
+	}
+	ok := mldsa65.Verify(k.pub, msg, nil, sig)
+	if ok {
+		verifyCachePut(pubBytes, msg, sig)
+	}
+	return ok
 }
 
 func UnmarshalIdentityPublicKey(b []byte) (*IdentityPublicKey, error) {
@@ -99,6 +107,9 @@ func UnmarshalIdentityKey(b []byte) *IdentityKey {
 
 // VerifySignature checks the signature against the public key.
 func VerifySignature(pubKey []byte, msg, sig []byte) bool {
+	if verifyCacheGet(pubKey, msg, sig) {
+		return true
+	}
 	if len(pubKey) != mldsa65.PublicKeySize {
 		return false
 	}
@@ -107,7 +118,11 @@ func VerifySignature(pubKey []byte, msg, sig []byte) bool {
 		return false
 	}
 	// ctx is optional, we use nil
-	return mldsa65.Verify(&pub, msg, nil, sig)
+	ok := mldsa65.Verify(&pub, msg, nil, sig)
+	if ok {
+		verifyCachePut(pubKey, msg, sig)
+	}
+	return ok
 }
 
 // SignatureSize returns the size of an ML-DSA-65 signature.

@@ -28,7 +28,7 @@ import (
 )
 
 func TestDownloadChunk_HedgedRequests(t *testing.T) {
-	c := NewClient("http://localhost:8080")
+	c := NewClient("http://localhost:8080").WithHedgeDelay(1 * time.Second)
 
 	// Chunk IDs are content addresses, so every replica serves the same bytes.
 	content := []byte("chunk-data")

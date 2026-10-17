@@ -68,6 +68,7 @@ func TestNativeStorePruning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	store.SetPruneInterval(0)
 	defer store.Close()
 
 	// Put 10 chunks of 25 bytes each (total 250 bytes)
