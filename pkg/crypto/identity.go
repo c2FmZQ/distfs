@@ -15,65 +15,55 @@
 package crypto
 
 import (
-	"bytes"
-	"crypto/rand"
+	"crypto/mldsa"
 	"fmt"
-
-	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 )
-
-// TODO: Switch to crypto/mldsa (standard library) when it becomes available in Go (planned for Go 1.27).
 
 // IdentityKey represents a user's asymmetric key pair for signing/identity.
 // Currently backed by ML-DSA-65 (FIPS 204).
 type IdentityKey struct {
-	priv *mldsa65.PrivateKey
-	pub  *mldsa65.PublicKey
+	priv *mldsa.PrivateKey
+	pub  *mldsa.PublicKey
 }
 
 // IdentityPublicKey represents a user's public signing key.
 type IdentityPublicKey struct {
-	pub *mldsa65.PublicKey
+	pub *mldsa.PublicKey
 }
 
 func (k *IdentityPublicKey) Verify(msg, sig []byte) bool {
-	return mldsa65.Verify(k.pub, msg, nil, sig)
+	return mldsa.Verify(k.pub, msg, sig, nil) == nil
 }
 
 func UnmarshalIdentityPublicKey(b []byte) (*IdentityPublicKey, error) {
-	if len(b) != mldsa65.PublicKeySize {
-		return nil, fmt.Errorf("invalid public key size")
-	}
-	var pub mldsa65.PublicKey
-	if err := pub.UnmarshalBinary(b); err != nil {
+	pub, err := mldsa.NewPublicKey(mldsa.MLDSA65(), b)
+	if err != nil {
 		return nil, err
 	}
-	return &IdentityPublicKey{pub: &pub}, nil
+	return &IdentityPublicKey{pub: pub}, nil
 }
 
 // GenerateIdentityKey creates a new ML-DSA (Dilithium) key pair.
 func GenerateIdentityKey() (*IdentityKey, error) {
-	pub, priv, err := mldsa65.GenerateKey(rand.Reader)
+	priv, err := mldsa.GenerateKey(mldsa.MLDSA65())
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate identity key: %w", err)
 	}
-	return &IdentityKey{priv: priv, pub: pub}, nil
+	return &IdentityKey{priv: priv, pub: priv.PublicKey()}, nil
 }
 
 // GenerateIdentityKeyFromSeed generates a key pair from a 32-byte seed.
 func GenerateIdentityKeyFromSeed(seed []byte) (*IdentityKey, error) {
-	// ML-DSA-65 requires a 32-byte seed.
-	// We use bytes.NewReader(seed) as the entropy source for deterministic generation.
-	pub, priv, err := mldsa65.GenerateKey(bytes.NewReader(seed))
+	priv, err := mldsa.NewPrivateKey(mldsa.MLDSA65(), seed)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate identity key from seed: %w", err)
 	}
-	return &IdentityKey{priv: priv, pub: pub}, nil
+	return &IdentityKey{priv: priv, pub: priv.PublicKey()}, nil
 }
 
 // Sign signs the message.
 func (k *IdentityKey) Sign(msg []byte) []byte {
-	sig, _ := k.priv.Sign(rand.Reader, msg, nil)
+	sig, _ := k.priv.Sign(nil, msg, nil)
 	return sig
 }
 
@@ -89,33 +79,28 @@ func (k *IdentityKey) MarshalPrivate() []byte {
 
 // UnmarshalIdentityKey deserializes the private key.
 func UnmarshalIdentityKey(b []byte) *IdentityKey {
-	var priv mldsa65.PrivateKey
-	if err := priv.UnmarshalBinary(b); err != nil {
+	priv, err := mldsa.NewPrivateKey(mldsa.MLDSA65(), b)
+	if err != nil {
 		return nil
 	}
-	pub := priv.Public().(*mldsa65.PublicKey)
-	return &IdentityKey{priv: &priv, pub: pub}
+	return &IdentityKey{priv: priv, pub: priv.PublicKey()}
 }
 
 // VerifySignature checks the signature against the public key.
 func VerifySignature(pubKey []byte, msg, sig []byte) bool {
-	if len(pubKey) != mldsa65.PublicKeySize {
+	pub, err := mldsa.NewPublicKey(mldsa.MLDSA65(), pubKey)
+	if err != nil {
 		return false
 	}
-	var pub mldsa65.PublicKey
-	if err := pub.UnmarshalBinary(pubKey); err != nil {
-		return false
-	}
-	// ctx is optional, we use nil
-	return mldsa65.Verify(&pub, msg, nil, sig)
+	return mldsa.Verify(pub, msg, sig, nil) == nil
 }
 
 // SignatureSize returns the size of an ML-DSA-65 signature.
 func SignatureSize() int {
-	return mldsa65.SignatureSize
+	return mldsa.MLDSA65SignatureSize
 }
 
 // PublicKeySize returns the size of an ML-DSA-65 public key.
 func PublicKeySize() int {
-	return mldsa65.PublicKeySize
+	return mldsa.MLDSA65PublicKeySize
 }
