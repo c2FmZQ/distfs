@@ -255,6 +255,27 @@ func TestIdentityKeySerialization(t *testing.T) {
 		t.Error("Public key mismatch after unmarshal")
 	}
 
+	k3, err := GenerateIdentityKeyFromSeed(priv)
+	if err != nil {
+		t.Fatalf("GenerateIdentityKeyFromSeed failed: %v", err)
+	}
+	if string(k.Public()) != string(k3.Public()) {
+		t.Error("Public key mismatch from seed")
+	}
+
+	pub, err := UnmarshalIdentityPublicKey(k.Public())
+	if err != nil {
+		t.Fatalf("UnmarshalIdentityPublicKey failed: %v", err)
+	}
+	msg := []byte("test message")
+	sig := k.Sign(msg)
+	if !pub.Verify(msg, sig) {
+		t.Error("IdentityPublicKey.Verify failed for valid signature")
+	}
+	if pub.Verify([]byte("wrong message"), sig) {
+		t.Error("IdentityPublicKey.Verify succeeded for wrong message")
+	}
+
 	if VerifySignature([]byte("invalid"), []byte("msg"), []byte("sig")) {
 		t.Error("VerifySignature should fail for invalid key length")
 	}
@@ -308,6 +329,12 @@ func TestIdentityKey_Errors(t *testing.T) {
 	// Bad unmarshal
 	if k := UnmarshalIdentityKey([]byte("too short")); k != nil {
 		t.Error("UnmarshalIdentityKey should fail for short data")
+	}
+	if _, err := GenerateIdentityKeyFromSeed([]byte("too short")); err == nil {
+		t.Error("GenerateIdentityKeyFromSeed should fail for short seed")
+	}
+	if _, err := UnmarshalIdentityPublicKey([]byte("too short")); err == nil {
+		t.Error("UnmarshalIdentityPublicKey should fail for short data")
 	}
 
 	// Verify with wrong key size
